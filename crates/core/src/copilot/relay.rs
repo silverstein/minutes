@@ -1313,17 +1313,23 @@ mod tests {
 
         server.publish_transcript_for_test(utterance("second"));
         server.publish_nudge(nudge("nudge-2"));
-        let mut second = CaptureRelayClient::connect_from(&discovery_path, cursor).unwrap();
-        let transcript = wait_for_frame(&mut second, |frame| {
-            matches!(frame, RelayFrame::Transcript { seq: 2, .. })
-        });
-        let replayed_nudge = wait_for_frame(&mut second, |frame| {
-            matches!(frame, RelayFrame::Nudge { seq: 2, .. })
-        });
-        assert!(matches!(transcript, RelayFrame::Transcript { seq: 2, .. }));
-        assert!(matches!(replayed_nudge, RelayFrame::Nudge { seq: 2, .. }));
-        assert_eq!(second.cursor().transcript_seq, 2);
-        assert_eq!(second.cursor().nudge_seq, 2);
+
+        // Reconnect through the retrying helper rather than a bare
+        // connect + wait_for_frame. The server's retirement of the dropped
+        // client is not ordered against accepting the next one, so a freshly
+        // connected client can observe EOF immediately; on Windows named pipes
+        // that happened in 5 of 25 runs (#656).
+        //
+        // An established consumer surfacing that as an error is deliberate
+        // production behavior, established in #529 and relied on by
+        // `repeated_reconnects_replay_each_cursor_advance` directly below, so
+        // the test retries instead of the client swallowing it. Replay is
+        // cursor-based, so a retry resumes from the same cursor and the
+        // invariant under test is unchanged: some (re)connection must deliver
+        // transcript 2 and nudge 2, and only those.
+        let resumed = read_reconnect_cycle_with_retry(&discovery_path, cursor, 2);
+        assert_eq!(resumed.transcript_seq, 2);
+        assert_eq!(resumed.nudge_seq, 2);
     }
 
     #[test]

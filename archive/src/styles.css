@@ -384,6 +384,48 @@ a:focus-visible {
   gap: 20px;
 }
 
+/* The index summary is a lead line plus its caveats. Every caveat was already
+   there; as one paragraph they were unreadable, and an unread disclosure is
+   not a disclosure. Warnings carry the danger colour because they decide
+   whether a negative search result can be trusted. */
+.vault-lead {
+  margin: 0 0 10px;
+  color: var(--ink-2);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
+.vault-notes {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.vault-notes li {
+  padding-left: 15px;
+  text-indent: -15px;
+}
+
+.vault-notes li::before {
+  content: "· ";
+  color: var(--line-2);
+}
+
+.vault-notes li.is-warning {
+  color: var(--danger);
+  font-weight: 550;
+}
+
+.vault-notes li.is-warning::before {
+  content: "! ";
+  color: var(--danger);
+}
+
 /* Approving and skipping are the same kind of choice, so they sit together
    and wrap rather than crowding the heading on a narrow window. */
 .location-actions {

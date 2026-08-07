@@ -64,3 +64,55 @@ fn worker_copies_in_temp() -> usize {
         })
         .unwrap_or(0)
 }
+
+/// Verifying the pinned worker from several threads at once must agree.
+///
+/// The digest used to be taken by rewinding a `try_clone` of the descriptor.
+/// `try_clone` is `dup`: the duplicate shares one open file description and
+/// therefore one offset, so concurrent verifications read each other's bytes
+/// and each concludes the executable was replaced underneath it. The converter
+/// carried the identical defect and it cost 40 of 60 documents on the first
+/// build that extracted on more than one thread; here it had simply not been
+/// reached yet, because one caller happens to drive the session from a single
+/// thread today.
+///
+/// Nothing about the file changes during this test, so every verification must
+/// succeed. With the shared offset restored this fails.
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_verification_of_the_pinned_worker_agrees() {
+    use minutes_archive_semantic::BoundedSemanticEngine;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    let executable = env!("CARGO_BIN_EXE_minutes-archive-semantic");
+    let engine = Arc::new(BoundedSemanticEngine::bind(Path::new(executable)).expect("bind"));
+
+    let failures = std::thread::scope(|scope| {
+        let workers = (0..8)
+            .map(|_| {
+                let engine = Arc::clone(&engine);
+                scope.spawn(move || {
+                    let mut failures = 0;
+                    for _ in 0..24 {
+                        // Opening a session re-verifies the pinned executable,
+                        // which is the path that took the digest.
+                        if engine.open_session().is_err() {
+                            failures += 1;
+                        }
+                    }
+                    failures
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().expect("thread"))
+            .sum::<usize>()
+    });
+
+    assert_eq!(
+        failures, 0,
+        "concurrent verification reported the worker as swapped while nothing touched it"
+    );
+}

@@ -209,6 +209,7 @@ const mockScript = `
       invoke: async (command) => {
         const responses = ${JSON.stringify({
           archive_bootstrap: {
+            buildIdentity: "v0.24.0 · build 39773037b5d5",
             locations: [],
             scanRunning: false,
             report: null,
@@ -220,6 +221,8 @@ const mockScript = `
             // The interface must show the location it kept, not refuse the
             // batch and clear the list.
             folded: 1,
+            // The folded location had a skipped folder inside it.
+            forgottenSkips: 1,
           },
           choose_archive_exclusions: {
             skipped: 1,
@@ -332,6 +335,10 @@ try {
           throw new Error("Timed out waiting for " + label);
         };
         await waitFor(() => !document.querySelector("#setup-view").hidden, "setup");
+        // The build has to name itself without reaching anywhere for the answer.
+        if (!document.querySelector("#build-identity").textContent.includes("build 39773037b5d5")) {
+          throw new Error("The running build does not identify itself");
+        }
         const setupButtonBounds = document
           .querySelector("#add-locations")
           .getBoundingClientRect()
@@ -343,6 +350,11 @@ try {
         // deliberately, and saying nothing reads as the app ignoring them.
         if (!document.querySelector("#setup-status").textContent.includes("already inside a folder you approved")) {
           throw new Error("The folded location was not accounted for");
+        }
+        // Folding silently un-skipped a folder: the index then reads what the
+        // owner deliberately excluded, and the first sign is the wait.
+        if (!document.querySelector("#setup-status").textContent.includes("no longer skipped")) {
+          throw new Error("A skipped folder was forgotten without saying so");
         }
         // Skipping folders is reachable only once a location exists, and it
         // must report both what it skipped and what it could not.

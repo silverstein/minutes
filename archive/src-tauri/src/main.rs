@@ -117,15 +117,58 @@ struct LocationSummary {
 struct LocationChoice {
     locations: Vec<LocationSummary>,
     folded: usize,
+    /// Skipped folders forgotten because the location holding them was folded.
+    ///
+    /// Silently dropping these reads *more* than the owner asked for, not less,
+    /// so nothing is lost from the index -- but the folder they pointed at was
+    /// excluded on purpose. On the archive this pilot is for that is 2,873
+    /// screenshots and roughly seventeen minutes of text recognition arriving
+    /// unannounced, in an index they believed excluded them.
+    forgotten_skips: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapState {
+    /// Which build this is, for a support conversation.
+    ///
+    /// The version alone does not identify a build: two candidates carried the
+    /// same version and one of them could not index a single document. The
+    /// short digest of the running executable is what the signed provenance
+    /// record already names a candidate by, so it is the thing to ask for when
+    /// someone reports a problem -- and it is computed from the file on disk
+    /// rather than compiled in, so it cannot claim to be a build it is not.
+    build_identity: String,
     locations: Vec<LocationSummary>,
     scan_running: bool,
     report: Option<CensusReport>,
     text_vault_report: Option<DocumentVaultBuildReport>,
+}
+
+/// Version plus a short digest of the executable that is actually running.
+///
+/// Reads nothing but its own binary and reaches no network -- the whole point
+/// of this application is that it does not, and knowing which build you have
+/// must not be the exception. Auto-update was considered and deliberately not
+/// wired: docs/investigations/auto-update-evaluation.md holds the decision, and
+/// a shipped updater endpoint sat in the configuration for a while contradicting
+/// the "networking disabled by design" line in this app's own footer.
+fn build_identity() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let digest = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .map(|bytes| {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(&bytes);
+            digest
+                .iter()
+                .take(6)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "unidentified".to_string());
+    format!("v{version} · build {digest}")
 }
 
 fn lock_error() -> String {
@@ -217,6 +260,7 @@ fn archive_index_progress(state: tauri::State<'_, ArchiveState>) -> UiBuildProgr
 fn archive_bootstrap(state: State<'_, ArchiveState>) -> Result<BootstrapState, String> {
     let session = state.session.lock().map_err(|_| lock_error())?;
     Ok(BootstrapState {
+        build_identity: build_identity(),
         locations: location_summaries(&session.locations),
         scan_running: session.scan.running,
         report: session.last_report.clone(),
@@ -249,6 +293,7 @@ async fn choose_archive_locations(
         let session = state.session.lock().map_err(|_| lock_error())?;
         return Ok(LocationChoice {
             folded: 0,
+            forgotten_skips: 0,
             locations: location_summaries(&session.locations),
         });
     };
@@ -312,13 +357,16 @@ async fn choose_archive_locations(
         .iter()
         .map(|location| location.id)
         .collect::<Vec<_>>();
+    let skips_before = session.exclusions.len();
     session
         .exclusions
         .retain(|exclusion| surviving_ids.contains(&exclusion.location_id));
+    let forgotten_skips = skips_before.saturating_sub(session.exclusions.len());
     session.last_report = None;
     session.text_vault = None;
     Ok(LocationChoice {
         folded,
+        forgotten_skips,
         locations: location_summaries(&session.locations),
     })
 }

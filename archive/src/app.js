@@ -42,6 +42,7 @@ const elements = {
   candidateCount: document.querySelector("#candidate-count"),
   searchStatus: document.querySelector("#search-status"),
   searchResults: document.querySelector("#search-results"),
+  buildIdentity: document.querySelector("#build-identity"),
 };
 
 let locations = [];
@@ -159,6 +160,22 @@ async function chooseLocations() {
       } already inside a folder you approved, so ${
         choice.folded === 1 ? "it is" : "they are"
       } covered by that one.`;
+    }
+    // Folding a location forgets the folders skipped inside it. That reads
+    // more than was asked for, never less, so nothing goes missing from the
+    // index -- but those folders were excluded deliberately, and finding out
+    // by watching an extra seventeen minutes of text recognition go by is not
+    // finding out.
+    if (choice.forgottenSkips > 0) {
+      elements.setupStatus.textContent = `${elements.setupStatus.textContent} ${
+        choice.forgottenSkips === 1
+          ? "One folder you had skipped is"
+          : `${choice.forgottenSkips} folders you had skipped are`
+      } no longer skipped, because the location holding ${
+        choice.forgottenSkips === 1 ? "it" : "them"
+      } was folded in. Choose them again under "Skip folders" if you still want ${
+        choice.forgottenSkips === 1 ? "it" : "them"
+      } left out.`;
     }
     lastReport = null;
     vaultReport = null;
@@ -423,54 +440,80 @@ async function exportReport() {
 
 function renderVaultSummary(report) {
   vaultReport = report;
-  // Defaulted, not asserted. A missing count must never blank the search view:
-  // throwing here hides every result behind a number the reader does not need.
+  // Every fact below was already disclosed; it was disclosed as one fifteen-line
+  // paragraph, which is the same as not disclosing it. An attorney opening this
+  // screen needs to know in one glance what is searchable, and then be able to
+  // find the caveat that applies to them. Nothing is dropped, and the warnings
+  // that change whether a negative result can be trusted are marked as such.
+  const lead = `${report.indexed_documents.toLocaleString()} supported document${
+    report.indexed_documents === 1 ? "" : "s"
+  } indexed (${formatBytes(report.indexed_bytes)}). All indexes exist only in memory.`;
+
+  const notes = [];
+  const formatBreakdown = [
+    `${report.searchable_pdf_documents.toLocaleString()} PDF`,
+    // One number for every word-processor format. The distinction that matters
+    // to counsel is how much became searchable, not which container it arrived in.
+    `${report.docx_documents.toLocaleString()} Word or OpenDocument`,
+  ].join(", ");
+  notes.push({ text: `Searchable formats: ${formatBreakdown}.` });
+
+  // Its own line. A scan that was read is searchable, but only as a
+  // transcription, and folding it into the indexed total would say the archive
+  // can quote more of itself than it can.
+  if ((report.transcribed_documents ?? 0) > 0) {
+    notes.push({
+      text: `${report.transcribed_documents.toLocaleString()} scanned page${
+        report.transcribed_documents === 1 ? "" : "s"
+      } read by text recognition — searchable as transcriptions, never quoted as source text.`,
+    });
+  }
+  if (report.unsupported_files_skipped > 0 || report.ocr_required_files > 0) {
+    notes.push({
+      text: `${report.unsupported_files_skipped.toLocaleString()} unsupported item${
+        report.unsupported_files_skipped === 1 ? "" : "s"
+      } skipped; ${report.ocr_required_files.toLocaleString()} PDF${
+        report.ocr_required_files === 1 ? "" : "s"
+      } are images of pages and carry no text to read.`,
+    });
+  }
+  // Defaulted, not asserted: a missing count must never blank the search view.
   const inferredBoundaryDocuments = report.inferred_boundary_documents ?? 0;
-  elements.vaultSummary.textContent =
-    `${report.indexed_documents.toLocaleString()} supported document${
-      report.indexed_documents === 1 ? "" : "s"
-    } indexed (${formatBytes(report.indexed_bytes)}). ` +
-    `${report.searchable_pdf_documents.toLocaleString()} PDF, ` +
-    // One number for every word-processor format. The distinction that
-    // matters to counsel is how much became searchable, not which container
-    // it arrived in.
-    `${report.docx_documents.toLocaleString()} Word or OpenDocument. ` +
-    // Its own number. A scan that was read is searchable, but only as a
-    // transcription, and folding it into the indexed total would say the
-    // archive can quote more of itself than it can.
-    ((report.transcribed_documents ?? 0) > 0
-      ? `${report.transcribed_documents.toLocaleString()} scanned page${
-          report.transcribed_documents === 1 ? "" : "s"
-        } read by text recognition -- searchable as transcriptions, never quoted as source text. `
-      : "") +
-    `${report.unsupported_files_skipped.toLocaleString()} unsupported item${
-      report.unsupported_files_skipped === 1 ? "" : "s"
-    } skipped; ${report.ocr_required_files.toLocaleString()} PDF${
-      report.ocr_required_files === 1 ? "" : "s"
-    } are images of pages and carry no text to read. ` +
-    // Defaulted, not asserted: a missing count must never blank the search
-    // view. Throwing here would hide every result behind a field the reader
-    // does not care about.
-    `${inferredBoundaryDocuments.toLocaleString()} indexed document${
-      inferredBoundaryDocuments === 1 ? "" : "s"
-    } cannot answer same-clause questions because the file does not record where a clause ends. ` +
-    (report.semantic_retrieval_enabled
+  if (inferredBoundaryDocuments > 0) {
+    notes.push({
+      text: `${inferredBoundaryDocuments.toLocaleString()} indexed document${
+        inferredBoundaryDocuments === 1 ? "" : "s"
+      } cannot answer same-clause questions because the file does not record where a clause ends.`,
+    });
+  }
+  notes.push({
+    text: report.semantic_retrieval_enabled
       ? `${report.semantic_provisions_indexed.toLocaleString()} provision suggestion vector${
           report.semantic_provisions_indexed === 1 ? "" : "s"
-        } built with the pinned macOS model inside its network-denied worker. `
-      : "Semantic suggestions are unavailable on this Mac. ") +
-    // Partial suggestion coverage is not the same as none, and it has to be
-    // said. Exact search is complete either way; a reader who assumes the
-    // suggestions swept the whole archive would be wrong.
-    (report.semantic_coverage_partial
-      ? "The on-device suggestion model stopped partway through this build, so meaning-based suggestions cover only part of the archive. Exact search covers all of it. "
-      : "") +
-    describeDroppedSources(report) +
-    // A partial index must say so on its face. It is a real index and worth
-    // having, but a reader who thinks it covers the whole folder will draw a
-    // false conclusion from a negative result.
-    (report.budget_reached
-      ? `This index is PARTIAL: a limit was reached. ${(
+        } built with the pinned macOS model inside its network-denied worker.`
+      : "Semantic suggestions are unavailable on this Mac.",
+  });
+  // Partial suggestion coverage is not the same as none. Exact search is
+  // complete either way; a reader who assumes the suggestions swept the whole
+  // archive would be wrong.
+  if (report.semantic_coverage_partial) {
+    notes.push({
+      warning: true,
+      text: "The on-device suggestion model stopped partway through this build, so meaning-based suggestions cover only part of the archive. Exact search covers all of it.",
+    });
+  }
+  const dropped = describeDroppedSources(report).trim();
+  if (dropped) {
+    notes.push({ text: dropped });
+  }
+  // A partial index must say so on its face. It is a real index and worth
+  // having, but a reader who thinks it covers the whole folder will draw a
+  // false conclusion from a negative result.
+  if (report.budget_reached) {
+    notes.push({
+      warning: true,
+      text:
+        `This index is PARTIAL: a limit was reached. ${(
           report.documents_left_unread ?? 0
         ).toLocaleString()} document${
           report.documents_left_unread === 1 ? " was" : "s were"
@@ -480,9 +523,24 @@ function renderVaultSummary(report) {
               report.directories_left_unread === 1 ? " was" : "s were"
             } too deep to enter`
           : "") +
-        ". Narrow the approved folders and rebuild before relying on a negative result. "
-      : "") +
-    "All indexes exist only in memory.";
+        ". Narrow the approved folders and rebuild before relying on a negative result.",
+    });
+  }
+
+  elements.vaultSummary.replaceChildren();
+  const leadLine = document.createElement("p");
+  leadLine.className = "vault-lead";
+  leadLine.textContent = lead;
+  const list = document.createElement("ul");
+  list.className = "vault-notes";
+  // Warnings first: they decide whether a negative result means anything.
+  for (const note of [...notes].sort((left, right) => (right.warning ? 1 : 0) - (left.warning ? 1 : 0))) {
+    const item = document.createElement("li");
+    if (note.warning) item.className = "is-warning";
+    item.textContent = note.text;
+    list.append(item);
+  }
+  elements.vaultSummary.append(leadLine, list);
 }
 
 // Documents that could not be indexed were counted and never shown. Counsel
@@ -912,6 +970,12 @@ function backToCensus() {
 async function bootstrap() {
   try {
     const state = await invoke("archive_bootstrap");
+    // Which build this is, in the footer, because "what does yours say?" is
+    // where a support conversation starts. Two candidates once carried the
+    // same version number and only one of them could index anything.
+    if (state.buildIdentity) {
+      elements.buildIdentity.textContent = `Private evidence build · ${state.buildIdentity}`;
+    }
     renderLocations(state.locations);
     lastReport = state.report;
     vaultReport = state.textVaultReport;

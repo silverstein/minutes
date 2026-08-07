@@ -178,3 +178,35 @@ channel-aware UI**
 
 Rejected for now: **Sparkle**, because it adds a second updater stack without a
 compelling Minutes-specific advantage over Tauri’s built-in updater path.
+
+## Minutes Archive, specifically (2026-08-07)
+
+The Archive pilot is the sharpest case for deferring, and it also nearly
+shipped the mistake.
+
+`tauri.conf.json` carried a `plugins.updater` block -- a minisign public key and
+a `github.com/.../latest-archive.json` endpoint -- together with a
+`tauri-plugin-updater` dependency, while `main.rs` never registered the plugin.
+Inert, so no update check ever ran. But it shipped inside the bundle of an
+application whose own footer reads **"Networking disabled by design"**, aimed at
+an attorney's thirty years of privileged client documents, and the endpoint
+404s because there is no Archive release train to publish a manifest to.
+
+Both were removed. For this application the gates above are not merely unmet,
+the third one is in tension with the product: an updater is the one component
+whose job is to reach the network, and "this app never contacts anything" is
+not a feature of the Archive pilot, it is the reason it is trusted with the
+material.
+
+**What the pilot does instead.** The need behind the request was real -- a
+single pilot user should not be stranded on a build with a known defect. The
+part of that solvable without a network is knowing *which build is running*, so
+the footer now shows the version and a short digest of the running executable,
+computed from the file on disk at startup. That is the identifier the signed
+provenance record already uses, and it is what a support conversation should
+open with: two candidates once carried the same version number and only one of
+them could index a single document.
+
+Delivering a fix stays a person handing over a signed build. For one user that
+is not a hardship; it is a smaller trust surface than an updater, and it keeps
+the footer honest.

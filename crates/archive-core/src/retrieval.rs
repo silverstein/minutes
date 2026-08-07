@@ -22,7 +22,21 @@ pub const MAX_DOCUMENT_TITLE_CHARS: usize = 512;
 pub const MAX_PROVISIONS_PER_DOCUMENT: usize = 20_000;
 pub const MAX_QUERY_CHARS: usize = 2_000;
 pub const MAX_EVIDENCE_RESULTS: usize = 100;
-const MAX_FTS_CANDIDATES: usize = 2_000;
+/// How many matching clauses a single query may weigh before it refuses.
+///
+/// A candidate is a clause, not a document, and a real archive holds several
+/// per document. At 2,000 this bit at roughly 3,600 documents for a term
+/// appearing in half of them -- measured, not estimated -- which meant that on
+/// a thirty-year practice of 16,621 documents essentially every ordinary
+/// contract term answered "narrow the query" instead of answering.
+///
+/// Raised rather than removed. Refusing beyond the ceiling is the property
+/// worth keeping: the clauses are fetched as an `OR` across the query's terms
+/// while the answer requires all of them, so truncating could drop a genuine
+/// match and let a negative result read as exhaustive when it is not. This
+/// only moves the point at which that honest refusal happens, from an archive
+/// smaller than the one the pilot is for to one several times larger.
+const MAX_FTS_CANDIDATES: usize = 25_000;
 const MAX_DOCUMENT_EVIDENCE_PROVISIONS: usize = 64;
 pub const MAX_SEMANTIC_PROVISIONS: usize = 100_000;
 const MAX_SEMANTIC_CANDIDATES: usize = 400;
@@ -4618,16 +4632,32 @@ mod tests {
 
     #[test]
     fn candidate_budget_fails_closed_instead_of_returning_incomplete_results() {
-        let mut text = String::new();
-        for ordinal in 1..=(MAX_FTS_CANDIDATES + 1) {
-            text.push_str(&format!(
-                "{ordinal}. ASSIGNMENT\nNeither party may assign this Agreement.\n\n"
-            ));
-        }
-        let source = document("large-agreement", "Large Agreement", &text);
+        // Spread across documents rather than piled into one. A single
+        // document cannot hold this many clauses -- `MAX_PROVISIONS_PER_DOCUMENT`
+        // stops it first -- and one enormous file is not how an archive
+        // actually exceeds the budget. Many ordinary agreements is.
+        const PER_DOCUMENT: usize = 2_000;
+        let documents = (MAX_FTS_CANDIDATES + 1).div_ceil(PER_DOCUMENT);
+        let sources = (0..documents)
+            .map(|which| {
+                let mut text = String::new();
+                for ordinal in 1..=PER_DOCUMENT {
+                    text.push_str(&format!(
+                        "{ordinal}. ASSIGNMENT\nNeither party may assign this Agreement.\n\n"
+                    ));
+                }
+                document(
+                    &format!("agreement-{which:03}"),
+                    &format!("Agreement {which}"),
+                    &text,
+                )
+            })
+            .collect::<Vec<_>>();
         let mut index = LegalIndex::new(vault()).expect("index");
-        index.replace_document(&source).expect("ingest");
-        let revisions = CurrentRevisionSet::from_documents([&source]);
+        for source in &sources {
+            index.replace_document(source).expect("ingest");
+        }
+        let revisions = CurrentRevisionSet::from_documents(sources.iter());
         let query = LegalQuery {
             raw: "Find assignment provisions.".to_string(),
             scope: MatchScope::SameProvision,

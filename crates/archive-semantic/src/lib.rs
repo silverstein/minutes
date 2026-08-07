@@ -526,6 +526,43 @@ fn terminate_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Measure the pinned worker without moving anyone's file offset.
+///
+/// The same defect the converter carried, left here after that one was fixed.
+/// `try_clone` is `dup`, and duplicated descriptors share one open file
+/// description and therefore one offset, so rewinding the clone rewinds the
+/// original. Two threads verifying the worker at the same moment read each
+/// other's bytes and both conclude the executable was swapped underneath them.
+/// In the converter that turned every concurrent conversion into "unavailable
+/// or mutable" while the file on disk had not changed at all.
+///
+/// It had not bitten here only because the semantic session is driven from one
+/// thread today. That is a property of the current caller, not of this
+/// function, and it is not a safe thing to leave resting on. Positional reads
+/// have no shared cursor to race over, and the check still measures the pinned
+/// inode rather than the path.
+#[cfg(unix)]
+fn digest_file(file: &fs::File) -> Result<(u64, [u8; 32]), std::io::Error> {
+    use std::os::unix::fs::FileExt;
+
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut offset = 0u64;
+    loop {
+        match file.read_at(&mut buffer, offset) {
+            Ok(0) => break,
+            Ok(read) => {
+                hasher.update(&buffer[..read]);
+                offset = offset.saturating_add(read as u64);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((offset, hasher.finalize().into()))
+}
+
+#[cfg(not(unix))]
 fn digest_file(file: &fs::File) -> Result<(u64, [u8; 32]), std::io::Error> {
     use std::io::{Seek, SeekFrom};
 

@@ -148,7 +148,7 @@ jobs:
           cargo run -p minutes-archive-core --example document_vault_smoke -- \
             "$executable"
           cargo run -p minutes-archive-core --example archive_pilot_soak -- \
-            "$executable"
+            "$executable" 4000
           scripts/archive-native-lifecycle-smoke.sh "$app"
 
       - name: Package unsigned candidate and provenance

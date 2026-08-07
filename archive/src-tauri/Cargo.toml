@@ -13,10 +13,10 @@ minutes-archive-core = { path = "../../crates/archive-core" }
 minutes-archive-ocr = { path = "../../crates/archive-ocr" }
 minutes-archive-semantic = { path = "../../crates/archive-semantic" }
 serde = { workspace = true }
+sha2 = "0.10"
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-updater = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

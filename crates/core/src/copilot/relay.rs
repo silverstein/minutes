@@ -1358,24 +1358,59 @@ mod tests {
         }
     }
 
+    /// Retry only the transient reconnect race, and only briefly.
+    ///
+    /// The race being absorbed is documented in #529 and #656: the server's
+    /// retirement of a dropped client is not ordered against accepting the
+    /// next one, so a freshly connected client can see EOF immediately. It
+    /// resolves in milliseconds and reports as `Io(UnexpectedEof)`.
+    ///
+    /// A timeout is different in kind. `try_wait_for_frame` waits 3s per frame
+    /// and reports `InvalidData("timed out ...")`, which means replay itself
+    /// did not deliver. Retrying that is never useful and is actively harmful:
+    /// at two frames per attempt it costs 6s a time, and
+    /// `repeated_reconnects_replay_each_cursor_advance` runs 40 cycles, so a
+    /// real break burned tens of minutes against a 4 minute job timeout. The
+    /// failure then surfaced as a CI timeout with no test named, instead of an
+    /// assertion pointing at the broken invariant.
+    ///
+    /// So: retry EOF fast, fail everything else immediately.
+    const RECONNECT_RETRY_BUDGET: Duration = Duration::from_secs(5);
+
+    fn is_transient_reconnect_eof(error: &CaptureRelayError) -> bool {
+        matches!(
+            error,
+            CaptureRelayError::Io(io_error) if io_error.kind() == io::ErrorKind::UnexpectedEof
+        )
+    }
+
     fn read_reconnect_cycle_with_retry(
         discovery_path: &Path,
         cursor: RelayCursor,
         seq: u64,
     ) -> RelayCursor {
-        for attempt in 1..=10u32 {
+        let deadline = Instant::now() + RECONNECT_RETRY_BUDGET;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
             match read_reconnect_cycle(discovery_path, cursor.clone(), seq) {
                 Ok(next) => return next,
-                Err(error) if attempt < 10 => {
+                Err(error) if !is_transient_reconnect_eof(&error) => panic!(
+                    "reconnect cycle {seq} failed on attempt {attempt} with a non-transient \
+                     error: {error:?}. Only an immediate EOF during reconnect is retried; \
+                     anything else means replay is broken."
+                ),
+                Err(error) if Instant::now() < deadline => {
                     eprintln!("reconnect cycle {seq} attempt {attempt} retrying after {error:?}");
                     thread::sleep(Duration::from_millis(20));
                 }
-                Err(error) => {
-                    panic!("reconnect cycle {seq} failed after {attempt} attempts: {error:?}")
-                }
+                Err(error) => panic!(
+                    "reconnect cycle {seq} still hitting the reconnect race after {attempt} \
+                     attempts in {:?}: {error:?}",
+                    RECONNECT_RETRY_BUDGET
+                ),
             }
         }
-        unreachable!("retry loop returns or panics")
     }
 
     fn read_reconnect_cycle(

@@ -145,9 +145,21 @@ jobs:
             if (-not (Test-Path $src)) { throw "missing $dll in $($crt.FullName)" }
             Copy-Item $src $stage -Force
           }
-          # Fail the job rather than publish an archive that repeats the bug.
-          $have = (Get-ChildItem "$stage\*.dll").Count
-          if ($have -ne 4) { throw "expected 4 DLLs beside minutes.exe, found $have" }
+          # Derive the requirement from the binary rather than a hardcoded
+          # list. Counting the four files we just copied only validated our own
+          # copy loop: a dependency adding an import such as MSVCP140_2.dll
+          # (C++17 special math) or MSVCP140_ATOMIC_WAIT.dll (C++20 atomic
+          # wait) would reproduce #657 with a green job.
+          $dumpbin = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found; cannot verify the import table' }
+          $imports = & $dumpbin.FullName /dependents "$stage\minutes.exe" |
+                     Select-String -Pattern '^\s+(\S+\.dll)$' |
+                     ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $needed = $imports | Where-Object { $_ -match '^(vcruntime|msvcp|concrt)' }
+          Write-Host "runtime imports: $($needed -join ', ')"
+          if (-not $needed) { throw 'no VC runtime imports detected; the import scan is probably broken' }
+          $missing = $needed | Where-Object { -not (Test-Path (Join-Path $stage $_)) }
+          if ($missing) { throw "minutes.exe imports runtime DLLs missing from the archive: $($missing -join ', '). Stage them too (#657)." }
           Compress-Archive -Path "$stage\*" -DestinationPath 'minutes-windows-x64.zip' -Force
           Write-Host ("archive MB: {0:N2}" -f ((Get-Item 'minutes-windows-x64.zip').Length/1MB))
 

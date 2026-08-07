@@ -787,8 +787,20 @@ cargo install --path crates/cli
 
 ### Windows
 
+Download **`minutes-windows-x64.zip`** from the
+[latest release](https://github.com/silverstein/minutes/releases/latest), unzip
+it, and run `minutes.exe` from the unzipped folder.
+
+Use the zip rather than the bare `minutes-windows-x64.exe`. Minutes is built
+with MSVC and imports the Visual C++ runtime, which is not part of Windows. On
+a PC that has never had the Visual C++ Redistributable installed the bare
+executable exits immediately and prints nothing at all. The zip carries those
+runtime files beside the executable, so it works on a fresh machine with no
+install step and no admin rights. Keep the DLLs next to `minutes.exe` when you
+move it.
+
 ```powershell
-# Download pre-built binary from GitHub releases, or build from source:
+# Or build from source:
 # Requires: Rust, cmake, MSVC build tools, LLVM (for libclang)
 
 # Install LLVM (needed by whisper-rs bindgen):
@@ -1069,6 +1081,8 @@ cargo tauri build --ci --bundles nsis --no-sign
 ```
 
 Tagged GitHub releases can include both a Windows NSIS installer as `minutes-desktop-windows-x64-setup.exe` and a raw desktop binary as `minutes-desktop-windows-x64.exe`. The installer is currently unsigned, so treat it as an advanced-user / preview distribution surface until Windows signing is added.
+
+**Use the installer, not the raw binary.** The desktop app imports the Visual C++ runtime, which Windows does not include. The installer places those runtime files beside the executable; the raw `.exe` does not carry them, so on a PC without the Visual C++ Redistributable it exits immediately with no message (#657).
 
 The desktop app adds a system tray icon, recording controls, audio visualizer, Recall, and a meeting list window. The current Windows desktop build covers recording, transcription, search, settings, and Recall. Calendar suggestions, call detection, tray copy/paste automation, and the native dictation hotkey remain macOS-only for now.
 

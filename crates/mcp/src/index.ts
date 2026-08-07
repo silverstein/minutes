@@ -2142,6 +2142,11 @@ function findMinutesBinary(): string {
   const candidates = [
     join(__dirname, "..", "..", "..", "target", "release", `minutes${ext}`),
     join(__dirname, "..", "..", "..", "target", "debug", `minutes${ext}`),
+    // Where the Windows auto-installer puts it: a Minutes-owned directory, so
+    // the MSVC runtime shipped beside the binary (#657) does not leak into a
+    // shared bin directory. Listed before ~/.cargo/bin so a fresh install wins
+    // over an older cargo-installed copy.
+    ...(isWindows ? [join(homedir(), ".minutes", "bin", `minutes${ext}`)] : []),
     join(homedir(), ".cargo", "bin", `minutes${ext}`),
     ...(isWindows
       ? []
@@ -2261,7 +2266,13 @@ function getReleaseBinaryName(): string | null {
 function getInstallDir(): string {
   const localBin = join(homedir(), ".local", "bin");
   if (process.platform === "win32") {
-    return join(homedir(), ".cargo", "bin"); // common writable dir on Windows
+    // A Minutes-owned directory, not ~/.cargo/bin. The Windows install ships
+    // the MSVC runtime beside the executable (#657), and Windows resolves an
+    // application's own directory ahead of the system path. Dropping those
+    // DLLs into the shared cargo bin directory would make every other
+    // cargo-installed tool launched from there load Minutes' pinned copies,
+    // and uninstalling would leave them behind.
+    return join(homedir(), ".minutes", "bin");
   }
   return localBin;
 }
@@ -2309,17 +2320,26 @@ async function tryAutoInstallAttempt(capabilityRepair: boolean = false): Promise
           targetPath: archivePath,
           execFileAsync,
         });
+        // Paths arrive as arguments rather than interpolated into the script
+        // text, so a home directory containing an apostrophe (C:\\Users\\O'Brien)
+        // cannot break or alter the command.
         await execFileAsync(
           "powershell",
           [
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            `Expand-Archive -Path '${archivePath}' -DestinationPath '${installDir}' -Force`,
+            "Expand-Archive -Path $args[0] -DestinationPath $args[1] -Force",
+            archivePath,
+            installDir,
           ],
           { timeout: 120000 },
         );
         await rm(archivePath, { force: true });
+        // Confirm the extraction actually produced the binary. The POSIX path
+        // gets this for free from rename(); without it a changed archive
+        // layout would report success while MINUTES_BIN points at nothing.
+        await stat(targetPath);
       } else {
         console.error(`[Minutes] Downloading ${binaryName} from latest release...`);
         // Download with curl, verify SHA256SUMS.txt, then move the verified

@@ -105,28 +105,6 @@ jobs:
         shell: bash
         run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
 
-      # The app imports the MSVC runtime, which is not part of Windows. Without
-      # these beside the executable it fails to start on a PC that has never had
-      # the Visual C++ Redistributable, showing nothing at all (#657). Tauri
-      # places bare-filename resources next to the exe, which is where the
-      # loader looks. Staged here rather than committed so Microsoft binaries
-      # stay out of the repo; the config uses globs so a local checkout without
-      # them still builds.
-      - name: Stage the MSVC runtime beside the app
-        shell: pwsh
-        working-directory: tauri/src-tauri
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $crt = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT' -Directory -ErrorAction SilentlyContinue |
-                 Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $crt) { throw 'Could not locate the VC143 CRT redistributable on the runner' }
-          foreach ($dll in 'vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','msvcp140_1.dll') {
-            Copy-Item (Join-Path $crt.FullName $dll) . -Force
-          }
-          $n = (Get-ChildItem 'vcruntime140*.dll','msvcp140*.dll').Count
-          if ($n -ne 4) { throw "expected 4 runtime DLLs staged, found $n" }
-          Write-Host "staged $n runtime DLLs from $($crt.FullName)"
-
       - name: Build desktop installer (unsigned)
         working-directory: tauri/src-tauri
         run: cargo tauri build --features parakeet --ci --bundles nsis --no-sign

@@ -8,8 +8,89 @@ fn main() {
     compile_calendar_helper();
     stage_rust_sidecars();
     stage_assistant_skill_bundle();
+    stage_msvc_runtime();
     tauri_build::build()
 }
+
+/// Copy the MSVC runtime next to the app so Windows bundles carry it.
+///
+/// The app imports VCRUNTIME140.dll, VCRUNTIME140_1.dll, MSVCP140.dll and
+/// MSVCP140_1.dll. Those ship in the Visual C++ Redistributable, not in
+/// Windows, so on a PC that has never had it the app exits 0xC0000135
+/// (STATUS_DLL_NOT_FOUND) showing nothing at all (#657). Verified on a clean
+/// Windows 11 VM: the same binary fails bare and runs with these four files
+/// beside it.
+///
+/// `bundle.resources` places bare filenames next to the executable, which is
+/// where the loader looks, but the files must exist when Tauri resolves the
+/// glob or the build fails outright. Staging here rather than in CI keeps
+/// local Windows builds working and keeps Microsoft binaries out of the repo
+/// (they are gitignored).
+#[cfg(windows)]
+fn stage_msvc_runtime() {
+    const RUNTIME_DLLS: [&str; 4] = [
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+    ];
+    let out = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if RUNTIME_DLLS.iter().all(|d| out.join(d).exists()) {
+        return;
+    }
+    let Some(redist) = find_vc_redist_dir() else {
+        // Building the app at all requires MSVC, so this should not happen.
+        // Fail loudly rather than produce a bundle that cannot start.
+        panic!(
+            "could not locate the VC143 CRT redistributable. The Windows app \
+             needs it staged beside the executable or it will not start on a \
+             machine without the Visual C++ Redistributable (#657)."
+        );
+    };
+    for dll in RUNTIME_DLLS {
+        let src = redist.join(dll);
+        std::fs::copy(&src, out.join(dll))
+            .unwrap_or_else(|e| panic!("failed to stage {}: {e}", src.display()));
+    }
+    println!("cargo:rerun-if-changed=tauri.windows.conf.json");
+}
+
+/// Newest `Microsoft.VC143.CRT` x64 directory from any installed Visual Studio.
+#[cfg(windows)]
+fn find_vc_redist_dir() -> Option<PathBuf> {
+    let roots = [
+        r"C:\Program Files\Microsoft Visual Studio",
+        r"C:\Program Files (x86)\Microsoft Visual Studio",
+    ];
+    let mut found: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let Ok(years) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for year in years.flatten() {
+            let Ok(editions) = std::fs::read_dir(year.path()) else {
+                continue;
+            };
+            for edition in editions.flatten() {
+                let msvc = edition.path().join("VC").join("Redist").join("MSVC");
+                let Ok(versions) = std::fs::read_dir(&msvc) else {
+                    continue;
+                };
+                for version in versions.flatten() {
+                    let candidate = version.path().join("x64").join("Microsoft.VC143.CRT");
+                    if candidate.join("vcruntime140.dll").exists() {
+                        found.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+    found.sort();
+    found.pop()
+}
+
+#[cfg(not(windows))]
+fn stage_msvc_runtime() {}
 
 /// Deployment target (`-target <arch>-apple-macos<min>`) for a bundled Swift
 /// helper.

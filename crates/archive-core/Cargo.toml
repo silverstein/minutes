@@ -17,7 +17,7 @@ minutes-archive-ocr = { path = "../archive-ocr" }
 minutes-archive-semantic = { path = "../archive-semantic" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = { workspace = true }
 
 [dev-dependencies]

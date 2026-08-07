@@ -4104,6 +4104,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tauri-plugin-updater",
  "tempfile",
 ]
 
@@ -4131,6 +4132,7 @@ dependencies = [
  "cap-std",
  "chrono",
  "dirs 6.0.0",
+ "libc",
  "minutes-archive-convert",
  "minutes-archive-ocr",
  "minutes-archive-semantic",

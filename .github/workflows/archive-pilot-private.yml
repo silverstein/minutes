@@ -119,11 +119,13 @@ jobs:
             -p minutes-archive-semantic \
             -p minutes-archive-convert \
             -p minutes-archive-core \
+            -p minutes-archive-ocr \
             -p minutes-archive-app
           cargo clippy \
             -p minutes-archive-semantic \
             -p minutes-archive-convert \
             -p minutes-archive-core \
+            -p minutes-archive-ocr \
             -p minutes-archive-app \
             --all-targets -- -D warnings
 
@@ -150,6 +152,8 @@ jobs:
           set -euo pipefail
           app="target/release/bundle/macos/Minutes Archive.app"
           cargo run -p minutes-archive-core --example document_vault_smoke -- \
+            "$app/Contents/MacOS/$ARCHIVE_EXECUTABLE"
+          cargo run -p minutes-archive-core --example archive_pilot_soak -- \
             "$app/Contents/MacOS/$ARCHIVE_EXECUTABLE"
           scripts/archive-native-lifecycle-smoke.sh "$app"
 

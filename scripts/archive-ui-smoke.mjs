@@ -104,6 +104,9 @@ const vaultReport = {
   converter_sandbox_verified: true,
   semantic_worker_sandbox_verified: true,
   semantic_retrieval_enabled: true,
+  // The worker died partway through this build. Partial suggestion coverage
+  // must be stated, not inferred from a smaller vector count.
+  semantic_coverage_partial: true,
   semantic_model: {
     model_id: "apple-nl-sentence-en-r1",
     revision: 1,
@@ -211,7 +214,20 @@ const mockScript = `
             report: null,
             textVaultReport: null,
           },
-          choose_archive_locations: [{ id: 1, label: "Approved location 1" }],
+          choose_archive_locations: {
+            locations: [{ id: 1, label: "Approved location 1" }],
+            // One of the chosen folders was already inside an approved one.
+            // The interface must show the location it kept, not refuse the
+            // batch and clear the list.
+            folded: 1,
+          },
+          choose_archive_exclusions: {
+            skipped: 1,
+            outside: 1,
+            refusedWholeLocation: 0,
+            total: 3,
+          },
+          clear_archive_exclusions: 0,
           remove_archive_location: [],
           run_archive_census: census,
           cancel_archive_census: true,
@@ -322,6 +338,37 @@ try {
           .toJSON();
         document.querySelector("#add-locations").click();
         await waitFor(() => document.querySelectorAll("#location-list li").length === 1, "location");
+        // A folder folded into one that already covers it is accounted for on
+        // screen. Silence here was the bug: the owner picked those folders
+        // deliberately, and saying nothing reads as the app ignoring them.
+        if (!document.querySelector("#setup-status").textContent.includes("already inside a folder you approved")) {
+          throw new Error("The folded location was not accounted for");
+        }
+        // Skipping folders is reachable only once a location exists, and it
+        // must report both what it skipped and what it could not.
+        if (document.querySelector("#skip-folders").disabled) {
+          throw new Error("Skip folders stayed disabled with a location approved");
+        }
+        document.querySelector("#skip-folders").click();
+        await waitFor(
+          () => document.querySelector("#setup-status").textContent.includes("will be skipped"),
+          "skipped folders",
+        );
+        if (!document.querySelector("#setup-status").textContent.includes("3 folders")) {
+          throw new Error("The skipped count came from the interface, not the native side");
+        }
+        if (!document.querySelector("#setup-status").textContent.includes("not inside an approved location")) {
+          throw new Error("A folder outside every approved location was dropped silently");
+        }
+        // The way back must be visible once something is skipped.
+        if (document.querySelector("#clear-skipped").hidden) {
+          throw new Error("Skipped folders cannot be undone from the interface");
+        }
+        document.querySelector("#clear-skipped").click();
+        await waitFor(
+          () => document.querySelector("#setup-status").textContent.includes("read whole"),
+          "cleared skipped folders",
+        );
         document.querySelector("#run-census").click();
         await waitFor(() => !document.querySelector("#results-view").hidden, "census result");
         if (!document.querySelector("#result-summary").textContent.includes("without reading")) {
@@ -397,7 +444,8 @@ try {
           !vaultSummary.includes("3 folders were too deep to enter") ||
           !vaultSummary.includes("9,000 were blocked by macOS permissions") ||
           !vaultSummary.includes("12 were scans the text recognizer could not read") ||
-          !vaultSummary.includes("2 changed while being read")
+          !vaultSummary.includes("2 changed while being read") ||
+          !vaultSummary.includes("suggestion model stopped partway")
         ) {
           throw new Error("Skipped links are not disclosed: " + vaultSummary);
         }

@@ -46,6 +46,30 @@
 
 :root {
   color-scheme: light;
+
+  /* Type scale.
+
+     The floor is 12px deliberately. macOS's smallest system text style is 11pt
+     and Apple advises against going below it for anything a reader must
+     actually read; a webview's own baseline is the browser default of 16px.
+     This interface had reading content -- metric labels, coverage signals, the
+     paragraph explaining what the build is about to open, the error banner --
+     at 9px and 10px. That is below both, and below the 13px body / 10-12px
+     mono-label floor DESIGN.md sets for the app.
+
+     Density was the intent and density is still the aesthetic; it is bought
+     with spacing and restraint, not by shrinking the words. Every size lives
+     here so the whole scale can move together. */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-body: 14px;
+  --text-md: 15px;
+  --text-lg: 17px;
+  --text-xl: 19px;
+  --text-2xl: 20px;
+  --text-3xl: 24px;
+  --text-4xl: 30px;
+
   --ink: #182420;
   --muted: #66716c;
   --paper: #f6f4ee;
@@ -129,7 +153,7 @@ a:focus-visible {
   align-items: center;
   gap: 11px;
   color: var(--ink);
-  font-size: 14px;
+  font-size: var(--text-body);
   font-weight: 720;
   letter-spacing: -0.01em;
   text-decoration: none;
@@ -144,7 +168,7 @@ a:focus-visible {
   border-radius: var(--radius-sm);
   background: var(--green);
   font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .mode-badges {
@@ -163,7 +187,7 @@ a:focus-visible {
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   background: rgba(255, 254, 250, 0.6);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 650;
   letter-spacing: 0.02em;
 }
@@ -202,7 +226,7 @@ a:focus-visible {
 }
 
 .is-working .hero h1 {
-  font-size: 22px;
+  font-size: var(--text-3xl);
   letter-spacing: -0.022em;
 }
 
@@ -210,7 +234,7 @@ a:focus-visible {
 .section-label {
   margin: 0 0 10px;
   color: var(--green-2);
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 750;
   letter-spacing: 0.105em;
   text-transform: uppercase;
@@ -233,7 +257,7 @@ a:focus-visible {
   max-width: 660px;
   margin: 10px 0 0;
   color: var(--muted);
-  font-size: 15px;
+  font-size: var(--text-md);
   line-height: 1.55;
 }
 
@@ -277,7 +301,7 @@ a:focus-visible {
   place-items: center;
   border: 1px solid var(--line-strong);
   border-radius: 50%;
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 700;
 }
 
@@ -298,12 +322,12 @@ a:focus-visible {
 
 .step strong {
   margin-top: 1px;
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .step div span {
   margin-top: 4px;
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.45;
 }
 
@@ -328,12 +352,12 @@ a:focus-visible {
 
 .assurance strong {
   color: var(--ink);
-  font-size: 11px;
+  font-size: var(--text-sm);
 }
 
 .assurance p {
   margin: 6px 0 0;
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.55;
 }
 
@@ -360,6 +384,15 @@ a:focus-visible {
   gap: 20px;
 }
 
+/* Approving and skipping are the same kind of choice, so they sit together
+   and wrap rather than crowding the heading on a narrow window. */
+.location-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .panel-heading {
   align-items: flex-start;
 }
@@ -373,14 +406,14 @@ a:focus-visible {
 .panel h2 {
   margin-bottom: 9px;
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  font-size: 27px;
+  font-size: var(--text-4xl);
   font-weight: 400;
   letter-spacing: -0.022em;
 }
 
 .panel h3 {
   margin-bottom: 0;
-  font-size: 15px;
+  font-size: var(--text-md);
   letter-spacing: -0.015em;
 }
 
@@ -389,7 +422,7 @@ a:focus-visible {
   max-width: 620px;
   margin-bottom: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
   line-height: 1.55;
 }
 
@@ -409,7 +442,7 @@ a:focus-visible {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--text-body);
   font-weight: 680;
   transition:
     transform 120ms ease,
@@ -467,13 +500,13 @@ a:focus-visible {
 
 .empty-state strong {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .empty-state p {
   margin: 5px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
 }
 
 .folder-illustration {
@@ -540,7 +573,7 @@ a:focus-visible {
   color: var(--green);
   border-radius: var(--radius-sm);
   background: var(--green-soft);
-  font-size: 15px;
+  font-size: var(--text-md);
 }
 
 .location-copy strong,
@@ -549,13 +582,13 @@ a:focus-visible {
 }
 
 .location-copy strong {
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .location-copy span {
   margin-top: 3px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .remove-location {
@@ -568,7 +601,7 @@ a:focus-visible {
   border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .remove-location:hover {
@@ -597,20 +630,20 @@ a:focus-visible {
   place-items: center;
   border: 1px solid rgba(45, 114, 89, 0.35);
   border-radius: 50%;
-  font-size: 13px;
+  font-size: var(--text-md);
   font-weight: 800;
 }
 
 .privacy-strip strong,
 .verified-strip strong {
-  font-size: 11px;
+  font-size: var(--text-sm);
 }
 
 .privacy-strip p,
 .verified-strip p {
   margin: 4px 0 0;
   color: var(--green-muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -623,7 +656,7 @@ a:focus-visible {
 .status {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
 }
 
 .scanning-view {
@@ -645,7 +678,7 @@ a:focus-visible {
 .scanning-view > p:not(.section-label) {
   max-width: 520px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
   line-height: 1.6;
 }
 
@@ -727,7 +760,7 @@ a:focus-visible {
   border: 1px solid rgba(45, 114, 89, 0.2);
   border-radius: var(--radius-pill);
   background: var(--green-soft);
-  font-size: 10px;
+  font-size: var(--text-sm);
   font-weight: 750;
   text-transform: capitalize;
 }
@@ -757,13 +790,13 @@ a:focus-visible {
 
 .metric span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .metric strong {
   margin-top: 7px;
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  font-size: 22px;
+  font-size: var(--text-3xl);
   font-weight: 400;
 }
 
@@ -790,10 +823,14 @@ a:focus-visible {
 
 .category-row {
   display: grid;
-  grid-template-columns: 118px minmax(60px, 1fr) 50px;
+  /* The label column was sized for 10px text and clipped "Plain text &
+     Markdown" to "Plain text & Markd…" at the readable size. A format name the
+     reader has to guess at defeats the point of the panel, and the bar is the
+     part that can afford to give up width. */
+  grid-template-columns: minmax(150px, max-content) minmax(60px, 1fr) 56px;
   gap: 10px;
   align-items: center;
-  font-size: 10px;
+  font-size: var(--text-sm);
 }
 
 .category-label {
@@ -843,12 +880,12 @@ a:focus-visible {
 
 .signals-list dt {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .signals-list dd {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -871,7 +908,7 @@ a:focus-visible {
 
 .pilot-strip strong {
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  font-size: 17px;
+  font-size: var(--text-lg);
   font-weight: 400;
 }
 
@@ -879,13 +916,13 @@ a:focus-visible {
   max-width: 660px;
   margin: 7px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.55;
 }
 
 .pilot-strip code {
   color: var(--ink);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .results-actions {
@@ -908,7 +945,7 @@ a:focus-visible {
   max-width: 620px;
   margin-bottom: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.55;
 }
 
@@ -923,7 +960,7 @@ a:focus-visible {
 .search-form label {
   display: block;
   margin-bottom: 9px;
-  font-size: 11px;
+  font-size: var(--text-sm);
   font-weight: 720;
 }
 
@@ -945,7 +982,7 @@ a:focus-visible {
   outline: 0;
   background: var(--surface-bright);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--text-body);
   line-height: 1.5;
 }
 
@@ -957,7 +994,7 @@ a:focus-visible {
 .search-help {
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.5;
 }
 
@@ -981,7 +1018,7 @@ a:focus-visible {
   border: 1px solid rgba(45, 114, 89, 0.22);
   border-radius: var(--radius-pill);
   background: var(--green-soft);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 670;
 }
 
@@ -998,7 +1035,7 @@ a:focus-visible {
 .semantic-heading {
   margin: 8px 0 -2px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
   font-weight: 720;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1018,7 +1055,7 @@ a:focus-visible {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
   cursor: pointer;
 }
 
@@ -1030,20 +1067,20 @@ a:focus-visible {
 .build-forecast {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .indexing-progress {
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--text-md);
   font-variant-numeric: tabular-nums;
 }
 
 .transcription-heading {
   margin: 8px 0 -2px;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
   font-weight: 720;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1060,7 +1097,7 @@ a:focus-visible {
 .transcription-why {
   margin: 2px 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .transcribed-text {
@@ -1074,7 +1111,7 @@ a:focus-visible {
 .transcription-confidence {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 
 .evidence-card,
@@ -1096,7 +1133,7 @@ a:focus-visible {
 
 .evidence-kicker {
   color: var(--green-2);
-  font-size: 9px;
+  font-size: var(--text-xs);
   font-weight: 760;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -1105,7 +1142,7 @@ a:focus-visible {
 .evidence-title {
   display: block;
   margin-top: 4px;
-  font-size: 13px;
+  font-size: var(--text-md);
 }
 
 .evidence-excerpt {
@@ -1115,7 +1152,7 @@ a:focus-visible {
   border-left: 3px solid var(--gold);
   background: var(--surface-muted);
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  font-size: 13px;
+  font-size: var(--text-md);
   line-height: 1.58;
   white-space: pre-wrap;
 }
@@ -1123,13 +1160,13 @@ a:focus-visible {
 .evidence-meta {
   margin-top: 12px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 .evidence-why {
   margin: 9px 0 0;
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--text-xs);
   line-height: 1.5;
 }
 
@@ -1147,14 +1184,14 @@ a:focus-visible {
 }
 
 .criterion-evidence strong {
-  font-size: 10px;
+  font-size: var(--text-sm);
 }
 
 .criterion-evidence p {
   margin: 6px 0 0;
   color: var(--ink-3);
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.5;
 }
 
@@ -1165,7 +1202,7 @@ a:focus-visible {
   border-radius: var(--radius-md);
   background: var(--surface-muted);
   text-align: center;
-  font-size: 11px;
+  font-size: var(--text-sm);
   line-height: 1.6;
 }
 
@@ -1189,7 +1226,7 @@ a:focus-visible {
   border-radius: var(--radius-md);
   background: var(--danger-soft);
   box-shadow: 0 10px 30px rgba(92, 35, 31, 0.11);
-  font-size: 10px;
+  font-size: var(--text-sm);
 }
 
 .error-banner button {
@@ -1197,7 +1234,7 @@ a:focus-visible {
   border: 0;
   background: transparent;
   cursor: pointer;
-  font-size: 18px;
+  font-size: var(--text-xl);
 }
 
 footer {
@@ -1206,7 +1243,7 @@ footer {
   gap: 8px;
   padding: 18px 4px 0;
   color: var(--muted-2);
-  font-size: 9px;
+  font-size: var(--text-xs);
 }
 
 [hidden] {
@@ -1267,6 +1304,6 @@ footer {
 .criterion-why {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--text-sm);
   line-height: 1.45;
 }

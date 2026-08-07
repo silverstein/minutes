@@ -94,10 +94,19 @@
                   a separate authorization boundary.
                 </p>
               </div>
-              <button id="add-locations" class="button button-secondary" type="button">
-                <span aria-hidden="true">＋</span>
-                Choose locations
-              </button>
+              <div class="location-actions">
+                <button id="add-locations" class="button button-secondary" type="button">
+                  <span aria-hidden="true">＋</span>
+                  Choose locations
+                </button>
+                <button id="skip-folders" class="button button-secondary" type="button" disabled>
+                  <span aria-hidden="true">−</span>
+                  Skip folders
+                </button>
+                <button id="clear-skipped" class="button button-quiet" type="button" hidden>
+                  Clear skipped
+                </button>
+              </div>
             </div>
 
             <div id="empty-locations" class="empty-state">

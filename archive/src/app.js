@@ -9,6 +9,8 @@ const elements = {
   emptyLocations: document.querySelector("#empty-locations"),
   locationList: document.querySelector("#location-list"),
   addLocations: document.querySelector("#add-locations"),
+  skipFolders: document.querySelector("#skip-folders"),
+  clearSkipped: document.querySelector("#clear-skipped"),
   runCensus: document.querySelector("#run-census"),
   cancelCensus: document.querySelector("#cancel-census"),
   cancelIndexing: document.querySelector("#cancel-indexing"),
@@ -90,6 +92,9 @@ function showView(name) {
 
 function setLocationControlsDisabled(disabled) {
   elements.addLocations.disabled = disabled;
+  // Nothing to skip until there is a location to skip inside of.
+  elements.skipFolders.disabled = disabled || locations.length === 0;
+  elements.clearSkipped.disabled = disabled;
   elements.runCensus.disabled = disabled || locations.length === 0;
   for (const button of elements.locationList.querySelectorAll("button")) {
     button.disabled = disabled;
@@ -130,6 +135,7 @@ function renderLocations(nextLocations) {
   }
 
   elements.runCensus.disabled = locations.length === 0;
+  elements.skipFolders.disabled = locations.length === 0;
   elements.setupStatus.textContent =
     locations.length === 0
       ? "Choose at least one location to continue."
@@ -142,7 +148,84 @@ async function chooseLocations() {
   hideError();
   setLocationControlsDisabled(true);
   try {
-    renderLocations(await invoke("choose_archive_locations"));
+    const choice = await invoke("choose_archive_locations");
+    renderLocations(choice.locations);
+    // Folders already covered by an approved location are folded in rather
+    // than refused. Say so plainly: they were chosen on purpose, and silence
+    // here reads as the app having ignored them.
+    if (choice.folded > 0) {
+      elements.setupStatus.textContent = `${elements.setupStatus.textContent} ${
+        choice.folded === 1 ? "One folder was" : `${choice.folded} folders were`
+      } already inside a folder you approved, so ${
+        choice.folded === 1 ? "it is" : "they are"
+      } covered by that one.`;
+    }
+    lastReport = null;
+    vaultReport = null;
+  } catch (error) {
+    showError(error);
+  } finally {
+    setLocationControlsDisabled(false);
+  }
+}
+
+/// Folders chosen here are never read during a build.
+///
+/// The panel is the same native one used for locations, so the interface still
+/// receives no path -- only counts. Every outcome is reported, including the
+/// ones that did nothing: an operator who believes a folder is being skipped
+/// and is wrong ends up with an index they cannot account for.
+async function chooseSkippedFolders() {
+  hideError();
+  setLocationControlsDisabled(true);
+  try {
+    const choice = await invoke("choose_archive_exclusions");
+    // Skipping is reversible, and the way back has to be visible: a folder
+    // skipped by mistake is a folder silently missing from every search.
+    elements.clearSkipped.hidden = choice.total === 0;
+    const notes = [];
+    if (choice.skipped > 0) {
+      notes.push(
+        `${choice.total.toLocaleString()} folder${
+          choice.total === 1 ? "" : "s"
+        } will be skipped when the index is built.`,
+      );
+    }
+    if (choice.outside > 0) {
+      notes.push(
+        `${choice.outside.toLocaleString()} ${
+          choice.outside === 1 ? "folder is" : "folders are"
+        } not inside an approved location, so ${
+          choice.outside === 1 ? "it was" : "they were"
+        } not added.`,
+      );
+    }
+    if (choice.refusedWholeLocation > 0) {
+      notes.push(
+        "A whole approved location cannot be skipped — remove the location instead.",
+      );
+    }
+    if (notes.length > 0) {
+      elements.setupStatus.textContent = notes.join(" ");
+    }
+    lastReport = null;
+    vaultReport = null;
+  } catch (error) {
+    showError(error);
+  } finally {
+    setLocationControlsDisabled(false);
+  }
+}
+
+async function clearSkippedFolders() {
+  hideError();
+  setLocationControlsDisabled(true);
+  try {
+    const cleared = await invoke("clear_archive_exclusions");
+    elements.clearSkipped.hidden = true;
+    elements.setupStatus.textContent = `${cleared.toLocaleString()} skipped folder${
+      cleared === 1 ? "" : "s"
+    } restored. Every approved location will be read whole.`;
     lastReport = null;
     vaultReport = null;
   } catch (error) {
@@ -199,9 +282,14 @@ function renderBuildForecast(report) {
   const scans = countFor("image_or_scan");
   const pdfs = countFor("pdf");
   const wordProcessing = countFor("word_processing");
-  // Measured on this machine: about 0.4s per scanned page, and about 0.5s per
-  // document that needs a converter process.
-  const seconds = scans * 0.4 + (pdfs + wordProcessing) * 0.5;
+  // Calibrated against a full-scale run, not a per-page guess: 16,621
+  // documents in that archive's own format mix -- 2,774 scans, 447 PDFs, 349
+  // Word -- took 1,028 seconds end to end. Extraction runs in parallel, which
+  // the old per-page arithmetic ignored, so it predicted 25 minutes for a
+  // build that takes 17. These rates keep a little headroom over the measured
+  // figure; a build that finishes early is a better surprise than one that
+  // runs past its own estimate.
+  const seconds = scans * 0.3 + (pdfs + wordProcessing) * 0.4;
   if (seconds < 60) {
     forecast.hidden = true;
     return;
@@ -371,6 +459,12 @@ function renderVaultSummary(report) {
           report.semantic_provisions_indexed === 1 ? "" : "s"
         } built with the pinned macOS model inside its network-denied worker. `
       : "Semantic suggestions are unavailable on this Mac. ") +
+    // Partial suggestion coverage is not the same as none, and it has to be
+    // said. Exact search is complete either way; a reader who assumes the
+    // suggestions swept the whole archive would be wrong.
+    (report.semantic_coverage_partial
+      ? "The on-device suggestion model stopped partway through this build, so meaning-based suggestions cover only part of the archive. Exact search covers all of it. "
+      : "") +
     describeDroppedSources(report) +
     // A partial index must say so on its face. It is a real index and worth
     // having, but a reader who thinks it covers the whole folder will draw a
@@ -837,6 +931,8 @@ async function bootstrap() {
 }
 
 elements.addLocations.addEventListener("click", chooseLocations);
+elements.skipFolders.addEventListener("click", chooseSkippedFolders);
+elements.clearSkipped.addEventListener("click", clearSkippedFolders);
 elements.runCensus.addEventListener("click", runCensus);
 elements.cancelCensus.addEventListener("click", () => cancelOperation(elements.cancelCensus));
 elements.cancelIndexing.addEventListener("click", () => cancelOperation(elements.cancelIndexing));

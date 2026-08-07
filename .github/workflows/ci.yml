@@ -29,13 +29,25 @@ jobs:
           filters: |
             rust:
               - 'tauri/**'
-              - 'crates/core/**'
-              - 'crates/cli/**'
-              - 'crates/reader/**'
-              - 'crates/whisper-guard/**'
+              - 'crates/**'
+              - 'archive/**'
+              - 'tests/**'
+              # Declared as build inputs by tauri/src-tauri/build.rs via
+              # cargo:rerun-if-changed and copied into the shipped bundle, so a
+              # change here really is a Rust build change.
+              - '.agents/skills/**'
+              - '.opencode/skills/**'
+              - '.opencode/commands/**'
+              - 'scripts/calendar-events.swift'
+              - 'scripts/calendar-helper-Info.plist'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              # Sets rustflags and build env per target, so it changes how every
+              # Rust target compiles. Omitting it meant a change that statically
+              # linked the Windows CRT skipped every Rust job and reported green
+              # (#657 follow-up).
+              - '.cargo/**'
               - '.github/workflows/ci.yml'
 
   test:

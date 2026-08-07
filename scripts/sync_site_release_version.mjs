@@ -187,6 +187,26 @@ if (currentContent === nextContent) {
 }
 
 if (checkOnly) {
+  // The test count is derived by scanning for #[test]/#[tokio::test], so it
+  // moves whenever anyone adds a test. Comparing it for exact equality made a
+  // shared, required check go red on main every time tests landed, and every
+  // open PR then inherited a failure it did not cause. That happened twice in
+  // two days (#664 and again the next morning).
+  //
+  // Release *links* are what this job is named for and what must be exact:
+  // version, and the tool/resource/prompt/command counts that appear in
+  // documented URLs. A slightly stale test count on a marketing page is not
+  // worth reddening everyone's CI, and the pre-push hook still refreshes it.
+  const staleOnlyByTestCount =
+    currentContent.replace(/MINUTES_TEST_COUNT = \d+/, "MINUTES_TEST_COUNT = 0") ===
+    nextContent.replace(/MINUTES_TEST_COUNT = \d+/, "MINUTES_TEST_COUNT = 0");
+  if (staleOnlyByTestCount) {
+    console.warn(
+      `site release constants match except the test count (committed differs from ${totalTestCount}). ` +
+        "Not failing: run scripts/sync_site_release_version.mjs to refresh it.",
+    );
+    process.exit(0);
+  }
   console.error(
     [
       "site release constants are out of sync with source",

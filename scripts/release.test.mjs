@@ -205,6 +205,19 @@ if (process.argv.includes("--release")) {
 console.log("Version sync check passed.");
 `,
   );
+  // The tag phase also gates on the site release constants, with the test
+  // count binding. Stubbed like check_version_sync above: the real script
+  // scans the whole repo for tests, which this fixture does not have.
+  await writeFixture(
+    root,
+    "scripts/sync_site_release_version.mjs",
+    `if (process.argv.includes("--check-release") && process.env.RELEASE_SITE_CHECK_FAIL === "1") {
+  console.error("simulated stale site release constants");
+  process.exit(1);
+}
+console.log("site release constants already match.");
+`,
+  );
   await writeFixture(root, "extra.txt", "original\n");
 
   assert.equal(git(root, "init", "-q", "-b", "main").status, 0);
@@ -370,5 +383,21 @@ test("tag aborts when the --release version policy check fails", async (t) => {
   const result = await runRelease(fixture, ["tag", version], { RELEASE_CHECK_FAIL: "release" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /simulated --release policy failure/);
+  assert.equal(git(fixture.root, "tag", "--list", `v${version}`).stdout.trim(), "");
+});
+
+test("tag aborts when the site release constants are stale", async (t) => {
+  // The site test count is tolerated per-PR so a number that moves with every
+  // added test cannot redden unrelated CI (#666), which means nothing refreshes
+  // it on its own. It is binding here instead. This must fail BEFORE the tag
+  // exists: release-cli.yml runs the same check, but only on the tag push, and
+  // by then the immutable-tag policy rules out simply retagging.
+  const fixture = await makeRepo(t);
+  await completePhase1(fixture);
+  await completePhase2(fixture);
+  assert.equal(git(fixture.root, "push", "-q", "origin", "main").status, 0);
+  const result = await runRelease(fixture, ["tag", version], { RELEASE_SITE_CHECK_FAIL: "1" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /simulated stale site release constants/);
   assert.equal(git(fixture.root, "tag", "--list", `v${version}`).stdout.trim(), "");
 });

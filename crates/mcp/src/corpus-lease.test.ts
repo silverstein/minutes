@@ -682,7 +682,16 @@ describe("stable corpus lease", () => {
           }
         )
       ).rejects.toThrow("stable meeting corpus authorization failed");
+      // The rejection is the non-publication proof: a published projection
+      // would have resolved to MUST_NOT_PUBLISH instead.
       expect(projections).toBe(1);
+      // And the stalled worker has to be reaped, not merely abandoned. Without
+      // this the deterministic deadline could satisfy the assertions above
+      // while leaving a wedged child holding admission, which is the failure
+      // this scenario exists to catch.
+      await expect(
+        withStableCorpusLease(root, () => "reused")
+      ).resolves.toBe("reused");
     });
   });
 

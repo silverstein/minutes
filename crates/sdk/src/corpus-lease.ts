@@ -1829,11 +1829,20 @@ async function dispatchStableCorpusLease<T>(
     resolveTermination();
   });
 
+  // A refusal kills the worker, but protocol lines already in flight are still
+  // being handled, so a write can land on a pipe whose reader is gone. That
+  // raises an asynchronous EPIPE on the stream, and an 'error' event with no
+  // listener is fatal to the host process, not just to this lease. Absorbing
+  // it is correct: by the time the pipe is gone the lease has already settled
+  // and the message has nowhere useful to go.
+  child.stdin?.on("error", () => {});
+
   const send = (message: unknown): void => {
     const serialized = JSON.stringify(message);
     if (Buffer.byteLength(serialized) > CORPUS_WORKER_PROTOCOL_MAX_BYTES || !child.stdin) {
       throw new CorpusLeaseBudgetError("meeting corpus worker protocol exceeded its budget");
     }
+    if (settled || child.stdin.destroyed || child.killed) return;
     child.stdin.write(serialized + "\n");
   };
 

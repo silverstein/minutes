@@ -2353,6 +2353,17 @@ async function tryAutoInstallAttempt(capabilityRepair: boolean = false): Promise
       }
 
       console.error(`[Minutes] ✓ Installed to ${targetPath}`);
+      // Everything this server runs uses the absolute path, and child
+      // processes get the directory prepended via mcpCliChildEnv. A terminal
+      // is a different matter: nothing adds this directory to the user's own
+      // PATH, so say so rather than leaving `minutes: command not found` as
+      // the first thing they see.
+      if (process.platform === "win32") {
+        console.error(
+          `[Minutes] To run 'minutes' in your own terminal, add ${installDir} to PATH:\n` +
+            `[Minutes]   setx PATH "%PATH%;${installDir}"   (new terminals only)`,
+        );
+      }
       MINUTES_BIN = targetPath;
       return true;
     } catch (e: any) {
@@ -2687,7 +2698,13 @@ const CLI_INSTALL_MSG =
   `  sudo ln -s /opt/homebrew/bin/minutes /usr/local/bin/minutes`;
 
 // Common binary locations that may not be in Claude Desktop's restricted PATH.
+//
+// ~/.minutes/bin is where the Windows auto-installer puts the CLI (#657). The
+// MCP server resolves it absolutely via MINUTES_BIN, but plugin skills shell
+// out to a bare `minutes`, so without this entry those fail right after an
+// otherwise successful install.
 const EXTRA_PATH_DIRS = [
+  join(homedir(), ".minutes", "bin"),
   join(homedir(), ".local", "bin"),
   join(homedir(), ".cargo", "bin"),
   "/opt/homebrew/bin",

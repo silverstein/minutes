@@ -20,8 +20,8 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -643,6 +643,15 @@ describe.runIf(process.platform !== "win32")(
       )
     ).toBe(false);
     expect(canonicalPathWireEquals("normal.md", drive)).toBe(false);
+  });
+
+  it("puts the Minutes-owned install directory on the child PATH", () => {
+    // The Windows auto-installer targets ~/.minutes/bin (#657). This server
+    // uses the absolute path, but plugin skills shell out to a bare `minutes`,
+    // so the directory has to reach child processes or those fail immediately
+    // after a successful install.
+    const parts = (mcpCliChildEnv().PATH || "").split(delimiter);
+    expect(parts).toContain(join(homedir(), ".minutes", "bin"));
   });
 
   it("forces the CLI deny policy after ambient and call-site overrides", () => {

@@ -1080,9 +1080,11 @@ cd tauri/src-tauri
 cargo tauri build --ci --bundles nsis --no-sign
 ```
 
-Tagged GitHub releases can include both a Windows NSIS installer as `minutes-desktop-windows-x64-setup.exe` and a raw desktop binary as `minutes-desktop-windows-x64.exe`. The installer is currently unsigned, so treat it as an advanced-user / preview distribution surface until Windows signing is added.
+Tagged GitHub releases can include three Windows desktop assets: an NSIS installer as `minutes-desktop-windows-x64-setup.exe`, a portable archive as `minutes-desktop-windows-x64.zip`, and a raw desktop binary as `minutes-desktop-windows-x64.exe`. The installer is currently unsigned, so treat it as an advanced-user / preview distribution surface until Windows signing is added.
 
-**Use the installer, not the raw binary.** The desktop app imports the Visual C++ runtime, which Windows does not include. The installer places those runtime files beside the executable; the raw `.exe` does not carry them, so on a PC without the Visual C++ Redistributable it exits immediately with no message (#657).
+**Use the installer or the zip, not the raw binary.** The desktop app imports the Visual C++ runtime, which Windows does not include. The installer and the zip both place those runtime files beside the executable; the raw `.exe` does not carry them, so on a PC without the Visual C++ Redistributable it exits immediately with no message (#657).
+
+The zip is the no-install option: unpack it anywhere and run `minutes-app.exe` from the extracted folder. Keep the runtime DLLs alongside it, since Windows resolves the application's own directory ahead of the system path and that is the whole reason the archive works.
 
 The desktop app adds a system tray icon, recording controls, audio visualizer, Recall, and a meeting list window. The current Windows desktop build covers recording, transcription, search, settings, and Recall. Calendar suggestions, call detection, tray copy/paste automation, and the native dictation hotkey remain macOS-only for now.
 

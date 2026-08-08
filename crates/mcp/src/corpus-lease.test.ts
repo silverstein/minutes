@@ -974,18 +974,20 @@ describe("stable corpus lease", () => {
     });
   });
 
-  it("reports one refusal even when the budget is gone before the worker starts", async () => {
-    // A deadline that has already elapsed when the lease is entered used to
-    // escape as the raw "meeting corpus authorization deadline elapsed",
-    // because the guard at the top of the dispatch throws before the worker
-    // machinery that wraps refusals exists. Callers then saw two different
-    // sentences for one condition, depending only on timing.
+  it("reports the documented refusal when the budget expires, whichever guard trips", async () => {
+    // An exhausted budget can be noticed by several guards, and only some sit
+    // inside the worker machinery that wraps refusals. The ones outside it
+    // used to escape as the raw "meeting corpus authorization deadline
+    // elapsed", so callers saw two different sentences for one condition
+    // depending only on which guard won. CI hit it on a contended Windows
+    // runner, where a short budget can expire between computing the deadline
+    // and the next statement checking it.
     //
-    // On a contended Windows runner that is reachable with an ordinary short
-    // budget: the process can be descheduled between computing the deadline
-    // and the next statement checking it, which is how CI hit it. The smallest
-    // budget the API accepts reaches the same window every time, because
-    // starting the worker takes far longer than a millisecond.
+    // This pins the contract rather than a route: the smallest budget the API
+    // accepts is reliably gone by the time some guard notices, and every guard
+    // has to produce the same sentence. Which one fires is timing-dependent
+    // and deliberately not asserted -- claiming a specific one would be the
+    // same kind of unverified detail this fix exists to remove.
     await withCorpus(async (root) => {
       writeFileSync(join(root, "meeting.md"), "elapsed budget canary");
       let projections = 0;

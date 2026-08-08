@@ -671,7 +671,12 @@ describe("stable corpus lease", () => {
             return "MUST_NOT_PUBLISH";
           },
           {
-            timeoutMs: 30_000,
+            // Below vitest's 15s testTimeout on purpose: if the
+            // deterministic deadline ever fails to fire, the lease still
+            // refuses with its own message instead of vitest killing the test
+            // with a less useful timeout. Still ~75x the measured worst-case
+            // startup, so it cannot race.
+            timeoutMs: 10_000,
             workerStallPhaseForTest: "before-authorized",
             operationDeadlineForTest: operationDeadline,
           }

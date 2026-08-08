@@ -661,13 +661,18 @@ describe("stable corpus lease", () => {
           { timeoutMs: 1_500, workerStallPhaseForTest: "before-baseline" }
         )
       ).rejects.toThrow("stable meeting corpus authorization failed");
-      // A lease that never got a worker running refuses almost immediately, so
-      // spending most of the budget is the evidence that one was alive and
-      // stalling. With the old 300ms budget the refusal was equally consistent
-      // with a worker that never started.
-      const elapsed = Date.now() - started;
-      expect(elapsed).toBeGreaterThanOrEqual(1_000);
-      expect(elapsed).toBeLessThan(6_000);
+      // The worker publishes its sentinels before the stall, so their presence
+      // is timing-independent proof it ran that far. Measured: a stalled
+      // worker leaves both fences behind, while a lease starved to 1ms refuses
+      // in 35ms with no namespace at all. Elapsed time alone could not tell
+      // those apart, since a budget consumed by startup also spends the budget.
+      const namespace = join(root, ".minutes-corpus-lease-v1");
+      expect(existsSync(namespace)).toBe(true);
+      expect(readdirSync(namespace).sort()).toEqual([
+        "lease-shared-0.fence",
+        "lease-shared-1.fence",
+      ]);
+      expect(Date.now() - started).toBeLessThan(6_000);
       expect(operationCalls).toBe(0);
       await expect(withStableCorpusLease(root, () => "reused")).resolves.toBe(
         "reused"

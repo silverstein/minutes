@@ -29,7 +29,25 @@ jobs:
           filters: |
             rust:
               - 'tauri/**'
-              - 'crates/**'
+              # Enumerated, not 'crates/**'. crates/mcp and crates/sdk are npm
+              # packages, not workspace members: neither has a Cargo.toml and
+              # between them they hold zero .rs files, so 'crates/**' ran
+              # test x3, install x2, the Linux full build and the Windows
+              # desktop installer on every TypeScript-only PR.
+              #
+              # Negation entries ('!crates/mcp/**') cannot do this: the action
+              # compiles each pattern separately, and a lone negated pattern
+              # matches every file outside its own subtree, which would make the
+              # filter always true. scripts/check_ci_rust_filter.mjs keeps this
+              # list in step with the workspace members instead.
+              - 'crates/core/**'
+              - 'crates/cli/**'
+              - 'crates/reader/**'
+              - 'crates/whisper-guard/**'
+              - 'crates/archive-convert/**'
+              - 'crates/archive-core/**'
+              - 'crates/archive-ocr/**'
+              - 'crates/archive-semantic/**'
               - 'archive/**'
               - 'tests/**'
               # Declared as build inputs by tauri/src-tauri/build.rs via
@@ -43,6 +61,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              # Workspace lint policy (disallowed-methods). `cargo clippy --all
+              # -- -D warnings` runs only inside the filtered test job, so
+              # without this a PR editing lint policy skipped every Rust job and
+              # reported green. crates/core/clippy.toml is covered by crates/**.
+              - 'clippy.toml'
               # Sets rustflags and build env per target, so it changes how every
               # Rust target compiles. Omitting it meant a change that statically
               # linked the Windows CRT skipped every Rust job and reported green
@@ -501,11 +524,17 @@ jobs:
       - name: Verify corpus lease mirror
         run: node scripts/check_corpus_lease_mirror.mjs
 
+      - name: Verify CI rust filter covers every workspace member
+        run: node scripts/check_ci_rust_filter.mjs
+
       - name: Test version policy checker
         run: node --test scripts/check_version_sync.test.mjs
 
       - name: Test optional Git hook setup
         run: node --test scripts/setup_hooks.test.mjs
+
+      - name: Test CI rust filter guard
+        run: node --test scripts/check_ci_rust_filter.test.mjs
 
       - name: Test transactional version bump
         run: node --test scripts/bump_version.test.mjs

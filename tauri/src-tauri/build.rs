@@ -63,10 +63,21 @@ fn stage_msvc_runtime() {
     // across targets, so "the files exist" says nothing about which
     // architecture they are. Without the stamp, building x86_64 and then
     // aarch64 in the same checkout ships x64 CRT DLLs inside an ARM64
-    // installer, which fails exactly like #657 on the user's machine. The
-    // stamp also forces a refresh after a toolset upgrade moves the source.
+    // installer, which fails exactly like #657 on the user's machine.
+    //
+    // Architecture only. A VS toolset upgrade leaves the files in place and
+    // the stamp matching, so the previously staged DLLs are reused; delete
+    // them to force a refresh. Recording the source version here would fix
+    // that, at the cost of re-staging whenever the toolset moves.
+    //
+    // Deliberately NOT declared with rerun-if-changed. This build script
+    // writes the stamp, and declaring a path the script itself writes makes
+    // cargo re-run it on every single build. Measured on Windows: a warm
+    // `cargo check -p minutes-app` recompiled every time (8.6s) with the
+    // declaration, against 0 rebuilds (3.0s) without it. The DLL paths above
+    // are declared and already cover the cases that should re-trigger
+    // staging; the stamp is read, never watched.
     let stamp_path = manifest_dir.join(".msvc-runtime-stage.stamp");
-    println!("cargo:rerun-if-changed={}", stamp_path.display());
 
     let staged = RUNTIME_DLLS.iter().all(|d| manifest_dir.join(d).exists());
     let stamp_matches = std::fs::read_to_string(&stamp_path)

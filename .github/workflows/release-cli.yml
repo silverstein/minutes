@@ -147,11 +147,21 @@ jobs:
           # Professional 14.29 over Community 14.44 on a box with both. Pinning
           # '2022' and 'VC143' would also silently stop matching the next
           # toolset.
+          #
+          # Two details that keep this equivalent to build.rs rather than
+          # merely similar:
+          #  - require at least two version components, because [version]
+          #    rejects a bare '14' and would abort the step under
+          #    ErrorActionPreference='Stop'
+          #  - require vcruntime140.dll to be present in the candidate, so an
+          #    incomplete redist directory falls through to the next-best
+          #    version instead of being selected and then hard-throwing below
           $crt = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT' -Directory -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)*$' } |
+                 Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)+$' } |
+                 Where-Object { Test-Path (Join-Path $_.FullName 'vcruntime140.dll') } |
                  Sort-Object @{ Expression = { [version]$_.Parent.Parent.Name } } -Descending |
                  Select-Object -First 1
-          if (-not $crt) { throw 'Could not locate a VC CRT redistributable on the runner' }
+          if (-not $crt) { throw 'Could not locate a complete VC CRT redistributable on the runner' }
           Write-Host "CRT source: $($crt.FullName)"
           $stage = 'minutes-windows-x64'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null

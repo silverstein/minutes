@@ -48,6 +48,9 @@ jobs:
               - 'crates/archive-core/**'
               - 'crates/archive-ocr/**'
               - 'crates/archive-semantic/**'
+              # Not a workspace member and not an npm package: fixture audio
+              # read by tests and scripts. 'crates/**' used to cover it.
+              - 'crates/assets/**'
               - 'archive/**'
               - 'tests/**'
               # Declared as build inputs by tauri/src-tauri/build.rs via

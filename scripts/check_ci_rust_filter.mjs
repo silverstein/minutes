@@ -17,7 +17,7 @@
  * enumeration going stale: add a workspace member without listing it and CI
  * fails here rather than silently skipping the Rust jobs forever.
  */
-import { readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
@@ -54,24 +54,51 @@ function rustFilterPatterns() {
 /**
  * Does any pattern cover this member's files?
  *
- * Only prefix globs count. A pattern like 'crates/core/**' covers
+ * Only recursive prefix globs count. A pattern like 'crates/core/**' covers
  * 'crates/core' and anything below it.
+ *
+ * A single-file entry such as 'crates/core/Cargo.toml' does NOT count, even
+ * though it names the member. Accepting it let the guard report full coverage
+ * for a crate whose .rs files all skipped the Rust matrix -- the same
+ * "PR touches Rust, CI reports green" gap the guard exists to close.
  */
 function coveredBy(member, patterns) {
   return patterns.some((pattern) => {
     if (pattern.startsWith("!")) return false;
-    if (!pattern.endsWith("/**")) return pattern === `${member}/Cargo.toml`;
+    if (!pattern.endsWith("/**")) return false;
     const prefix = pattern.slice(0, -3);
     return member === prefix || member.startsWith(`${prefix}/`);
   });
 }
 
+/**
+ * Directories under crates/ that are neither workspace members nor npm
+ * packages -- today that is crates/assets, which holds fixture audio.
+ *
+ * The filter used to be a blanket 'crates/**' and covered these for free.
+ * Enumerating Rust crates dropped them, and checking workspace members alone
+ * cannot notice: they are not members. So they are checked explicitly.
+ */
+function unclassifiedCrateDirs() {
+  const cratesDir = join(repoRoot, "crates");
+  if (!existsSync(cratesDir)) return [];
+  return readdirSync(cratesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => `crates/${entry.name}`)
+    .filter(
+      (dir) =>
+        !existsSync(join(repoRoot, dir, "Cargo.toml")) &&
+        !existsSync(join(repoRoot, dir, "package.json")),
+    );
+}
+
 const members = workspaceMembers();
 const patterns = rustFilterPatterns();
-const missing = members.filter((m) => !coveredBy(m, patterns));
+const mustCover = [...members, ...unclassifiedCrateDirs()];
+const missing = mustCover.filter((m) => !coveredBy(m, patterns));
 
 if (missing.length > 0) {
-  console.error("CI's `rust` path filter does not cover every workspace member.");
+  console.error("CI's `rust` path filter does not cover every Rust build input.");
   console.error("");
   for (const m of missing) console.error(`  uncovered: ${m}`);
   console.error("");
@@ -83,5 +110,6 @@ if (missing.length > 0) {
 
 console.log(
   `CI rust filter covers all ${members.length} workspace members ` +
+    `and ${mustCover.length - members.length} unclassified crates/ dirs ` +
     `(${patterns.length} patterns).`
 );

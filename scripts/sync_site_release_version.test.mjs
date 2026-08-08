@@ -19,6 +19,26 @@ function run(args) {
   return { code: result.status, output: `${result.stdout || ""}${result.stderr || ""}` };
 }
 
+// These tests edit a tracked file. A normal run restores it in a finally, but
+// an interrupted one (Ctrl-C, a killed pipeline, a cancelled CI job) would
+// otherwise leave the working tree modified, and the next run then fails with
+// a confusing "test edit did not change release.ts". Restore on the way out
+// too, so an abort cannot corrupt the checkout.
+const pristineReleaseTs = readFileSync(releaseTs, "utf8");
+let releaseTsDirty = false;
+function restoreReleaseTs() {
+  if (!releaseTsDirty) return;
+  writeFileSync(releaseTs, pristineReleaseTs);
+  releaseTsDirty = false;
+}
+process.on("exit", restoreReleaseTs);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    restoreReleaseTs();
+    process.exit(1);
+  });
+}
+
 /**
  * Run `body` with release.ts temporarily edited, always restoring it.
  *
@@ -27,14 +47,14 @@ function run(args) {
  * which is how the first version of these tests reported a false result.
  */
 function withEditedReleaseTs(edit, body) {
-  const original = readFileSync(releaseTs, "utf8");
-  const edited = edit(original);
-  assert.notEqual(edited, original, "test edit did not change release.ts");
+  const edited = edit(pristineReleaseTs);
+  assert.notEqual(edited, pristineReleaseTs, "test edit did not change release.ts");
   try {
     writeFileSync(releaseTs, edited);
+    releaseTsDirty = true;
     return body();
   } finally {
-    writeFileSync(releaseTs, original);
+    restoreReleaseTs();
   }
 }
 
@@ -83,7 +103,13 @@ test("--check fails when the version and the test count both drift", () => {
   assert.match(result.output, /out of sync/);
 });
 
-test("both modes pass on a clean tree", () => {
+test("--check passes on the working tree", () => {
+  // Deliberately only --check. Asserting --check-release here would couple a
+  // unit test to live repo state: this file runs in the unfiltered version_sync
+  // job, which feeds the required CI Gate, so every PR that adds a test would
+  // redden main and every open PR. That is exactly the breakage #666 removed
+  // the exact-count comparison to stop, and the first version of this test
+  // reinstated it one layer down. Release readiness is checked where a release
+  // happens, not on every PR.
   assert.equal(run(["--check"]).code, 0);
-  assert.equal(run(["--check-release"]).code, 0);
 });

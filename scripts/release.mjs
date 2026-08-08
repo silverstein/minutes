@@ -175,6 +175,22 @@ async function runVersionCheck(root, release = false) {
     [path.join(root, "scripts", "check_version_sync.mjs"), ...(release ? ["--release"] : [])],
     { cwd: root },
   );
+  if (release) {
+    // Site constants, with the test count binding. Per-PR CI tolerates a stale
+    // count so a number that moves with every added test cannot redden
+    // unrelated checks (#666), which means nothing refreshes it on its own.
+    //
+    // This has to run here rather than only in release-cli.yml: that workflow
+    // triggers on the tag push, so a failure there arrives after the tag and
+    // the draft release already exist, and the recovery is delete-and-retag,
+    // which the immutable-tag policy forbids. Here it is a local failure with
+    // no tag created yet.
+    await exec(
+      process.execPath,
+      [path.join(root, "scripts", "sync_site_release_version.mjs"), "--check-release"],
+      { cwd: root },
+    );
+  }
 }
 
 async function assertTreeVersion(root, version) {

@@ -85,6 +85,17 @@ test("a parent glob covers nested members", () => {
   assert.equal(result.code, 0, result.output);
 });
 
+test("a Cargo.toml-only pattern does not count as covering the crate", () => {
+  // Naming the manifest is not covering the crate: every .rs file under it
+  // would still skip the Rust matrix while the guard reported green.
+  const result = runAgainst({
+    members: ["crates/foo"],
+    patterns: ["crates/foo/Cargo.toml"],
+  });
+  assert.equal(result.code, 1);
+  assert.match(result.output, /uncovered: crates\/foo/);
+});
+
 test("a negated pattern never counts as coverage", () => {
   // The action compiles each pattern separately, so '!crates/mcp/**' matches
   // every file outside that subtree rather than excluding it. Treating one as
@@ -95,6 +106,15 @@ test("a negated pattern never counts as coverage", () => {
   });
   assert.equal(result.code, 1);
   assert.match(result.output, /uncovered: crates\/core/);
+});
+
+test("the real filter covers crates/assets, which is not a workspace member", () => {
+  // crates/assets holds fixture audio and has neither a Cargo.toml nor a
+  // package.json, so 'crates/**' covered it for free and the enumeration
+  // dropped it. Checking workspace members alone cannot see the gap.
+  const ci = readFileSync(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
+  const rustBlock = ci.slice(ci.indexOf("rust:"), ci.indexOf("  test:"));
+  assert.match(rustBlock, /-\s*'crates\/assets\/\*\*'/);
 });
 
 test("the real repo satisfies the guard", () => {

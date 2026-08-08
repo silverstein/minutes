@@ -1724,7 +1724,46 @@ function parentControls(
  * Run a multi-source projection while a killable worker owns every corpus
  * traversal, exact read, watcher, fence, and cleanup filesystem operation.
  */
+/**
+ * Authorize a stable corpus read, presenting one error for one condition.
+ *
+ * Every way the lease can refuse is a refusal, and callers get the same
+ * sentence for all of them. Without this, which sentence you saw depended on
+ * where the failure landed: `fail()` wraps refusals raised once the worker is
+ * running, but a `CorpusLeaseChangedError` thrown before that, such as the
+ * deadline guard at the top of the dispatch below, escaped raw.
+ *
+ * That is observable, not cosmetic. On a contended Windows runner a short
+ * budget can elapse between computing the deadline and the very next
+ * statement checking it, so the same timeout surfaced as
+ * "meeting corpus authorization deadline elapsed" instead of the documented
+ * refusal, and CI failed with a message mismatch rather than a real defect.
+ *
+ * `CorpusLeaseBudgetError` and the plain `Error` refusals keep their own text:
+ * those name a caller-actionable limit rather than an authorization outcome.
+ */
 export async function withStableCorpusLease<T>(
+  root: string,
+  operation: (
+    snapshot: StableCorpusSnapshot,
+    attempt: number,
+    signal: AbortSignal
+  ) => T | Promise<T>,
+  hooks: CorpusLeaseHooks = {}
+): Promise<T> {
+  try {
+    return await dispatchStableCorpusLease(root, operation, hooks);
+  } catch (error) {
+    if (error instanceof CorpusLeaseChangedError) {
+      throw new Error(
+        "Access denied: stable meeting corpus authorization failed"
+      );
+    }
+    throw error;
+  }
+}
+
+async function dispatchStableCorpusLease<T>(
   root: string,
   operation: (
     snapshot: StableCorpusSnapshot,

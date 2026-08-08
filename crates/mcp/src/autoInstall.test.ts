@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   downloadReleaseBinaryWithChecksum,
+  extractZipWithPowerShell,
   findSha256ForAsset,
   parseSha256Sums,
 } from "./autoInstall.js";
@@ -109,5 +110,80 @@ describe("downloadReleaseBinaryWithChecksum", () => {
       })
     ).rejects.toThrow("checksum mismatch");
     await expect(stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("extractZipWithPowerShell", () => {
+  function capture() {
+    const calls: Array<{
+      file: string;
+      args: readonly string[];
+      options?: { timeout?: number; env?: NodeJS.ProcessEnv };
+    }> = [];
+    const execFileAsync = async (
+      file: string,
+      args: readonly string[],
+      options?: { timeout?: number; env?: NodeJS.ProcessEnv }
+    ) => {
+      calls.push({ file, args, options });
+      return undefined;
+    };
+    return { calls, execFileAsync };
+  }
+
+  it("passes both paths through the environment, not the command text", async () => {
+    const { calls, execFileAsync } = capture();
+    await extractZipWithPowerShell({
+      archivePath: "C:\\Users\\qa\\.minutes\\bin\\minutes-windows-x64.zip",
+      destDir: "C:\\Users\\qa\\.minutes\\bin",
+      execFileAsync,
+    });
+
+    expect(calls).toHaveLength(1);
+    const [call] = calls;
+    expect(call.file).toBe("powershell");
+    expect(call.options?.env?.MINUTES_ZIP_PATH).toBe(
+      "C:\\Users\\qa\\.minutes\\bin\\minutes-windows-x64.zip"
+    );
+    expect(call.options?.env?.MINUTES_ZIP_DEST).toBe("C:\\Users\\qa\\.minutes\\bin");
+  });
+
+  it("never reads $args, which -Command leaves empty", async () => {
+    const { calls, execFileAsync } = capture();
+    await extractZipWithPowerShell({
+      archivePath: "C:\\tmp\\a.zip",
+      destDir: "C:\\tmp\\out",
+      execFileAsync,
+    });
+
+    const { args } = calls[0];
+    const commandIndex = args.indexOf("-Command");
+    expect(commandIndex).toBeGreaterThanOrEqual(0);
+    const script = args[commandIndex + 1];
+
+    // `powershell -Command` appends trailing arguments to the command text and
+    // leaves $args empty; only -File binds them. Reading $args[0] made every
+    // Windows install fail with "argument is null or empty".
+    expect(script).not.toContain("$args");
+    expect(script).toContain("$env:MINUTES_ZIP_PATH");
+    expect(script).toContain("$env:MINUTES_ZIP_DEST");
+
+    // Nothing may follow the script, or it lands in the command text.
+    expect(args).toHaveLength(commandIndex + 2);
+  });
+
+  it("keeps an apostrophe home directory out of the command text", async () => {
+    const { calls, execFileAsync } = capture();
+    const home = "C:\\Users\\O'Brien\\.minutes\\bin";
+    await extractZipWithPowerShell({
+      archivePath: `${home}\\minutes-windows-x64.zip`,
+      destDir: home,
+      execFileAsync,
+    });
+
+    const { args, options } = calls[0];
+    const script = args[args.indexOf("-Command") + 1];
+    expect(script).not.toContain("O'Brien");
+    expect(options?.env?.MINUTES_ZIP_DEST).toBe(home);
   });
 });

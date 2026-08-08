@@ -90,7 +90,10 @@ import {
   probeCapabilitiesSync,
   type CapabilityProbeResult,
 } from "./capabilities.js";
-import { downloadReleaseBinaryWithChecksum } from "./autoInstall.js";
+import {
+  downloadReleaseBinaryWithChecksum,
+  extractZipWithPowerShell,
+} from "./autoInstall.js";
 import {
   attachCaptureRelay,
   type CaptureRelayCursor,
@@ -2320,21 +2323,11 @@ async function tryAutoInstallAttempt(capabilityRepair: boolean = false): Promise
           targetPath: archivePath,
           execFileAsync,
         });
-        // Paths arrive as arguments rather than interpolated into the script
-        // text, so a home directory containing an apostrophe (C:\\Users\\O'Brien)
-        // cannot break or alter the command.
-        await execFileAsync(
-          "powershell",
-          [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Expand-Archive -Path $args[0] -DestinationPath $args[1] -Force",
-            archivePath,
-            installDir,
-          ],
-          { timeout: 120000 },
-        );
+        await extractZipWithPowerShell({
+          archivePath,
+          destDir: installDir,
+          execFileAsync,
+        });
         await rm(archivePath, { force: true });
         // Confirm the extraction actually produced the binary. The POSIX path
         // gets this for free from rename(); without it a changed archive

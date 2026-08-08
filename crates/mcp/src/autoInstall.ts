@@ -5,7 +5,7 @@ import { readFile, rename, rm } from "fs/promises";
 type ExecFileAsync = (
   file: string,
   args: readonly string[],
-  options?: { timeout?: number }
+  options?: { timeout?: number; env?: NodeJS.ProcessEnv }
 ) => Promise<unknown>;
 
 export type Sha256Entry = {
@@ -57,6 +57,47 @@ export async function verifyDownloadedAsset(
       `checksum mismatch: expected ${expectedSha256.toLowerCase()}, got ${actual}`
     );
   }
+}
+
+/**
+ * Extract a zip on Windows via PowerShell's Expand-Archive.
+ *
+ * The paths travel in the environment, never in the command text. Two ways to
+ * get this wrong, both of which shipped:
+ *
+ * - Interpolating into a single-quoted PowerShell string breaks on a home
+ *   directory containing an apostrophe (`C:\Users\O'Brien`).
+ * - Passing them as trailing arguments and reading `$args[0]` does not work at
+ *   all: `powershell -Command` appends trailing arguments to the command text
+ *   and leaves `$args` empty (only `-File` binds them), so `$args[0]` is
+ *   `$null` and `Expand-Archive` rejects the parameter on every machine.
+ *
+ * `$env:` lookups are read at runtime and are never parsed as script, so no
+ * value of either path can alter the command.
+ */
+export async function extractZipWithPowerShell(options: {
+  archivePath: string;
+  destDir: string;
+  execFileAsync: ExecFileAsync;
+}): Promise<void> {
+  const { archivePath, destDir, execFileAsync } = options;
+  await execFileAsync(
+    "powershell",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Expand-Archive -Path $env:MINUTES_ZIP_PATH -DestinationPath $env:MINUTES_ZIP_DEST -Force",
+    ],
+    {
+      timeout: 120000,
+      env: {
+        ...process.env,
+        MINUTES_ZIP_PATH: archivePath,
+        MINUTES_ZIP_DEST: destDir,
+      },
+    }
+  );
 }
 
 export async function downloadReleaseBinaryWithChecksum(options: {

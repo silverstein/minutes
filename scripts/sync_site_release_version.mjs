@@ -13,6 +13,11 @@ const cliMainPath = path.join(repoRoot, "crates", "cli", "src", "main.rs");
 const mcpSourcePath = path.join(repoRoot, "crates", "mcp", "src", "index.ts");
 const cratesDir = path.join(repoRoot, "crates");
 const checkOnly = process.argv.includes("--check");
+// Release gate: like --check, but the test count is binding too. Ordinary PRs
+// should not go red over a number that moves whenever anyone adds a test; a
+// release that publishes the wrong number is a different matter, and tagging
+// is deliberate and infrequent, so the fix is one command at the right moment.
+const strict = process.argv.includes("--check-release");
 
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const version = manifest.version;
@@ -186,7 +191,7 @@ if (currentContent === nextContent) {
   process.exit(0);
 }
 
-if (checkOnly) {
+if (checkOnly || strict) {
   // The test count is derived by scanning for #[test]/#[tokio::test], so it
   // moves whenever anyone adds a test. Comparing it for exact equality made a
   // shared, required check go red on main every time tests landed, and every
@@ -196,10 +201,17 @@ if (checkOnly) {
   // Release *links* are what this job is named for and what must be exact:
   // version, and the tool/resource/prompt/command counts that appear in
   // documented URLs. A slightly stale test count on a marketing page is not
-  // worth reddening everyone's CI, and the pre-push hook still refreshes it.
+  // worth reddening everyone's CI.
+  //
+  // Tolerating it per-PR does mean nothing refreshes it on its own: the
+  // pre-push hook only runs this same --check and never wrote the value, so
+  // after #666 the count could drift indefinitely with every gate green. So
+  // --check-release makes it binding at tag time, where the number actually
+  // gets published and one command fixes it.
   const staleOnlyByTestCount =
+    !strict &&
     currentContent.replace(/MINUTES_TEST_COUNT = \d+/, "MINUTES_TEST_COUNT = 0") ===
-    nextContent.replace(/MINUTES_TEST_COUNT = \d+/, "MINUTES_TEST_COUNT = 0");
+      nextContent.replace(/MINUTES_TEST_COUNT = \d+/, "MINUTES_TEST_COUNT = 0");
   if (staleOnlyByTestCount) {
     console.warn(
       `site release constants match except the test count (committed differs from ${totalTestCount}). ` +

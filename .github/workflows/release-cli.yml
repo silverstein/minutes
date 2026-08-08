@@ -27,6 +27,13 @@ jobs:
       - name: Verify committed release invariants
         run: node scripts/check_version_sync.mjs --release
 
+      # Per-PR CI tolerates a stale test count so a number that moves whenever
+      # anyone adds a test cannot redden everyone's checks (#666). Nothing
+      # refreshes it automatically though, so it is binding here instead: a
+      # release should not publish a figure that has been drifting for weeks.
+      - name: Verify site release constants including the test count
+        run: node scripts/sync_site_release_version.mjs --check-release
+
   build:
     name: Build (${{ matrix.target }})
     needs: release_readiness

@@ -35,6 +35,11 @@ git log "$LAST_PUBLISH_COMMIT"..HEAD -- crates/whisper-guard/   # any commits �
 - Tools in `manifest.json` match tools registered in `crates/mcp/src/index.ts`
 - `long_description` reflects current capabilities
 - `keywords` are current
+- Regenerate the site constants and commit the result:
+  ```bash
+  node scripts/sync_site_release_version.mjs
+  ```
+  Per-PR CI tolerates a stale `MINUTES_TEST_COUNT` so a number that moves with every added test cannot redden unrelated checks (#666), but `release_readiness` runs `--check-release` at tag push and that tolerance does not apply. Do this before Step 10 or the tag fails. Step 15 refreshes the prose after publishing; this is the numbers, before tagging.
 
 ### 3. MCP runtime deps
 All `import` statements in `crates/mcp/src/index.ts` must have their packages in `dependencies` (not `devDependencies`) in `package.json`. Smoke-test: `node -e "require('./crates/mcp/dist/index.js')"`
@@ -207,7 +212,7 @@ Before deploying, make sure the site matches what just shipped:
    ```bash
    node scripts/sync_site_release_version.mjs
    ```
-   The `Site Release Link Consistency` CI job runs this with `--check` on every push, so forgetting this step also blocks CI — but running it locally first saves a round-trip and surfaces drift before tagging.
+   The `Site Release Link Consistency` CI job runs this with `--check` on every push, which allows a stale test count through so unrelated PRs do not go red (#666). `release_readiness` runs `--check-release` at tag push and does not, so the numbers should already be current from Step 2; this step is for anything that changed since.
 2. **Hand-update the prose** — the changelog strip and headline feature blurb in `site/app/page.tsx`, plus `docs/architecture/frontmatter-schema.md`'s "corresponds to" footer if the schema row moved. The sync script handles numbers; it cannot rewrite copy that references last release's headline features.
 3. **Refresh social proof + comparison freshness** — update `site/lib/proof.ts` (stars/forks/contributors from the GitHub API, npm monthly downloads from `api.npmjs.org`) and spot-check the homepage comparison table cells plus `/compare/*` pages against competitors' current public docs. Competitor capabilities drift; stale cells cost more credibility than they buy.
 4. **Build the exact static artifact**:

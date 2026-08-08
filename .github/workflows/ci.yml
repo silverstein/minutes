@@ -513,6 +513,9 @@ jobs:
       - name: Test committed release flow
         run: node --test scripts/release.test.mjs
 
+      - name: Test site release constant sync modes
+        run: node --test scripts/sync_site_release_version.test.mjs
+
   design_tokens:
     name: Design Tokens
     runs-on: ubuntu-latest

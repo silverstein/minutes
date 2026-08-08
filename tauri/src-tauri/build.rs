@@ -57,11 +57,24 @@ fn stage_msvc_runtime() {
         );
     }
 
-    if RUNTIME_DLLS.iter().all(|d| manifest_dir.join(d).exists()) {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".into());
+
+    // The DLLs have fixed names and land in the manifest dir, which is shared
+    // across targets, so "the files exist" says nothing about which
+    // architecture they are. Without the stamp, building x86_64 and then
+    // aarch64 in the same checkout ships x64 CRT DLLs inside an ARM64
+    // installer, which fails exactly like #657 on the user's machine. The
+    // stamp also forces a refresh after a toolset upgrade moves the source.
+    let stamp_path = manifest_dir.join(".msvc-runtime-stage.stamp");
+    println!("cargo:rerun-if-changed={}", stamp_path.display());
+
+    let staged = RUNTIME_DLLS.iter().all(|d| manifest_dir.join(d).exists());
+    let stamp_matches = std::fs::read_to_string(&stamp_path)
+        .is_ok_and(|recorded| recorded.trim() == stage_stamp(&arch));
+    if staged && stamp_matches {
         return;
     }
 
-    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".into());
     let Some(redist) = find_vc_redist_dir(&arch) else {
         // Deliberately a warning, not a panic. The compiler toolset and the
         // redistributable are separate Visual Studio components, so a Build
@@ -77,15 +90,33 @@ fn stage_msvc_runtime() {
         );
         return;
     };
+    let mut staged_all = true;
     for dll in RUNTIME_DLLS {
         let src = redist.join(dll);
         if let Err(error) = std::fs::copy(&src, manifest_dir.join(dll)) {
+            staged_all = false;
             println!(
                 "cargo:warning=failed to stage {} for the Windows bundle: {error}",
                 src.display()
             );
         }
     }
+
+    // Only record the stamp once every file is in place, so a partial copy
+    // re-stages next build instead of being cached as complete.
+    if staged_all {
+        let _ = std::fs::write(&stamp_path, stage_stamp(&arch));
+    } else {
+        let _ = std::fs::remove_file(&stamp_path);
+    }
+}
+
+/// Identity of a staged runtime set: which architecture it was copied for.
+///
+/// Compared as text, so extending it later (toolset version, source path)
+/// simply invalidates every existing stamp and re-stages.
+fn stage_stamp(arch: &str) -> String {
+    format!("arch={arch}\n")
 }
 
 /// Newest `Microsoft.VC*.CRT` directory for `arch` from any installed Visual

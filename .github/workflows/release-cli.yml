@@ -133,9 +133,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $crt = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT' -Directory -ErrorAction SilentlyContinue |
-                 Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $crt) { throw 'Could not locate the VC143 CRT redistributable on the runner' }
+          # Same lookup rules as tauri/src-tauri/build.rs find_vc_redist_dir.
+          # Any VS year, any Microsoft.VC<major>.CRT, ordered by the parsed
+          # redist version rather than by path text: the edition segment sits
+          # ahead of the version in the path, so `Sort-Object FullName` picked
+          # Professional 14.29 over Community 14.44 on a box with both. Pinning
+          # '2022' and 'VC143' would also silently stop matching the next
+          # toolset.
+          $crt = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT' -Directory -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)*$' } |
+                 Sort-Object @{ Expression = { [version]$_.Parent.Parent.Name } } -Descending |
+                 Select-Object -First 1
+          if (-not $crt) { throw 'Could not locate a VC CRT redistributable on the runner' }
           Write-Host "CRT source: $($crt.FullName)"
           $stage = 'minutes-windows-x64'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null

@@ -1079,37 +1079,6 @@ describe("stable corpus lease", () => {
     });
   });
 
-  it("reports the documented refusal when the budget expires, whichever guard trips", async () => {
-    // An exhausted budget can be noticed by several guards, and only some sit
-    // inside the worker machinery that wraps refusals. The ones outside it
-    // used to escape as the raw "meeting corpus authorization deadline
-    // elapsed", so callers saw two different sentences for one condition
-    // depending only on which guard won. CI hit it on a contended Windows
-    // runner, where a short budget can expire between computing the deadline
-    // and the next statement checking it.
-    //
-    // This pins the contract rather than a route: the smallest budget the API
-    // accepts is reliably gone by the time some guard notices, and every guard
-    // has to produce the same sentence. Which one fires is timing-dependent
-    // and deliberately not asserted -- claiming a specific one would be the
-    // same kind of unverified detail this fix exists to remove.
-    await withCorpus(async (root) => {
-      writeFileSync(join(root, "meeting.md"), "elapsed budget canary");
-      let projections = 0;
-      await expect(
-        withStableCorpusLease(
-          root,
-          () => {
-            projections += 1;
-            return "unreachable";
-          },
-          { timeoutMs: 1 }
-        )
-      ).rejects.toThrow("stable meeting corpus authorization failed");
-      expect(projections).toBe(0);
-    });
-  });
-
   it("requires and acknowledges a bounded sentinel repulse", async () => {
     await withCorpus(async (root) => {
       const nested = join(root, "nested");

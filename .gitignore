@@ -27,6 +27,10 @@ __pycache__/
 *.pyc
 docs/marketing/
 docs/demo/node_modules/
+# Also as a bare name: a symlink named node_modules is not a directory, so the
+# trailing-slash pattern above does not ignore it, and `git add -A` in a
+# worktree using linked deps once committed two machine-absolute symlinks.
+node_modules
 docs/demo/.remotion/
 
 # Build artifacts

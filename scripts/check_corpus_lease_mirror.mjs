@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 const MIRRORED_FILES = [
   "corpus-lease.ts",
   "corpus-lease.test.ts",
+  "corpus-lease-refusal.test.ts",
   "corpus-lease-worker.ts",
   "secure-read.ts",
 ];

@@ -21,9 +21,15 @@
 // its own namespace (dlopen plugin or worker process; see the tracking issue
 // referenced from #683).
 //
-// Linux and Windows are unaffected: sherpa links dynamically there, and its
-// shared library resolves against its own bundled dependencies rather than
-// the executable's.
+// Linux is verified unaffected: with both stacks linked into one binary
+// (sherpa via libsherpa-onnx-c-api.so, pyannote via static ort 1.22.0),
+// enrollment saves a voice profile and sherpa transcribes, in one process
+// (x86_64, 2026-08-09). The dynamic sherpa library resolves ONNX Runtime from
+// its own DT_NEEDED libonnxruntime.so rather than the executable, which does
+// not export the colliding symbols. Windows is expected safe by the same
+// dynamic-linking structure (per-DLL imports), but has not been executed in
+// this combination; if sherpa ever links statically off macOS, this guard's
+// scope must widen.
 //
 // `vad-ort` is included because it also pulls `dep:ort`: the same two static
 // ONNX Runtimes collide even without pyannote in the picture, and which copy

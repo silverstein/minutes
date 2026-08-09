@@ -1,5 +1,41 @@
 #![warn(clippy::disallowed_methods)]
 
+// `engine-sherpa` and `diarize` cannot share one macOS binary (issue #683).
+//
+// sherpa-onnx's static bundle and pyannote's dependencies each vendor two of
+// the same native libraries: ONNX Runtime (sherpa 1.17.1 vs ort-sys 1.22.0)
+// and kaldi-native-fbank (both literally named libkaldi-native-fbank-core.a).
+// A Mach-O image has one definition per symbol, so whichever copy wins the
+// link serves both consumers. Measured on macOS arm64, every resolution is
+// broken in one direction or the other:
+//
+//   ORT winner   kaldi winner   pyannote            sherpa
+//   1.17.1       sherpa's       API 17/22 error     works
+//   1.22.0       sherpa's       SIGABRT in fbank    works
+//   1.22.0       knf-rs's       works               SIGABRT
+//
+// ORT could be unified upward because its C API is version-stable, but
+// kaldi-native-fbank has no ABI contract, and identical mangled names with
+// divergent layouts are undefined behavior, not a clean failure. Refusing to
+// link is the only honest option until the sherpa stack is isolated behind
+// its own namespace (dlopen plugin or worker process; see the tracking issue
+// referenced from #683).
+//
+// Linux and Windows are unaffected: sherpa links dynamically there, and its
+// shared library resolves against its own bundled dependencies rather than
+// the executable's.
+//
+// For a sherpa CLI build without diarization:
+//   cargo build --release -p minutes-cli --no-default-features \
+//     --features whisper,engine-sherpa,metal
+#[cfg(all(target_os = "macos", feature = "engine-sherpa", feature = "diarize"))]
+compile_error!(
+    "engine-sherpa and diarize cannot be linked into one macOS binary: sherpa-onnx and \
+     pyannote both vendor ONNX Runtime and kaldi-native-fbank, and whichever copy wins the \
+     link breaks the other consumer (issue #683). Build sherpa without diarization: \
+     cargo build -p minutes-cli --no-default-features --features whisper,engine-sherpa,metal"
+);
+
 pub mod apple_fm;
 pub mod apple_speech;
 pub mod apple_speech_worker;

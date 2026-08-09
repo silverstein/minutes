@@ -975,8 +975,17 @@ minutes setup --diarization
 # Experimental engine: Sherpa (in-process sherpa-onnx running parakeet-tdt-0.6b-v3).
 # Newer multilingual model (EN/FR/ES and more EU languages), no Python. Opt-in and
 # NOT yet the recommended daily engine: in real-meeting A/B it trails the Parakeet
-# engine on segmentation/casing (see issue #369). Compile with `--features
-# engine-sherpa`, then enable in one command:
+# engine on segmentation/casing (see issue #369).
+#
+# macOS: engine-sherpa cannot be combined with the default `diarize` feature in
+# one binary. Both stacks vendor ONNX Runtime and kaldi-native-fbank, and the
+# static link can only keep one copy of each, which breaks voice enrollment or
+# sherpa itself depending on which copy wins (issue #683; the build refuses
+# with a compile error rather than shipping the broken combination). Build the
+# sherpa CLI without diarization:
+#   cargo build --release -p minutes-cli --no-default-features \
+#     --features whisper,engine-sherpa,metal
+# Then enable in one command:
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature/model, transcription auto-falls-back
 # to Whisper (the bundled default), so a recording never breaks. See docs/architecture/sherpa-engine.md.

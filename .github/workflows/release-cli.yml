@@ -46,10 +46,13 @@ jobs:
             os: macos-latest
             binary: minutes
             asset: minutes-macos-arm64
-            # engine-sherpa is macOS-only here: sherpa-onnx links statically on
-            # darwin (self-contained binary, #369) but dynamically on Linux and
-            # Windows, where shipping it would need the dylibs bundled alongside.
-            features: parakeet,metal,engine-sherpa
+            # engine-sherpa is OFF here until #683's isolation work lands:
+            # the release CLI carries diarize (default), and on macOS static
+            # sherpa and pyannote vendor conflicting copies of ONNX Runtime and
+            # kaldi-native-fbank, so one of them always breaks at runtime. The
+            # compile guard in crates/core/src/lib.rs enforces this; do not add
+            # engine-sherpa back without removing that guard's reason first.
+            features: parakeet,metal
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             binary: minutes.exe

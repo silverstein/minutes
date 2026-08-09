@@ -167,6 +167,19 @@ jobs:
         # otherwise only surfaces at release, and exercises Linux beyond no-default-features.
         run: cargo build -p minutes-core --no-default-features --features engine-sherpa
 
+      - name: Sherpa + diarize refuse to link on macOS (#683 guard)
+        if: runner.os == 'macOS'
+        # The combination vendors two conflicting copies of ONNX Runtime and
+        # kaldi-native-fbank; the compile guard in crates/core/src/lib.rs is
+        # what keeps it out of release builds. Assert it actually fires, so a
+        # refactor cannot silently drop the cfg and re-open #683.
+        run: |
+          if cargo check -p minutes-core --no-default-features --features diarize,engine-sherpa 2>/dev/null; then
+            echo "::error::the #683 compile guard did not fire for diarize+engine-sherpa on macOS"
+            exit 1
+          fi
+          echo "guard fired as expected"
+
       - name: Build full workspace (macOS only)
         if: runner.os == 'macOS'
         run: cargo build --no-default-features

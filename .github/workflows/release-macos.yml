@@ -193,7 +193,8 @@ jobs:
       # it). build.rs stages it from target/release/minutes, so the CLI must be
       # built first or the bundle ships a placeholder stub (#324).
       - name: Build release CLI for bundling
-        run: cargo build --release -p minutes-cli --features parakeet,metal,engine-sherpa
+        # engine-sherpa held out per #683 (conflicts with diarize on macOS; see crates/core/src/lib.rs guard)
+        run: cargo build --release -p minutes-cli --features parakeet,metal
 
       - name: Build signed bundle (helper identity is repaired before notarization)
         env:
@@ -206,7 +207,8 @@ jobs:
         # workspace, so cargo resolves --features against every member, and
         # minutes-archive-app has neither parakeet nor metal.
         working-directory: tauri/src-tauri
-        run: cargo tauri build --features parakeet,metal,engine-sherpa --bundles app
+        # engine-sherpa held out per #683 (the app hard-enables diarize; see crates/core/src/lib.rs guard)
+        run: cargo tauri build --features parakeet,metal --bundles app
 
       - name: Sign graph helper inside-out and notarize the final exact app
         env:

@@ -10,7 +10,7 @@
         "description": "I build local-first software for people who would rather own their data than be promised it is safe. My main project is Minutes, a conversation memory layer that transcribes and diarizes meetings entirely on your own machine, so there is no cloud service to breach and no vendor database of your conversations to subpoena.\n\nI am the sole maintainer. Funding goes toward maintainer time and toward security and privacy work that I currently cannot finish at the pace the project needs.",
         "webpageUrl": {
             "url": "https://useminutes.app",
-            "wellKnown": ""
+            "wellKnown": "https://useminutes.app/.well-known/funding-manifest-urls"
         }
     },
     "projects": [{
@@ -18,7 +18,8 @@
         "name": "Minutes",
         "description": "Minutes is an open-source, privacy-first conversation memory layer for AI assistants. It captures audio (meetings, calls, voice memos), transcribes it locally with whisper.cpp or parakeet.cpp, diarizes and attributes speakers using local ONNX models, and writes searchable markdown with structured action items and decisions to your own disk.\n\nNothing is uploaded. Transcription, diarization, and speaker matching all run on the device, output files are written with owner-only permissions, and no API key is required to use it. Every meeting notetaker on the market answers the privacy question with policy; Minutes answers it with architecture.\n\nIt ships a CLI, a Tauri desktop app, an MCP server, and a TypeScript SDK, so any AI assistant can read a meeting corpus without the audio ever leaving the machine. It also publishes whisper-guard, a standalone Rust crate that defends against local transcription models fabricating text on silence and noise, which matters because that fabricated text otherwise becomes a record of what somebody said.",
         "webpageUrl": {
-            "url": "https://useminutes.app"
+            "url": "https://useminutes.app",
+            "wellKnown": "https://useminutes.app/.well-known/funding-manifest-urls"
         },
         "repositoryUrl": {
             "url": "https://github.com/silverstein/minutes",

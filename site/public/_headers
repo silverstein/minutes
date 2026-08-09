@@ -1,3 +1,7 @@
 /llms.txt
   Content-Type: text/plain; charset=utf-8
   Cache-Control: public, max-age=3600
+
+/.well-known/funding-manifest-urls
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=3600

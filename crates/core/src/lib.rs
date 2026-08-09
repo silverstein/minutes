@@ -25,14 +25,23 @@
 // shared library resolves against its own bundled dependencies rather than
 // the executable's.
 //
+// `vad-ort` is included because it also pulls `dep:ort`: the same two static
+// ONNX Runtimes collide even without pyannote in the picture, and which copy
+// wins is a link-order coin flip. The measured 1.17.1-wins outcome hard-fails
+// every ort-rs consumer at init with the API 17/22 error.
+//
 // For a sherpa CLI build without diarization:
 //   cargo build --release -p minutes-cli --no-default-features \
 //     --features whisper,engine-sherpa,metal
-#[cfg(all(target_os = "macos", feature = "engine-sherpa", feature = "diarize"))]
+#[cfg(all(
+    target_os = "macos",
+    feature = "engine-sherpa",
+    any(feature = "diarize", feature = "vad-ort")
+))]
 compile_error!(
-    "engine-sherpa and diarize cannot be linked into one macOS binary: sherpa-onnx and \
-     pyannote both vendor ONNX Runtime and kaldi-native-fbank, and whichever copy wins the \
-     link breaks the other consumer (issue #683). Build sherpa without diarization: \
+    "engine-sherpa cannot share a macOS binary with diarize or vad-ort: sherpa-onnx's static \
+     bundle vendors its own ONNX Runtime (and kaldi-native-fbank), and whichever copy wins \
+     the link breaks the other consumer (issue #683). Build sherpa without them: \
      cargo build -p minutes-cli --no-default-features --features whisper,engine-sherpa,metal"
 );
 

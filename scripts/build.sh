@@ -14,7 +14,7 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 # decision. Packaging is fixed for opt-in local builds: sherpa links statically
 # and the existing ort path does not leave dangling runtime dylib references.
 # Opt in explicitly:
-#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort,engine-sherpa
+#   MINUTES_BUILD_FEATURES=parakeet,metal,vad-ort   # engine-sherpa conflicts with diarize/vad-ort on macOS (#683)
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
     MINUTES_BUILD_FEATURES="parakeet,metal"
 fi

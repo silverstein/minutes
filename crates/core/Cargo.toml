@@ -73,7 +73,7 @@ sys-locale = { workspace = true }
 tempfile = "3"
 sha2 = "0.10"
 cap-std = { workspace = true }
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = "0.11.0"
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]

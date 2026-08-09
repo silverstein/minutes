@@ -101,7 +101,7 @@ sherpa-rs = { version = "0.6.8", default-features = false, features = ["download
 # The macOS frameworks are linked automatically via #[link(name = "...")]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 # Dynamic on Windows, as before the macOS static fix (CI builds this gate on
 # all three platforms; static archives are only wired up for macOS).
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries"], optional = true }

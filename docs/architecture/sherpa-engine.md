@@ -183,15 +183,17 @@ The `engine-sherpa` Cargo feature must be enabled at build time:
 
 ```bash
 # Core library check
-cargo check -p minutes-core --features engine-sherpa
+cargo check -p minutes-core --no-default-features --features engine-sherpa
 
-# CLI build
-cargo build --release -p minutes-cli --features engine-sherpa
+# CLI build (macOS: --no-default-features is required, see the constraint above)
+cargo build --release -p minutes-cli --no-default-features --features whisper,engine-sherpa,metal
 ```
 
-The feature is opt-in and not included in the default build. Whisper is still
-the default feature, so a normal `--features engine-sherpa` build includes both
-Whisper and Sherpa unless you also pass `--no-default-features`.
+The feature is opt-in and not included in the default build. The CLI's default
+features are `whisper` and `diarize`, so a plain `--features engine-sherpa`
+build would include Whisper, Sherpa, and diarization; on macOS that
+combination refuses to compile (issue #683), which is why the commands above
+drop the defaults and re-add `whisper` explicitly.
 
 `sherpa-rs-sys` builds sherpa-onnx through CMake, so a working CMake toolchain
 must be available during the build.
@@ -216,7 +218,9 @@ Change `engine = "whisper"` in config.toml. No model deletion is required.
 The binary was built without the `engine-sherpa` feature. Rebuild with:
 
 ```bash
-cargo build -p minutes-cli --features engine-sherpa
+# macOS: the defaults include diarize, which cannot share a binary with
+# engine-sherpa (issue #683), so drop them and re-add whisper:
+cargo build -p minutes-cli --no-default-features --features whisper,engine-sherpa,metal
 ```
 
 ### "sherpa model not found"

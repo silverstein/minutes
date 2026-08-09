@@ -173,16 +173,30 @@ jobs:
         # kaldi-native-fbank; the compile guard in crates/core/src/lib.rs is
         # what keeps it out of release builds. Assert it actually fires, so a
         # refactor cannot silently drop the cfg and re-open #683.
+        # The oracle greps for the guard's own message. Merely asserting a
+        # nonzero exit would pass on any unrelated failure (network error in a
+        # build script, toolchain breakage) while proving nothing about the
+        # guard.
         run: |
-          if cargo check -p minutes-core --no-default-features --features diarize,engine-sherpa 2>/dev/null; then
-            echo "::error::the #683 compile guard did not fire for diarize+engine-sherpa on macOS"
-            exit 1
-          fi
-          if cargo check -p minutes-core --no-default-features --features vad-ort,engine-sherpa 2>/dev/null; then
-            echo "::error::the #683 compile guard did not fire for vad-ort+engine-sherpa on macOS"
-            exit 1
-          fi
-          echo "guard fired as expected for both combinations"
+          check_guard() {
+            # bash -e: a failing command substitution in a plain assignment
+            # would abort the step before the oracle runs, so capture the
+            # status in the same statement.
+            status=0
+            out=$(cargo check -p minutes-core --no-default-features --features "$1" 2>&1) || status=$?
+            if [ $status -eq 0 ]; then
+              echo "::error::the #683 compile guard did not fire for $1 on macOS"
+              return 1
+            fi
+            if ! printf '%s' "$out" | grep -q "cannot share a macOS binary"; then
+              echo "::error::$1 failed for a reason other than the #683 guard:"
+              printf '%s\n' "$out" | tail -20
+              return 1
+            fi
+            echo "guard fired for $1"
+          }
+          check_guard diarize,engine-sherpa
+          check_guard vad-ort,engine-sherpa
 
       - name: Build full workspace (macOS only)
         if: runner.os == 'macOS'

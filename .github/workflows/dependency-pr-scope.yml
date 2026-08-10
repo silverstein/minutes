@@ -1,0 +1,110 @@
+# Dependency PRs must only touch dependency files.
+#
+# On 2026-08-09, PR #693 was titled "chore(deps): bump nanoid 3.3.16 to 3.3.18
+# in docs/demo-video" and carried a one-line lockfile change. It also carried
+# three unrelated site commits and shipped 345 lines of unreviewed marketing
+# copy to production, because Cloudflare Pages auto-deploys site/* from main.
+#
+# The cause was the branch point, not the index: the branch was cut from a
+# shared working tree whose HEAD was another session's feature branch, so those
+# commits were already ancestors. Committing your work does not protect against
+# this; cutting branches with an explicit `git checkout -b <name> origin/main`
+# does. This job is the backstop for when someone forgets.
+#
+# Scope is deliberately narrow. It only judges PRs that claim to be dependency
+# bumps, and it only asks whether the diff matches that claim. It is not a
+# general "unrelated files" detector, because that cannot be defined precisely
+# enough to gate a merge on.
+name: Dependency PR scope
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    name: Dependency PR touches only dependency files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check changed paths against the PR's declared scope
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Only judge PRs that present themselves as dependency updates.
+          is_dep_pr=0
+          case "$PR_TITLE" in
+            'chore(deps)'*|'chore(deps-dev)'*|'build(deps)'*|'build(deps-dev)'*) is_dep_pr=1 ;;
+          esac
+          case "$HEAD_REF" in
+            dependabot/*) is_dep_pr=1 ;;
+          esac
+
+          if [ "$is_dep_pr" -eq 0 ]; then
+            echo "Not a dependency PR (title: $PR_TITLE). Nothing to check."
+            exit 0
+          fi
+
+          echo "Dependency PR detected: $PR_TITLE"
+          echo "Branch: $HEAD_REF"
+          echo
+
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          if [ -z "$changed" ]; then
+            echo "No changed files."
+            exit 0
+          fi
+
+          # Manifests, lockfiles, and the workflow files that pin action SHAs.
+          # Anything a genuine dependency bump needs to touch belongs here.
+          offenders=""
+          while IFS= read -r f; do
+            case "$f" in
+              package.json|*/package.json) ;;
+              package-lock.json|*/package-lock.json) ;;
+              npm-shrinkwrap.json|*/npm-shrinkwrap.json) ;;
+              yarn.lock|*/yarn.lock) ;;
+              pnpm-lock.yaml|*/pnpm-lock.yaml) ;;
+              Cargo.toml|*/Cargo.toml) ;;
+              Cargo.lock|*/Cargo.lock) ;;
+              go.mod|*/go.mod|go.sum|*/go.sum) ;;
+              requirements*.txt|*/requirements*.txt) ;;
+              Gemfile|*/Gemfile|Gemfile.lock|*/Gemfile.lock) ;;
+              .github/workflows/*) ;;
+              .github/dependabot.yml) ;;
+              *) offenders="${offenders}${f}"$'\n' ;;
+            esac
+          done <<< "$changed"
+
+          if [ -n "$offenders" ]; then
+            echo "::error::This PR is titled as a dependency update but changes files that are not dependency manifests or lockfiles."
+            echo
+            echo "Unexpected files:"
+            printf '%s' "$offenders" | sed 's/^/  /'
+            echo
+            echo "Most likely cause: the branch was cut from a shared working tree whose HEAD"
+            echo "was someone else's branch, so their commits are ancestors of yours."
+            echo
+            echo "Check with:  git log --oneline ${BASE_SHA}..${HEAD_SHA}"
+            echo "Fix by re-cutting the branch from the remote and replaying only your own commit:"
+            echo "  git checkout -b <name>-clean origin/main"
+            echo "  git cherry-pick <your-commit>"
+            echo
+            echo "If the extra files are genuinely part of this dependency update, retitle the PR"
+            echo "so it no longer claims to be a dependency-only change."
+            exit 1
+          fi
+
+          echo "All changed files are dependency manifests or lockfiles:"
+          printf '%s\n' "$changed" | sed 's/^/  /'

@@ -11065,7 +11065,16 @@ pub async fn cmd_recall_chat_send(
                 terminate_tracked_recall_chat_child(&worker_turn, turn_id);
             }
 
-            let _ = stderr_thread.join();
+            if read_broke {
+                // Detached rather than joined. Nothing is needed from a
+                // discarded turn's stderr, and a provider that survived
+                // termination still holds that pipe open, so joining here would
+                // reintroduce the hang the termination above exists to prevent.
+                // The thread ends on its own once the pipe closes.
+                drop(stderr_thread);
+            } else {
+                let _ = stderr_thread.join();
+            }
 
             // Reaped before the persistence decision, not after, because the
             // exit status is part of that decision.

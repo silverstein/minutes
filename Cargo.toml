@@ -46,7 +46,7 @@ hound = "3.5"
 whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 
 # File watching
-notify = "7"
+notify = "8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

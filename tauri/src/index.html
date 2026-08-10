@@ -656,6 +656,18 @@
 
     /* Streaming caret — only once text is arriving, so an empty bubble doesn't
        read as a stray cursor. */
+    /* Shown under a partial answer when the stream did not finish. Kept
+       visually distinct from the answer itself so an incomplete turn is never
+       mistaken for what the model actually said. */
+    .chat-incomplete-notice {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
     .chat-bubble-assistant.streaming:not(:empty)::after {
       content: '\25ae';
       margin-left: 2px;
@@ -13607,10 +13619,23 @@
           (recallChatMessages
             ? recallChatMessages.querySelector('.chat-bubble-assistant:last-of-type')
             : null);
-        if (bubble && !bubble.textContent.trim()) {
-          bubble.classList.remove('streaming');
+        if (!bubble) return;
+        bubble.classList.remove('streaming');
+        if (!bubble.textContent.trim()) {
           bubble.textContent = stderr;
+          return;
         }
+        // A partial answer is already on screen. Showing nothing here was the
+        // real defect: the backend detects a truncated or failed stream and
+        // refuses to save it, but the panel still rendered whatever arrived and
+        // `recall-chat-done` then cleared the streaming state, so an answer that
+        // stopped mid-sentence looked finished. Append rather than replace, so
+        // the user keeps what the model did say and can see it is incomplete.
+        if (bubble.querySelector('.chat-incomplete-notice')) return;
+        const notice = document.createElement('div');
+        notice.className = 'chat-incomplete-notice';
+        notice.textContent = stderr;
+        bubble.appendChild(notice);
       });
 
       await currentWindow.listen('recall-chat-done', () => {

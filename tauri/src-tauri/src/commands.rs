@@ -9928,6 +9928,12 @@ fn openai_compatible_stream_is_reasoning(line: &str) -> bool {
 /// Extract the incremental assistant text from one server-sent-events line of
 /// an OpenAI-compatible stream.
 ///
+/// True when the frame is the SSE terminator, which is the only positive
+/// evidence an OpenAI-compatible stream finished rather than being cut off.
+fn openai_compatible_stream_is_done(line: &str) -> bool {
+    line.trim().strip_prefix("data:").map(str::trim) == Some("[DONE]")
+}
+
 /// Returns `None` for keepalives, the `[DONE]` sentinel, and any frame without
 /// a content delta, so the caller can treat "no text" uniformly.
 fn openai_compatible_stream_delta(line: &str) -> Option<String> {
@@ -10387,10 +10393,14 @@ pub async fn cmd_recall_chat_send(
             let mut body = resp.into_body();
             // The Take handle stays out here so the byte budget is still
             // readable after `lines()` has consumed the BufReader.
-            let mut limited = body.as_reader().take(RECALL_CHAT_MAX_RESPONSE_BYTES);
+            let mut limited = body.as_reader().take(RECALL_CHAT_MAX_RESPONSE_BYTES + 1);
             let reader = BufReader::new(&mut limited);
             let mut full_response = String::new();
             let mut stream_failed = false;
+            // Positive evidence the protocol finished. A clean early EOF looks
+            // identical to success without it, and that is the likeliest way a
+            // real answer gets cut short.
+            let mut saw_terminator = false;
             for line_result in reader.lines() {
                 if cancelled.load(Ordering::Relaxed) {
                     break;
@@ -10398,6 +10408,9 @@ pub async fn cmd_recall_chat_send(
                 match line_result {
                     Ok(line) if !line.trim().is_empty() => {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if val.get("done").and_then(|d| d.as_bool()) == Some(true) {
+                                saw_terminator = true;
+                            }
                             if let Some(text) = val
                                 .get("message")
                                 .and_then(|m| m.get("content"))
@@ -10428,26 +10441,26 @@ pub async fn cmd_recall_chat_send(
 
             // A body that consumed the entire budget was cut off mid-answer.
             let truncated = limited.limit() == 0;
-            if !cancelled.load(Ordering::Relaxed) && (stream_failed || truncated) {
+            let stream_broke = stream_failed || truncated || !saw_terminator;
+            if !cancelled.load(Ordering::Relaxed) && stream_broke {
                 emit_recall_chat_stream_failure(
                     &app_clone,
                     if truncated {
                         "The local model sent more than Recall will buffer, so the answer was cut \
                          off. Nothing was saved to this conversation."
-                    } else {
+                    } else if stream_failed {
                         "The connection to the local model failed partway through, so the answer \
                          is incomplete. Nothing was saved to this conversation."
+                    } else {
+                        "The local model closed the connection before finishing, so the answer is \
+                         incomplete. Nothing was saved to this conversation."
                     },
                 );
             }
 
             // Only a turn that streamed to completion becomes history. Storing a
             // truncated answer would present it as what the model said.
-            if !cancelled.load(Ordering::Relaxed)
-                && !stream_failed
-                && !truncated
-                && !full_response.is_empty()
-            {
+            if !cancelled.load(Ordering::Relaxed) && !stream_broke && !full_response.is_empty() {
                 store_recall_history_if_still_authorized(
                     &history_arc,
                     RecallChatHistoryTurn {
@@ -10577,10 +10590,14 @@ pub async fn cmd_recall_chat_send(
             let mut body = resp.into_body();
             // The Take handle stays out here so the byte budget is still
             // readable after `lines()` has consumed the BufReader.
-            let mut limited = body.as_reader().take(RECALL_CHAT_MAX_RESPONSE_BYTES);
+            let mut limited = body.as_reader().take(RECALL_CHAT_MAX_RESPONSE_BYTES + 1);
             let reader = BufReader::new(&mut limited);
             let mut full_response = String::new();
             let mut stream_failed = false;
+            // Positive evidence the protocol finished. A clean early EOF looks
+            // identical to success without it, and that is the likeliest way a
+            // real answer gets cut short.
+            let mut saw_terminator = false;
             // A reasoning model can spend hundreds of frames thinking before a
             // single word of answer appears (observed: 504 of 508 frames). With
             // no signal the panel looks hung, so announce once that work is
@@ -10593,6 +10610,9 @@ pub async fn cmd_recall_chat_send(
                 }
                 match line_result {
                     Ok(line) => {
+                        if openai_compatible_stream_is_done(&line) {
+                            saw_terminator = true;
+                        }
                         if !announced_thinking
                             && full_response.is_empty()
                             && openai_compatible_stream_is_reasoning(&line)
@@ -10630,7 +10650,7 @@ pub async fn cmd_recall_chat_send(
 
             // A body that consumed the entire budget was cut off mid-answer.
             let truncated = limited.limit() == 0;
-            let stream_broke = stream_failed || truncated;
+            let stream_broke = stream_failed || truncated || !saw_terminator;
 
             if !cancelled.load(Ordering::Relaxed) && stream_broke {
                 emit_recall_chat_stream_failure(
@@ -10638,9 +10658,12 @@ pub async fn cmd_recall_chat_send(
                     if truncated {
                         "The local model sent more than Recall will buffer, so the answer was cut \
                          off. Nothing was saved to this conversation."
-                    } else {
+                    } else if stream_failed {
                         "The connection to the local model failed partway through, so the answer \
                          is incomplete. Nothing was saved to this conversation."
+                    } else {
+                        "The local model closed the connection before finishing, so the answer is \
+                         incomplete. Nothing was saved to this conversation."
                     },
                 );
             }
@@ -12248,6 +12271,78 @@ mod tests {
         assert!(
             limited.limit() > 0,
             "a normal answer must not read as truncated"
+        );
+    }
+
+    /// The terminator is the only positive evidence a stream finished. A
+    /// server that closes cleanly mid-answer produces no read error and stays
+    /// under the byte cap, so without this check it is indistinguishable from
+    /// success, which is how a truncated answer got saved as a real one.
+    #[test]
+    fn openai_done_sentinel_is_recognized_in_its_wire_forms() {
+        assert!(openai_compatible_stream_is_done("data: [DONE]"));
+        assert!(openai_compatible_stream_is_done("data:[DONE]"));
+        assert!(openai_compatible_stream_is_done("  data: [DONE]  "));
+    }
+
+    #[test]
+    fn ordinary_frames_are_not_mistaken_for_the_terminator() {
+        assert!(!openai_compatible_stream_is_done(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+        assert!(!openai_compatible_stream_is_done(""));
+        assert!(!openai_compatible_stream_is_done("data: [DONE] trailing"));
+        // A model that merely says the word must not end the stream.
+        assert!(!openai_compatible_stream_is_done(
+            r#"data: {"choices":[{"delta":{"content":"[DONE]"}}]}"#
+        ));
+    }
+
+    /// Ollama marks completion with `done: true` on its final NDJSON frame.
+    #[test]
+    fn ollama_completion_flag_is_read_from_the_final_frame() {
+        let final_frame: serde_json::Value =
+            serde_json::from_str(r#"{"message":{"content":""},"done":true}"#).unwrap();
+        let mid_frame: serde_json::Value =
+            serde_json::from_str(r#"{"message":{"content":"hi"},"done":false}"#).unwrap();
+        let absent: serde_json::Value =
+            serde_json::from_str(r#"{"message":{"content":"hi"}}"#).unwrap();
+
+        assert_eq!(
+            final_frame.get("done").and_then(|d| d.as_bool()),
+            Some(true)
+        );
+        assert_ne!(mid_frame.get("done").and_then(|d| d.as_bool()), Some(true));
+        assert_ne!(absent.get("done").and_then(|d| d.as_bool()), Some(true));
+    }
+
+    /// `Take` reaching zero only proves the budget was consumed, so reading to
+    /// exactly the cap would report a valid answer as truncated. Reading
+    /// `cap + 1` makes an exhausted budget mean a genuine overflow.
+    #[test]
+    fn exact_cap_body_is_not_reported_as_truncated() {
+        use std::io::{Read, Write};
+
+        let cap = 4096u64;
+        let mut body = Vec::new();
+        body.write_all(&vec![b'x'; cap as usize]).unwrap();
+
+        let mut limited = (&body[..]).take(cap + 1);
+        let mut sink = Vec::new();
+        limited.read_to_end(&mut sink).unwrap();
+
+        assert_eq!(sink.len() as u64, cap);
+        assert_eq!(limited.limit(), 1, "a body exactly at the cap is complete");
+
+        let mut over = vec![b'x'; cap as usize];
+        over.push(b'x');
+        let mut limited_over = (&over[..]).take(cap + 1);
+        let mut sink_over = Vec::new();
+        limited_over.read_to_end(&mut sink_over).unwrap();
+        assert_eq!(
+            limited_over.limit(),
+            0,
+            "one byte past the cap is truncated"
         );
     }
 

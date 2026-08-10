@@ -154,8 +154,10 @@ export default function RemoveNotetakerBotsPage() {
             <span className="font-medium text-[var(--text)]">
               Zoom AI Companion and Teams Copilot are not this.
             </span>{" "}
-            They are features of the platform rather than participants, so there is nothing in
-            the list to eject and the controls are account and policy settings instead. See{" "}
+            Inside their own platform they are features rather than participants, so there is
+            nothing in the list to eject and the controls are account and policy settings
+            instead. (Zoom AI Companion brought into a Google Meet or Teams meeting is the
+            exception: there it does join as a participant.) See{" "}
             <a
               href="/resources/turn-off-built-in-ai-notetakers"
               className="text-[var(--accent)] hover:underline"

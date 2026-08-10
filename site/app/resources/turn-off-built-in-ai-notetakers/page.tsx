@@ -7,7 +7,7 @@ import { faqPageSchema } from "@/lib/schema";
 export const metadata: Metadata = {
   title: "How to turn off built-in AI notetakers in Zoom and Teams",
   description:
-    "Zoom AI Companion and Teams Copilot are platform features, not bots you can remove from the participant list. The exact admin paths, the Teams setting that is only a default rather than an enforcement, and why your Zoom toggle is grayed out.",
+    "Inside their own platform there is no bot to eject, so the controls are settings. The exact Zoom and Teams admin paths, the in-meeting stop most guides omit, the Teams setting that is only a default rather than an enforcement, and why your Zoom toggle is grayed out.",
   alternates: {
     canonical: "/resources/turn-off-built-in-ai-notetakers",
   },
@@ -37,7 +37,7 @@ const faqs = [
   {
     question: "Can I remove a built-in AI notetaker from a meeting like a bot?",
     answer:
-      "No, and this is the main difference from tools like Otter or Fireflies. Those join as participants, so you can remove them from the participant list. Zoom AI Companion and Teams Copilot are features of the platform itself, running inside the service that hosts your call. There is nothing in the participant list to eject, so the only controls are the account, policy, and per-meeting settings.",
+      "Generally no, when the AI belongs to the platform hosting the meeting. Zoom AI Companion in a Zoom meeting and Teams Copilot in a Teams meeting run inside the service itself, so there is no participant to eject and the controls are account, policy, and per-meeting settings. A Zoom host can still stop Meeting Summary during the call. One exception: Zoom supports bringing AI Companion into Google Meet and Microsoft Teams meetings, and there it does join as a participant and can be removed like one.",
   },
 ] as const;
 
@@ -45,6 +45,18 @@ const sources = [
   {
     label: "Zoom support: enabling or disabling Zoom AI meeting summary (account, group, and user level)",
     href: "https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0057623",
+  },
+  {
+    label: "Zoom support: stopping Zoom AI Companion during a meeting",
+    href: "https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0058013",
+  },
+  {
+    label: "Zoom support: enabling Meeting Summary at account, group, and user level",
+    href: "https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0057960",
+  },
+  {
+    label: "Zoom support: using AI Companion in Google Meet and Microsoft Teams meetings",
+    href: "https://support.zoom.com/hc/en/article?id=zm_kb&sysparm_article=KB0080354",
   },
   {
     label: "Microsoft Learn: manage Microsoft 365 Copilot in Teams meetings and events",
@@ -96,11 +108,12 @@ export default function BuiltInAiNotetakersPage() {
           How to turn off built-in AI notetakers in Zoom and Teams
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          Zoom AI Companion and Teams Copilot are a different problem from Otter or Fireflies.
-          Those arrive as participants you can eject. These are features of the platform
-          hosting your call, so there is nothing in the participant list to remove, and the
-          controls live in settings you may not own. Here are the exact paths, and the two
-          places where turning it off does not do what it looks like.
+          Zoom AI Companion and Teams Copilot are a different problem from Otter or Fireflies
+          when they run inside their own platform. There is no bot in the participant list to
+          eject, because the feature lives in the service already hosting your call, and the
+          controls sit in settings you may not own. Here are the exact paths, the live control
+          most guides omit, and the two places where turning it off does not do what it looks
+          like.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <span className="rounded-full bg-[var(--bg-elevated)] px-3 py-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
@@ -122,10 +135,18 @@ export default function BuiltInAiNotetakersPage() {
             It runs inside the service that is already carrying your audio.
           </p>
           <p>
-            The practical consequence is that every control here is a setting rather than an
-            action, and the setting is often owned by someone else. If you are not an admin, the
-            most reliable move in the room is still the social one: ask the organizer to turn it
-            off, and confirm they did.
+            The practical consequence is that most controls here are settings rather than
+            actions, and the setting is often owned by someone else. There is one real live
+            action, covered below: a Zoom host can stop Meeting Summary during the call. If you
+            are not the host or an admin, the most reliable move in the room is the social one:
+            ask the organizer to stop it, and confirm they did.
+          </p>
+          <p>
+            One qualification, because it cuts against the framing above. Zoom now supports
+            bringing AI Companion into meetings hosted on Google Meet and Microsoft Teams, and in
+            that configuration it does join as a participant and can be removed like one. The
+            &ldquo;nothing to eject&rdquo; rule holds for a platform&rsquo;s own AI inside its
+            own meetings; it does not hold for Zoom&rsquo;s AI visiting someone else&rsquo;s.
           </p>
         </div>
       </section>
@@ -141,7 +162,8 @@ export default function BuiltInAiNotetakersPage() {
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">One group:</span> Admin Center →
-              Users → Groups, then select the group
+              Users → Groups → select the group → General configuration → Edit product
+              settings
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">Just you:</span> Settings
@@ -165,6 +187,23 @@ export default function BuiltInAiNotetakersPage() {
               at the group level still reads as unavailable in your personal settings, so the
               fix is to change it at the level where the lock was applied rather than the level
               where you noticed it.
+            </p>
+          </div>
+          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
+              Stopping it during the meeting
+            </p>
+            <p className="mt-3">
+              This is the control most guides skip, and it is the only one that works in the
+              moment. A Zoom host can open Zoom AI during the call and stop Meeting Summary, or
+              stop all Zoom AI use, and has the option to delete the associated meeting assets.
+            </p>
+            <p className="mt-3">
+              It matters more than it sounds, because of how the summary is scoped: Zoom
+              documents that Meeting Summary covers the meeting from the point it was enabled.
+              Stopping it partway therefore limits the summary to what came before, rather than
+              leaving a full-meeting summary behind. If a call turns sensitive halfway through,
+              speaking up is not futile.
             </p>
           </div>
         </div>
@@ -234,9 +273,10 @@ export default function BuiltInAiNotetakersPage() {
               without the AI summary?&rdquo; is a normal request now.
             </li>
             <li>
-              <span className="font-medium text-[var(--text)]">Say it before the substance.</span>{" "}
-              If a call turns sensitive, raising it at that moment is late but still better than
-              not raising it; summaries are generated from the whole meeting.
+              <span className="font-medium text-[var(--text)]">Speak up even mid-call.</span>{" "}
+              Worth knowing: Zoom says Meeting Summary covers the meeting from the point it was
+              enabled, so stopping it partway genuinely limits the summary to what came before.
+              Raising it late is not futile.
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">Escalate to whoever owns the tenant.</span>{" "}
@@ -245,38 +285,51 @@ export default function BuiltInAiNotetakersPage() {
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">Move the conversation.</span> For
-              genuinely confidential discussion, a platform whose vendor is not summarizing by
-              default is a cleaner answer than fighting settings you do not control.
+              genuinely confidential discussion, holding it somewhere you have confirmed the AI
+              features are off is cleaner than fighting settings you do not control. Confirm
+              rather than assume, since what is enabled depends on how your tenant is
+              configured.
             </li>
           </ul>
         </div>
       </section>
 
       <section className="mt-14 max-w-[800px]">
-        <SectionLabel label="The Version Of This Problem That Solves Itself" />
+        <SectionLabel label="A Note On What This Page Is Not" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            Notice what all of the above has in common: the notes are being produced by the
-            company hosting your call, using settings owned by someone in your organization, and
-            your ability to say no depends on where you sit in an admin hierarchy. That is a
-            governance arrangement, not a product feature you can toggle away.
+            We make a local notetaker, so it is worth being direct about where it does and does
+            not belong in this conversation.
           </p>
           <p>
-            The alternative is to let the platform do the call and keep the record yourself.{" "}
-            <span className="font-medium text-[var(--text)]">Minutes</span> records device-side,
-            transcribes locally with whisper.cpp, and writes markdown to your own disk, so the
-            notes exist because you made them rather than because a tenant policy allowed it. It
-            does not disable anything the platform is doing, and it should not be read as a way
-            around your organization&rsquo;s rules. It changes who holds the copy you rely on.
+            Everything above is governed by your organization. When an admin disables Copilot or
+            locks Zoom AI, that is a decision your employer is entitled to make, frequently for
+            legal or records-retention reasons you may not be able to see from your seat.{" "}
+            <span className="font-medium text-[var(--text)]">
+              Running your own capture tool is not the workaround for that
+            </span>
+            , and we are not suggesting it. If your organization has decided meetings are not
+            recorded, a local recording is still a recording, and it is still your
+            employer&rsquo;s policy that governs it.
           </p>
           <p>
-            To be exact about our own limits: transcript text leaves your machine only if you
-            deliberately configure a provider-backed summarizer, which is off by default and
-            documented on our{" "}
+            Where <span className="font-medium text-[var(--text)]">Minutes</span> is a
+            reasonable answer is the case where notes are wanted and permitted, and the open
+            question is only where they live. It records device-side, transcribes locally with
+            whisper.cpp, and writes markdown to a folder you control, which some organizations
+            prefer for confidential work precisely because it keeps the record inside the
+            perimeter they already govern. That is an architecture to propose to whoever owns
+            the policy, not a way around them.
+          </p>
+          <p>
+            To be exact about our own limits: conversation content leaves your machine when you
+            send it somewhere, which means a summarizer you configured, or an AI agent you
+            connect and ask to read your meetings, whose provider then receives what it reads.
+            Out of the box neither is happening. The complete list is on our{" "}
             <a href="/security" className="text-[var(--accent)] hover:underline">
               security page
             </a>
-            . And for third-party bots, which are a different problem with different fixes, see{" "}
+            . For third-party bots, which are a different problem with different fixes, see{" "}
             <a
               href="/resources/remove-ai-notetaker-bots-from-meetings"
               className="text-[var(--accent)] hover:underline"
@@ -286,8 +339,8 @@ export default function BuiltInAiNotetakersPage() {
             .
           </p>
           <p>
-            One thing device-side capture does not change: tell people you are recording, and
-            follow your own organization&rsquo;s policy on it. The legal detail is in{" "}
+            And the constant: tell people you are recording, and follow your
+            organization&rsquo;s policy on it. The legal detail is in{" "}
             <a
               href="/resources/is-it-legal-to-record-a-meeting"
               className="text-[var(--accent)] hover:underline"

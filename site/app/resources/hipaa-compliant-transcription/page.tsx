@@ -425,6 +425,8 @@ export default function HipaaTranscriptionPage() {
             That conclusion is conditional on your deployment, and it is worth being blunt about
             what breaks it. Configure a provider-backed summarizer, which is off by default, and
             transcript text goes to whichever model provider you chose, whose terms then govern.
+            Connect an AI agent over MCP and ask it to read your meetings, and what it reads
+            travels to that agent's provider as context.
             Sync your meetings folder to a hosted drive and that host is now storing PHI. Grant
             anyone remote access to the machine and the same applies. None of those are exotic;
             they are ordinary choices that change the analysis, and each needs its own review

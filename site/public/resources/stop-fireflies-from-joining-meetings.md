@@ -50,7 +50,7 @@ Everything above manages a symptom. The bot exists because cloud notetakers need
 
 In fairness, Fireflies now offers bot-free capture of its own via a Google Meet SDK integration and a desktop app. Read it precisely: those remove the visible bot from the call, not the upload. Fireflies' own SDK documentation describes meeting audio and video being shared with Fireflies and processed into its notebook. No bot in the participant list is a courtesy improvement, not an architectural one.
 
-Minutes is the architectural version: device-side recording, local transcription (whisper.cpp), markdown on your own disk, so no bot joins and no audio is uploaded. To be exact about our own limits, transcript text leaves your machine only if you explicitly configure a provider-backed summarizer, which is off by default and documented on our security page.
+Minutes is the architectural version: device-side recording, local transcription (whisper.cpp), markdown on your own disk, so no bot joins and no audio is uploaded. To be exact about our own limits, conversation content leaves your machine when you send it somewhere: a summarizer you configured, or an AI agent you connect and ask to read your meetings, whose provider then receives what it reads. Out of the box neither is happening.
 
 One thing device-side capture does not change: tell people you are recording. The bot's single virtue was announcing itself; without it, consent is your job, which is where it belonged anyway.
 

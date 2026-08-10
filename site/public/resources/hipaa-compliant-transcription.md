@@ -65,7 +65,7 @@ Local processing converts a vendor-disclosure problem into an endpoint problem. 
 
 Minutes is built for the third architecture: records on your device, transcribes locally with whisper.cpp, diarizes with local models, writes markdown into a folder you control. In a local-only deployment we do not receive, maintain, or transmit your PHI, and supplying software to someone who uses it that way does not by itself create a business associate relationship.
 
-That conclusion is conditional on your deployment, and it is worth being blunt about what breaks it. Configure a provider-backed summarizer, which is off by default, and transcript text goes to whichever model provider you chose, whose terms then govern. Sync your meetings folder to a hosted drive and that host is now storing PHI. Grant anyone remote access to the machine and the same applies. Each needs its own review and ordinarily a BAA with that party.
+That conclusion is conditional on your deployment, and it is worth being blunt about what breaks it. Configure a provider-backed summarizer, which is off by default, and transcript text goes to whichever model provider you chose, whose terms then govern. Connect an AI agent over MCP and ask it to read your meetings, and what it reads travels to that agent's provider as context. Sync your meetings folder to a hosted drive and that host is now storing PHI. Grant anyone remote access to the machine and the same applies. Each needs its own review and ordinarily a BAA with that party.
 
 Where it is the wrong tool:
 

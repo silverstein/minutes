@@ -285,9 +285,11 @@ export default function StopFirefliesJoiningPage() {
             <span className="font-medium text-[var(--text)]">Minutes</span> is the architectural
             version: it records device-side and transcribes locally with whisper.cpp, writing
             markdown to your own disk, so no bot joins and no audio is uploaded. To be exact
-            about our own limits, transcript text leaves your machine only if you explicitly
-            configure a provider-backed summarizer, which is off by default and documented on
-            our <a href="/security" className="text-[var(--accent)] hover:underline">security page</a>.
+            about our own limits, conversation content leaves your machine when you send it
+            somewhere: a summarizer you configured, or an AI agent you connect and ask to read
+            your meetings, whose provider then receives what it reads. Out of the box neither is
+            happening, and the complete list is on our{" "}
+            <a href="/security" className="text-[var(--accent)] hover:underline">security page</a>.
             If you want the direct comparison, we keep one for{" "}
             <a
               href="/compare/fireflies-vs-minutes"

@@ -10242,6 +10242,9 @@ fn terminate_tracked_recall_chat_child(
         if let Err(error) = terminate_recall_chat_process_tree(&mut child) {
             tracing::warn!(error = %error, "failed to terminate stalled Recall chat provider");
         }
+        // Safe to wait even when termination failed: the caller has already
+        // closed stdout, so a child that was blocked writing gets EPIPE and
+        // exits on its own.
         let _ = child.wait();
     }
 }
@@ -11029,12 +11032,16 @@ pub async fn cmd_recall_chat_send(
             let read_broke = stream_failed || truncated;
 
             // Stopping early leaves the child writing into a pipe nobody
-            // drains; it would block and the stderr join below would never
-            // return. Kill it first, then release our end of stdout.
+            // drains, where it blocks and the stderr join below never returns.
+            //
+            // Order matters: release our end of stdout *first*. That is what
+            // unblocks the child unconditionally, via EPIPE, and it still holds
+            // if termination fails and leaves the process alive. Terminating
+            // first and closing after would keep the hang on exactly that path.
+            drop(limited);
             if read_broke {
                 terminate_tracked_recall_chat_child(&worker_turn, turn_id);
             }
-            drop(limited);
 
             let _ = stderr_thread.join();
 
@@ -12674,17 +12681,18 @@ mod tests {
         assert!(!recall_chat_stream_completed(false, Some(killed)));
     }
 
-    /// The shape that made stopping early dangerous: a provider that keeps
-    /// writing after we stop reading fills the pipe and blocks. Reading a
-    /// bounded prefix and then killing it must let the wait complete, which is
-    /// what the worker now does before joining stderr.
+    /// The shape that made stopping early dangerous, with the escape hatch the
+    /// production path relies on. stdout is closed while the provider is still
+    /// writing and still holding the pipe; the child must then become reapable
+    /// even though nothing terminated it. That is what makes the helper's
+    /// `wait()` safe on the path where termination itself fails.
     #[cfg(unix)]
     #[test]
-    fn a_still_writing_provider_can_be_reaped_after_an_early_stop() {
+    fn closing_stdout_lets_a_still_writing_provider_be_reaped() {
         use std::io::{BufRead, BufReader, Read};
         use std::process::{Command, Stdio};
 
-        // Writes far more than any pipe buffer holds, and never exits on its own.
+        // Writes far more than any pipe buffer holds and never exits on its own.
         let mut child = Command::new("sh")
             .arg("-c")
             .arg("while :; do printf 'x%.0s' $(seq 1 1000); echo; done")
@@ -12692,9 +12700,9 @@ mod tests {
             .spawn()
             .expect("spawn writer");
 
+        let stdout = child.stdout.take().expect("stdout");
+        let mut limited = stdout.take(4096);
         {
-            let stdout = child.stdout.take().expect("stdout");
-            let mut limited = stdout.take(4096);
             let reader = BufReader::new(&mut limited);
             let mut lines = 0;
             for line in reader.lines() {
@@ -12704,16 +12712,19 @@ mod tests {
                 lines += 1;
             }
             assert!(lines > 0, "should have read a bounded prefix");
-            assert_eq!(limited.limit(), 0, "budget should be exhausted");
         }
+        assert_eq!(limited.limit(), 0, "budget should be exhausted");
 
-        // Without the kill this wait would hang: the child is blocked writing
-        // into a pipe nobody is draining.
-        let _ = terminate_recall_chat_process_tree(&mut child);
+        // No kill. Closing the read end alone must be enough to unblock it.
+        drop(limited);
+
         let status = child
             .wait()
-            .expect("child must be reapable after termination");
-        assert!(!recall_chat_stream_completed(true, Some(status)));
+            .expect("closing stdout must make the child reapable");
+        assert!(
+            !recall_chat_stream_completed(true, Some(status)),
+            "a provider that died on EPIPE never completed the turn"
+        );
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {

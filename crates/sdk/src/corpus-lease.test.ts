@@ -648,6 +648,9 @@ describe("stable corpus lease", () => {
             { timeoutMs: 10_000, operationDeadlineForTest: operationDeadline }
           )
         ).rejects.toThrow("stable meeting corpus authorization failed");
+        // The write is deferred so it cannot delay the denial, so let the
+        // scheduled diagnostic run before asserting it was attempted.
+        await new Promise((resolve) => setImmediate(resolve));
         expect(attempted).toBeGreaterThan(0);
       } finally {
         (process.stderr as unknown as { write: unknown }).write = original;

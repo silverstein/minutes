@@ -1880,7 +1880,7 @@ async function dispatchStableCorpusLease<T>(
         settled = true;
         // Sampled before the teardown below so the number reflects the moment
         // of denial, not how long cleanup took.
-        const remainingMs = Number((deadline - process.hrtime.bigint()) / 1_000_000n);
+        const remainingNs = deadline - process.hrtime.bigint();
 
         operationAbort.abort(new CorpusLeaseChangedError(message));
         killCorpusWorker(child);
@@ -1897,15 +1897,25 @@ async function dispatchStableCorpusLease<T>(
         // must not learn why authorization failed. The reason goes to stderr,
         // which is operator-visible only. Every reason is a fixed internal
         // string, so no corpus path or content is disclosed.
-        try {
-          const budget =
-            remainingMs >= 0
-              ? `${remainingMs}ms of authorization budget remained`
-              : `authorization budget overrun by ${-remainingMs}ms`;
-          process.stderr.write(`[corpus-lease] denied: ${message} (${budget})\n`);
-        } catch {
-          // A broken stderr must never turn a clean denial into a crash.
-        }
+        // Deferred as well as guarded. `fail()` must return before promise
+        // handlers can run, so writing inline would let a blocked stderr, a
+        // full pipe for instance, delay the caller's observation of a denial
+        // that has already been decided.
+        setImmediate(() => {
+          try {
+            // Sign is taken from nanoseconds: BigInt division truncates toward
+            // zero, so a sub-millisecond overrun would otherwise render as
+            // "0ms remained" rather than an overrun.
+            const overran = remainingNs < 0n;
+            const magnitudeMs = Number((overran ? -remainingNs : remainingNs) / 1_000_000n);
+            const budget = overran
+              ? `authorization budget overrun by ${magnitudeMs}ms`
+              : `${magnitudeMs}ms of authorization budget remained`;
+            process.stderr.write(`[corpus-lease] denied: ${message} (${budget})\n`);
+          } catch {
+            // A broken stderr must never turn a clean denial into a crash.
+          }
+        });
       };
       const timer = setTimeout(
         () => fail("meeting corpus authorization deadline elapsed"),

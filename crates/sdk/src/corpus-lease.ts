@@ -1878,6 +1878,25 @@ async function dispatchStableCorpusLease<T>(
       const fail = (message: string): void => {
         if (settled) return;
         settled = true;
+        // The rejection stays a single uniform denial on purpose: callers must
+        // not be able to distinguish why authorization failed. But the reason
+        // was being discarded entirely, which left a CI failure reading only
+        // "authorization failed" with no way to tell a deadline overrun from a
+        // dead worker. Report it to stderr, where operators and CI logs can see
+        // it and the caller still cannot.
+        // Remaining budget is the discriminating number: at or below zero means
+        // the deadline actually elapsed, while a large remainder means something
+        // else failed and the budget was never the problem.
+        //
+        // Computed inline rather than through `remainingAuthorizationMs`, which
+        // throws once the deadline has passed. That is correct for its callers,
+        // who must not proceed on an expired lease, but fatal here: this handler
+        // runs *because* the deadline elapsed, and throwing inside it would skip
+        // the abort and the reject below and leave the lease promise unsettled.
+        const remainingMs = Number((deadline - process.hrtime.bigint()) / 1_000_000n);
+        process.stderr.write(
+          `[corpus-lease] denied: ${message} (${remainingMs}ms of authorization budget remained)\n`
+        );
         operationAbort.abort(new CorpusLeaseChangedError(message));
         killCorpusWorker(child);
         reject(new Error("Access denied: stable meeting corpus authorization failed"));

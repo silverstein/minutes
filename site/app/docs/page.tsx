@@ -178,7 +178,7 @@ export default function DocsIndexPage() {
                   <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
                     {section.label}
                   </p>
-                  <h2 className="mt-3 text-[18px] font-medium text-[var(--text)]">{link.title}</h2>
+                  <h3 className="mt-3 text-[18px] font-medium text-[var(--text)]">{link.title}</h3>
                   <p className="mt-2 text-[15px] leading-8 text-[var(--text-secondary)]">
                     {link.blurb}
                   </p>

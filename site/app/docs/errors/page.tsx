@@ -70,7 +70,7 @@ export default function ErrorsPage() {
         <div className="space-y-10">
           {data.groups.map((group) => (
             <div key={group.enumName}>
-              <SectionLabel label={`${group.enumName} (${group.count})`} />
+              <SectionLabel label={`${group.enumName} (${group.count})`} level={3} />
               <div className="grid gap-4">
                 {group.entries.map((entry) => (
                   <div

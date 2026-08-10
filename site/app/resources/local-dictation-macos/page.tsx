@@ -123,7 +123,7 @@ export default function LocalDictationMacosPage() {
               key={opt.name}
               className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
             >
-              <h2 className="font-serif text-[22px] text-[var(--text)]">{opt.name}</h2>
+              <h3 className="font-serif text-[22px] text-[var(--text)]">{opt.name}</h3>
               <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
                 {opt.bestFor}
               </p>

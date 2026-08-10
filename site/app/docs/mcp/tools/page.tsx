@@ -103,7 +103,7 @@ export default function MpcToolsPage() {
         <div className="space-y-8">
           {toolGroups.map(([group, tools]) => (
             <div key={group}>
-              <SectionLabel label={group} />
+              <SectionLabel label={group} level={3} />
               <div className="grid gap-4">
                 {tools.map((tool) => (
                   <div
@@ -131,7 +131,7 @@ export default function MpcToolsPage() {
         <div className="space-y-8">
           {resourceGroups.map(([group, resources]) => (
             <div key={group}>
-              <SectionLabel label={group} />
+              <SectionLabel label={group} level={3} />
               <div className="grid gap-4">
                 {resources.map((resource) => (
                   <div
@@ -159,7 +159,7 @@ export default function MpcToolsPage() {
         <div className="space-y-8">
           {promptGroups.map(([group, prompts]) => (
             <div key={group}>
-              <SectionLabel label={group} />
+              <SectionLabel label={group} level={3} />
               <div className="grid gap-4">
                 {prompts.map((prompt) => (
                   <div

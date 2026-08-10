@@ -141,7 +141,7 @@ export default function SecurityPage() {
               key={g.title}
               className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
             >
-              <h2 className="font-serif text-[20px] text-[var(--text)]">{g.title}</h2>
+              <h3 className="font-serif text-[20px] text-[var(--text)]">{g.title}</h3>
               <p className="mt-3 text-[15px] leading-8 text-[var(--text-secondary)]">{g.body}</p>
             </div>
           ))}

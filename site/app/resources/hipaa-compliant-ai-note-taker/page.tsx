@@ -177,7 +177,7 @@ export default function HipaaCompliantAiNoteTakerPage() {
               className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 shadow-[var(--shadow-panel)]"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <h2 className="font-serif text-[22px] text-[var(--text)]">{v.name}</h2>
+                <h3 className="font-serif text-[22px] text-[var(--text)]">{v.name}</h3>
                 <span
                   className={`rounded-full px-3 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${
                     v.verdict === "No"

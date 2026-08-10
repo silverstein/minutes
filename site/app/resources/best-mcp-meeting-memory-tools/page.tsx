@@ -141,7 +141,7 @@ export default function BestMcpMeetingMemoryToolsPage() {
               <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
                 {tool.bestFor}
               </p>
-              <h2 className="mt-3 text-[18px] font-medium text-[var(--text)]">{tool.name}</h2>
+              <h3 className="mt-3 text-[18px] font-medium text-[var(--text)]">{tool.name}</h3>
               <p className="mt-2 text-[15px] leading-8 text-[var(--text-secondary)]">
                 {tool.summary}
               </p>

@@ -13623,6 +13623,12 @@
         bubble.classList.remove('streaming');
         if (!bubble.textContent.trim()) {
           bubble.textContent = stderr;
+          // Marked so a second error event appends a notice under this text
+          // rather than repeating it verbatim.
+          bubble.dataset.errorShown = '1';
+          return;
+        }
+        if (bubble.dataset.errorShown === '1' && !bubble.querySelector('.chat-incomplete-notice')) {
           return;
         }
         // A partial answer is already on screen. Showing nothing here was the

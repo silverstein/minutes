@@ -10429,6 +10429,12 @@ pub async fn cmd_recall_chat_send(
                                     .ok();
                             }
                         }
+                        // The final Ollama frame can still carry content, so it
+                        // is processed first and the loop stops here rather
+                        // than draining whatever follows it.
+                        if saw_terminator {
+                            break;
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -10610,8 +10616,13 @@ pub async fn cmd_recall_chat_send(
                 }
                 match line_result {
                     Ok(line) => {
+                        // Stop at the terminator instead of draining the rest
+                        // of the body: trailing bytes after it could otherwise
+                        // append junk, or trip the truncation or read-error
+                        // checks and turn a completed answer into a failure.
                         if openai_compatible_stream_is_done(&line) {
                             saw_terminator = true;
+                            break;
                         }
                         if !announced_thinking
                             && full_response.is_empty()

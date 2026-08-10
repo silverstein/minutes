@@ -148,7 +148,16 @@ export default function RemoveNotetakerBotsPage() {
             <span className="font-medium text-[var(--text)]">Fireflies (Fred).</span> Same
             pattern: Fireflies settings → autojoin rules (change to invite-only or off, or
             disconnect the calendar), and remove the notetaker from the participant list
-            mid-call. Fireflies&rsquo; own guide is linked below.
+            mid-call. Fireflies&rsquo; own guide is linked below. One detail worth knowing
+            before the call rather than during it: remove it within three minutes and no
+            transcript is created at all. Full detail in{" "}
+            <a
+              href="/resources/stop-fireflies-from-joining-meetings"
+              className="text-[var(--accent)] hover:underline"
+            >
+              how to stop Fireflies joining your meetings
+            </a>
+            .
           </p>
           <p>
             <span className="font-medium text-[var(--text)]">Anything else.</span> The pattern

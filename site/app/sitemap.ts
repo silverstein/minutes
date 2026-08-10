@@ -38,6 +38,7 @@ const routes = [
   "/resources/open-source-alternatives-to-granola-ai",
   "/resources/remove-ai-notetaker-bots-from-meetings",
   "/resources/remove-otter-ai-from-zoom",
+  "/resources/stop-fireflies-from-joining-meetings",
   "/security",
   "/writing",
   "/writing/governance-built-in-not-retrofitted",

@@ -15,9 +15,9 @@ export function FaqSection({ items }: { items: ReadonlyArray<FaqItem> }) {
   return (
     <section className="mt-14 max-w-[800px]">
       <div className="mb-6 flex items-center gap-3">
-        <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
+        <h2 className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
           Common questions
-        </span>
+        </h2>
         <div className="h-px flex-1 bg-[var(--border)]" />
       </div>
       <div className="divide-y divide-[color:var(--border)] border-y border-[color:var(--border)]">

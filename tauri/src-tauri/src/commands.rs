@@ -10217,6 +10217,47 @@ fn spawn_tracked_recall_chat_child(
     })
 }
 
+/// Terminate the tracked child after we have stopped reading its stdout.
+///
+/// Breaking out of the read loop early leaves the child writing into a pipe
+/// nobody drains. Once that pipe fills, the child blocks, so stderr never
+/// reaches EOF, the stderr join never returns, and the turn hangs instead of
+/// reporting the failure. Killing it first is what makes the early exits safe.
+///
+/// Deliberately narrower than `cancel_recall_chat_turn`: it must not set the
+/// cancelled flag or clear the turn, because this is a provider failure the
+/// user still needs reported, not a cancellation.
+fn terminate_tracked_recall_chat_child(
+    current_turn: &Arc<Mutex<Option<RecallChatTurn>>>,
+    turn_id: u64,
+) {
+    let child = {
+        let mut current = current_turn.lock().unwrap();
+        current
+            .as_mut()
+            .filter(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.child.take())
+    };
+    if let Some(mut child) = child {
+        if let Err(error) = terminate_recall_chat_process_tree(&mut child) {
+            tracing::warn!(error = %error, "failed to terminate stalled Recall chat provider");
+        }
+        let _ = child.wait();
+    }
+}
+
+/// Decide whether a finished Recall chat turn may be stored.
+///
+/// Split out so the rule is testable on its own. `None` is not evidence of a
+/// clean run: it covers a child already taken by cancellation and a `wait()`
+/// that itself failed, so only an observed successful status counts.
+fn recall_chat_stream_completed(
+    read_broke: bool,
+    exit_status: Option<std::process::ExitStatus>,
+) -> bool {
+    !read_broke && matches!(exit_status, Some(status) if status.success())
+}
+
 /// Reap the child and report how it exited.
 ///
 /// The status used to be discarded. For a subprocess it is better evidence of
@@ -10984,15 +11025,23 @@ pub async fn cmd_recall_chat_send(
                     }
                 }
             }
-            let _ = stderr_thread.join();
-
             let truncated = limited.limit() == 0;
+            let read_broke = stream_failed || truncated;
+
+            // Stopping early leaves the child writing into a pipe nobody
+            // drains; it would block and the stderr join below would never
+            // return. Kill it first, then release our end of stdout.
+            if read_broke {
+                terminate_tracked_recall_chat_child(&worker_turn, turn_id);
+            }
+            drop(limited);
+
+            let _ = stderr_thread.join();
 
             // Reaped before the persistence decision, not after, because the
             // exit status is part of that decision.
             let exit_status = reap_recall_chat_child(&worker_turn, turn_id);
-            let exited_cleanly = exit_status.is_none_or(|status| status.success());
-            let stream_broke = stream_failed || truncated || !exited_cleanly;
+            let stream_broke = !recall_chat_stream_completed(read_broke, exit_status);
 
             if !cancelled.load(Ordering::Relaxed) && stream_broke {
                 emit_recall_chat_stream_failure(
@@ -12586,29 +12635,30 @@ mod tests {
         assert!(!saw_terminator);
     }
 
-    /// For a subprocess the exit status is stronger evidence of completion
-    /// than any in-band marker: a provider that crashed or was killed produced
-    /// a short answer no matter how well-formed its last line looked. The
-    /// status used to be discarded, and the turn stored anyway.
+    /// The storage rule, exercised through the function the worker actually
+    /// calls. `None` is the case that matters: it covers both a child already
+    /// taken by cancellation and a `wait()` that failed, so treating it as a
+    /// clean run would certify a turn nobody observed finishing.
     #[test]
-    fn provider_exit_status_decides_whether_the_answer_finished() {
+    fn only_an_observed_successful_exit_completes_a_turn() {
         use std::process::Command;
 
         let ok = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
         let failed = Command::new("sh").arg("-c").arg("exit 1").status().unwrap();
 
-        // Mirrors the worker's rule: Some(status) must be successful, and None
-        // means there was no child left to reap, which is the cancellation path.
-        assert!(Some(ok).is_none_or(|s| s.success()));
-        assert!(!Some(failed).is_none_or(|s| s.success()));
-        assert!(None::<std::process::ExitStatus>.is_none_or(|s| s.success()));
+        assert!(recall_chat_stream_completed(false, Some(ok)));
+        assert!(!recall_chat_stream_completed(false, Some(failed)));
+        assert!(!recall_chat_stream_completed(false, None));
+        // A broken read is disqualifying even when the provider exits 0, which
+        // is what a truncated-but-tidy provider looks like.
+        assert!(!recall_chat_stream_completed(true, Some(ok)));
     }
 
-    /// A provider killed by a signal exits without a code at all. That must
-    /// still read as broken rather than falling through as success.
+    /// A provider killed by a signal exits with no code at all; without an
+    /// explicit success check that falls through as completion.
     #[cfg(unix)]
     #[test]
-    fn a_signalled_provider_does_not_count_as_a_clean_exit() {
+    fn a_signalled_provider_does_not_complete_a_turn() {
         use std::process::Command;
 
         let killed = Command::new("sh")
@@ -12621,8 +12671,49 @@ mod tests {
             killed.code().is_none(),
             "expected a signal, not an exit code"
         );
-        assert!(!killed.success());
-        assert!(!Some(killed).is_none_or(|s| s.success()));
+        assert!(!recall_chat_stream_completed(false, Some(killed)));
+    }
+
+    /// The shape that made stopping early dangerous: a provider that keeps
+    /// writing after we stop reading fills the pipe and blocks. Reading a
+    /// bounded prefix and then killing it must let the wait complete, which is
+    /// what the worker now does before joining stderr.
+    #[cfg(unix)]
+    #[test]
+    fn a_still_writing_provider_can_be_reaped_after_an_early_stop() {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::{Command, Stdio};
+
+        // Writes far more than any pipe buffer holds, and never exits on its own.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("while :; do printf 'x%.0s' $(seq 1 1000); echo; done")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn writer");
+
+        {
+            let stdout = child.stdout.take().expect("stdout");
+            let mut limited = stdout.take(4096);
+            let reader = BufReader::new(&mut limited);
+            let mut lines = 0;
+            for line in reader.lines() {
+                if line.is_err() {
+                    break;
+                }
+                lines += 1;
+            }
+            assert!(lines > 0, "should have read a bounded prefix");
+            assert_eq!(limited.limit(), 0, "budget should be exhausted");
+        }
+
+        // Without the kill this wait would hang: the child is blocked writing
+        // into a pipe nobody is draining.
+        let _ = terminate_recall_chat_process_tree(&mut child);
+        let status = child
+            .wait()
+            .expect("child must be reapable after termination");
+        assert!(!recall_chat_stream_completed(true, Some(status)));
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {

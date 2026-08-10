@@ -1901,6 +1901,13 @@ async function dispatchStableCorpusLease<T>(
         // handlers can run, so writing inline would let a blocked stderr, a
         // full pipe for instance, delay the caller's observation of a denial
         // that has already been decided.
+        //
+        // Not a total guarantee, and deliberately not chased further: the
+        // scheduled write can still land during the lease's own async cleanup,
+        // so a genuinely blocked stderr could delay the public rejection by
+        // however long it blocks. Node writes to pipes asynchronously, leaving
+        // only a wedged TTY or file, which is a broken host rather than a
+        // failure mode this diagnostic should contort itself around.
         setImmediate(() => {
           try {
             // Sign is taken from nanoseconds: BigInt division truncates toward

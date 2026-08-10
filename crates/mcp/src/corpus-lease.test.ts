@@ -616,6 +616,48 @@ describe("stable corpus lease", () => {
     });
   });
 
+  it("still denies cleanly when the diagnostic sink is broken", async () => {
+    await withCorpus(async (root) => {
+      writeFileSync(join(root, "meeting.md"), "stderr canary");
+      // A denial writes its reason to stderr. That write happens after the
+      // lease has settled precisely so it cannot matter, and this pins it: with
+      // a stderr that throws on every write, the denial must still reject
+      // normally rather than stranding the promise. The earlier arrangement,
+      // which wrote before rejecting, would hang here forever.
+      const original = process.stderr.write;
+      let attempted = 0;
+      (process.stderr as unknown as { write: unknown }).write = () => {
+        attempted += 1;
+        throw new Error("stderr is gone");
+      };
+      try {
+        let forceOperationDeadline!: () => void;
+        const operationDeadline = new Promise<void>((resolve) => {
+          forceOperationDeadline = resolve;
+        });
+        await expect(
+          withStableCorpusLease(
+            root,
+            (_snapshot, _attempt, signal) =>
+              new Promise((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(signal.reason), {
+                  once: true,
+                });
+                forceOperationDeadline();
+              }),
+            { timeoutMs: 10_000, operationDeadlineForTest: operationDeadline }
+          )
+        ).rejects.toThrow("stable meeting corpus authorization failed");
+        // The write is deferred so it cannot delay the denial, so let the
+        // scheduled diagnostic run before asserting it was attempted.
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(attempted).toBeGreaterThan(0);
+      } finally {
+        (process.stderr as unknown as { write: unknown }).write = original;
+      }
+    });
+  });
+
   it("aborts an asynchronous operation at the cumulative authorization deadline", async () => {
     await withCorpus(async (root) => {
       writeFileSync(join(root, "meeting.md"), "operation deadline canary");

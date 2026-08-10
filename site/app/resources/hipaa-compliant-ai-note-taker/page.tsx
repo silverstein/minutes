@@ -225,6 +225,18 @@ export default function HipaaCompliantAiNoteTakerPage() {
             control, patient consent). But the vendor-risk column of your HIPAA analysis goes to
             zero, permanently, on every &ldquo;plan.&rdquo;
           </p>
+          <p>
+            For why that follows from the rule rather than from a marketing claim, including the
+            definition that decides it and what on-device processing pointedly does{" "}
+            <em>not</em> excuse you from, see{" "}
+            <a
+              href="/resources/hipaa-compliant-transcription"
+              className="text-[var(--accent)] hover:underline"
+            >
+              what HIPAA actually requires of transcription
+            </a>
+            .
+          </p>
         </div>
       </section>
 

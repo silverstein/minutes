@@ -26,6 +26,7 @@ const routes = [
   "/resources/ai-notetakers-attorney-client-privilege",
   "/resources/best-local-speech-to-text",
   "/resources/hipaa-compliant-ai-note-taker",
+  "/resources/hipaa-compliant-transcription",
   "/resources/is-it-legal-to-record-a-meeting",
   "/resources/best-mcp-meeting-memory-tools",
   "/resources/best-meeting-tools-for-claude-code-and-codex",

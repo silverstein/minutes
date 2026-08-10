@@ -149,8 +149,8 @@ export default function RemoveNotetakerBotsPage() {
             pattern: Fireflies settings → autojoin rules (change to invite-only or off, or
             disconnect the calendar), and remove the notetaker from the participant list
             mid-call. Fireflies&rsquo; own guide is linked below. One detail worth knowing
-            before the call rather than during it: remove it within three minutes and no
-            transcript is created at all. Full detail in{" "}
+            before the call rather than during it: Fireflies says that removing the notetaker
+            within three minutes means no transcript or notes are created. Full detail in{" "}
             <a
               href="/resources/stop-fireflies-from-joining-meetings"
               className="text-[var(--accent)] hover:underline"

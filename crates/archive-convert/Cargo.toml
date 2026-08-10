@@ -16,7 +16,7 @@ libc = "0.2"
 # Pinned to the exact version pdf-extract already carries, so the text-origin
 # inspection reads the same parsed document the extractor reads, not a second
 # parser's opinion of it.
-lopdf = "=0.42.0"
+lopdf = "=0.44.0"
 pdf-extract = "=0.12.0"
 quick-xml = "=0.41.0"
 serde = { workspace = true }

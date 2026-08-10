@@ -9928,6 +9928,27 @@ fn openai_compatible_stream_is_reasoning(line: &str) -> bool {
 /// Extract the incremental assistant text from one server-sent-events line of
 /// an OpenAI-compatible stream.
 ///
+/// True when a frame claims to carry data but its payload is not valid JSON.
+///
+/// Silently skipping these was safe while any stream could be stored; it is not
+/// safe now that a terminator marks a stream complete, because a dropped
+/// content frame followed by a valid terminator would save a response with a
+/// hole in it as if it were whole.
+///
+/// Deliberately narrow. SSE comments, `event:`/`id:`/`retry:` fields, blank
+/// keepalives, and the `[DONE]` sentinel are all normal traffic and must not be
+/// mistaken for corruption; only a `data:` frame with an unparseable payload is.
+fn openai_compatible_stream_frame_is_malformed(line: &str) -> bool {
+    let Some(payload) = line.trim().strip_prefix("data:") else {
+        return false;
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(payload).is_err()
+}
+
 /// True when the frame is the SSE terminator, which is the only positive
 /// evidence an OpenAI-compatible stream finished rather than being cut off.
 fn openai_compatible_stream_is_done(line: &str) -> bool {
@@ -10407,6 +10428,14 @@ pub async fn cmd_recall_chat_send(
                 }
                 match line_result {
                     Ok(line) if !line.trim().is_empty() => {
+                        // Every non-empty line in an NDJSON stream is meant to
+                        // be a frame, so one that will not parse is corruption,
+                        // not noise to skip past.
+                        if serde_json::from_str::<serde_json::Value>(&line).is_err() {
+                            eprintln!("[recall-chat/ollama] malformed frame");
+                            stream_failed = true;
+                            break;
+                        }
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                             if val.get("done").and_then(|d| d.as_bool()) == Some(true) {
                                 saw_terminator = true;
@@ -10616,6 +10645,11 @@ pub async fn cmd_recall_chat_send(
                 }
                 match line_result {
                     Ok(line) => {
+                        if openai_compatible_stream_frame_is_malformed(&line) {
+                            eprintln!("[recall-chat/openai-compatible] malformed data frame");
+                            stream_failed = true;
+                            break;
+                        }
                         // Stop at the terminator instead of draining the rest
                         // of the body: trailing bytes after it could otherwise
                         // append junk, or trip the truncation or read-error
@@ -12354,6 +12388,69 @@ mod tests {
             limited_over.limit(),
             0,
             "one byte past the cap is truncated"
+        );
+    }
+
+    /// Corruption has to be told apart from ordinary stream noise. Treating
+    /// every unparseable line as failure would break legitimate servers that
+    /// send comments and keepalives; treating none as failure lets a dropped
+    /// content frame plus a valid terminator save a response with a hole in it.
+    #[test]
+    fn malformed_data_frames_are_detected() {
+        assert!(openai_compatible_stream_frame_is_malformed(
+            r#"data: {"choices":[{"delta":{"content":"cut off"#
+        ));
+        assert!(openai_compatible_stream_frame_is_malformed(
+            "data: not json at all"
+        ));
+        assert!(openai_compatible_stream_frame_is_malformed("data: {oops}"));
+    }
+
+    #[test]
+    fn ordinary_stream_noise_is_not_treated_as_corruption() {
+        // SSE comments and non-data fields are normal traffic.
+        assert!(!openai_compatible_stream_frame_is_malformed(": keepalive"));
+        assert!(!openai_compatible_stream_frame_is_malformed(
+            "event: message"
+        ));
+        assert!(!openai_compatible_stream_frame_is_malformed("id: 42"));
+        assert!(!openai_compatible_stream_frame_is_malformed("retry: 1000"));
+        assert!(!openai_compatible_stream_frame_is_malformed(""));
+        // A data frame with no payload is a keepalive, not corruption.
+        assert!(!openai_compatible_stream_frame_is_malformed("data:"));
+        // The terminator is not JSON and must not read as malformed.
+        assert!(!openai_compatible_stream_frame_is_malformed("data: [DONE]"));
+        // A well-formed content frame is obviously fine.
+        assert!(!openai_compatible_stream_frame_is_malformed(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+    }
+
+    /// The case that motivated this: corruption followed by a valid
+    /// terminator. The terminator alone must not certify the response.
+    #[test]
+    fn a_terminator_after_corruption_does_not_certify_the_stream() {
+        let frames = [
+            r#"data: {"choices":[{"delta":{"content":"first half"}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"trunc"#,
+            "data: [DONE]",
+        ];
+        let mut stream_failed = false;
+        let mut saw_terminator = false;
+        for line in frames {
+            if openai_compatible_stream_frame_is_malformed(line) {
+                stream_failed = true;
+                break;
+            }
+            if openai_compatible_stream_is_done(line) {
+                saw_terminator = true;
+                break;
+            }
+        }
+        assert!(stream_failed, "corruption must fail the stream");
+        assert!(
+            !saw_terminator,
+            "a terminator after corruption is never reached"
         );
     }
 

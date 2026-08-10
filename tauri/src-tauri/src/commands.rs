@@ -9949,6 +9949,26 @@ fn openai_compatible_stream_frame_is_malformed(line: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(payload).is_err()
 }
 
+/// True when a frame is a provider error object rather than content.
+///
+/// A server can report a mid-stream failure as perfectly valid JSON and then
+/// still send `[DONE]`; vLLM does exactly this. The frame parses, so the
+/// malformed check passes it, and the terminator then certifies a partial
+/// answer as complete. Recognizing the error object is what closes that.
+fn openai_compatible_stream_frame_is_error(line: &str) -> bool {
+    let Some(payload) = line.trim().strip_prefix("data:") else {
+        return false;
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| value.get("error").cloned())
+        .is_some_and(|error| !error.is_null())
+}
+
 /// True when the frame is the SSE terminator, which is the only positive
 /// evidence an OpenAI-compatible stream finished rather than being cut off.
 fn openai_compatible_stream_is_done(line: &str) -> bool {
@@ -10437,6 +10457,11 @@ pub async fn cmd_recall_chat_send(
                             break;
                         }
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if val.get("error").is_some_and(|e| !e.is_null()) {
+                                eprintln!("[recall-chat/ollama] provider error frame");
+                                stream_failed = true;
+                                break;
+                            }
                             if val.get("done").and_then(|d| d.as_bool()) == Some(true) {
                                 saw_terminator = true;
                             }
@@ -10647,6 +10672,11 @@ pub async fn cmd_recall_chat_send(
                     Ok(line) => {
                         if openai_compatible_stream_frame_is_malformed(&line) {
                             eprintln!("[recall-chat/openai-compatible] malformed data frame");
+                            stream_failed = true;
+                            break;
+                        }
+                        if openai_compatible_stream_frame_is_error(&line) {
+                            eprintln!("[recall-chat/openai-compatible] provider error frame");
                             stream_failed = true;
                             break;
                         }
@@ -12452,6 +12482,61 @@ mod tests {
             !saw_terminator,
             "a terminator after corruption is never reached"
         );
+    }
+
+    /// A mid-stream failure can arrive as perfectly valid JSON followed by a
+    /// normal terminator. vLLM does this. Without recognizing it, the frame
+    /// parses cleanly and `[DONE]` then certifies a partial answer.
+    #[test]
+    fn provider_error_frames_fail_the_stream() {
+        assert!(openai_compatible_stream_frame_is_error(
+            r#"data: {"error":{"message":"context length exceeded","type":"invalid_request"}}"#
+        ));
+        assert!(openai_compatible_stream_frame_is_error(
+            r#"data: {"error":"something broke"}"#
+        ));
+    }
+
+    #[test]
+    fn content_frames_are_not_mistaken_for_errors() {
+        assert!(!openai_compatible_stream_frame_is_error(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+        // An explicitly null error is not an error.
+        assert!(!openai_compatible_stream_frame_is_error(
+            r#"data: {"error":null,"choices":[{"delta":{"content":"hi"}}]}"#
+        ));
+        // A model discussing errors is not the stream failing.
+        assert!(!openai_compatible_stream_frame_is_error(
+            r#"data: {"choices":[{"delta":{"content":"the error was"}}]}"#
+        ));
+        assert!(!openai_compatible_stream_frame_is_error("data: [DONE]"));
+        assert!(!openai_compatible_stream_frame_is_error(": keepalive"));
+    }
+
+    #[test]
+    fn an_error_frame_before_the_terminator_is_never_certified() {
+        let frames = [
+            r#"data: {"choices":[{"delta":{"content":"partial"}}]}"#,
+            r#"data: {"error":{"message":"aborted"}}"#,
+            "data: [DONE]",
+        ];
+        let mut stream_failed = false;
+        let mut saw_terminator = false;
+        for line in frames {
+            if openai_compatible_stream_frame_is_malformed(line)
+                || openai_compatible_stream_frame_is_error(line)
+            {
+                stream_failed = true;
+                break;
+            }
+            if openai_compatible_stream_is_done(line) {
+                saw_terminator = true;
+                break;
+            }
+        }
+        assert!(stream_failed);
+        assert!(!saw_terminator);
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {

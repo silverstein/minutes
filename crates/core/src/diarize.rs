@@ -2169,6 +2169,44 @@ fn merge_remote_diarization_into_stem_result(
     }
 }
 
+/// Speakers holding enough of a stem's speech to be treated as really present.
+///
+/// Deliberately stricter than `meaningful_speaker_count_excluding`'s
+/// half-second bar, because this gates a safety decision rather than a
+/// descriptive one. An incidental split (a cough picked up as its own cluster,
+/// a diarizer hiccup on one noisy window) must not read as a second person and
+/// suppress self-attribution that would otherwise be correct, so a speaker
+/// counts only when they hold both an absolute and a proportional share of the
+/// attributed speech.
+///
+/// The two people sharing a room in issue #169 held roughly even talk time
+/// across 17 minutes, which clears both bars by a wide margin; the artifacts
+/// this is written to ignore clear neither.
+pub(crate) fn substantial_speaker_count(result: &DiarizationResult) -> usize {
+    const MIN_ABSOLUTE_SECS: f64 = 5.0;
+    const MIN_SHARE_OF_SPEECH: f64 = 0.10;
+
+    let mut speaker_durations: std::collections::HashMap<&str, f64> =
+        std::collections::HashMap::new();
+    for segment in &result.segments {
+        *speaker_durations
+            .entry(segment.speaker.as_str())
+            .or_insert(0.0) += (segment.end - segment.start).max(0.0);
+    }
+
+    let total: f64 = speaker_durations.values().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+
+    speaker_durations
+        .values()
+        .filter(|&&duration| {
+            duration >= MIN_ABSOLUTE_SECS && duration / total >= MIN_SHARE_OF_SPEECH
+        })
+        .count()
+}
+
 fn meaningful_speaker_count_excluding(result: &DiarizationResult, ignored: &[&str]) -> usize {
     let mut speaker_durations: std::collections::HashMap<&str, f64> =
         std::collections::HashMap::new();
@@ -3892,6 +3930,70 @@ fn find_python_with_candidates(
 
 #[cfg(test)]
 mod tests {
+
+    fn stem_result(segments: &[(&str, f64, f64)]) -> DiarizationResult {
+        DiarizationResult {
+            segments: segments
+                .iter()
+                .map(|(speaker, start, end)| SpeakerSegment {
+                    speaker: (*speaker).into(),
+                    start: *start,
+                    end: *end,
+                })
+                .collect(),
+            num_speakers: 0,
+            system_dominant_ratio: 0.0,
+            voice_dominant_ratio: 0.0,
+            degraded_capture: None,
+            from_stems: false,
+            source_aware: false,
+            speaker_embeddings: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn substantial_speaker_count_sees_two_people_sharing_one_microphone() {
+        // Issue #169: two colleagues in one room on one mic, roughly even talk
+        // time. This is the case that must be detected, because naming the
+        // shared label after the recorder misattributes the other person.
+        let shared_room = stem_result(&[
+            ("SPEAKER_0", 0.0, 240.0),
+            ("SPEAKER_1", 240.0, 500.0),
+            ("SPEAKER_0", 500.0, 760.0),
+        ]);
+        assert_eq!(substantial_speaker_count(&shared_room), 2);
+    }
+
+    #[test]
+    fn substantial_speaker_count_ignores_incidental_splits() {
+        // The regression this guard must not cause: one real speaker plus a
+        // brief artifact (a cough, one noisy window clustered on its own) has
+        // to read as one person, or self-attribution that was previously
+        // correct starts declining for solo recorders.
+        let solo_with_artifact = stem_result(&[
+            ("SPEAKER_0", 0.0, 600.0),
+            ("SPEAKER_1", 600.0, 602.0),
+            ("SPEAKER_0", 602.0, 900.0),
+        ]);
+        assert_eq!(substantial_speaker_count(&solo_with_artifact), 1);
+
+        // Long enough in absolute terms but a negligible share: still one.
+        let solo_with_long_artifact =
+            stem_result(&[("SPEAKER_0", 0.0, 3600.0), ("SPEAKER_1", 3600.0, 3610.0)]);
+        assert_eq!(substantial_speaker_count(&solo_with_long_artifact), 1);
+
+        // An even split, but only seconds of audio: neither voice clears the
+        // absolute bar, so the count is zero rather than two. What the guard
+        // needs is that it is not above one, because a clip this short cannot
+        // support the claim that a room was shared.
+        let short_clip = stem_result(&[("SPEAKER_0", 0.0, 4.0), ("SPEAKER_1", 4.0, 8.0)]);
+        assert_eq!(substantial_speaker_count(&short_clip), 0);
+    }
+
+    #[test]
+    fn substantial_speaker_count_handles_a_silent_stem() {
+        assert_eq!(substantial_speaker_count(&stem_result(&[])), 0);
+    }
     use super::*;
 
     static DIARIZATION_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -310,6 +310,10 @@ enum SelfAttributionAppliedVia {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum SelfAttributionSkippedReason {
+    /// The voice stem itself holds more than one person, so the local label is
+    /// a merge and naming it after the recorder would misattribute the other
+    /// speaker (issue #169).
+    VoiceStemMultipleSpeakers,
     NoDiarizedSpeakers,
     DiarizationNotFromStems,
     AlreadyMapped,
@@ -339,6 +343,14 @@ struct SelfAttributionDebug {
     skipped_reason: Option<SelfAttributionSkippedReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_reason: Option<SelfAttributionSkippedReason>,
+    /// Substantial speakers found in the voice stem, when it was diarized.
+    ///
+    /// Recorded whether or not it changed the decision. Diagnosing #169 needed
+    /// a code trace to learn that one `applied_via` value covers both "matching
+    /// ran and missed" and "matching never ran", and that nothing anywhere
+    /// reported how many people the local stem held.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice_stem_speaker_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -388,9 +400,16 @@ impl SelfAttributionOutcome {
                 applied_via: Some(applied_via),
                 skipped_reason: None,
                 fallback_reason,
+                voice_stem_speaker_count: None,
             },
             attribution: Some(attribution),
         }
+    }
+
+    /// Attach the voice-stem speaker count to an outcome for the debug record.
+    fn with_voice_stem_speaker_count(mut self, count: usize) -> Self {
+        self.debug.voice_stem_speaker_count = Some(count);
+        self
     }
 
     fn skipped(reason: SelfAttributionSkippedReason) -> Self {
@@ -405,6 +424,7 @@ impl SelfAttributionOutcome {
                 applied_via: None,
                 skipped_reason: Some(reason),
                 fallback_reason: None,
+                voice_stem_speaker_count: None,
             },
         }
     }
@@ -2491,6 +2511,35 @@ fn single_stem_speaker_self_attribution(
     if let Some(stems) = diarize::discover_stems(audio_path) {
         if let Some(source_backed_label) = source_backed_speaker_label.clone() {
             if let Some(voice_stem_result) = diarize::diarize(&stems.voice, config) {
+                // A source-backed label says which STEM the speech came from,
+                // never how many people were in front of that microphone. Two
+                // colleagues sharing one room and one mic land in the same
+                // stem, so naming the label after the recorder would attribute
+                // the other person's speech to them (issue #169).
+                //
+                // Checked before the enrollment comparison because a match
+                // does not make it safe: a match proves the recorder is one of
+                // the voices in the stem, while the label still covers all of
+                // them. A wrong name is worse than an anonymous label, so this
+                // declines and leaves the label for the capped, clearly
+                // hedged suggestion paths.
+                //
+                // The count is free here: this branch already diarized the
+                // voice stem for embeddings and previously discarded
+                // everything except the match result.
+                let voice_stem_speakers = diarize::substantial_speaker_count(&voice_stem_result);
+                if voice_stem_speakers > 1 {
+                    tracing::info!(
+                        voice_stem_speakers,
+                        label = %source_backed_label,
+                        "declining deterministic self-attribution: the voice stem holds more than one speaker"
+                    );
+                    return SelfAttributionOutcome::skipped(
+                        SelfAttributionSkippedReason::VoiceStemMultipleSpeakers,
+                    )
+                    .with_voice_stem_speaker_count(voice_stem_speakers);
+                }
+
                 let matched_self =
                     match_speakers_by_voice(config, &voice_stem_result.speaker_embeddings)
                         .attributions
@@ -2517,7 +2566,8 @@ fn single_stem_speaker_self_attribution(
                         SelfAttributionAppliedVia::SourceBackedStem
                     },
                     None,
-                );
+                )
+                .with_voice_stem_speaker_count(voice_stem_speakers);
             }
 
             return SelfAttributionOutcome::applied(

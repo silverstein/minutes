@@ -22,16 +22,16 @@ Every element matters, and reducing this to "they received PHI" is the most comm
 
 Applied to this category the answer is usually straightforward: a transcription provider that processes identifiable patient recordings for you is ordinarily a business associate, and **45 CFR 164.502(e)** then requires a written contract with satisfactory assurances *before* you disclose the recording.
 
-Notice what the definition does not turn on: encryption strength, data center location, or SOC 2. Those are safeguards a business associate must implement; they are not what makes someone a business associate.
+Notice what the definition does not turn on: encryption strength, data center location, or SOC 2. Those may inform your risk management and vendor diligence, but none determines business associate status, and two of them are not HIPAA requirements at all. The Security Rule requires reasonable and appropriate safeguards, with encryption treated as addressable rather than mandatory in every case.
 
 ## The exclusions, and the conduit idea
 
 Paragraph (4) excludes four categories, each with conditions worth reading rather than paraphrasing loosely:
 
-- A health care provider, with respect to disclosures *concerning the treatment of the individual*
-- A plan sponsor, with respect to disclosures by a group health plan, but only to the extent the requirements of § 164.504(f) apply and are met
-- A government agency determining eligibility for or enrollment in a government health plan providing public benefits administered by another agency, to the extent authorized by law
-- A covered entity participating in an organized health care arrangement that performs the specified functions or services for that arrangement by virtue of those activities
+- A health care provider, with respect to disclosures *by a covered entity to that provider* concerning the treatment of the individual
+- A plan sponsor, with respect to disclosures *by a group health plan, or by a health insurance issuer or HMO with respect to a group health plan*, to the plan sponsor, and only to the extent the requirements of § 164.504(f) apply and are met
+- A government agency, with respect to determining eligibility for or enrollment in a government health plan that provides public benefits and is administered by another government agency, *or collecting PHI for such purposes*, to the extent authorized by law
+- A covered entity participating in an organized health care arrangement that performs a function or activity described in paragraph (1)(i) for that arrangement, or provides a service described in paragraph (1)(ii) to or for it, by virtue of those activities or services
 
 Software vendors are not on that list, and vendors sometimes present that as ominous. It is not, and the reason matters: **paragraph (4) is not the only route to not being a business associate**. A vendor that never satisfies the positive definition, because it never creates, receives, maintains, or transmits PHI on your behalf, needs no exception at all. It simply is not one.
 
@@ -43,7 +43,7 @@ The related "conduit" idea is narrower than its reputation. OCR treats it as cov
 
 **Cloud AI transcription** — ordinarily a business associate; BAA required before PHI is disclosed. The vendor receives your audio, processes it on its servers, and usually stores the transcript. Check whether your plan is one the vendor will actually sign a BAA for, since several offer that only on higher tiers; the plan decides whether the required contract is even available to you.
 
-**On-device transcription** — no vendor in the path, if deployed local-only; no BAA with the software vendor provided it never receives PHI. Whether this holds is a fact about your deployment, not a property of the software. Any cloud summarizer, synced folder, hosted backup, or vendor support access puts PHI back in someone else's hands and needs its own analysis. The tradeoff is that the endpoint becomes the security surface, with no vendor contract to fall back on.
+**On-device transcription** — no vendor in the path, in a genuinely local-only deployment; no BAA with the software vendor provided it never receives PHI. Whether this holds is a fact about your deployment, not a property of the software. Any cloud summarizer, synced folder, hosted backup, or vendor support access puts PHI back in someone else's hands and needs its own analysis. The tradeoff is that the endpoint becomes the security surface, with no vendor contract to fall back on.
 
 A caution for the first two: a signed BAA is necessary when a vendor is a business associate, but not sufficient. The disclosure still has to be permissible, still has to satisfy minimum necessary where that applies, and your own risk analysis and safeguards remain yours. The contract allocates obligations; it does not discharge yours.
 
@@ -54,7 +54,7 @@ Keeping processing local can remove one question, whether a software vendor rece
 - **You owe a fresh risk analysis.** The Security Rule requires an accurate and thorough assessment of risks to all ePHI you hold, and recording consultations creates a new corpus of audio and transcripts on an endpoint that may never have held a designated record set before.
 - **Encryption is risk-based.** It is an addressable implementation specification, so the question is what your risk analysis concludes and what you document. In practice, full-disk encryption on a portable endpoint holding patient audio is very hard to reason your way out of.
 - **A lost laptop triggers an assessment, not automatic notification.** Breach notification concerns unsecured PHI and requires the regulatory risk assessment; PHI encrypted to the specified standard can fall outside the requirement entirely.
-- **The rest of the Security Rule still applies:** access control, audit controls, integrity, authentication, device and media controls, contingency planning and backup, retention and disposal.
+- **The rest of the Security Rule still applies:** access control, audit controls, integrity, authentication, device and media controls, contingency planning and backup, secure disposal. Retention is separate: the six-year rule governs required HIPAA documentation, while medical record retention periods generally come from other federal or state law.
 - **Privacy Rule duties follow the record.** If a transcript becomes part of a designated record set, patient access and amendment rights attach.
 - **Recording consent is a separate question.** State wiretap and recording law and professional ethics rules apply regardless of where processing happens, and are not the same as a HIPAA authorization. HIPAA permits many treatment, payment, and operations uses without individual authorization; authorization is required where the Privacy Rule does not otherwise permit the use or disclosure.
 - **You lose a party to hold accountable.** A business associate under contract carries obligations and liability. Your own endpoint carries none.

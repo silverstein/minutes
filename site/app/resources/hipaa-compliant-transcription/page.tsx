@@ -32,7 +32,7 @@ const faqs = [
   {
     question: "What is the difference between transcription services and transcription software?",
     answer:
-      "Human transcription services use transcriptionists, can produce certified transcripts where a use requires one, and are ordinarily business associates. Cloud software sends audio to a vendor's servers, which ordinarily makes that vendor a business associate too. On-device software runs the model on your own machine, so no third party receives the audio at all. All three can be appropriate; they differ in who else ends up holding the PHI and what contracts that requires.",
+      "Human transcription services use transcriptionists, can produce certified transcripts where a use requires one, and are ordinarily business associates. Cloud software sends audio to a vendor's servers, which ordinarily makes that vendor a business associate too. On-device software runs the model on your own machine, so in a genuinely local-only deployment, where no separate service receives or maintains the files, no third party receives the audio. Local inference by itself does not establish that: sync, backup, upload, and remote support paths all have to be absent too. All three architectures can be appropriate; they differ in who else ends up holding the PHI and what contracts that requires.",
   },
   {
     question: "Does the HIPAA conduit exception cover a transcription vendor?",
@@ -227,8 +227,11 @@ export default function HipaaTranscriptionPage() {
           </p>
           <p>
             Notice what the definition does not turn on: encryption strength, data center
-            location, or SOC 2. Those are safeguards a business associate must implement. They
-            are not what makes someone a business associate in the first place.
+            location, or SOC 2. Those may be useful inputs to your risk management and your
+            vendor diligence, but none of them determines business associate status, and two of
+            them are not HIPAA requirements at all. What the Security Rule requires is
+            reasonable and appropriate safeguards, with encryption treated as addressable rather
+            than mandatory in every case.
           </p>
         </div>
       </section>
@@ -243,21 +246,30 @@ export default function HipaaTranscriptionPage() {
           <ul className="list-disc space-y-2 pl-6">
             <li>
               A health care provider, with respect to disclosures{" "}
-              <em>concerning the treatment of the individual</em>.
+              <em>by a covered entity to that provider</em> concerning the treatment of the
+              individual.
             </li>
             <li>
-              A plan sponsor, with respect to disclosures by a group health plan, but only to
-              the extent the requirements of &sect; 164.504(f) apply and are met.
+              A plan sponsor, with respect to disclosures{" "}
+              <em>
+                by a group health plan, or by a health insurance issuer or HMO with respect to a
+                group health plan
+              </em>
+              , to the plan sponsor, and only to the extent the requirements of &sect;
+              164.504(f) apply and are met.
             </li>
             <li>
-              A government agency determining eligibility for or enrollment in a government
-              health plan providing public benefits that is administered by another agency, to
-              the extent those activities are authorized by law.
+              A government agency, with respect to determining eligibility for or enrollment in
+              a government health plan that provides public benefits and is administered by
+              another government agency,{" "}
+              <em>or collecting PHI for such purposes</em>, to the extent those activities are
+              authorized by law.
             </li>
             <li>
               A covered entity participating in an organized health care arrangement that
-              performs the specified functions or services for that arrangement by virtue of
-              those activities.
+              performs a function or activity described in paragraph (1)(i) for that
+              arrangement, or provides a service described in paragraph (1)(ii) to or for it, by
+              virtue of those activities or services.
             </li>
           </ul>
           <p>
@@ -358,8 +370,10 @@ export default function HipaaTranscriptionPage() {
                 The rest of the Security Rule still applies.
               </span>{" "}
               Access control, audit controls, integrity, authentication, device and media
-              controls, contingency planning and backup, and retention and disposal all reach
-              these files.
+              controls, contingency planning and backup, and secure disposal all reach these
+              files. How long you must keep the records themselves is a separate question: the
+              Security Rule&rsquo;s six-year rule governs required HIPAA documentation, while
+              medical record retention periods generally come from other federal or state law.
             </li>
             <li>
               <span className="font-medium text-[var(--text)]">

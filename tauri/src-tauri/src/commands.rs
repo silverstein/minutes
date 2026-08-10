@@ -10217,7 +10217,17 @@ fn spawn_tracked_recall_chat_child(
     })
 }
 
-fn reap_recall_chat_child(current_turn: &Arc<Mutex<Option<RecallChatTurn>>>, turn_id: u64) {
+/// Reap the child and report how it exited.
+///
+/// The status used to be discarded. For a subprocess it is better evidence of
+/// completion than any in-band marker: a provider that crashed, was killed, or
+/// exited non-zero produced an answer that stopped early, however well-formed
+/// the lines before it looked. `None` means there was no child left to wait on,
+/// which is the cancellation path rather than a failure.
+fn reap_recall_chat_child(
+    current_turn: &Arc<Mutex<Option<RecallChatTurn>>>,
+    turn_id: u64,
+) -> Option<std::process::ExitStatus> {
     let child = {
         let mut current = current_turn.lock().unwrap();
         current
@@ -10225,9 +10235,7 @@ fn reap_recall_chat_child(current_turn: &Arc<Mutex<Option<RecallChatTurn>>>, tur
             .filter(|turn| turn.id == turn_id)
             .and_then(|turn| turn.child.take())
     };
-    if let Some(mut child) = child {
-        let _ = child.wait();
-    }
+    child.and_then(|mut child| child.wait().ok())
 }
 
 /// Cancel the current turn and return whether the caller owns its one-and-only
@@ -10925,14 +10933,28 @@ pub async fn cmd_recall_chat_send(
                 }
             });
 
-            let reader = BufReader::new(stdout);
+            // Bounded for the same reason as the HTTP providers: `lines()`
+            // allocates a whole line before yielding it, so a provider stuck in
+            // a loop can grow this without limit. A local CLI is far less
+            // adversarial than a network peer, but the failure mode is the same.
+            let mut limited = stdout.take(RECALL_CHAT_MAX_RESPONSE_BYTES + 1);
+            let reader = BufReader::new(&mut limited);
             let mut full_response = String::new();
+            let mut stream_failed = false;
             for line_result in reader.lines() {
                 if cancelled.load(Ordering::Relaxed) {
                     break;
                 }
                 match line_result {
                     Ok(line) if !line.trim().is_empty() => {
+                        // stream-json is NDJSON: every non-empty line is meant
+                        // to be a frame, so one that will not parse is truncated
+                        // or corrupt output, not noise to skip past.
+                        if serde_json::from_str::<serde_json::Value>(&line).is_err() {
+                            eprintln!("[recall-chat] malformed stream-json frame");
+                            stream_failed = true;
+                            break;
+                        }
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                             if json.get("type").and_then(|t| t.as_str()) == Some("assistant") {
                                 if let Some(arr) = json
@@ -10957,13 +10979,39 @@ pub async fn cmd_recall_chat_send(
                     Ok(_) => {}
                     Err(e) => {
                         eprintln!("[recall-chat] stdout read error: {}", e);
+                        stream_failed = true;
                         break;
                     }
                 }
             }
             let _ = stderr_thread.join();
 
-            if !cancelled.load(Ordering::Relaxed) && !full_response.is_empty() {
+            let truncated = limited.limit() == 0;
+
+            // Reaped before the persistence decision, not after, because the
+            // exit status is part of that decision.
+            let exit_status = reap_recall_chat_child(&worker_turn, turn_id);
+            let exited_cleanly = exit_status.is_none_or(|status| status.success());
+            let stream_broke = stream_failed || truncated || !exited_cleanly;
+
+            if !cancelled.load(Ordering::Relaxed) && stream_broke {
+                emit_recall_chat_stream_failure(
+                    &app,
+                    if truncated {
+                        "The provider sent more than Recall will buffer, so the answer was cut \
+                         off. Nothing was saved to this conversation."
+                    } else if stream_failed {
+                        "The provider's output ended unexpectedly, so the answer is incomplete. \
+                         Nothing was saved to this conversation."
+                    } else {
+                        "The provider exited before finishing, so the answer is incomplete. \
+                         Nothing was saved to this conversation."
+                    },
+                );
+            }
+
+            // Only a turn whose provider ran to a clean exit becomes history.
+            if !cancelled.load(Ordering::Relaxed) && !stream_broke && !full_response.is_empty() {
                 store_recall_history_if_still_authorized(
                     &history_arc,
                     RecallChatHistoryTurn {
@@ -10974,7 +11022,6 @@ pub async fn cmd_recall_chat_send(
                 );
             }
 
-            reap_recall_chat_child(&worker_turn, turn_id);
             finish_recall_chat_turn(&app, &worker_turn, turn_id);
         })
         .await
@@ -12537,6 +12584,45 @@ mod tests {
         }
         assert!(stream_failed);
         assert!(!saw_terminator);
+    }
+
+    /// For a subprocess the exit status is stronger evidence of completion
+    /// than any in-band marker: a provider that crashed or was killed produced
+    /// a short answer no matter how well-formed its last line looked. The
+    /// status used to be discarded, and the turn stored anyway.
+    #[test]
+    fn provider_exit_status_decides_whether_the_answer_finished() {
+        use std::process::Command;
+
+        let ok = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
+        let failed = Command::new("sh").arg("-c").arg("exit 1").status().unwrap();
+
+        // Mirrors the worker's rule: Some(status) must be successful, and None
+        // means there was no child left to reap, which is the cancellation path.
+        assert!(Some(ok).is_none_or(|s| s.success()));
+        assert!(!Some(failed).is_none_or(|s| s.success()));
+        assert!(None::<std::process::ExitStatus>.is_none_or(|s| s.success()));
+    }
+
+    /// A provider killed by a signal exits without a code at all. That must
+    /// still read as broken rather than falling through as success.
+    #[cfg(unix)]
+    #[test]
+    fn a_signalled_provider_does_not_count_as_a_clean_exit() {
+        use std::process::Command;
+
+        let killed = Command::new("sh")
+            .arg("-c")
+            .arg("kill -TERM $$")
+            .status()
+            .unwrap();
+
+        assert!(
+            killed.code().is_none(),
+            "expected a signal, not an exit code"
+        );
+        assert!(!killed.success());
+        assert!(!Some(killed).is_none_or(|s| s.success()));
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {

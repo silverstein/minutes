@@ -10217,6 +10217,10 @@ fn spawn_tracked_recall_chat_child(
     })
 }
 
+/// How long to keep trying to reap a provider that survived termination before
+/// abandoning it. The turn is already known broken, so this only bounds cleanup.
+const CORPUS_STALLED_PROVIDER_REAP_BUDGET: Duration = Duration::from_secs(2);
+
 /// Terminate the tracked child after we have stopped reading its stdout.
 ///
 /// Breaking out of the read loop early leaves the child writing into a pipe
@@ -10242,10 +10246,28 @@ fn terminate_tracked_recall_chat_child(
         if let Err(error) = terminate_recall_chat_process_tree(&mut child) {
             tracing::warn!(error = %error, "failed to terminate stalled Recall chat provider");
         }
-        // Safe to wait even when termination failed: the caller has already
-        // closed stdout, so a child that was blocked writing gets EPIPE and
-        // exits on its own.
-        let _ = child.wait();
+        // Bounded, and deliberately not authoritative. Closing stdout unblocks
+        // a child that was stuck writing, but one that stalls without writing
+        // again would never deliver EPIPE, so an unbounded wait here could hang
+        // the turn on exactly the path where termination already failed.
+        //
+        // Giving up costs only a lingering process. The turn is already known
+        // broken by this point, so nothing downstream needs this exit status.
+        let deadline = Instant::now() + CORPUS_STALLED_PROVIDER_REAP_BUDGET;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        tracing::warn!(
+                            "Recall chat provider survived termination; abandoning the reap"
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
     }
 }
 
@@ -12725,6 +12747,51 @@ mod tests {
             !recall_chat_stream_completed(true, Some(status)),
             "a provider that died on EPIPE never completed the turn"
         );
+    }
+
+    /// The reap must give up rather than hang when a provider survives
+    /// termination and then simply sits there. A process that never writes
+    /// again never receives EPIPE, so closing stdout cannot rescue an
+    /// unbounded wait; only the deadline can.
+    #[cfg(unix)]
+    #[test]
+    fn reaping_a_surviving_provider_gives_up_instead_of_hanging() {
+        use std::process::{Command, Stdio};
+
+        // Alive, silent, and far outliving the budget. Never terminated here,
+        // which is exactly the termination-failed path.
+        let mut child = Command::new("sleep")
+            .arg("120")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn sleeper");
+
+        let started = Instant::now();
+        let deadline = started + CORPUS_STALLED_PROVIDER_REAP_BUDGET;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < CORPUS_STALLED_PROVIDER_REAP_BUDGET + Duration::from_secs(3),
+            "reap must be bounded, took {elapsed:?}"
+        );
+        assert!(
+            child.try_wait().expect("still queryable").is_none(),
+            "the sleeper should still be running, proving we gave up rather than waited it out"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     fn test_guard() -> MutexGuard<'static, ()> {

@@ -150,9 +150,9 @@ export default function UsingMinutesPage() {
       <div className="space-y-12 border-t border-[color:var(--border)] pt-10">
         {sections.map((section) => (
           <section key={section.label}>
-            <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
+            <h2 className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
               {section.label}
-            </p>
+            </h2>
             <div className="space-y-4">
               {section.items.map(([title, description]) => (
                 <div key={title} className="flex gap-3 text-sm">

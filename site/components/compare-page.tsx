@@ -1,4 +1,5 @@
 import { PublicFooter } from "@/components/public-footer";
+import { SectionLabel } from "@/components/section-label";
 import { comparisonArticleSchema } from "@/lib/schema";
 
 type ComparisonRow = {
@@ -56,16 +57,6 @@ type ComparePageProps = {
   architecture?: Architecture;
 };
 
-function SectionLabel({ label }: { label: string }) {
-  return (
-    <div className="mb-6 flex items-center gap-3">
-      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-        {label}
-      </span>
-      <div className="h-px flex-1 bg-[var(--border)]" />
-    </div>
-  );
-}
 
 function FlowCard({ column }: { column: FlowColumn }) {
   return (

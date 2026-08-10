@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
 import { PublicFooter } from "@/components/public-footer";
+import { NumberedSectionLabel as SectionLabel } from "@/components/section-label";
 import surfaces from "@/lib/product-surfaces.json";
 import {
   MINUTES_MCP_PROMPT_COUNT,
@@ -861,16 +862,3 @@ export default function ForAgentsPage() {
   );
 }
 
-function SectionLabel({ n, label }: { n: string; label: string }) {
-  return (
-    <div className="mb-8 flex items-center gap-3">
-      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-        {n}
-      </span>
-      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--text-secondary)]">
-        {label}
-      </span>
-      <div className="h-px flex-1 bg-[var(--border)]" />
-    </div>
-  );
-}

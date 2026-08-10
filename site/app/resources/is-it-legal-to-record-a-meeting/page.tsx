@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { FaqSection } from "@/components/faq-section";
 import { PublicFooter } from "@/components/public-footer";
+import { SectionLabel } from "@/components/section-label";
 import { faqPageSchema } from "@/lib/schema";
 
 export const metadata: Metadata = {
@@ -55,16 +56,6 @@ const sources = [
   { label: "Minutes consent-in-frontmatter design", href: "/writing/governance-built-in-not-retrofitted" },
 ] as const;
 
-function SectionLabel({ label }: { label: string }) {
-  return (
-    <div className="mb-6 flex items-center gap-3">
-      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-        {label}
-      </span>
-      <div className="h-px flex-1 bg-[var(--border)]" />
-    </div>
-  );
-}
 
 export default function IsItLegalToRecordAMeetingPage() {
   return (

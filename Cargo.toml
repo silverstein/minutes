@@ -61,7 +61,7 @@ anyhow = "1"
 # Filesystem
 dirs = "6"
 walkdir = "2"
-which = "4"
+which = "8"
 cap-std = "4.0.2"
 
 # Logging

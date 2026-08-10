@@ -489,7 +489,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "shlex",
  "syn 2.0.117",
- "which",
+ "which 4.4.2",
 ]
 
 [[package]]
@@ -4090,7 +4090,7 @@ dependencies = [
  "tracing",
  "ureq 3.3.0",
  "walkdir",
- "which",
+ "which 8.0.5",
  "window-vibrancy 0.8.0",
 ]
 
@@ -4253,7 +4253,7 @@ dependencies = [
  "tracing",
  "ureq 3.3.0",
  "walkdir",
- "which",
+ "which 8.0.5",
  "whisper-guard",
  "whisper-rs",
  "windows-sys 0.59.0",
@@ -8951,6 +8951,15 @@ dependencies = [
  "home",
  "once_cell",
  "rustix 0.38.44",
+]
+
+[[package]]
+name = "which"
+version = "8.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f3ef584124b911bcc3875c2f1472e80f24361ceb789bd1c62b3e9a3df9ff43c"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

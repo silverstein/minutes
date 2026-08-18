@@ -20,10 +20,14 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
+# Sized so all three attempts fit inside the twenty minute step backstop:
+# 3 x (120 + 240) seconds of work plus 45 seconds of pauses is 18m45s. Without
+# that the backstop would fire mid-retry and the third attempt would never run,
+# which is the opposite of the point.
 attempts=3
 for attempt in $(seq 1 "${attempts}"); do
-  if sudo timeout 300 apt-get update \
-    && sudo timeout 600 apt-get install -y "$@"; then
+  if sudo timeout 120 apt-get update \
+    && sudo timeout 240 apt-get install -y "$@"; then
     exit 0
   fi
 

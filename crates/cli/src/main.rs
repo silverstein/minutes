@@ -6502,8 +6502,8 @@ fn cmd_diagnose(path: &Path, title: Option<&str>, config: &Config) -> Result<()>
             );
             std::collections::HashMap::new()
         }
-        minutes_core::diarize::DiarizationOutcome::NotConfigured => {
-            eprintln!("  No diarization result (disabled or failed).");
+        minutes_core::diarize::DiarizationOutcome::NotConfigured { reason } => {
+            eprintln!("  No diarization result: {}", reason.detail());
             std::collections::HashMap::new()
         }
     };

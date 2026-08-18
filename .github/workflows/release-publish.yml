@@ -228,9 +228,9 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Linux build dependencies
+        timeout-minutes: 20
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          .github/scripts/apt-install.sh \
             libasound2-dev libpipewire-0.3-dev libspa-0.2-dev \
             clang libclang-dev cmake build-essential pkg-config
 
@@ -238,7 +238,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+        timeout-minutes: 20
+        run: .github/scripts/apt-install.sh libasound2-dev cmake
 
       - name: Authenticate to crates.io with OIDC
         id: crates-auth

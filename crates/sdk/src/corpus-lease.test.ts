@@ -599,7 +599,14 @@ describe("stable corpus lease", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
-  }, 30_000);
+    // 80 corpus lifetimes means 80 worker process lifecycles, and process
+    // creation on the Windows runners is slow enough that this lands at
+    // 30024ms against a 30s limit: failing by 24 milliseconds, then taking the
+    // rest of the file down with it. The iteration count is load bearing, it
+    // has to exceed the 64 slot bound this test exists to check, so the limit
+    // is what gives. Four minutes is not a performance budget, it is headroom
+    // against a slow runner; the assertion is about slot reuse, not speed.
+  }, 240_000);
 
   // Not "across retry attempts": the parent's cumulative timer kills the
   // worker while it is still awaiting a hook, so the phase-result that would

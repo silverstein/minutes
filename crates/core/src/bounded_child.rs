@@ -2365,10 +2365,27 @@ mod tests {
         let directory = tempfile::TempDir::new().unwrap();
         let pid_path = directory.path().join("escaped-writer.pid");
         let mut command = BoundedCommand::new("sh");
+        // Two things had to change to stop this racing the scheduler rather
+        // than testing the invariant. It failed on unrelated pull requests by
+        // returning Ok with empty stdout from an already-exited launcher.
+        //
+        // The escapee now writes past the 1024 byte budget before publishing
+        // its pid, and the launcher waits for that pid before exiting, so
+        // `run` can never observe a finished parent with nothing in the pipe.
+        //
+        // The wall clock budget is seconds rather than 150ms because the
+        // budget error fires on byte count, not on the deadline: giving the
+        // escapee room to be scheduled cannot slow the passing path down, it
+        // only stops a loaded runner from hitting the deadline first and
+        // reporting the wrong error. The elapsed assertion below still proves
+        // the escapee cannot hold the pipe workers open, which is the point.
         command
             .args([
                 "-c",
-                "setsid sh -c 'echo $$ > \"$1\"; while :; do printf x; done' escaped \"$1\" & exit 0",
+                "setsid sh -c 'printf \"%02048d\" 0; echo $$ > \"$1\"; while :; do printf x; done' escaped \"$1\" & \
+                 attempts=0; \
+                 while [ ! -s \"$1\" ] && [ \"$attempts\" -lt 500 ]; do sleep 0.01; attempts=$((attempts+1)); done; \
+                 exit 0",
                 "minutes-setsid-writer-launcher",
             ])
             .arg(&pid_path);
@@ -2378,12 +2395,15 @@ mod tests {
             &mut command,
             None,
             StdoutTarget::Capture { max_bytes: 1024 },
-            budget(150),
+            budget(5_000),
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("stdout resource budget"));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(
+            error.to_string().contains("stdout resource budget"),
+            "expected the stdout budget to trip, got: {error}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
         let escaped_pid = std::fs::read_to_string(pid_path)
             .unwrap()
             .trim()

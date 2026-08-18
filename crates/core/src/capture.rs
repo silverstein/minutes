@@ -1119,12 +1119,73 @@ fn dual_source_slot_for_chunk(base_slot: u64, chunk: &crate::streaming::AudioChu
     base_slot + chunk.index
 }
 
+/// Consecutive slots a source may be absent for before we call it a fault
+/// rather than jitter. 300 slots is 30 seconds.
+///
+/// A source that stops delivering is not the same as a source that is quiet.
+/// A quiet microphone still delivers chunks, they just contain low-amplitude
+/// samples, so these counters move only when a source produces nothing at all.
+#[cfg(feature = "streaming")]
+const SOURCE_GAP_FAULT_SLOTS: u64 = 300;
+
 #[cfg(feature = "streaming")]
 #[derive(Default)]
 struct DualSlotStats {
     both: u64,
     voice_only: u64,
     system_only: u64,
+    voice_gap: u64,
+    voice_gap_longest: u64,
+    system_gap: u64,
+    system_gap_longest: u64,
+}
+
+#[cfg(feature = "streaming")]
+impl DualSlotStats {
+    /// Record one slot and track how long each source has been absent.
+    ///
+    /// The totals alone cannot see the failure in issue #792 bug 6, where the
+    /// microphone delivered normally for minutes and then stopped for good
+    /// after a device change. Cumulative counts stay healthy in that case
+    /// because most of the recording was fine. What is diagnostic is the
+    /// longest unbroken run with nothing from a source.
+    fn record(&mut self, has_voice: bool, has_system: bool) {
+        match (has_voice, has_system) {
+            (true, true) => self.both += 1,
+            (true, false) => self.voice_only += 1,
+            (false, true) => self.system_only += 1,
+            (false, false) => {}
+        }
+
+        if has_voice {
+            self.voice_gap = 0;
+        } else {
+            self.voice_gap += 1;
+            self.voice_gap_longest = self.voice_gap_longest.max(self.voice_gap);
+        }
+
+        if has_system {
+            self.system_gap = 0;
+        } else {
+            self.system_gap += 1;
+            self.system_gap_longest = self.system_gap_longest.max(self.system_gap);
+        }
+    }
+
+    /// Sources that went absent for long enough to call it a fault, with the
+    /// duration of the longest gap.
+    fn faults(&self) -> Vec<(&'static str, f64)> {
+        let mut faults = Vec::new();
+        for (name, longest) in [
+            ("voice", self.voice_gap_longest),
+            ("system", self.system_gap_longest),
+        ] {
+            if longest >= SOURCE_GAP_FAULT_SLOTS {
+                faults.push((name, longest as f64 / 10.0));
+            }
+        }
+        faults
+    }
 }
 
 #[cfg(feature = "streaming")]
@@ -1148,12 +1209,9 @@ fn flush_dual_source_slots(
     while slot <= max_slot {
         let has_voice = pending_voice.contains_key(&slot);
         let has_system = pending_system.contains_key(&slot);
-        match (has_voice, has_system) {
-            (true, true) => slot_stats.both += 1,
-            (true, false) => slot_stats.voice_only += 1,
-            (false, true) => slot_stats.system_only += 1,
-            (false, false) => {} // silence slot, both padded
-        }
+        // Counts both sources and how long each has been absent. A slot with
+        // neither source is a silence slot: both stems get padding.
+        slot_stats.record(has_voice, has_system);
         let voice = padded_slot(pending_voice.remove(&slot));
         let system = padded_slot(pending_system.remove(&slot));
         writers.write_slot(&voice, &system, live_tx)?;
@@ -1497,6 +1555,22 @@ fn record_to_wav_dual_source(
             pct_both,
             "dual-source mixer stats"
         );
+
+        // A source that stops delivering is written as silence, slot after
+        // slot, and the stem comes out the right length and completely empty.
+        // Every failure in issue #792 reached the user as either nothing at
+        // all or a transcript full of hallucinated sound effects, so say it
+        // here, where it is measured rather than guessed at later.
+        for (source, seconds) in slot_stats.faults() {
+            eprintln!(
+                "[minutes] WARNING: the {source} source stopped delivering audio for {seconds:.0}s during this recording. That part of the {source} stem is silence, not quiet audio."
+            );
+            tracing::warn!(
+                source,
+                longest_gap_secs = seconds,
+                "a capture source stopped delivering audio mid-recording"
+            );
+        }
     }
 
     if total_samples == 0 {
@@ -3868,5 +3942,81 @@ mod tests {
             "on-disk config must still reference the original pin so users can reconnect later; runtime heal must NOT touch the file. Got:\n{}",
             disk_after
         );
+    }
+}
+
+#[cfg(all(test, feature = "streaming"))]
+mod source_gap_tests {
+    use super::{DualSlotStats, SOURCE_GAP_FAULT_SLOTS};
+
+    #[test]
+    fn a_source_that_dies_partway_is_caught_even_though_the_totals_look_healthy() {
+        // Issue #792 bug 6: the microphone delivered normally, then a default
+        // input device change killed it and it never recovered. The stem came
+        // out the right length and at exact digital zero, and nothing
+        // complained. Cumulative counts cannot see this, because most of the
+        // recording really was fine.
+        let mut stats = DualSlotStats::default();
+        for _ in 0..600 {
+            stats.record(true, true);
+        }
+        for _ in 0..600 {
+            stats.record(false, true);
+        }
+
+        assert_eq!(stats.both, 600, "the healthy half still counts as healthy");
+        assert_eq!(stats.system_only, 600);
+        assert_eq!(
+            stats.faults(),
+            vec![("voice", 60.0)],
+            "the 60s of silence after the device change must be reported"
+        );
+    }
+
+    #[test]
+    fn brief_absences_are_not_faults_and_do_not_accumulate_across_recoveries() {
+        // Jitter, a dropped buffer, a moment of rescheduling. A source that
+        // comes back is working, and repeated short gaps must not add up into
+        // a fault, or every long recording would report one.
+        let mut stats = DualSlotStats::default();
+        for _ in 0..20 {
+            for _ in 0..(SOURCE_GAP_FAULT_SLOTS - 1) {
+                stats.record(false, true);
+            }
+            stats.record(true, true);
+        }
+
+        assert!(
+            stats.faults().is_empty(),
+            "gaps that recover are not faults, however many of them there are"
+        );
+        assert_eq!(stats.voice_gap_longest, SOURCE_GAP_FAULT_SLOTS - 1);
+    }
+
+    #[test]
+    fn the_threshold_is_the_boundary_it_claims_to_be() {
+        let mut just_under = DualSlotStats::default();
+        for _ in 0..(SOURCE_GAP_FAULT_SLOTS - 1) {
+            just_under.record(false, true);
+        }
+        assert!(just_under.faults().is_empty());
+
+        let mut exactly_at = DualSlotStats::default();
+        for _ in 0..SOURCE_GAP_FAULT_SLOTS {
+            exactly_at.record(false, true);
+        }
+        assert_eq!(exactly_at.faults(), vec![("voice", 30.0)]);
+    }
+
+    #[test]
+    fn both_sources_can_fault_and_each_is_named() {
+        let mut stats = DualSlotStats::default();
+        for _ in 0..SOURCE_GAP_FAULT_SLOTS {
+            stats.record(false, true);
+        }
+        for _ in 0..SOURCE_GAP_FAULT_SLOTS {
+            stats.record(true, false);
+        }
+        assert_eq!(stats.faults(), vec![("voice", 30.0), ("system", 30.0)]);
     }
 }

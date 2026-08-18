@@ -445,7 +445,41 @@ struct CoreAudioTapCallbackContext {
     interleaved: bool,
     resample_pos: f64,
     input_samples: Vec<f32>,
+    /// Resampled samples not yet emitted, held until a whole chunk is ready.
+    ///
+    /// Consumers treat one AudioChunk as one 100 ms slot regardless of how
+    /// many samples it carries, so emitting a short chunk does not shorten the
+    /// slot, it zero-fills the rest of it and advances time by a full slot
+    /// anyway. A Core Audio callback delivering 512 frames at 48 kHz yields
+    /// about 171 samples, which is a slot that is 89% silence and 9.4x longer
+    /// than the audio in it (issue #792, bugs 2 and 3).
+    pending_output: Vec<f32>,
     chunk_index: u64,
+}
+
+/// Samples in one emitted chunk: 100 ms at 16 kHz.
+///
+/// This matches the microphone path in `streaming.rs`, which is the contract
+/// the dual-source slot writer is built around.
+#[cfg(feature = "streaming")]
+const TAP_CHUNK_SAMPLES: usize = 1600;
+
+/// Take whole `size`-sample chunks off the front of `pending`, leaving any
+/// partial tail behind for the next callback to complete.
+///
+/// Returning the tail rather than padding it is the whole point. A consumer
+/// treats one chunk as one slot however many samples it holds, so a short
+/// chunk is not a short slot, it is a full slot mostly filled with silence.
+#[cfg(feature = "streaming")]
+fn drain_whole_chunks(pending: &mut Vec<f32>, size: usize) -> Vec<Vec<f32>> {
+    if size == 0 {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    while pending.len() >= size {
+        chunks.push(pending.drain(..size).collect());
+    }
+    chunks
 }
 
 #[cfg(all(target_os = "macos", feature = "streaming"))]
@@ -463,6 +497,7 @@ impl CoreAudioTapCallbackContext {
             interleaved: asbd.is_interleaved(),
             resample_pos: 0.0,
             input_samples: Vec::new(),
+            pending_output: Vec::new(),
             chunk_index: 0,
         }
     }
@@ -494,21 +529,27 @@ impl CoreAudioTapCallbackContext {
             return;
         }
 
-        let rms = (resampled
-            .iter()
-            .map(|sample| (*sample as f64) * (*sample as f64))
-            .sum::<f64>()
-            / resampled.len() as f64)
-            .sqrt() as f32;
-        let index = self.chunk_index;
-        self.chunk_index += 1;
-        let _ = self.sink.try_send(AudioChunk {
-            samples: resampled,
-            rms,
-            timestamp: std::time::Instant::now(),
-            index,
-            source: SourceRole::Call,
-        });
+        // Emit whole chunks only. A partial tail stays here until the next
+        // callback fills it, so every chunk downstream is a full slot of real
+        // audio rather than a short one padded out with silence.
+        self.pending_output.extend(resampled);
+        for samples in drain_whole_chunks(&mut self.pending_output, TAP_CHUNK_SAMPLES) {
+            let rms = (samples
+                .iter()
+                .map(|sample| (*sample as f64) * (*sample as f64))
+                .sum::<f64>()
+                / samples.len() as f64)
+                .sqrt() as f32;
+            let index = self.chunk_index;
+            self.chunk_index += 1;
+            let _ = self.sink.try_send(AudioChunk {
+                samples,
+                rms,
+                timestamp: std::time::Instant::now(),
+                index,
+                source: SourceRole::Call,
+            });
+        }
     }
 }
 
@@ -916,5 +957,70 @@ mod tests {
         assert_eq!(result.observed_signal.frames_captured, 0);
         assert_eq!(result.failure_kind, Some(FailureKind::BackendUnavailable));
         assert_eq!(result.diagnostic_confidence, DiagnosticConfidence::Inferred);
+    }
+}
+
+#[cfg(all(test, feature = "streaming"))]
+mod chunking_tests {
+    use super::{drain_whole_chunks, TAP_CHUNK_SAMPLES};
+
+    #[test]
+    fn short_callbacks_accumulate_instead_of_emitting_short_chunks() {
+        // A Core Audio callback of 512 frames at 48 kHz resamples to about 171
+        // samples. Emitting that as a chunk gave the dual-source writer a slot
+        // that was 89% silence and advanced the file by a full 100 ms anyway,
+        // which is issue #792 bugs 2 and 3 in one line of code.
+        let mut pending = Vec::new();
+        let callback = vec![0.5f32; 171];
+
+        let mut emitted = Vec::new();
+        for _ in 0..9 {
+            pending.extend_from_slice(&callback);
+            emitted.extend(drain_whole_chunks(&mut pending, TAP_CHUNK_SAMPLES));
+        }
+        assert!(
+            emitted.is_empty(),
+            "9 short callbacks are 1539 samples, not yet a whole chunk"
+        );
+
+        pending.extend_from_slice(&callback);
+        emitted.extend(drain_whole_chunks(&mut pending, TAP_CHUNK_SAMPLES));
+        assert_eq!(emitted.len(), 1, "the tenth callback completes one chunk");
+        assert_eq!(emitted[0].len(), TAP_CHUNK_SAMPLES);
+        assert_eq!(
+            pending.len(),
+            110,
+            "the remainder is kept for the next callback, not padded or dropped"
+        );
+    }
+
+    #[test]
+    fn emitted_chunks_carry_the_samples_unchanged_and_in_order() {
+        // The failure this guards against writes real samples followed by
+        // silence, so a chunk that is the right length is not enough: it has
+        // to be the right length *of audio*.
+        let mut pending: Vec<f32> = (0..TAP_CHUNK_SAMPLES * 2 + 7)
+            .map(|index| index as f32)
+            .collect();
+        let chunks = drain_whole_chunks(&mut pending, TAP_CHUNK_SAMPLES);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(pending.len(), 7);
+        for (position, sample) in chunks[0].iter().enumerate() {
+            assert_eq!(*sample, position as f32);
+        }
+        for (position, sample) in chunks[1].iter().enumerate() {
+            assert_eq!(*sample, (TAP_CHUNK_SAMPLES + position) as f32);
+        }
+        // The position-by-position equality above is the real guarantee: every
+        // emitted sample is the source sample that belongs at that offset, so
+        // nothing was inserted, dropped, or reordered.
+    }
+
+    #[test]
+    fn a_zero_size_never_loops_forever() {
+        let mut pending = vec![1.0f32; 10];
+        assert!(drain_whole_chunks(&mut pending, 0).is_empty());
+        assert_eq!(pending.len(), 10);
     }
 }

@@ -3873,6 +3873,43 @@ pub fn recording_active(recording: &Arc<AtomicBool>) -> bool {
     recording.load(Ordering::Relaxed) || minutes_core::pid::status().recording
 }
 
+/// Whether to signal a recording owned by some other process.
+///
+/// Stopping an externally started recording from the tray is a feature: the
+/// user runs `minutes record`, then hits Stop in the app, and expects it to
+/// work. What is not a feature is the app stopping a recording it does not own
+/// while believing that recording is its own.
+///
+/// That combination is what issue #792 bug 5 reports. The desktop app showed a
+/// recording in progress while capturing nothing, and the only recording on
+/// the machine belonged to a separate CLI process, which it then terminated
+/// after 202 seconds. The user loses a recording the app never made.
+///
+/// The app can legitimately own a recording under a different PID, which is
+/// why ownership is asked about rather than assumed from the PID alone.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalStopDecision {
+    /// Signal it. Either the app knows it is not the one recording, so this is
+    /// a deliberate stop of someone else, or the recording is ours under
+    /// another PID.
+    Signal,
+    /// Refuse. The app believes it is recording, yet the recording belongs to
+    /// a process that is not ours, so these are two different recordings and
+    /// stopping this one is not what was asked for.
+    RefuseForeign,
+}
+
+pub(crate) fn external_stop_decision(
+    app_believes_it_is_recording: bool,
+    desktop_app_owns_recording: bool,
+) -> ExternalStopDecision {
+    if app_believes_it_is_recording && !desktop_app_owns_recording {
+        ExternalStopDecision::RefuseForeign
+    } else {
+        ExternalStopDecision::Signal
+    }
+}
+
 pub fn request_stop(
     recording: &Arc<AtomicBool>,
     stop_flag: &Arc<AtomicBool>,
@@ -3884,11 +3921,34 @@ pub fn request_stop(
                 recording.store(true, Ordering::Relaxed);
                 Ok(())
             } else {
+                #[cfg(unix)]
+                let desktop_owns = minutes_core::desktop_control::desktop_app_owns_pid(pid);
+                // Without the ownership probe there is nothing to distinguish
+                // our own out-of-process recording from someone else's, so
+                // keep the previous behavior rather than refuse a legitimate
+                // stop.
+                #[cfg(not(unix))]
+                let desktop_owns = true;
+
+                if external_stop_decision(recording.load(Ordering::Relaxed), desktop_owns)
+                    == ExternalStopDecision::RefuseForeign
+                {
+                    // Leave the other process alone and correct our own state,
+                    // which is the part that is actually wrong here.
+                    recording.store(false, Ordering::Relaxed);
+                    eprintln!(
+                        "refusing to stop recording PID {pid}: it belongs to another process, and this app believed it was recording. Not stopping it."
+                    );
+                    return Err(format!(
+                        "This app thought it was recording, but the active recording (PID {pid}) belongs to another process. It was left running. Stop it where it was started, or restart the app if its state looks wrong."
+                    ));
+                }
+
                 minutes_core::pid::write_stop_sentinel().map_err(|e| e.to_string())?;
 
                 #[cfg(unix)]
                 {
-                    if minutes_core::desktop_control::desktop_app_owns_pid(pid) {
+                    if desktop_owns {
                         eprintln!(
                             "recording PID {} is owned by the desktop app; using sentinel-only stop",
                             pid
@@ -22128,6 +22188,48 @@ mod dictation_hud_position_tests {
         assert_eq!(
             nearest_dictation_hud_anchor(1100.0, 100.0, 0.0, 0.0, 1200.0, 800.0),
             "top_right"
+        );
+    }
+}
+
+#[cfg(test)]
+mod external_stop_tests {
+    use super::{external_stop_decision, ExternalStopDecision};
+
+    #[test]
+    fn stopping_someone_elses_recording_from_the_tray_still_works() {
+        // The user runs `minutes record` in a terminal, then hits Stop in the
+        // app. The app knows it is not the one recording, so this is a
+        // deliberate stop of another process and must keep working.
+        assert_eq!(
+            external_stop_decision(false, false),
+            ExternalStopDecision::Signal
+        );
+    }
+
+    #[test]
+    fn our_own_recording_under_another_pid_is_still_ours_to_stop() {
+        // The desktop app can own a recording that runs under a different PID.
+        // Refusing that would break stopping our own capture.
+        assert_eq!(
+            external_stop_decision(true, true),
+            ExternalStopDecision::Signal
+        );
+        assert_eq!(
+            external_stop_decision(false, true),
+            ExternalStopDecision::Signal
+        );
+    }
+
+    #[test]
+    fn a_foreign_recording_is_not_stopped_while_we_think_we_are_recording() {
+        // Issue #792 bug 5. The app showed a recording in progress while
+        // capturing nothing, the only real recording belonged to a separate
+        // CLI process, and the app terminated it after 202 seconds. Two
+        // different recordings, and the wrong one was stopped.
+        assert_eq!(
+            external_stop_decision(true, false),
+            ExternalStopDecision::RefuseForeign
         );
     }
 }

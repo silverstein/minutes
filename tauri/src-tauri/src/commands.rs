@@ -2981,18 +2981,47 @@ fn viable_native_call_stem(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.len() >= min_viable_stem_bytes(path))
 }
 
-fn native_call_capture_warning_health(
-    message: impl Into<String>,
-) -> minutes_core::markdown::RecordingHealth {
-    let mut health = minutes_core::markdown::RecordingHealth {
+fn empty_native_call_health() -> minutes_core::markdown::RecordingHealth {
+    minutes_core::markdown::RecordingHealth {
         voice_stem_active_ratio: None,
         system_stem_active_ratio: None,
         system_dominant_ratio: None,
         capture_warnings: Vec::new(),
         diarization_path: Some(minutes_core::markdown::DiarizationPath::None),
-    };
+    }
+}
+
+fn native_call_capture_warning_health(
+    message: impl Into<String>,
+) -> minutes_core::markdown::RecordingHealth {
+    let mut health = empty_native_call_health();
     minutes_core::health::append_native_call_capture_warning(&mut health, message);
     health
+}
+
+/// Describe a stem that exists on disk but finalized below the viability
+/// threshold, or `None` when the stem is absent or long enough to use.
+///
+/// This is a materially different failure from "the stem was never written":
+/// capture ran for the whole session and the bytes were lost when the file was
+/// closed. Issue #792 reports the system stem repeatedly finalizing at 7,936
+/// bytes -- a page-aligned WAV header plus 0.02 s of audio -- after growing
+/// normally for half an hour.
+fn truncated_native_call_stem_reason(path: &Path) -> Option<String> {
+    let len = path.metadata().ok()?.len();
+    let min_bytes = min_viable_stem_bytes(path);
+    if len >= min_bytes {
+        return None;
+    }
+    let byte_rate = read_wav_byte_rate(path)
+        .unwrap_or(FALLBACK_WAV_BYTE_RATE)
+        .max(1);
+    // Approximate: everything past the header is treated as audio. Good enough
+    // to tell "0.02 s" from "0.5 s" in a diagnostic message.
+    let observed_secs = len as f64 / byte_rate as f64;
+    Some(format!(
+        "stem finalized at {len} bytes (~{observed_secs:.3}s of audio); at least          {MIN_VIABLE_STEM_DURATION_SECS:.1}s is required for a stem to be usable"
+    ))
 }
 
 fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProcessingInput> {
@@ -3024,7 +3053,7 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
         ));
     }
 
-    let recovery_health = if !primary_has_bytes {
+    let mut recovery_health = if !primary_has_bytes {
         // The .mov is the grouping anchor that lets the queue move primary and
         // both stems together. The worker never decodes this synthetic anchor.
         std::fs::write(output_path, b"minutes native-call stem anchor")?;
@@ -3034,6 +3063,35 @@ fn native_call_processing_input(output_path: &Path) -> io::Result<NativeCallProc
     } else {
         None
     };
+
+    // One viable stem is enough to proceed, so the check above stays silent
+    // whenever the surviving sibling is healthy. That silence is the problem
+    // reported in #792: a system stem truncated at finalization left the job
+    // queued as if nothing was wrong, and the only signal reaching the user
+    // was a downstream `Inferred` "call audio was missing or silent" note --
+    // indistinguishable from a call where nobody spoke.
+    //
+    // A stem that is present on disk but too short to use is direct evidence
+    // of a finalization failure, not something to infer. Record it as a
+    // `High`-confidence invalid-stem warning carrying the measured size, while
+    // still processing the sibling so usable audio is never discarded.
+    for (path, source) in [
+        (system, minutes_core::diarize::CaptureSource::System),
+        (voice, minutes_core::diarize::CaptureSource::Voice),
+    ] {
+        let Some(path) = path else { continue };
+        let Some(reason) = truncated_native_call_stem_reason(path) else {
+            continue;
+        };
+        tracing::error!(
+            stem = %path.display(),
+            ?source,
+            reason = %reason,
+            "native call capture finalized a truncated stem"
+        );
+        let health = recovery_health.get_or_insert_with(empty_native_call_health);
+        minutes_core::health::append_native_call_invalid_stem_warning(health, source, &reason);
+    }
 
     Ok(NativeCallProcessingInput {
         path: output_path.to_path_buf(),
@@ -15224,6 +15282,109 @@ mod tests {
         if pad > 0 {
             file.write_all(&vec![0u8; pad]).expect("pad");
         }
+    }
+
+    /// #792: a system stem that finalized truncated while the microphone stem
+    /// stayed healthy used to queue silently. `native_call_processing_input`
+    /// only errors when *both* stems are unusable, so a half-hour call whose
+    /// remote audio was lost at close produced a mic-only transcript whose
+    /// only marking was a downstream `Inferred` "missing or silent" note.
+    #[test]
+    fn truncated_system_stem_records_a_high_confidence_invalid_stem_warning() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("2026-06-02-083135-call.mov");
+        std::fs::write(&mov, vec![7_u8; 64_000]).unwrap();
+        write_test_wav(
+            &dir.path().join("2026-06-02-083135-call.voice.wav"),
+            48_000,
+            4_000_000,
+        );
+        // The exact size reported in #792: a page-aligned WAV header plus
+        // 0.02 s of audio, written after 30+ minutes of healthy capture.
+        write_test_wav(
+            &dir.path().join("2026-06-02-083135-call.system.wav"),
+            48_000,
+            7_936,
+        );
+
+        let input = native_call_processing_input(&mov).expect("healthy voice stem is viable");
+        let health = input
+            .recovery_health
+            .expect("a truncated stem must be reported, not passed over");
+        let warning = health
+            .capture_warnings
+            .iter()
+            .find(|warning| {
+                matches!(
+                    &warning.kind,
+                    minutes_core::diarize::FailureKind::Other { code }
+                        if code == minutes_core::health::NATIVE_CALL_INVALID_STEM_CODE
+                )
+            })
+            .expect("invalid-stem warning");
+
+        assert_eq!(warning.source, minutes_core::diarize::CaptureSource::System);
+        assert_eq!(
+            warning.diagnostic_confidence,
+            minutes_core::diarize::DiagnosticConfidence::High,
+            "a stem measured on disk is observed, not inferred"
+        );
+        assert!(
+            warning.message.contains("7936"),
+            "message should carry the measured size: {}",
+            warning.message
+        );
+    }
+
+    /// The mirror case: a truncated microphone stem next to a healthy system
+    /// stem must be reported against the voice source.
+    #[test]
+    fn truncated_voice_stem_is_attributed_to_the_voice_source() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("call.mov");
+        std::fs::write(&mov, vec![7_u8; 64_000]).unwrap();
+        write_test_wav(&dir.path().join("call.voice.wav"), 48_000, 7_936);
+        write_test_wav(&dir.path().join("call.system.wav"), 48_000, 4_000_000);
+
+        let input = native_call_processing_input(&mov).expect("healthy system stem is viable");
+        let health = input
+            .recovery_health
+            .expect("truncated stem must be reported");
+        assert!(health
+            .capture_warnings
+            .iter()
+            .any(|warning| warning.source == minutes_core::diarize::CaptureSource::Voice));
+    }
+
+    /// A healthy pair must stay quiet — this path runs on every successful
+    /// call capture, so a false positive here would mark every recording.
+    #[test]
+    fn healthy_stem_pair_records_no_capture_warning() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("call.mov");
+        std::fs::write(&mov, vec![7_u8; 64_000]).unwrap();
+        write_test_wav(&dir.path().join("call.voice.wav"), 48_000, 4_000_000);
+        write_test_wav(&dir.path().join("call.system.wav"), 48_000, 4_000_000);
+
+        let input = native_call_processing_input(&mov).expect("both stems viable");
+        assert!(
+            input.recovery_health.is_none(),
+            "healthy captures must not be marked"
+        );
+    }
+
+    /// An absent stem is not a truncated one. Single-stem captures are a
+    /// supported outcome and already carry their own recovery reporting; they
+    /// must not also be labelled as a finalization failure.
+    #[test]
+    fn missing_system_stem_is_not_reported_as_truncated() {
+        let dir = TempDir::new().unwrap();
+        let mov = dir.path().join("call.mov");
+        std::fs::write(&mov, vec![7_u8; 64_000]).unwrap();
+        write_test_wav(&dir.path().join("call.voice.wav"), 48_000, 4_000_000);
+
+        let input = native_call_processing_input(&mov).expect("voice stem is viable");
+        assert!(input.recovery_health.is_none());
     }
 
     fn write_signal_wav(path: &Path, audible: bool) {

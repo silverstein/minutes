@@ -33,6 +33,14 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     // Per-source stem writers
     private var voiceStemFile: AVAudioFile?
     private var systemStemFile: AVAudioFile?
+    // Set once stop() has closed the stems, and never cleared. Both stem files
+    // are created lazily on first sample, so without this a sample arriving
+    // after the close reopens the file with AVAudioFile(forWriting:), which
+    // truncates it. Closing the stems does not stop the stream: stopCapture()
+    // is awaited afterwards and ScreenCaptureKit keeps delivering until it
+    // returns, so that window is not rare, it is every stop where remote audio
+    // is still playing. Mutated and read only on sampleQueue (issue #792).
+    private var stemsClosed = false
     private var voiceStemURL: URL?
     private var systemStemURL: URL?
 
@@ -196,6 +204,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         // with any in-flight writeStemSamples calls. Without this,
         // nil'ing on the main thread races with writes on sampleQueue.
         sampleQueue.sync {
+            stemsClosed = true
             voiceStemFile = nil
             systemStemFile = nil
         }
@@ -293,6 +302,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     private func writeStemSamples(_ sampleBuffer: CMSampleBuffer, source: SCStreamOutputType) {
+        // Runs on sampleQueue, the same queue stop() closes the stems on, so
+        // this either sees the closed latch or ran entirely before it was set.
+        // Dropping these late samples loses at most the few milliseconds
+        // between the close and stopCapture() returning; honouring them
+        // destroys the whole recording.
+        if stemsClosed { return }
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee else {
             return

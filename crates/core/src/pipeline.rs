@@ -229,6 +229,35 @@ fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> 
     })
 }
 
+/// Records a [`ProcessingWarning`] when diarization ran but produced no
+/// speaker labels.
+///
+/// Same rationale as [`detect_engine_fallback_warning`] (#633): the desktop
+/// app installs no `tracing_subscriber`, so the `tracing::error!` inside
+/// `run_diarization_engine` is dropped and the failure is invisible. A
+/// transcript that silently lost its speaker labels is a materially different
+/// artifact, so the file itself carries the record.
+///
+/// `Disabled` is deliberately not warned about: an operator who set
+/// `engine = "none"` already knows.
+fn detect_diarization_warning(
+    reason: Option<&crate::diarize::DiarizationUnavailable>,
+) -> Option<ProcessingWarning> {
+    let reason = reason?;
+    if matches!(reason, crate::diarize::DiarizationUnavailable::Disabled) {
+        return None;
+    }
+    Some(ProcessingWarning {
+        step: "diarize".to_string(),
+        reason: reason.reason_code().to_string(),
+        timeout_secs: None,
+        message: Some(format!(
+            "Speaker diarization produced no labels ({}); the transcript is unlabeled.",
+            reason.detail()
+        )),
+    })
+}
+
 const SILENT_REMOTE_WARNING_MESSAGE: &str =
     "Call/remote audio was not captured (system stem silent); transcript reflects only your microphone";
 const SILENT_MICROPHONE_WARNING_MESSAGE: &str =
@@ -3856,7 +3885,7 @@ mod authorized_process_input_tests {
                     transcript_windows: None,
                 },
             ),
-            crate::diarize::DiarizationOutcome::NotConfigured
+            crate::diarize::DiarizationOutcome::NotConfigured { .. }
         ));
         assert!(resolve_screen_context_directory(
             context.context_session_id.as_deref(),
@@ -5009,6 +5038,7 @@ where
     let mut transcript = artifact.transcript.clone();
     let mut diarization_num_speakers = 0usize;
     let mut diarization_from_stems = false;
+    let mut diarization_unavailable: Option<crate::diarize::DiarizationUnavailable> = None;
     let mut degraded_ml_fallback = false;
     let mut diarization_embeddings: std::collections::HashMap<String, Vec<f32>> =
         std::collections::HashMap::new();
@@ -5080,12 +5110,20 @@ where
                 );
                 recording_health = Some(reason.into());
             }
-            diarize::DiarizationOutcome::NotConfigured => {
+            diarize::DiarizationOutcome::NotConfigured { reason } => {
+                // A bare `{"skipped": true}` here made an operator-disabled
+                // engine indistinguishable from a recording that exceeded
+                // `MAX_DIARIZATION_SECONDS`. Both ship unlabeled transcripts.
+                diarization_unavailable = Some(reason.clone());
                 logging::log_step(
                     "diarize",
                     &diagnostic_audio_target,
                     diarize_start.elapsed().as_millis() as u64,
-                    serde_json::json!({"skipped": true}),
+                    serde_json::json!({
+                        "skipped": true,
+                        "reason": reason.reason_code(),
+                        "detail": reason.detail(),
+                    }),
                 );
             }
         }
@@ -5362,6 +5400,9 @@ where
         summarization_warnings.push(warning);
     }
     if let Some(warning) = detect_engine_fallback_warning(config) {
+        summarization_warnings.push(warning);
+    }
+    if let Some(warning) = detect_diarization_warning(diarization_unavailable.as_ref()) {
         summarization_warnings.push(warning);
     }
     if !descriptor_authorized {
@@ -5740,7 +5781,7 @@ where
                 recording_health = merge_recording_health(Some(reason.into()), recording_health);
                 transcript
             }
-            diarize::DiarizationOutcome::NotConfigured => transcript,
+            diarize::DiarizationOutcome::NotConfigured { .. } => transcript,
         }
     } else {
         transcript
@@ -8534,6 +8575,63 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("engine `claude`"));
+    }
+
+    #[test]
+    fn diarization_warning_names_the_reason_labels_were_lost() {
+        // The regression this guards: a recording longer than
+        // MAX_DIARIZATION_SECONDS is refused by the decode, the pipeline
+        // reports NotConfigured, and the meeting silently ships with no
+        // speaker labels. Before this warning existed the only trace was a
+        // bare `{"skipped": true}` in the JSON log, which the desktop app's
+        // missing tracing_subscriber made the *only* trace anywhere.
+        let reason = crate::diarize::DiarizationUnavailable::EngineFailed(
+            "audio exceeds the diarization sample budget".to_string(),
+        );
+        let warning = detect_diarization_warning(Some(&reason)).expect("warning expected");
+        assert_eq!(warning.step, "diarize");
+        assert_eq!(warning.reason, "engine_failed");
+        let message = warning.message.as_ref().unwrap();
+        assert!(message.contains("no labels"), "message: {message}");
+        assert!(
+            message.contains("audio exceeds the diarization sample budget"),
+            "the underlying engine error must survive into the file: {message}"
+        );
+    }
+
+    #[test]
+    fn diarization_warning_absent_when_operator_disabled_it() {
+        // `engine = "none"` is a choice, not a degradation.
+        assert!(detect_diarization_warning(Some(
+            &crate::diarize::DiarizationUnavailable::Disabled
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn diarization_warning_absent_when_labels_were_produced() {
+        assert!(detect_diarization_warning(None).is_none());
+    }
+
+    #[test]
+    fn diarization_reason_codes_are_distinct_and_stable() {
+        use crate::diarize::DiarizationUnavailable as U;
+        let codes = [
+            U::Disabled.reason_code(),
+            U::EngineUnresolved.reason_code(),
+            U::EngineFailed(String::new()).reason_code(),
+            U::SystemStemOnlyFailed.reason_code(),
+            U::WorkerBusy.reason_code(),
+            U::WorkerTimedOut.reason_code(),
+            U::WorkerPanicked.reason_code(),
+            U::CapabilityRejected.reason_code(),
+        ];
+        let unique: std::collections::HashSet<_> = codes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "reason codes are the greppable contract; they must not collide"
+        );
     }
 
     #[test]

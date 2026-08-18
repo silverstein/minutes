@@ -346,18 +346,104 @@ pub struct TranscriptWindow {
     pub end_secs: f32,
 }
 
+/// Why a diarization attempt produced no speaker labels.
+///
+/// `DiarizationOutcome::NotConfigured` used to be reason-free, which made
+/// "the operator set `engine = \"none\"`" indistinguishable in the logs from
+/// "this recording is longer than `MAX_DIARIZATION_SECONDS` so the decode
+/// refused it". Both shipped a transcript with no speaker labels and logged
+/// the same bare `{"skipped": true}`. Carrying the reason is what lets the
+/// pipeline both log it and write a `ProcessingWarning`, the same way #633
+/// did for transcription-engine fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiarizationUnavailable {
+    /// `[diarization] engine = "none"`.
+    Disabled,
+    /// No engine resolved: models are not downloaded, or this build has no
+    /// `diarize` feature compiled in.
+    EngineUnresolved,
+    /// The engine ran and returned an error. The string is the only place the
+    /// `MAX_DIARIZATION_SECONDS` refusal is currently visible.
+    EngineFailed(String),
+    /// Source-aware diarization over a system-stem-only capture failed and
+    /// there was no full-audio path to fall back to.
+    SystemStemOnlyFailed,
+    /// A previous diarization worker still held the process-global lease.
+    WorkerBusy,
+    /// The worker outlived `DIARIZATION_WORKER_DEADLINE`.
+    WorkerTimedOut,
+    /// The worker thread panicked.
+    WorkerPanicked,
+    /// A private-audio capability failed revalidation before any work began.
+    CapabilityRejected,
+}
+
+impl DiarizationUnavailable {
+    /// Stable, greppable token for structured logs and frontmatter.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            DiarizationUnavailable::Disabled => "disabled",
+            DiarizationUnavailable::EngineUnresolved => "engine_unresolved",
+            DiarizationUnavailable::EngineFailed(_) => "engine_failed",
+            DiarizationUnavailable::SystemStemOnlyFailed => "system_stem_only_failed",
+            DiarizationUnavailable::WorkerBusy => "worker_busy",
+            DiarizationUnavailable::WorkerTimedOut => "worker_timed_out",
+            DiarizationUnavailable::WorkerPanicked => "worker_panicked",
+            DiarizationUnavailable::CapabilityRejected => "capability_rejected",
+        }
+    }
+
+    /// Human-readable detail for `ProcessingWarning::message`.
+    pub fn detail(&self) -> String {
+        match self {
+            DiarizationUnavailable::Disabled => {
+                "diarization is disabled (`[diarization] engine = \"none\"`)".to_string()
+            }
+            DiarizationUnavailable::EngineUnresolved => {
+                "no diarization engine is available (models not downloaded, or this build has no `diarize` feature)"
+                    .to_string()
+            }
+            DiarizationUnavailable::EngineFailed(error) => {
+                format!("the diarization engine failed: {error}")
+            }
+            DiarizationUnavailable::SystemStemOnlyFailed => {
+                "source-aware diarization failed on a system-stem-only capture".to_string()
+            }
+            DiarizationUnavailable::WorkerBusy => {
+                "a previous diarization worker still held the process-global lease".to_string()
+            }
+            DiarizationUnavailable::WorkerTimedOut => format!(
+                "diarization exceeded its {}s deadline",
+                DIARIZATION_WORKER_DEADLINE.as_secs()
+            ),
+            DiarizationUnavailable::WorkerPanicked => "the diarization worker panicked".to_string(),
+            DiarizationUnavailable::CapabilityRejected => {
+                "the private-audio capability failed revalidation".to_string()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DiarizationOutcome {
     Result(DiarizationResult),
     Skipped { reason: DegradedCapture },
-    NotConfigured,
+    NotConfigured { reason: DiarizationUnavailable },
 }
 
 impl DiarizationOutcome {
     pub fn result_for_auxiliary_use(&self) -> Option<&DiarizationResult> {
         match self {
             DiarizationOutcome::Result(result) => Some(result),
-            DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured => None,
+            DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured { .. } => None,
+        }
+    }
+
+    /// The reason no labels were produced, when there is one.
+    pub fn unavailable_reason(&self) -> Option<&DiarizationUnavailable> {
+        match self {
+            DiarizationOutcome::NotConfigured { reason } => Some(reason),
+            _ => None,
         }
     }
 }
@@ -1987,7 +2073,7 @@ fn run_diarization_engine(
     audio_path: &Path,
     config: &Config,
     resolved_engine: &str,
-) -> Option<DiarizationResult> {
+) -> Result<DiarizationResult, DiarizationUnavailable> {
     tracing::info!(
         engine = %resolved_engine,
         file = %crate::pipeline::private_audio_diagnostic_label(audio_path),
@@ -2012,23 +2098,23 @@ fn run_diarization_engine(
                 segments = result.segments.len(),
                 "diarization complete"
             );
-            Some(result)
+            Ok(result)
         }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "diarization failed, continuing without speaker labels");
-            None
+            Err(DiarizationUnavailable::EngineFailed(e))
         }
         Err(DiarizationWorkerError::Busy) => {
             tracing::error!("diarization skipped because a previous worker is still active");
-            None
+            Err(DiarizationUnavailable::WorkerBusy)
         }
         Err(DiarizationWorkerError::TimedOut) => {
             tracing::error!("diarization exceeded its bounded deadline; worker remains isolated");
-            None
+            Err(DiarizationUnavailable::WorkerTimedOut)
         }
         Err(DiarizationWorkerError::Panicked) => {
             tracing::error!("diarization thread panicked");
-            None
+            Err(DiarizationUnavailable::WorkerPanicked)
         }
     }
 }
@@ -2668,7 +2754,10 @@ fn degraded_voice_stem_ml_fallback(
         resolved_engine,
         reason,
         ctx,
-        run_diarization_engine,
+        // This fallback only needs "did it work"; the reason is reported by
+        // the caller that owns the outcome, so adapt rather than widen the
+        // runner bound (and its tests) to carry an error it discards.
+        |path, config, engine| run_diarization_engine(path, config, engine).ok(),
     )
 }
 
@@ -2692,12 +2781,16 @@ pub fn diarize_with_context(
 ) -> DiarizationOutcome {
     if crate::pipeline::is_reserved_private_audio_path(audio_path) {
         tracing::warn!("private audio token rejected by ordinary diarization entry point");
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::CapabilityRejected,
+        };
     }
     let engine = &config.diarization.engine;
 
     if engine == "none" {
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::Disabled,
+        };
     }
 
     let resolved_engine = resolve_diarization_engine(config);
@@ -2735,8 +2828,7 @@ pub fn diarize_with_context(
                     system_stem = %stems.system.display(),
                     "source-aware stem diarization failed, falling back to system-stem ML diarization"
                 );
-                if let Some(result) = run_diarization_engine(&stems.system, config, resolved_engine)
-                {
+                if let Ok(result) = run_diarization_engine(&stems.system, config, resolved_engine) {
                     return DiarizationOutcome::Result(result);
                 }
             }
@@ -2756,7 +2848,9 @@ pub fn diarize_with_context(
                         system_stem = %crate::pipeline::private_audio_diagnostic_label(&system_stem),
                         "system-stem-only diarization failed; keeping the transcript unlabeled"
                     );
-                    return DiarizationOutcome::NotConfigured;
+                    return DiarizationOutcome::NotConfigured {
+                        reason: DiarizationUnavailable::SystemStemOnlyFailed,
+                    };
                 }
                 tracing::warn!(
                     system_stem = %crate::pipeline::private_audio_diagnostic_label(&system_stem),
@@ -2764,8 +2858,8 @@ pub fn diarize_with_context(
                     "system-stem-only diarization failed, falling back to full-audio ML diarization"
                 );
                 return match run_diarization_engine(audio_path, config, resolved_engine) {
-                    Some(result) => DiarizationOutcome::Result(result),
-                    None => DiarizationOutcome::NotConfigured,
+                    Ok(result) => DiarizationOutcome::Result(result),
+                    Err(reason) => DiarizationOutcome::NotConfigured { reason },
                 };
             }
         }
@@ -2804,11 +2898,13 @@ pub fn diarize_with_context(
     }
 
     let Some(resolved_engine) = resolved_engine else {
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::EngineUnresolved,
+        };
     };
     match run_diarization_engine(audio_path, config, resolved_engine) {
-        Some(result) => DiarizationOutcome::Result(result),
-        None => DiarizationOutcome::NotConfigured,
+        Ok(result) => DiarizationOutcome::Result(result),
+        Err(reason) => DiarizationOutcome::NotConfigured { reason },
     }
 }
 
@@ -2823,17 +2919,23 @@ pub(crate) fn diarize_proof_bound_audio(
 ) -> DiarizationOutcome {
     if let Err(error) = input.verify_pipeline_binding() {
         tracing::warn!(error = %error, "authorized diarization capability failed revalidation");
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::CapabilityRejected,
+        };
     }
     if config.diarization.engine == "none" {
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::Disabled,
+        };
     }
     let Some(resolved_engine) = resolve_diarization_engine(config) else {
-        return DiarizationOutcome::NotConfigured;
+        return DiarizationOutcome::NotConfigured {
+            reason: DiarizationUnavailable::EngineUnresolved,
+        };
     };
     match run_diarization_engine(input.processing_path(), config, resolved_engine) {
-        Some(result) => DiarizationOutcome::Result(result),
-        None => DiarizationOutcome::NotConfigured,
+        Ok(result) => DiarizationOutcome::Result(result),
+        Err(reason) => DiarizationOutcome::NotConfigured { reason },
     }
 }
 
@@ -2847,7 +2949,7 @@ pub fn diarize(audio_path: &Path, config: &Config) -> Option<DiarizationResult> 
         },
     ) {
         DiarizationOutcome::Result(result) => Some(result),
-        DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured => None,
+        DiarizationOutcome::Skipped { .. } | DiarizationOutcome::NotConfigured { .. } => None,
     }
 }
 

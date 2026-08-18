@@ -305,7 +305,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         // Runs on sampleQueue, the same queue stop() closes the stems on, so
         // this either sees the closed latch or ran entirely before it was set.
         // Dropping these late samples loses at most the few milliseconds
-        // between the close and stopCapture() returning; honouring them
+        // between the close and stopCapture() returning; honoring them
         // destroys the whole recording.
         if stemsClosed { return }
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),

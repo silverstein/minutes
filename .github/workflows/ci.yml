@@ -249,12 +249,26 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
 
-      - name: Unit tests (streaming feature)
-        # Temporary, to reproduce #800 where it actually happens. The permanent
-        # version of this step is MrFreekour's in #797; this branch is a
-        # diagnostic and is not for merge.
-        run: cargo test -p minutes-core --no-default-features --features streaming --lib -- --test-threads=1 --nocapture
-        timeout-minutes: 20
+      - name: Repeat the racing audit test to catch #800
+        # Diagnostic, not for merge. #800 is intermittent: it failed on four of
+        # eight concurrent processes in one run and passed entirely in the
+        # next. Running the racing test once tells us almost nothing, so run it
+        # repeatedly and stop at the first failure, which is the run whose
+        # output we actually want.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for attempt in $(seq 1 25); do
+            echo "=== attempt $attempt ==="
+            if ! cargo test -p minutes-core --no-default-features --features streaming --lib \
+                 -- --test-threads=1 --nocapture \
+                 policy_fs::tests::restricted_override_audit; then
+              echo "::warning::#800 reproduced on attempt $attempt"
+              exit 1
+            fi
+          done
+          echo "::warning::#800 did not reproduce in 25 attempts"
+        timeout-minutes: 45
 
       - name: Copilot attach, routing, and window-contract tests
         # On Windows this executes the real named-pipe connect/reconnect path.

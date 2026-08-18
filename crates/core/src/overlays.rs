@@ -452,25 +452,58 @@ mod windows_private {
             let mut control = 0u16;
             let mut revision = 0u32;
             let mut info = unsafe { zeroed::<ACL_SIZE_INFORMATION>() };
-            if owner.is_null()
-                || unsafe { EqualSid(owner, self.sid()) } == 0
-                || dacl.is_null()
-                || unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
-                    == 0
-                || control & SE_DACL_PROTECTED == 0
-                || unsafe {
+            // Evaluated one condition at a time so the error can say which
+            // one failed. The single combined message cost real debugging time
+            // on #800, where the attestation failed on four of eight
+            // concurrent processes and the message could not distinguish "the
+            // owner is somebody else" from "the DACL is inheritable" from
+            // "there is more than one entry".
+            let owner_missing = owner.is_null();
+            let owner_mismatch = !owner_missing && unsafe { EqualSid(owner, self.sid()) } == 0;
+            let dacl_missing = dacl.is_null();
+            let control_unreadable = !dacl_missing
+                && unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
+                    == 0;
+            let dacl_inheritable =
+                !dacl_missing && !control_unreadable && control & SE_DACL_PROTECTED == 0;
+            let acl_info_unreadable = !dacl_missing
+                && unsafe {
                     GetAclInformation(
                         dacl,
                         (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
                         size_of::<ACL_SIZE_INFORMATION>() as u32,
                         AclSizeInformation,
                     )
-                } == 0
-                || info.AceCount != 1
+                } == 0;
+            let wrong_ace_count = !acl_info_unreadable && info.AceCount != 1;
+
+            if owner_missing
+                || owner_mismatch
+                || dacl_missing
+                || control_unreadable
+                || dacl_inheritable
+                || acl_info_unreadable
+                || wrong_ace_count
             {
-                return Err(io::Error::other(
-                    "private correction store DACL is not owner-only",
-                ));
+                let reason = if owner_missing {
+                    "the object has no owner"
+                } else if owner_mismatch {
+                    "the object is owned by another account"
+                } else if dacl_missing {
+                    "the object has no DACL"
+                } else if control_unreadable {
+                    "the security descriptor control word could not be read"
+                } else if dacl_inheritable {
+                    "the DACL is not protected, so it can inherit entries"
+                } else if acl_info_unreadable {
+                    "the ACL size information could not be read"
+                } else {
+                    "the DACL has more than one entry"
+                };
+                return Err(io::Error::other(format!(
+                    "private correction store DACL is not owner-only: {reason}                      (control=0x{control:04x}, aces={})",
+                    info.AceCount
+                )));
             }
             let mut ace_ptr: *mut c_void = null_mut();
             if unsafe { GetAce(dacl, 0, &mut ace_ptr) } == 0 || ace_ptr.is_null() {

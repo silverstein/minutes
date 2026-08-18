@@ -247,6 +247,13 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
 
+      - name: Unit tests (streaming feature)
+        # Temporary, to reproduce #800 where it actually happens. The permanent
+        # version of this step is MrFreekour's in #797; this branch is a
+        # diagnostic and is not for merge.
+        run: cargo test -p minutes-core --no-default-features --features streaming --lib -- --test-threads=1 --nocapture
+        timeout-minutes: 20
+
       - name: Copilot attach, routing, and window-contract tests
         # On Windows this executes the real named-pipe connect/reconnect path.
         # On Unix it also asserts owner-only socket/discovery permissions.

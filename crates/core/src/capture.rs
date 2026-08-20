@@ -1059,7 +1059,6 @@ fn update_audio_level_from_samples(samples: &[f32]) {
     AUDIO_LEVEL.store(level, Ordering::Relaxed);
 }
 
-#[cfg(feature = "streaming")]
 /// Running tally of how much of a stem is actually audio.
 ///
 /// Counted while the samples are already in hand. Reading the finished file
@@ -1130,20 +1129,6 @@ fn write_samples_to_wav(
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV write: {}", e))))?;
     }
     content.record(&converted);
-    Ok(())
-}
-
-#[cfg(not(feature = "streaming"))]
-fn write_samples_to_wav(
-    writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
-    samples: &[f32],
-) -> Result<(), CaptureError> {
-    for &sample in samples {
-        let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-        writer
-            .write_sample(s16)
-            .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV write: {}", e))))?;
-    }
     Ok(())
 }
 

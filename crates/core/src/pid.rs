@@ -609,25 +609,119 @@ pub fn stop_sentinel_path() -> PathBuf {
     Config::minutes_dir().join("recording.stop")
 }
 
-/// Write the sentinel file to signal the recording process to stop.
+/// Prefix of an addressed sentinel. Anything else is treated as the legacy
+/// unaddressed form.
+const STOP_SENTINEL_TARGET_PREFIX: &str = "stop-pid:";
+
+/// Write an unaddressed sentinel: stop whoever is recording.
+///
+/// Kept because it is the honest representation of `minutes stop`, which
+/// intends to stop the current recording whatever it is, and because older
+/// builds sharing `~/.minutes` only understand this form.
 pub fn write_stop_sentinel() -> std::io::Result<()> {
+    write_sentinel_bytes("stop")
+}
+
+/// Write a sentinel addressed to one recording.
+///
+/// A sentinel is a file in a directory shared by every Minutes process on the
+/// machine, and the reader used to be "does this file exist". That is how the
+/// desktop app terminated a CLI recording it had never started and was not
+/// itself recording (#804): the message had no addressee, so the wrong process
+/// answered it.
+///
+/// Addressing does not help against a reader too old to look, which is why
+/// #805 also guards the writer. It does mean two current builds cannot stop
+/// each other by accident, and that a sentinel meant for a process that has
+/// since exited is recognizable as stale rather than consumed by the next
+/// recording to start.
+pub fn write_stop_sentinel_for(target_pid: u32) -> std::io::Result<()> {
+    write_sentinel_bytes(&format!("{STOP_SENTINEL_TARGET_PREFIX}{target_pid}"))
+}
+
+fn write_sentinel_bytes(contents: &str) -> std::io::Result<()> {
     let path = stop_sentinel_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, "stop")
+    fs::write(&path, contents)
+}
+
+/// Who a sentinel is addressed to, if anyone.
+#[derive(Debug, PartialEq, Eq)]
+enum SentinelAddressee {
+    /// Legacy or unreadable payload: stop whoever is recording.
+    Anyone,
+    /// Addressed to exactly this process.
+    Pid(u32),
+}
+
+fn parse_sentinel(contents: &str) -> SentinelAddressee {
+    contents
+        .trim()
+        .strip_prefix(STOP_SENTINEL_TARGET_PREFIX)
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .map_or(SentinelAddressee::Anyone, SentinelAddressee::Pid)
+}
+
+/// Decide what a reader should do with a sentinel it found.
+///
+/// Split out from the filesystem so the contract is testable, since getting it
+/// wrong means either recordings that cannot be stopped or recordings stopped
+/// by somebody else.
+fn sentinel_action(
+    contents: &str,
+    self_pid: u32,
+    target_is_alive: impl FnOnce(u32) -> bool,
+) -> SentinelAction {
+    match parse_sentinel(contents) {
+        // Unaddressed. Honor it: `minutes stop` and every build that predates
+        // addressing writes this, and refusing would leave those users unable
+        // to stop a recording at all.
+        SentinelAddressee::Anyone => SentinelAction::StopUs,
+        SentinelAddressee::Pid(pid) if pid == self_pid => SentinelAction::StopUs,
+        // Addressed to a process that is gone. Nobody is coming to collect it,
+        // and leaving it would stop the next recording that reads it.
+        SentinelAddressee::Pid(pid) if !target_is_alive(pid) => SentinelAction::ClearStale,
+        // Addressed to a live process that is not us. Leave it for them.
+        SentinelAddressee::Pid(_) => SentinelAction::Leave,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SentinelAction {
+    StopUs,
+    ClearStale,
+    Leave,
+}
+
+/// Check whether a stop was requested of *this* process, clearing the sentinel
+/// when it was.
+///
+/// A sentinel addressed to another live process is left in place rather than
+/// consumed, so the process it was meant for still sees it.
+pub fn check_and_clear_sentinel_for(self_pid: u32) -> bool {
+    let path = stop_sentinel_path();
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return false;
+    };
+    match sentinel_action(&contents, self_pid, is_process_alive) {
+        SentinelAction::StopUs => {
+            fs::remove_file(&path).ok();
+            true
+        }
+        SentinelAction::ClearStale => {
+            fs::remove_file(&path).ok();
+            false
+        }
+        SentinelAction::Leave => false,
+    }
 }
 
 /// Check if the stop sentinel exists and remove it.
 /// Returns true if it was present (stop was requested).
 pub fn check_and_clear_sentinel() -> bool {
-    let path = stop_sentinel_path();
-    if path.exists() {
-        fs::remove_file(&path).ok();
-        true
-    } else {
-        false
-    }
+    check_and_clear_sentinel_for(std::process::id())
 }
 
 /// Spawn a background thread that polls for the sentinel file and sets the stop flag.
@@ -1019,5 +1113,78 @@ mod tests {
 
         drop(guard);
         assert_eq!(inspect_pid_file(&path), PidFileState::Inactive);
+    }
+}
+
+#[cfg(test)]
+mod sentinel_addressing_tests {
+    use super::{parse_sentinel, sentinel_action, SentinelAction, SentinelAddressee};
+
+    #[test]
+    fn a_legacy_sentinel_still_stops_us() {
+        // Every build that predates addressing writes "stop", and `minutes
+        // stop` means "stop whatever is recording". Refusing these would leave
+        // those users unable to stop a recording at all, which is a worse bug
+        // than the one being fixed.
+        assert_eq!(parse_sentinel("stop"), SentinelAddressee::Anyone);
+        assert_eq!(
+            sentinel_action("stop", 4242, |_| true),
+            SentinelAction::StopUs
+        );
+    }
+
+    #[test]
+    fn an_unreadable_payload_is_treated_as_unaddressed_rather_than_ignored() {
+        // Failing open here is deliberate. A sentinel we cannot parse still
+        // means somebody asked for a stop, and ignoring it would strand a
+        // recording that the user is actively trying to end.
+        for payload in ["", "garbage", "stop-pid:", "stop-pid:not-a-number"] {
+            assert_eq!(
+                sentinel_action(payload, 7, |_| true),
+                SentinelAction::StopUs,
+                "payload {payload:?} must still stop us"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sentinel_addressed_to_us_stops_us() {
+        assert_eq!(parse_sentinel("stop-pid:99"), SentinelAddressee::Pid(99));
+        assert_eq!(
+            sentinel_action("stop-pid:99", 99, |_| true),
+            SentinelAction::StopUs
+        );
+    }
+
+    #[test]
+    fn a_sentinel_for_another_live_process_is_left_alone() {
+        // #804: the desktop app stopped a CLI recording it had never started.
+        // Leaving rather than clearing matters as much as not stopping: the
+        // process it was addressed to still has to receive it.
+        assert_eq!(
+            sentinel_action("stop-pid:1234", 5678, |pid| {
+                assert_eq!(pid, 1234, "liveness must be checked for the addressee");
+                true
+            }),
+            SentinelAction::Leave
+        );
+    }
+
+    #[test]
+    fn a_sentinel_for_a_dead_process_is_cleared_without_stopping_us() {
+        // Otherwise it outlives its addressee and the next recording to read
+        // it stops immediately for no reason anyone can see.
+        assert_eq!(
+            sentinel_action("stop-pid:1234", 5678, |_| false),
+            SentinelAction::ClearStale
+        );
+    }
+
+    #[test]
+    fn whitespace_around_the_target_does_not_change_who_it_is_for() {
+        assert_eq!(
+            sentinel_action("  stop-pid: 4321 \n", 4321, |_| true),
+            SentinelAction::StopUs
+        );
     }
 }

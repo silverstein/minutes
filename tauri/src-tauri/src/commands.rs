@@ -3942,7 +3942,11 @@ pub fn request_stop(
                 recording.store(true, Ordering::Relaxed);
                 Ok(())
             } else {
-                minutes_core::pid::write_stop_sentinel().map_err(|e| e.to_string())?;
+                // Address it to the recording we actually looked up. An
+                // unaddressed sentinel is read by whoever gets there first,
+                // which is how this path terminated a CLI recording the app
+                // had never started (#804).
+                minutes_core::pid::write_stop_sentinel_for(pid).map_err(|e| e.to_string())?;
 
                 #[cfg(unix)]
                 {

@@ -963,6 +963,8 @@ struct DualCaptureWriters {
     voice: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     system: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     mixed_sample_count: u64,
+    voice_content: StemContent,
+    system_content: StemContent,
 }
 
 fn wav_spec_16k_mono() -> hound::WavSpec {
@@ -998,6 +1000,8 @@ impl DualCaptureWriters {
             voice: create_wav_writer(&stems.voice)?,
             system: create_wav_writer(&stems.system)?,
             mixed_sample_count: 0,
+            voice_content: StemContent::default(),
+            system_content: StemContent::default(),
         })
     }
 
@@ -1007,12 +1011,13 @@ impl DualCaptureWriters {
         system_samples: &[f32],
         live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
     ) -> Result<(), CaptureError> {
-        write_samples_to_wav(&mut self.voice, voice_samples)?;
-        write_samples_to_wav(&mut self.system, system_samples)?;
+        write_samples_to_wav(&mut self.voice, voice_samples, &mut self.voice_content)?;
+        write_samples_to_wav(&mut self.system, system_samples, &mut self.system_content)?;
 
         let mixed = mix_dual_source_slot(voice_samples, system_samples);
         update_audio_level_from_samples(&mixed);
-        write_samples_to_wav(&mut self.mixed, &mixed)?;
+        let mut mixed_content = StemContent::default();
+        write_samples_to_wav(&mut self.mixed, &mixed, &mut mixed_content)?;
         self.mixed_sample_count += mixed.len() as u64;
 
         if let Some(ref tx) = live_tx {
@@ -1024,12 +1029,16 @@ impl DualCaptureWriters {
         Ok(())
     }
 
-    fn finalize(self) -> Result<u64, CaptureError> {
+    fn finalize(self) -> Result<(u64, StemContentReport), CaptureError> {
+        let contents = [
+            ("voice", self.voice_content),
+            ("system", self.system_content),
+        ];
         finalize_wav_writer(self.voice)?;
         finalize_wav_writer(self.system)?;
         let mixed_sample_count = self.mixed_sample_count;
         finalize_wav_writer(self.mixed)?;
-        Ok(mixed_sample_count)
+        Ok((mixed_sample_count, contents))
     }
 }
 
@@ -1051,6 +1060,80 @@ fn update_audio_level_from_samples(samples: &[f32]) {
 }
 
 #[cfg(feature = "streaming")]
+/// Running tally of how much of a stem is actually audio.
+///
+/// Counted while the samples are already in hand. Reading the finished file
+/// back to measure this would be a second pass over hundreds of megabytes, and
+/// would happen after the point where the answer is useful.
+#[cfg(feature = "streaming")]
+#[derive(Default, Clone, Copy)]
+struct StemContent {
+    written: u64,
+    nonzero: u64,
+}
+
+/// Below this fraction of nonzero samples, a stem that contains *some* audio is
+/// treated as corrupted rather than quiet.
+///
+/// The zero-stuffing in #792 produced 7.9% to 10.7% nonzero. Real speech with
+/// long pauses sits far above this: the microphone stems in the same recordings
+/// measured 97% to 99.7%, because a live input delivers dither and noise rather
+/// than exact zeros even when nobody is talking.
+#[cfg(feature = "streaming")]
+const STEM_CORRUPTION_NONZERO_RATIO: f64 = 0.25;
+
+/// Per-source content tallies returned alongside the finalized sample
+/// count: the source name, and what was actually written to its stem.
+#[cfg(feature = "streaming")]
+type StemContentReport = [(&'static str, StemContent); 2];
+
+#[cfg(feature = "streaming")]
+impl StemContent {
+    fn record(&mut self, samples: &[i16]) {
+        self.written += samples.len() as u64;
+        self.nonzero += samples.iter().filter(|sample| **sample != 0).count() as u64;
+    }
+
+    fn nonzero_ratio(&self) -> Option<f64> {
+        if self.written == 0 {
+            return None;
+        }
+        Some(self.nonzero as f64 / self.written as f64)
+    }
+
+    /// Whether this stem looks like the #792 failure: real audio present, but
+    /// most of the samples are exact zeros.
+    ///
+    /// Deliberately excludes the all-zero case. A stem with no nonzero samples
+    /// at all is a source that never delivered, which is a different fault with
+    /// a different message, already reported by the slot gap counters.
+    fn looks_zero_stuffed(&self) -> bool {
+        match self.nonzero_ratio() {
+            Some(ratio) => self.nonzero > 0 && ratio < STEM_CORRUPTION_NONZERO_RATIO,
+            None => false,
+        }
+    }
+}
+
+#[cfg(feature = "streaming")]
+fn write_samples_to_wav(
+    writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
+    samples: &[f32],
+    content: &mut StemContent,
+) -> Result<(), CaptureError> {
+    let mut converted = Vec::with_capacity(samples.len());
+    for &sample in samples {
+        let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        converted.push(s16);
+        writer
+            .write_sample(s16)
+            .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV write: {}", e))))?;
+    }
+    content.record(&converted);
+    Ok(())
+}
+
+#[cfg(not(feature = "streaming"))]
 fn write_samples_to_wav(
     writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     samples: &[f32],
@@ -1531,7 +1614,27 @@ fn record_to_wav_dual_source(
         );
     }
 
-    let total_samples = writers.finalize()?;
+    let (total_samples, stem_contents) = writers.finalize()?;
+
+    // Say it here, while the audio still exists. The #792 reporter lost three
+    // of four meetings in a day to a stem that was ~10% nonzero: the recording
+    // finished, the file looked plausible, and the only signal was a decode
+    // budget error hours later in another subsystem, about audio that was by
+    // then unrecoverable.
+    for (source, content) in stem_contents {
+        if content.looks_zero_stuffed() {
+            let percent = content.nonzero_ratio().unwrap_or(0.0) * 100.0;
+            eprintln!(
+                "[minutes] WARNING: the {source} stem is {percent:.1}% audio and the rest exact silence. That is the signature of a corrupted capture, not a quiet room. Keep the recording and report it."
+            );
+            tracing::error!(
+                source,
+                nonzero_percent = percent,
+                written_samples = content.written,
+                "stem finalized mostly zero-valued, which indicates capture corruption"
+            );
+        }
+    }
     let duration_secs = total_samples as f64 / 16000.0;
     let total_slots = slot_stats.both + slot_stats.voice_only + slot_stats.system_only;
 
@@ -4022,5 +4125,83 @@ mod source_gap_tests {
             stats.record(true, false);
         }
         assert_eq!(stats.faults(), vec![("voice", 30.0), ("system", 30.0)]);
+    }
+}
+
+#[cfg(all(test, feature = "streaming"))]
+mod stem_content_tests {
+    use super::{StemContent, STEM_CORRUPTION_NONZERO_RATIO};
+
+    fn stem(pattern: &[i16], repeats: usize) -> StemContent {
+        let mut content = StemContent::default();
+        for _ in 0..repeats {
+            content.record(pattern);
+        }
+        content
+    }
+
+    #[test]
+    fn the_reported_zero_stuffing_is_flagged() {
+        // #792 measured 7.9% to 10.7% nonzero on the corrupted system stems.
+        // One real sample followed by nine zeros is 10%, the middle of that.
+        let mut pattern = [0i16; 10];
+        pattern[0] = 4_000;
+        let content = stem(&pattern, 160);
+
+        assert_eq!(content.nonzero_ratio(), Some(0.1));
+        assert!(
+            content.looks_zero_stuffed(),
+            "a stem that is 10% audio is the failure this exists to catch"
+        );
+    }
+
+    #[test]
+    fn a_quiet_but_healthy_microphone_is_not_flagged() {
+        // The microphone stems in the same recordings measured 97% to 99.7%
+        // nonzero even where nobody was speaking, because a live input carries
+        // dither rather than exact zeros. Flagging those would make this
+        // warning worthless within a week.
+        let mut pattern = [1i16; 1000];
+        pattern[0] = 0;
+        pattern[1] = 0;
+        pattern[2] = 0;
+        let content = stem(&pattern, 4);
+
+        assert_eq!(content.nonzero_ratio(), Some(0.997));
+        assert!(!content.looks_zero_stuffed());
+    }
+
+    #[test]
+    fn a_completely_silent_stem_is_left_to_the_gap_counters() {
+        // All zeros is a source that never delivered, which is a different
+        // fault with a different message. Reporting it here as well would give
+        // the user two explanations for one problem, one of them wrong.
+        let content = stem(&[0i16; 100], 10);
+
+        assert_eq!(content.nonzero_ratio(), Some(0.0));
+        assert!(!content.looks_zero_stuffed());
+    }
+
+    #[test]
+    fn an_empty_stem_has_no_opinion() {
+        let content = StemContent::default();
+        assert_eq!(content.nonzero_ratio(), None);
+        assert!(!content.looks_zero_stuffed());
+    }
+
+    #[test]
+    fn the_threshold_is_the_boundary_it_claims_to_be() {
+        // Just under the threshold is corruption, at it is not, so the
+        // constant means what the doc comment says rather than being
+        // approximately right.
+        let mut under = StemContent::default();
+        under.written = 1000;
+        under.nonzero = (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64 - 1;
+        assert!(under.looks_zero_stuffed());
+
+        let mut at = StemContent::default();
+        at.written = 1000;
+        at.nonzero = (STEM_CORRUPTION_NONZERO_RATIO * 1000.0) as u64;
+        assert!(!at.looks_zero_stuffed());
     }
 }

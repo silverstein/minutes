@@ -2242,12 +2242,17 @@ impl BoundRecoveryDirectory {
             ));
         }
         self.attest_location()?;
-        let (file, created) = match self
+        #[cfg(windows)]
+        let create_result =
+            crate::overlays::create_owner_only_lease_file(&self.chain.display_path.join(name));
+        #[cfg(not(windows))]
+        let create_result = self
             .chain
             .leaf()
             .open_with(name, &private_lease_file_open_options(true))
-        {
-            Ok(file) => (file.into_std(), true),
+            .map(|file| file.into_std());
+        let file = match create_result {
+            Ok(file) => file,
             Err(error)
                 if error.kind() == std::io::ErrorKind::AlreadyExists
                     || cfg!(windows) && error.raw_os_error() == Some(32) =>
@@ -2257,18 +2262,12 @@ impl BoundRecoveryDirectory {
                 // deliberately denies delete sharing. Re-open the existing
                 // read/write identity and prove it below; the retained
                 // no-delete-sharing peer prevents a name swap meanwhile.
-                (open_private_lease_file_at(self.chain.leaf(), name)?, false)
+                open_private_lease_file_at(self.chain.leaf(), name)?
             }
             Err(error) => return Err(error),
         };
         #[cfg(windows)]
-        if created {
-            crate::overlays::secure_private_file_handle(&file)?;
-        } else {
-            crate::overlays::attest_owner_only_file_handle(&file)?;
-        }
-        #[cfg(not(windows))]
-        let _ = created;
+        crate::overlays::attest_owner_only_file_handle(&file)?;
         let lexical = self.chain.leaf().symlink_metadata(name)?;
         if !cap_lexical_regular_file_is_safe(&lexical)
             || !cap_metadata_identity_matches_opened(&lexical, &file)

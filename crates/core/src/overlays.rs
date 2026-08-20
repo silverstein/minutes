@@ -277,7 +277,7 @@ mod windows_private {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
-        FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+        CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
         OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
@@ -611,6 +611,37 @@ mod windows_private {
         security.verify(&file)
     }
 
+    /// Create a new retained lease file with its final owner-only DACL attached
+    /// before the directory entry becomes visible.
+    ///
+    /// Applying the DACL after `CREATE_NEW` leaves a window where another
+    /// process can open the inherited descriptor and correctly reject it as
+    /// non-canonical (#800). The retained parent directory handle prevents the
+    /// ambient path from being renamed while this call resolves it.
+    pub(super) fn create_lease_file(path: &Path) -> io::Result<File> {
+        let wide = wide(path)?;
+        let mut security = OwnerOnlySecurity::new(false)?;
+        let attributes = security.attributes();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_handle(handle as _) };
+        validate_type(&file, false)?;
+        security.verify(&file)?;
+        Ok(file)
+    }
+
     pub(super) fn attest_handle(file: &File, directory: bool) -> io::Result<()> {
         validate_type(file, directory)?;
         OwnerOnlySecurity::new(directory)?.verify(file)
@@ -667,6 +698,11 @@ pub(crate) fn secure_private_file_handle(file: &File) -> std::io::Result<()> {
 #[cfg(windows)]
 pub(crate) fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
     windows_private::create_directory(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_owner_only_lease_file(path: &Path) -> std::io::Result<File> {
+    windows_private::create_lease_file(path)
 }
 
 #[cfg(windows)]

@@ -54,6 +54,74 @@ pub struct AudioChunk {
     pub source: SourceRole,
 }
 
+/// Samples in one `AudioChunk`: 100 ms of 16 kHz mono audio.
+///
+/// Every producer of `AudioChunk` must emit exactly this many samples per
+/// chunk. Dual-source capture derives its mixer slots from
+/// `AudioChunk::index` and pads each slot out to this length, so a producer
+/// that forwards whatever its driver callback happened to deliver both
+/// zero-stuffs its own stem and inflates the slot count for every other
+/// source sharing the mixer. Use `ChunkAccumulator` rather than chunking by
+/// hand. See issue #792.
+pub const CHUNK_SAMPLES: usize = 1600;
+
+/// Buffers a producer's resampled 16 kHz mono samples into fixed-size
+/// `CHUNK_SAMPLES` chunks carrying a monotonic per-producer index.
+///
+/// Driver callbacks deliver whatever their IO buffer size dictates — a Core
+/// Audio process tap on a 48 kHz output device hands over 512 frames per
+/// callback, which is 170.67 samples once decimated to 16 kHz. Emitting that
+/// directly as an `AudioChunk` is what produced the zero-stuffed system stems
+/// in #792: the dual-source mixer padded each 171-sample chunk out to a
+/// 1600-sample slot, leaving ~89% zeros, and advanced the slot counter ~9.4x
+/// faster than the microphone did.
+///
+/// The trailing partial chunk stays buffered rather than being emitted short.
+/// At most `CHUNK_SAMPLES - 1` samples (<100 ms) are dropped when a stream
+/// stops, matching what the microphone path has always done.
+pub struct ChunkAccumulator {
+    buf: Vec<f32>,
+    next_index: u64,
+}
+
+impl Default for ChunkAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChunkAccumulator {
+    pub fn new() -> Self {
+        Self {
+            // Two chunks of headroom: a callback can straddle a boundary and
+            // leave a remainder without forcing a realloc.
+            buf: Vec::with_capacity(CHUNK_SAMPLES * 2),
+            next_index: 0,
+        }
+    }
+
+    /// Append `samples`, invoking `emit(index, chunk)` once per complete
+    /// `CHUNK_SAMPLES`-sample chunk. Called from real-time audio callbacks,
+    /// so it allocates only the emitted chunks themselves.
+    pub fn push<F>(&mut self, samples: &[f32], mut emit: F)
+    where
+        F: FnMut(u64, Vec<f32>),
+    {
+        self.buf.extend_from_slice(samples);
+        while self.buf.len() >= CHUNK_SAMPLES {
+            let chunk: Vec<f32> = self.buf.drain(..CHUNK_SAMPLES).collect();
+            let index = self.next_index;
+            self.next_index += 1;
+            emit(index, chunk);
+        }
+    }
+
+    /// Samples held back awaiting a full chunk.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+}
+
 /// Shared audio level (0–100) for UI visualization.
 /// Separate from capture.rs AUDIO_LEVEL to allow both APIs to coexist.
 static STREAM_AUDIO_LEVEL: AtomicU32 = AtomicU32::new(0);
@@ -199,35 +267,26 @@ impl AudioStream {
 
         let stop = Arc::new(AtomicBool::new(false));
         let err_flag = Arc::new(AtomicBool::new(false));
-        let chunk_size: usize = 1600; // 100ms at 16kHz
 
-        let mut chunk_buf: Vec<f32> = Vec::with_capacity(chunk_size);
-        let mut chunk_counter: u64 = 0;
+        let mut accumulator = ChunkAccumulator::new();
 
         let (stream, device_name, _config) = crate::resample::build_resampled_input_stream(
             &device,
             &stop,
             &err_flag,
             move |resampled: &[f32]| {
-                for &sample in resampled {
-                    chunk_buf.push(sample);
-
-                    if chunk_buf.len() >= chunk_size {
-                        let samples: Vec<f32> = chunk_buf.drain(..chunk_size).collect();
-                        let rms = compute_rms(&samples);
-                        let level = (rms * 2000.0).min(100.0) as u32;
-                        STREAM_AUDIO_LEVEL.store(level, Ordering::Relaxed);
-                        let idx = chunk_counter;
-                        chunk_counter += 1;
-                        let _ = tx.try_send(AudioChunk {
-                            samples,
-                            rms,
-                            timestamp: Instant::now(),
-                            index: idx,
-                            source: SourceRole::Default,
-                        });
-                    }
-                }
+                accumulator.push(resampled, |index, samples| {
+                    let rms = compute_rms(&samples);
+                    let level = (rms * 2000.0).min(100.0) as u32;
+                    STREAM_AUDIO_LEVEL.store(level, Ordering::Relaxed);
+                    let _ = tx.try_send(AudioChunk {
+                        samples,
+                        rms,
+                        timestamp: Instant::now(),
+                        index,
+                        source: SourceRole::Default,
+                    });
+                });
             },
         )?;
 
@@ -357,6 +416,110 @@ impl Drop for MultiAudioStream {
         self.stop.store(true, Ordering::Relaxed);
         self.voice.stop();
         self.call.stop();
+    }
+}
+
+#[cfg(test)]
+mod chunk_accumulator_tests {
+    use super::*;
+
+    /// A Core Audio process tap on a 48 kHz output device delivers 512 frames
+    /// per IO callback; decimated to 16 kHz that is 512/3 samples. This is the
+    /// callback size measured on the recordings in #792.
+    const TAP_CALLBACK_SAMPLES: usize = 171;
+
+    fn drain(accumulator: &mut ChunkAccumulator, samples: &[f32]) -> Vec<(u64, Vec<f32>)> {
+        let mut out = Vec::new();
+        accumulator.push(samples, |index, chunk| out.push((index, chunk)));
+        out
+    }
+
+    #[test]
+    fn emits_nothing_until_a_full_chunk_is_available() {
+        let mut accumulator = ChunkAccumulator::new();
+        let almost_a_chunk = vec![0.5; CHUNK_SAMPLES - 1];
+        let emitted = drain(&mut accumulator, &almost_a_chunk);
+        assert!(emitted.is_empty());
+        assert_eq!(accumulator.buffered(), CHUNK_SAMPLES - 1);
+
+        let emitted = drain(&mut accumulator, &[0.5]);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].1.len(), CHUNK_SAMPLES);
+        assert_eq!(accumulator.buffered(), 0);
+    }
+
+    #[test]
+    fn every_emitted_chunk_is_exactly_chunk_samples_long() {
+        let mut accumulator = ChunkAccumulator::new();
+        for size in [1usize, 171, 512, 1600, 4801] {
+            let callback = vec![0.25; size];
+            for (_, chunk) in drain(&mut accumulator, &callback) {
+                assert_eq!(chunk.len(), CHUNK_SAMPLES);
+            }
+        }
+    }
+
+    #[test]
+    fn indices_are_monotonic_and_gapless() {
+        let mut accumulator = ChunkAccumulator::new();
+        let mut indices = Vec::new();
+        let callback = vec![0.1; TAP_CALLBACK_SAMPLES];
+        for _ in 0..100 {
+            for (index, _) in drain(&mut accumulator, &callback) {
+                indices.push(index);
+            }
+        }
+        assert!(!indices.is_empty());
+        assert_eq!(indices, (0..indices.len() as u64).collect::<Vec<_>>());
+    }
+
+    /// Regression for #792. Feeding tap-sized callbacks used to produce one
+    /// `AudioChunk` per callback, which the dual-source mixer then padded out
+    /// to a full slot — yielding a system stem that was ~89% zero samples and
+    /// a slot counter running ~9.4x too fast. Chunks must now be dense.
+    #[test]
+    fn tap_sized_callbacks_produce_dense_chunks_not_zero_stuffed_ones() {
+        let mut accumulator = ChunkAccumulator::new();
+        let mut chunks = Vec::new();
+        // ~10 seconds of tap callbacks carrying continuously nonzero audio.
+        let callback = vec![0.3; TAP_CALLBACK_SAMPLES];
+        for _ in 0..1000 {
+            for (_, chunk) in drain(&mut accumulator, &callback) {
+                chunks.push(chunk);
+            }
+        }
+
+        assert!(!chunks.is_empty());
+        let total: usize = chunks.iter().map(Vec::len).sum();
+        let nonzero: usize = chunks
+            .iter()
+            .flatten()
+            .filter(|sample| **sample != 0.0)
+            .count();
+        assert_eq!(
+            nonzero, total,
+            "every sample from a continuously-nonzero source must survive chunking"
+        );
+
+        // No slot inflation: emitted samples must account for the input,
+        // minus at most one partial chunk still buffered.
+        let pushed = 1000 * TAP_CALLBACK_SAMPLES;
+        assert_eq!(total + accumulator.buffered(), pushed);
+    }
+
+    /// A callback larger than one chunk must be split, not truncated. The
+    /// mixer's `padded_slot` silently drops anything past a slot boundary, so
+    /// an oversized chunk would lose audio outright.
+    #[test]
+    fn oversized_callbacks_are_split_rather_than_truncated() {
+        let mut accumulator = ChunkAccumulator::new();
+        let pushed = CHUNK_SAMPLES * 3 + 7;
+        let oversized = vec![0.75; pushed];
+        let emitted = drain(&mut accumulator, &oversized);
+        assert_eq!(emitted.len(), 3);
+        let total: usize = emitted.iter().map(|(_, chunk)| chunk.len()).sum();
+        assert_eq!(total + accumulator.buffered(), pushed);
+        assert_eq!(accumulator.buffered(), 7);
     }
 }
 

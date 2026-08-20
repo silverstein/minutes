@@ -498,10 +498,10 @@ mod windows_private {
                 } else if acl_info_unreadable {
                     "the ACL size information could not be read"
                 } else {
-                    "the DACL has more than one entry"
+                    "the DACL entry count is not one"
                 };
                 return Err(io::Error::other(format!(
-                    "private correction store DACL is not owner-only: {reason}                      (control=0x{control:04x}, aces={})",
+                    "private correction store DACL is not owner-only: {reason} (control=0x{control:04x}, aces={})",
                     info.AceCount
                 )));
             }

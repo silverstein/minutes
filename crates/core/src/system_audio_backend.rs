@@ -445,7 +445,7 @@ struct CoreAudioTapCallbackContext {
     interleaved: bool,
     resample_pos: f64,
     input_samples: Vec<f32>,
-    chunk_index: u64,
+    accumulator: crate::streaming::ChunkAccumulator,
 }
 
 #[cfg(all(target_os = "macos", feature = "streaming"))]
@@ -463,7 +463,7 @@ impl CoreAudioTapCallbackContext {
             interleaved: asbd.is_interleaved(),
             resample_pos: 0.0,
             input_samples: Vec::new(),
-            chunk_index: 0,
+            accumulator: crate::streaming::ChunkAccumulator::new(),
         }
     }
 
@@ -494,20 +494,33 @@ impl CoreAudioTapCallbackContext {
             return;
         }
 
-        let rms = (resampled
-            .iter()
-            .map(|sample| (*sample as f64) * (*sample as f64))
-            .sum::<f64>()
-            / resampled.len() as f64)
-            .sqrt() as f32;
-        let index = self.chunk_index;
-        self.chunk_index += 1;
-        let _ = self.sink.try_send(AudioChunk {
-            samples: resampled,
-            rms,
-            timestamp: std::time::Instant::now(),
-            index,
-            source: SourceRole::Call,
+        // Buffer to whole `CHUNK_SAMPLES` chunks instead of sending one chunk
+        // per IO callback. A tap on a 48 kHz output device delivers 512 frames
+        // per callback, which decimates to ~171 samples — about a ninth of a slot.
+        // Emitting those directly made the dual-source mixer zero-pad every
+        // system slot to 1600 samples (~89% zeros) and advance the slot
+        // counter ~9.4x faster than the microphone, inflating the declared
+        // duration of every stem in the recording (#792).
+        //
+        // Split the borrow so the emit closure can use `sink` while
+        // `accumulator` is mutably borrowed by `push`.
+        let Self {
+            sink, accumulator, ..
+        } = self;
+        accumulator.push(&resampled, |index, samples| {
+            let rms = (samples
+                .iter()
+                .map(|sample| (*sample as f64) * (*sample as f64))
+                .sum::<f64>()
+                / samples.len() as f64)
+                .sqrt() as f32;
+            let _ = sink.try_send(AudioChunk {
+                samples,
+                rms,
+                timestamp: std::time::Instant::now(),
+                index,
+                source: SourceRole::Call,
+            });
         });
     }
 }

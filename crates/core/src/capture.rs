@@ -950,8 +950,12 @@ fn try_reconnect(
     }
 }
 
+/// One mixer slot is one `AudioChunk` from each source. Kept equal to
+/// `streaming::CHUNK_SAMPLES` by construction: `padded_slot` pads every slot
+/// to this length, so a producer emitting a different chunk size writes a
+/// zero-stuffed stem (#792).
 #[cfg(feature = "streaming")]
-const DUAL_SOURCE_SLOT_SAMPLES: usize = 1600;
+const DUAL_SOURCE_SLOT_SAMPLES: usize = crate::streaming::CHUNK_SAMPLES;
 
 #[cfg(feature = "streaming")]
 struct DualCaptureWriters {

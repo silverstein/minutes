@@ -75,7 +75,7 @@ const QMD_POLICY_LOCK: &str = "qmd-policy-mirror.lock";
 const QMD_OWNED_TARGET: &str = "qmd-owned-target-v1.json";
 const QMD_RETIREMENT_PENDING: &str = "qmd-retirement-pending-v1";
 pub const AGENT_TRUST_READINESS_REMEDIATION: &str =
-    "Run `minutes qmd cleanup`, repair or reinstall qmd if requested, then restart Minutes.";
+    "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed. Make sure `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes.";
 /// Privacy-safe reason returned when a caller requests persistent QMD state.
 pub const QMD_PERSISTENCE_DISABLED_REASON: &str = "Persistent QMD collections are disabled because QMD's global index cannot guarantee revocation after an external meeting-policy change";
 
@@ -3455,6 +3455,20 @@ struct QmdOperationRunner<'a, R: QmdRunner> {
     runner: &'a R,
     deadline: Instant,
     commands_started: std::cell::Cell<usize>,
+    /// Set the first time a `qmd` command comes back successful, meaning the
+    /// registry answered us at least once.
+    ///
+    /// `run` flattens errors to strings for callers, so without this the
+    /// difference between "we could not inspect a registry that answered us"
+    /// and "there is no registry here to inspect" is lost, and that difference
+    /// is the whole of #788.
+    ///
+    /// This tracks the positive fact rather than the negative one on purpose.
+    /// The retraction runs a second audit after its removals and can fail with
+    /// an I/O error at any point, so "the last command failed to spawn" does
+    /// not mean qmd was never there. Once it has answered, every later failure
+    /// keeps failing closed.
+    registry_answered: std::cell::Cell<bool>,
 }
 
 impl<'a, R: QmdRunner> QmdOperationRunner<'a, R> {
@@ -3467,6 +3481,7 @@ impl<'a, R: QmdRunner> QmdOperationRunner<'a, R> {
             runner,
             deadline: Instant::now() + timeout,
             commands_started: std::cell::Cell::new(0),
+            registry_answered: std::cell::Cell::new(false),
         }
     }
 
@@ -3479,9 +3494,16 @@ impl<'a, R: QmdRunner> QmdOperationRunner<'a, R> {
             return Err("QMD registry command budget exceeded".into());
         }
         self.commands_started.set(started + 1);
-        self.runner
-            .run_until(args, self.deadline)
-            .map_err(|error| error.to_string())
+        let result = self.runner.run_until(args, self.deadline);
+        if result.as_ref().is_ok_and(|command| command.success) {
+            self.registry_answered.set(true);
+        }
+        result.map_err(|error| error.to_string())
+    }
+
+    /// Whether a command failed specifically because `qmd` is not installed.
+    fn registry_never_answered(&self) -> bool {
+        !self.registry_answered.get()
     }
 }
 
@@ -3707,6 +3729,10 @@ fn qmd_registry_audit<R: QmdRunner>(
 ) -> Result<QmdRegistryAudit, String> {
     let list = runner.run(&["collection", "list"])?;
     if !list.success {
+        // qmd ran but declined to enumerate. A broken install fails this way,
+        // a native-binding load failure exits non-zero, and it leaves us as
+        // uninformed as no qmd at all. Nothing to set here: an unsuccessful
+        // command never marks the registry as having answered.
         return Err("QMD registry could not be listed".into());
     }
     let all = parse_qmd_collection_names(&list.stdout)?;
@@ -4970,6 +4996,56 @@ fn purge_qmd_policy_plaintext_at_with_hooks_and_claims(
     qmd_sync_directory(parent).map_err(|_| "QMD mirror cleanup could not be synced".to_string())
 }
 
+/// Outcome of a retraction attempt, keeping the reason it failed.
+struct QmdRetractionOutcome {
+    result: Result<(), String>,
+    /// No `qmd` command ever came back successful, so the registry told us
+    /// nothing at all: either it is not installed, or it is installed and will
+    /// not answer. Nothing was inspectable, as opposed to inspected and found
+    /// wanting.
+    registry_never_answered: bool,
+    /// Whether this machine showed any sign Minutes had registered a
+    /// collection, read before the retraction below started deleting the
+    /// things that constitute the evidence.
+    registration_evidence: bool,
+}
+
+fn disable_qmd_persistence_reporting_at<R: QmdRunner>(
+    config: &Config,
+    runner: &R,
+    mirror_path: &Path,
+    lock_directory: &Path,
+    configured_target: Option<&str>,
+) -> QmdRetractionOutcome {
+    let operation = QmdOperationRunner::new(runner);
+    let lock = acquire_policy_lock_at_until(lock_directory, QMD_POLICY_LOCK, operation.deadline);
+    let Ok(_lock) = lock else {
+        return QmdRetractionOutcome {
+            result: Err("QMD policy lock failed".to_string()),
+            registry_never_answered: false,
+            registration_evidence: true,
+        };
+    };
+    // Read the evidence under the policy lock, before the retraction below
+    // starts deleting the mirror directories that constitute it. Reading it
+    // outside the lock would be reading it against a machine another retraction
+    // may be halfway through changing.
+    let registration_evidence = qmd_registration_evidence_at(config, mirror_path, lock_directory);
+    let result = disable_qmd_persistence_locked(
+        config,
+        &operation,
+        mirror_path,
+        lock_directory,
+        configured_target,
+    );
+    let registry_never_answered = operation.registry_never_answered();
+    QmdRetractionOutcome {
+        result,
+        registry_never_answered,
+        registration_evidence,
+    }
+}
+
 fn disable_qmd_persistence_with_at<R: QmdRunner>(
     config: &Config,
     runner: &R,
@@ -5052,6 +5128,48 @@ fn disable_unconfigured_qmd(config: &Config) -> Result<(), String> {
 /// Registry inspection is mandatory even without a marker or mirror so legacy
 /// raw-output aliases cannot remain queryable. If QMD cannot be inspected, the
 /// plaintext cleanup is still attempted but the attestation fails closed.
+/// Whether the retraction succeeded, and if not, whether the only obstacle was
+/// that `qmd` is not installed.
+pub struct QmdRetractionStatus {
+    pub confirmed: bool,
+    /// Nothing could be inspected because there is no `qmd` on this machine.
+    /// Distinct from an inspection that ran and could not confirm.
+    pub registry_never_answered: bool,
+    /// Whether this machine showed any sign Minutes had registered a
+    /// collection. Callers deciding that a cleanup is confirmed must require
+    /// this to be false whenever they are relying on
+    /// [`Self::registry_never_answered`], or they will report success on a
+    /// machine that agent readiness is still blocking.
+    pub registration_evidence: bool,
+    pub error: Option<String>,
+}
+
+/// Retract persistence and report why it failed, so a caller can tell "qmd is
+/// installed and something is wrong" from "there is no qmd here" (#788).
+pub fn ensure_qmd_persistence_disabled_status(config: &Config) -> QmdRetractionStatus {
+    let outcome = disable_qmd_persistence_reporting_at(
+        config,
+        &SystemQmdRunner,
+        &qmd_policy_mirror_path(),
+        &Config::minutes_dir(),
+        config.search.qmd_collection.as_deref(),
+    );
+    match outcome.result {
+        Ok(()) => QmdRetractionStatus {
+            confirmed: true,
+            registry_never_answered: outcome.registry_never_answered,
+            registration_evidence: outcome.registration_evidence,
+            error: None,
+        },
+        Err(error) => QmdRetractionStatus {
+            confirmed: false,
+            registry_never_answered: outcome.registry_never_answered,
+            registration_evidence: outcome.registration_evidence,
+            error: Some(error),
+        },
+    }
+}
+
 pub fn ensure_qmd_persistence_disabled(config: &Config) -> Result<(), String> {
     disable_qmd_persistence_with_at(
         config,
@@ -5062,24 +5180,136 @@ pub fn ensure_qmd_persistence_disabled(config: &Config) -> Result<(), String> {
     )
 }
 
+/// Path of the QMD ownership marker, for tests that need to plant one from
+/// outside this crate.
+#[doc(hidden)]
+pub fn qmd_owned_target_path_for_tests() -> PathBuf {
+    Config::minutes_dir().join(QMD_OWNED_TARGET)
+}
+
+/// How many directory entries the residue scan will read before it gives up
+/// and answers "assume there is residue".
+///
+/// Deliberately far above any plausible `~/.minutes`, because the cost of
+/// hitting it is a machine that stays blocked, and the cost of scanning past a
+/// real one would be a machine that reports clean without having looked.
+const MAX_QMD_EVIDENCE_ENTRIES: usize = 8192;
+
+/// Whether a mirror transaction directory is sitting next to the live mirror.
+///
+/// A run that died mid-retirement leaves its staging, previous, or retired
+/// directory behind, holding the same plaintext the live mirror does, so it
+/// means the same thing about whether a registration ever happened.
+///
+/// Every uncertain answer here is "yes". A directory we cannot open, an entry
+/// we cannot read, or more entries than we are willing to walk all resolve to
+/// residue, because this feeds a gate that lets agent tools run and the only
+/// safe direction to be wrong in is towards blocking.
+fn qmd_mirror_residue_evidence(mirror_path: &Path) -> bool {
+    qmd_mirror_residue_evidence_within(mirror_path, MAX_QMD_EVIDENCE_ENTRIES)
+}
+
+/// [`qmd_mirror_residue_evidence`] with the walk bound supplied, so the
+/// give-up rule can be tested without materializing the real bound.
+fn qmd_mirror_residue_evidence_within(mirror_path: &Path, limit: usize) -> bool {
+    let Some(parent) = mirror_path.parent() else {
+        return true;
+    };
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    let prefixes = [
+        format!(".{QMD_MIRROR_DIR}.staging-"),
+        format!(".{QMD_MIRROR_DIR}.previous-"),
+        format!(".{QMD_MIRROR_DIR}.retired-"),
+    ];
+    for (inspected, entry) in entries.enumerate() {
+        if inspected >= limit {
+            return true;
+        }
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether anything on this machine suggests Minutes ever registered a QMD
+/// collection. All three signals are Minutes-owned and readable without QMD.
+///
+/// This exists because the retirement audit fails closed on *any* QMD problem:
+/// absent, broken native bindings, or the non-zero Apple Silicon cleanup exits
+/// reported upstream. That is correct when Minutes might have left a collection
+/// behind, and indefensible when it provably did not, because the remediation
+/// we print runs the same audit and fails the same way, leaving no route out
+/// at all (#788).
+///
+/// A marker, a mirror, or a QMD reference in config each mean "we may have
+/// registered something, and only QMD can say whether it is still there". None
+/// of them present means there is nothing to revoke, whatever state QMD is in.
+fn qmd_registration_evidence_at(
+    config: &Config,
+    mirror_path: &Path,
+    lock_directory: &Path,
+) -> bool {
+    let marker_present = !matches!(
+        fs::symlink_metadata(lock_directory.join(QMD_OWNED_TARGET)),
+        Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    let mirror_present = !matches!(
+        fs::symlink_metadata(mirror_path),
+        Err(ref error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    let residue_present = qmd_mirror_residue_evidence(mirror_path);
+    let configured =
+        config.search.engine.eq_ignore_ascii_case("qmd") || config.search.qmd_collection.is_some();
+    marker_present || mirror_present || residue_present || configured
+}
+
 fn evaluate_agent_trust_readiness_with_at<R: QmdRunner>(
     config: &Config,
     runner: &R,
     mirror_path: &Path,
     lock_directory: &Path,
 ) -> AgentTrustReadiness {
-    match disable_qmd_persistence_with_at(
+    let outcome = disable_qmd_persistence_reporting_at(
         config,
         runner,
         mirror_path,
         lock_directory,
         config.search.qmd_collection.as_deref(),
-    ) {
+    );
+    match outcome.result {
         Ok(()) => match clear_qmd_retirement_pending(lock_directory) {
             Ok(()) => AgentTrustReadiness::ready(QmdRetirementReadiness::ReadyClean),
             Err(_) => AgentTrustReadiness::blocked(),
         },
+        Err(_) if outcome.registry_never_answered && !outcome.registration_evidence => {
+            // Two things are true at once here: the registry told us nothing
+            // (no qmd, or a qmd that will not answer), and nothing on this
+            // machine says Minutes ever registered a collection. There is no
+            // copy to revoke and no way to look for one, so there is nothing
+            // here for the block to protect (#788).
+            //
+            // The pending marker is kept deliberately. Readiness is
+            // re-evaluated on every agent call, so if qmd later appears or
+            // starts answering, the audit runs again and can still block. This
+            // defers an unanswerable question rather than answering it.
+            let _ = mark_qmd_retirement_pending(lock_directory);
+            AgentTrustReadiness::ready(QmdRetirementReadiness::ReadyClean)
+        }
         Err(_) => {
+            // Either the registry answered and we still could not confirm the
+            // collection is gone, or this machine shows a registration Minutes
+            // made. Both are live questions about a copy that may exist, and
+            // both still fail closed.
             let _ = mark_qmd_retirement_pending(lock_directory);
             AgentTrustReadiness::blocked()
         }
@@ -12839,7 +13069,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_startup_blocks_missing_and_transient_qmd_spawn_failures_without_local_evidence() {
+    fn agent_startup_blocks_unusable_qmd_only_when_a_registration_may_exist() {
+        // This case used to block on any spawn failure, including on machines
+        // that had never registered anything. That was deliberate, on the
+        // reasoning that Minutes cannot prove a negative from its own state.
+        //
+        // It was changed after #788, where a user who never opted into QMD was
+        // locked out of every content-bearing tool with no route back: the
+        // remediation Minutes prints runs this same audit and fails the same
+        // way. The audit also fails closed on a QMD that is present but broken,
+        // so this was reachable well beyond "never installed".
+        //
+        // The refined rule keeps the property the old one was protecting. A
+        // registration Minutes made leaves a marker, a mirror, or a config
+        // reference behind, and any of those still blocks. What no longer
+        // blocks is a machine showing none of them, where there is no copy to
+        // revoke and so nothing for the block to protect.
         for kind in [
             std::io::ErrorKind::NotFound,
             std::io::ErrorKind::Interrupted,
@@ -12851,11 +13096,208 @@ mod tests {
             let readiness =
                 evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
 
-            assert!(!readiness.ready, "spawn kind {kind:?} must block");
-            assert_eq!(readiness.qmd_retirement, QmdRetirementReadiness::Blocked);
-            assert!(readiness.remediation.is_some());
+            assert!(
+                readiness.ready,
+                "spawn kind {kind:?} must not block a machine with no registration evidence"
+            );
+            // Still pending, so a later working QMD re-audits rather than
+            // inheriting this pass.
             assert!(state.path().join(QMD_RETIREMENT_PENDING).exists());
         }
+
+        // The same failures with an ownership marker present must still block:
+        // that marker is Minutes saying it registered something.
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let (_meetings, state, _mirror_parent, config, mirror) = qmd_fixture();
+            save_qmd_owned_target(state.path(), "minutes").unwrap();
+            let runner = FakeQmdRunner::default();
+            runner.state.lock().unwrap().list_io_error = Some(kind);
+
+            let readiness =
+                evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
+
+            assert!(
+                !readiness.ready,
+                "spawn kind {kind:?} must block when a registration marker exists"
+            );
+            assert_eq!(readiness.qmd_retirement, QmdRetirementReadiness::Blocked);
+            assert!(readiness.remediation.is_some());
+        }
+    }
+
+    /// Answers one `collection list` and then behaves as though the binary is
+    /// gone, the way a qmd removed or replaced mid-run would.
+    struct VanishingQmdRunner {
+        lists: std::sync::atomic::AtomicUsize,
+    }
+
+    impl QmdRunner for VanishingQmdRunner {
+        fn run_until(
+            &self,
+            args: &[&str],
+            _deadline: Instant,
+        ) -> Result<QmdCommandResult, QmdRunError> {
+            if args == ["collection", "list"]
+                && self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            {
+                return Ok(QmdCommandResult {
+                    success: true,
+                    stdout: "Collections (0):\n".into(),
+                });
+            }
+            Err(QmdRunError::Io {
+                kind: std::io::ErrorKind::NotFound,
+                message: "qmd vanished mid-run".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn residue_evidence_answers_yes_when_it_cannot_finish_looking() {
+        // Every uncertain answer from the residue scan has to be "there is
+        // residue". The scan used to read a bounded prefix of the directory and
+        // treat an unreadable directory as clean, so on a machine with enough
+        // entries the answer depended on readdir order, and on one we could not
+        // open it was simply wrong in the unsafe direction.
+        let parent = TempDir::new().unwrap();
+        let mirror = parent.path().join("mirror");
+        assert!(
+            !qmd_mirror_residue_evidence(&mirror),
+            "an empty parent has no residue"
+        );
+
+        fs::create_dir(parent.path().join(format!(".{QMD_MIRROR_DIR}.retired-old"))).unwrap();
+        assert!(
+            qmd_mirror_residue_evidence(&mirror),
+            "a retired mirror directory is residue"
+        );
+
+        // More entries than the scan is willing to walk, and none of them
+        // residue. Answering "no" here would be answering a question we
+        // stopped reading before the end of, so it has to answer "yes".
+        //
+        // Asserted through the injected bound rather than by materializing the
+        // real one. A test that writes 8193 files to prove this puts that load
+        // on every other test running beside it, and asserting it on a sampled
+        // prefix instead would make the result depend on readdir order, which
+        // is the defect being tested for.
+        let crowded = TempDir::new().unwrap();
+        let crowded_mirror = crowded.path().join("mirror");
+        for index in 0..4 {
+            fs::write(crowded.path().join(format!("unrelated-{index}")), b"").unwrap();
+        }
+        assert!(
+            qmd_mirror_residue_evidence_within(&crowded_mirror, 3),
+            "a scan that gave up early must not report clean"
+        );
+        assert!(
+            !qmd_mirror_residue_evidence_within(&crowded_mirror, 4),
+            "a scan that read every entry and found nothing reports clean"
+        );
+
+        // A missing parent is the one honest "no": there is nowhere for a
+        // mirror to have been.
+        let absent = TempDir::new().unwrap();
+        let absent_mirror = absent.path().join("gone").join("mirror");
+        assert!(!qmd_mirror_residue_evidence(&absent_mirror));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_mirror_parent_counts_as_residue() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = TempDir::new().unwrap();
+        let sealed = parent.path().join("sealed");
+        fs::create_dir(&sealed).unwrap();
+        let mirror = sealed.join("mirror");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        let evidence = qmd_mirror_residue_evidence(&mirror);
+        // Restore before asserting so a failure cannot leave the tree sealed.
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            evidence,
+            "a directory we cannot open must not be reported clean"
+        );
+    }
+
+    #[test]
+    fn a_retraction_reports_the_evidence_it_saw_before_it_started() {
+        // The CLI decides whether to tell the user their cleanup is confirmed,
+        // and it must decide from the same snapshot readiness uses. When it
+        // computed its own weaker version, `minutes qmd cleanup` reported
+        // success on a machine carrying an ownership marker while readiness
+        // went on blocking on that same marker.
+        let (_meetings, state, _mirror_parent, config, mirror) = qmd_fixture();
+        save_qmd_owned_target(state.path(), "minutes").unwrap();
+        let runner = FakeQmdRunner::default();
+        runner.state.lock().unwrap().list_io_error = Some(std::io::ErrorKind::NotFound);
+
+        let outcome = disable_qmd_persistence_reporting_at(
+            &config,
+            &runner,
+            &mirror,
+            state.path(),
+            config.search.qmd_collection.as_deref(),
+        );
+
+        assert!(outcome.result.is_err());
+        assert!(outcome.registry_never_answered);
+        assert!(
+            outcome.registration_evidence,
+            "the marker present at entry must be reported, even though the retraction ran after it"
+        );
+    }
+
+    #[test]
+    fn a_registry_that_answered_once_never_counts_as_unreachable() {
+        // The #788 pass requires that qmd told us nothing at all. Deciding that
+        // from the *last* failure instead of the whole run is wrong: the
+        // retraction re-audits after its removals, so a registry that listed
+        // fine and then failed would look identical to one that was never
+        // there. On a machine whose local marker had been deleted, that would
+        // report ready while a real Minutes-owned collection still held the
+        // meeting text.
+        let (_meetings, state, _mirror_parent, config, mirror) = qmd_fixture();
+        let runner = VanishingQmdRunner {
+            lists: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let readiness =
+            evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
+
+        assert!(
+            !readiness.ready,
+            "a registry that answered once must keep failing closed"
+        );
+        assert_eq!(readiness.qmd_retirement, QmdRetirementReadiness::Blocked);
+    }
+
+    #[test]
+    fn a_mirror_or_configured_collection_also_counts_as_registration_evidence() {
+        // The marker is not the only trace. A leftover plaintext mirror, or a
+        // config that still names a QMD collection, each mean a registration
+        // may exist, and each must keep failing closed when QMD cannot answer.
+        let (_meetings, state, _mirror_parent, config, mirror) = qmd_fixture();
+        fs::create_dir_all(&mirror).unwrap();
+        let runner = FakeQmdRunner::default();
+        runner.state.lock().unwrap().list_io_error = Some(std::io::ErrorKind::NotFound);
+        let readiness =
+            evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
+        assert!(!readiness.ready, "a leftover mirror must still block");
+
+        let (_meetings2, state2, _parent2, mut config2, mirror2) = qmd_fixture();
+        config2.search.qmd_collection = Some("minutes".to_string());
+        let runner2 = FakeQmdRunner::default();
+        runner2.state.lock().unwrap().list_io_error = Some(std::io::ErrorKind::NotFound);
+        let readiness2 =
+            evaluate_agent_trust_readiness_with_at(&config2, &runner2, &mirror2, state2.path());
+        assert!(
+            !readiness2.ready,
+            "a configured QMD collection must still block"
+        );
     }
 
     #[test]
@@ -12865,7 +13307,13 @@ mod tests {
         let first = evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
         assert!(first.ready);
 
-        runner.state.lock().unwrap().list_io_error = Some(std::io::ErrorKind::NotFound);
+        // Use a registry that answers with garbage rather than one that will
+        // not spawn. Both used to block, but an unreachable registry on a
+        // machine with no registration evidence is now allowed through (#788),
+        // which would make this test pass for the wrong reason. What is under
+        // test here is that readiness is recomputed, not the retirement policy.
+        runner.state.lock().unwrap().list_output_override =
+            Some("unparseable QMD registry output".into());
         let second =
             evaluate_agent_trust_readiness_with_at(&config, &runner, &mirror, state.path());
 
@@ -18312,5 +18760,34 @@ mod tests {
         assert!(log.contains("Q2 Pricing Call"));
         assert!(log.contains("Facts written: 3, skipped: 1"));
         assert_eq!(log.matches("Q2 Pricing Call").count(), 2); // two appends
+    }
+
+    /// Stands in for a machine where `qmd` was never installed.
+    struct AbsentQmdRunner;
+
+    impl QmdRunner for AbsentQmdRunner {
+        fn run_until(
+            &self,
+            _args: &[&str],
+            _deadline: Instant,
+        ) -> Result<QmdCommandResult, QmdRunError> {
+            Err(QmdRunError::Io {
+                kind: std::io::ErrorKind::NotFound,
+                message: "no such file or directory".into(),
+            })
+        }
+    }
+
+    /// Installed, but cannot be inspected.
+    struct BrokenQmdRunner;
+
+    impl QmdRunner for BrokenQmdRunner {
+        fn run_until(
+            &self,
+            _args: &[&str],
+            _deadline: Instant,
+        ) -> Result<QmdCommandResult, QmdRunError> {
+            Err(QmdRunError::Other("qmd exploded".into()))
+        }
     }
 }

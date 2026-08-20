@@ -249,6 +249,15 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
 
+      - name: Unit tests (streaming feature)
+        # The step above runs with streaming off, so every #[cfg(test)] module
+        # inside a streaming-gated file was compiled by "Build core with
+        # streaming only" and then never executed. That covered the dual-source
+        # chunking invariants in streaming.rs and the mic-mute tests. Run the
+        # same suite once more with the feature on.
+        run: cargo test -p minutes-core --no-default-features --features streaming --lib -- --test-threads=1 --nocapture
+        timeout-minutes: 15
+
       - name: Repeat the racing audit test to catch #800
         # Diagnostic, not for merge. #800 is intermittent: it failed on four of
         # eight concurrent processes in one run and passed entirely in the

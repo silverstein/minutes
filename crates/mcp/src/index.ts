@@ -3435,7 +3435,7 @@ export async function requireAgentTrustReadiness(
   if (!readiness.ready) {
     throw new Error(
       readiness.remediation ||
-        "Run `minutes qmd cleanup`, repair or reinstall qmd if requested, then restart Minutes."
+        "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed. Make sure `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes."
     );
   }
   return readiness;

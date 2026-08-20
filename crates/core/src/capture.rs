@@ -1088,9 +1088,16 @@ type StemContentReport = [(&'static str, StemContent); 2];
 
 #[cfg(feature = "streaming")]
 impl StemContent {
+    fn record_sample(&mut self, sample: i16) {
+        self.written += 1;
+        self.nonzero += u64::from(sample != 0);
+    }
+
+    #[cfg(test)]
     fn record(&mut self, samples: &[i16]) {
-        self.written += samples.len() as u64;
-        self.nonzero += samples.iter().filter(|sample| **sample != 0).count() as u64;
+        for &sample in samples {
+            self.record_sample(sample);
+        }
     }
 
     fn nonzero_ratio(&self) -> Option<f64> {
@@ -1120,15 +1127,13 @@ fn write_samples_to_wav(
     samples: &[f32],
     content: &mut StemContent,
 ) -> Result<(), CaptureError> {
-    let mut converted = Vec::with_capacity(samples.len());
     for &sample in samples {
         let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-        converted.push(s16);
         writer
             .write_sample(s16)
             .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV write: {}", e))))?;
+        content.record_sample(s16);
     }
-    content.record(&converted);
     Ok(())
 }
 

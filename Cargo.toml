@@ -113,7 +113,7 @@ pyannote-rs = "0.3.4"
 # has a normalisation bug so we bypass get_segments for the segmentation step)
 ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
 # Runtime loader for the isolated sherpa plugin (#685).
-libloading = "0.8"
+libloading = "0.9"
 ndarray = "0.16"
 
 # SQLite (relationship graph index)

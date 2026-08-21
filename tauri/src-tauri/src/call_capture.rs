@@ -645,7 +645,7 @@ fn find_native_call_helper_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "macos")]
-    use super::native_call_helper_path;
+    use super::find_native_call_helper_binary;
     use super::{
         finish_microphone_startup_handshake, native_call_helper_args, parse_macos_major_version,
         resolve_microphone_selection, MicrophoneSelection, MicrophoneStartupStatus,
@@ -660,7 +660,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_helper_decodes_hfp_pcm_container_layouts() {
-        let helper = native_call_helper_path().expect("native call helper should be built");
+        let helper = find_native_call_helper_binary().expect("native call helper should be built");
         let output = std::process::Command::new(helper)
             .arg("--self-test-pcm-decoder")
             .output()

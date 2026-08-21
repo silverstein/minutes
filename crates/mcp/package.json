@@ -50,7 +50,7 @@
     "zod": "^3.25 || ^4.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.17",
+    "@types/node": "^26.2.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0",
     "vite": "^7.3.2",

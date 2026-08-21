@@ -531,6 +531,18 @@ pub fn start_native_call_capture(
                         let _ = microphone_status_tx
                             .send(MicrophoneStartupStatus::Fallback(name.to_string()));
                     }
+                    Some("audio_format") => {
+                        tracing::info!(
+                            audio_format = %value,
+                            "native call source audio format negotiated"
+                        );
+                    }
+                    Some("audio_format_unsupported") => {
+                        tracing::warn!(
+                            audio_format = %value,
+                            "native call source PCM layout is unsupported; stem buffer withheld"
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -632,6 +644,8 @@ fn find_native_call_helper_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::native_call_helper_path;
     use super::{
         finish_microphone_startup_handshake, native_call_helper_args, parse_macos_major_version,
         resolve_microphone_selection, MicrophoneSelection, MicrophoneStartupStatus,
@@ -642,6 +656,27 @@ mod tests {
         sync::{mpsc, Arc, Mutex},
         time::Duration,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_helper_decodes_hfp_pcm_container_layouts() {
+        let helper = native_call_helper_path().expect("native call helper should be built");
+        let output = std::process::Command::new(helper)
+            .arg("--self-test-pcm-decoder")
+            .output()
+            .expect("PCM decoder self-test should launch");
+
+        assert!(
+            output.status.success(),
+            "PCM decoder self-test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(r#""event":"pcm_decoder_self_test""#),
+            "PCM decoder self-test did not emit its success receipt: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 
     #[test]
     fn parses_major_version_from_product_version() {

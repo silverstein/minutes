@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import CoreMedia
 import Dispatch
 import Foundation
@@ -12,6 +13,280 @@ private func availableMicrophones() -> [AVCaptureDevice] {
     ).devices
 }
 
+private func emitJSON(_ payload: [String: Any]) {
+    if let data = try? JSONSerialization.data(withJSONObject: payload),
+       let json = String(data: data, encoding: .utf8) {
+        print(json)
+        fflush(stdout)
+    }
+}
+
+private func formatIDString(_ formatID: AudioFormatID) -> String {
+    let bytes: [UInt8] = [
+        UInt8((formatID >> 24) & 0xff),
+        UInt8((formatID >> 16) & 0xff),
+        UInt8((formatID >> 8) & 0xff),
+        UInt8(formatID & 0xff),
+    ]
+    return String(bytes: bytes, encoding: .ascii) ?? String(formatID)
+}
+
+private struct LinearPCMLayout {
+    let channels: Int
+    let bitsPerChannel: Int
+    let bytesPerFrame: Int
+    let bytesPerSample: Int
+    let isFloat: Bool
+    let isSignedInteger: Bool
+    let isBigEndian: Bool
+    let isNonInterleaved: Bool
+    let isAlignedHigh: Bool
+
+    init?(_ asbd: AudioStreamBasicDescription) {
+        guard asbd.mFormatID == kAudioFormatLinearPCM else { return nil }
+
+        let channels = Int(asbd.mChannelsPerFrame)
+        let bitsPerChannel = Int(asbd.mBitsPerChannel)
+        let bytesPerFrame = Int(asbd.mBytesPerFrame)
+        guard channels > 0,
+              bitsPerChannel > 0,
+              bitsPerChannel <= 64,
+              bytesPerFrame > 0 else {
+            return nil
+        }
+
+        let flags = asbd.mFormatFlags
+        let isNonInterleaved = (flags & kAudioFormatFlagIsNonInterleaved) != 0
+        let bytesPerSample: Int
+        if isNonInterleaved {
+            bytesPerSample = bytesPerFrame
+        } else {
+            guard bytesPerFrame % channels == 0 else { return nil }
+            bytesPerSample = bytesPerFrame / channels
+        }
+        guard bytesPerSample > 0,
+              bytesPerSample <= 8,
+              bitsPerChannel <= bytesPerSample * 8 else {
+            return nil
+        }
+
+        self.channels = channels
+        self.bitsPerChannel = bitsPerChannel
+        self.bytesPerFrame = bytesPerFrame
+        self.bytesPerSample = bytesPerSample
+        self.isFloat = (flags & kAudioFormatFlagIsFloat) != 0
+        self.isSignedInteger = (flags & kAudioFormatFlagIsSignedInteger) != 0
+        self.isBigEndian = (flags & kAudioFormatFlagIsBigEndian) != 0
+        self.isNonInterleaved = isNonInterleaved
+        self.isAlignedHigh = (flags & kAudioFormatFlagIsAlignedHigh) != 0
+    }
+
+    func sampleOffset(frame: Int, channel: Int, frameCount: Int) -> Int {
+        if isNonInterleaved {
+            return channel * frameCount * bytesPerFrame + frame * bytesPerFrame
+        }
+        return frame * bytesPerFrame + channel * bytesPerSample
+    }
+
+    func decodeSample(_ bytes: UnsafeRawBufferPointer, offset: Int) -> Float? {
+        guard offset >= 0, offset + bytesPerSample <= bytes.count else { return nil }
+
+        var raw: UInt64 = 0
+        if isBigEndian {
+            for index in 0..<bytesPerSample {
+                raw = (raw << 8) | UInt64(bytes[offset + index])
+            }
+        } else {
+            for index in 0..<bytesPerSample {
+                raw |= UInt64(bytes[offset + index]) << UInt64(index * 8)
+            }
+        }
+
+        let containerBits = bytesPerSample * 8
+        if isAlignedHigh, containerBits > bitsPerChannel {
+            raw >>= UInt64(containerBits - bitsPerChannel)
+        }
+
+        if isFloat {
+            let sample: Double
+            switch bitsPerChannel {
+            case 32:
+                sample = Double(Float(bitPattern: UInt32(truncatingIfNeeded: raw)))
+            case 64:
+                sample = Double(bitPattern: raw)
+            default:
+                return nil
+            }
+            return sample.isFinite ? Float(sample) : 0
+        }
+
+        let mask: UInt64 = bitsPerChannel == 64
+            ? UInt64.max
+            : (UInt64(1) << UInt64(bitsPerChannel)) - 1
+        raw &= mask
+
+        if isSignedInteger {
+            let signBit = UInt64(1) << UInt64(bitsPerChannel - 1)
+            let signedValue: Int64
+            if bitsPerChannel == 64 {
+                signedValue = Int64(bitPattern: raw)
+            } else if (raw & signBit) != 0 {
+                signedValue = Int64(bitPattern: raw | ~mask)
+            } else {
+                signedValue = Int64(raw)
+            }
+            let scale = pow(2.0, Double(bitsPerChannel - 1))
+            return Float(Double(signedValue) / scale)
+        }
+
+        let midpoint = Double(mask) / 2.0
+        guard midpoint > 0 else { return nil }
+        return Float((Double(raw) - midpoint) / midpoint)
+    }
+}
+
+private func decodeLinearPCMToMono(
+    bytes: UnsafeRawBufferPointer,
+    frameCount: Int,
+    asbd: AudioStreamBasicDescription,
+    output: UnsafeMutablePointer<Float>
+) -> Bool {
+    guard frameCount > 0, let layout = LinearPCMLayout(asbd) else { return false }
+
+    for frame in 0..<frameCount {
+        var sum: Float = 0
+        for channel in 0..<layout.channels {
+            let offset = layout.sampleOffset(
+                frame: frame,
+                channel: channel,
+                frameCount: frameCount
+            )
+            guard let sample = layout.decodeSample(bytes, offset: offset) else {
+                return false
+            }
+            sum += sample
+        }
+        output[frame] = sum / Float(layout.channels)
+    }
+    return true
+}
+
+private func testASBD(
+    channels: UInt32,
+    bitsPerChannel: UInt32,
+    bytesPerFrame: UInt32,
+    flags: AudioFormatFlags
+) -> AudioStreamBasicDescription {
+    var asbd = AudioStreamBasicDescription()
+    asbd.mSampleRate = 16_000
+    asbd.mFormatID = kAudioFormatLinearPCM
+    asbd.mFormatFlags = flags
+    asbd.mBytesPerPacket = bytesPerFrame
+    asbd.mFramesPerPacket = 1
+    asbd.mBytesPerFrame = bytesPerFrame
+    asbd.mChannelsPerFrame = channels
+    asbd.mBitsPerChannel = bitsPerChannel
+    return asbd
+}
+
+private func appendLittleEndian<T: FixedWidthInteger>(_ value: T, to bytes: inout [UInt8]) {
+    var littleEndian = value.littleEndian
+    withUnsafeBytes(of: &littleEndian) { bytes.append(contentsOf: $0) }
+}
+
+private func appendFloat32(_ value: Float, to bytes: inout [UInt8]) {
+    appendLittleEndian(value.bitPattern, to: &bytes)
+}
+
+private func decodedSamples(
+    bytes: [UInt8],
+    frameCount: Int,
+    asbd: AudioStreamBasicDescription
+) -> [Float]? {
+    var output = [Float](repeating: 0, count: frameCount)
+    let decoded = bytes.withUnsafeBytes { input in
+        output.withUnsafeMutableBufferPointer { destination in
+            guard let baseAddress = destination.baseAddress else { return false }
+            return decodeLinearPCMToMono(
+                bytes: input,
+                frameCount: frameCount,
+                asbd: asbd,
+                output: baseAddress
+            )
+        }
+    }
+    return decoded ? output : nil
+}
+
+private func runPCMDecoderSelfTest() -> Bool {
+    let signedPacked = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked
+    let signedHighAligned = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsAlignedHigh
+
+    var int16Bytes: [UInt8] = []
+    appendLittleEndian(Int16(16_384), to: &int16Bytes)
+    appendLittleEndian(Int16(-16_384), to: &int16Bytes)
+    let int16 = decodedSamples(
+        bytes: int16Bytes,
+        frameCount: 2,
+        asbd: testASBD(channels: 1, bitsPerChannel: 16, bytesPerFrame: 2, flags: signedPacked)
+    )
+
+    // Bluetooth/HFP paths can expose 16 significant bits high-aligned inside
+    // a 32-bit Core Audio container. The old decoder read the low padding as
+    // Int16, turning valid speech into a near-silent stem (issue #814).
+    var highAlignedBytes: [UInt8] = []
+    appendLittleEndian(Int32(16_384) << 16, to: &highAlignedBytes)
+    appendLittleEndian(Int32(-16_384) << 16, to: &highAlignedBytes)
+    let highAligned = decodedSamples(
+        bytes: highAlignedBytes,
+        frameCount: 2,
+        asbd: testASBD(
+            channels: 1,
+            bitsPerChannel: 16,
+            bytesPerFrame: 4,
+            flags: signedHighAligned
+        )
+    )
+
+    var int32Bytes: [UInt8] = []
+    appendLittleEndian(Int32(1_073_741_824), to: &int32Bytes)
+    appendLittleEndian(Int32(-1_073_741_824), to: &int32Bytes)
+    let int32 = decodedSamples(
+        bytes: int32Bytes,
+        frameCount: 2,
+        asbd: testASBD(channels: 1, bitsPerChannel: 32, bytesPerFrame: 4, flags: signedPacked)
+    )
+
+    var stereoFloatBytes: [UInt8] = []
+    appendFloat32(0.75, to: &stereoFloatBytes)
+    appendFloat32(0.25, to: &stereoFloatBytes)
+    appendFloat32(-0.75, to: &stereoFloatBytes)
+    appendFloat32(-0.25, to: &stereoFloatBytes)
+    let stereoFloat = decodedSamples(
+        bytes: stereoFloatBytes,
+        frameCount: 2,
+        asbd: testASBD(
+            channels: 2,
+            bitsPerChannel: 32,
+            bytesPerFrame: 8,
+            flags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        )
+    )
+
+    let tolerance: Float = 0.000_01
+    let cases = [int16, highAligned, int32, stereoFloat]
+    let passed = cases.allSatisfy { samples in
+        guard let samples, samples.count == 2 else { return false }
+        return abs(samples[0] - 0.5) < tolerance && abs(samples[1] + 0.5) < tolerance
+    }
+    if passed {
+        emitJSON(["event": "pcm_decoder_self_test", "status": "ok", "cases": cases.count])
+    } else {
+        fputs("PCM decoder self-test failed\n", stderr)
+    }
+    return passed
+}
+
 @available(macOS 15.0, *)
 final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput {
     private var stream: SCStream?
@@ -20,6 +295,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private let requestedMicrophoneName: String?
     private var selectedMicrophoneID: String?
     private var selectedMicrophoneName: String?
+    private var selectedMicrophoneDeviceSampleRate: Double?
     private var microphoneSelectionEvent: [String: Any]?
     private let sampleQueue = DispatchQueue(label: "minutes.system-audio.samples")
     private var monitorTimer: DispatchSourceTimer?
@@ -29,6 +305,10 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var lastReportedMicLive = false
     private var latestSystemLevel: UInt32 = 0
     private var latestMicLevel: UInt32 = 0
+    private var protocolReady = false
+    private var pendingSourceEvents: [[String: Any]] = []
+    private var reportedSourceFormats = Set<String>()
+    private var reportedDecodeFailures = Set<String>()
 
     // Per-source stem writers
     private var voiceStemFile: AVAudioFile?
@@ -120,6 +400,11 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             configuration.microphoneCaptureDeviceID = microphone.uniqueID
             selectedMicrophoneID = microphone.uniqueID
             selectedMicrophoneName = microphone.localizedName
+            if let deviceASBD = CMAudioFormatDescriptionGetStreamBasicDescription(
+                microphone.activeFormat.formatDescription
+            )?.pointee {
+                selectedMicrophoneDeviceSampleRate = deviceASBD.mSampleRate
+            }
             if requestedMicrophoneName != nil {
                 NotificationCenter.default.addObserver(
                     self,
@@ -313,6 +598,17 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             return
         }
 
+        let sourceName: String
+        switch source {
+        case .microphone:
+            sourceName = "microphone"
+        case .audio:
+            sourceName = "system"
+        default:
+            return
+        }
+        reportSourceFormatOnce(sourceName: sourceName, asbd: asbd)
+
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
             return
         }
@@ -320,17 +616,19 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
         guard sampleCount > 0 else { return }
 
-        var lengthAtOffset: Int = 0
-        var totalLength: Int = 0
+        var contiguousLength: Int = 0
+        let totalLength = CMBlockBufferGetDataLength(blockBuffer)
         var dataPointer: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
-        guard status == kCMBlockBufferNoErr, let data = dataPointer else {
-            return
-        }
+        let pointerStatus = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: &contiguousLength,
+            totalLengthOut: nil,
+            dataPointerOut: &dataPointer
+        )
+        guard totalLength > 0 else { return }
 
-        let channelCount = Int(asbd.mChannelsPerFrame)
         let sampleRate = asbd.mSampleRate
-        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
 
         // Stems are always mono float32 — mix down if multi-channel
         guard let monoFormat = AVAudioFormat(
@@ -340,7 +638,53 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             interleaved: false
         ) else { return }
 
-        // Lazily create the stem file on first samples
+        let frameCount = AVAudioFrameCount(sampleCount)
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameCount) else {
+            return
+        }
+        pcmBuffer.frameLength = frameCount
+
+        guard let monoPtr = pcmBuffer.floatChannelData?[0] else { return }
+        let decoded: Bool
+        if pointerStatus == kCMBlockBufferNoErr,
+           let dataPointer,
+           contiguousLength >= totalLength {
+            decoded = decodeLinearPCMToMono(
+                bytes: UnsafeRawBufferPointer(start: dataPointer, count: totalLength),
+                frameCount: Int(frameCount),
+                asbd: asbd,
+                output: monoPtr
+            )
+        } else {
+            var copiedBytes = [UInt8](repeating: 0, count: totalLength)
+            let copyStatus: OSStatus = copiedBytes.withUnsafeMutableBytes { destination in
+                guard let baseAddress = destination.baseAddress else {
+                    return -1
+                }
+                return CMBlockBufferCopyDataBytes(
+                    blockBuffer,
+                    atOffset: 0,
+                    dataLength: totalLength,
+                    destination: baseAddress
+                )
+            }
+            decoded = copyStatus == kCMBlockBufferNoErr && copiedBytes.withUnsafeBytes { bytes in
+                decodeLinearPCMToMono(
+                    bytes: bytes,
+                    frameCount: Int(frameCount),
+                    asbd: asbd,
+                    output: monoPtr
+                )
+            }
+        }
+
+        guard decoded else {
+            reportDecodeFailureOnce(sourceName: sourceName, asbd: asbd)
+            return
+        }
+
+        // Lazily create the stem only after the first buffer decodes. An
+        // unsupported source format must not leave a plausible empty WAV.
         let stemFile: AVAudioFile?
         switch source {
         case .microphone:
@@ -367,60 +711,6 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
 
         guard let file = stemFile else { return }
 
-        // Mix multi-channel source data to mono float32.
-        // ScreenCaptureKit may deliver interleaved or non-interleaved audio.
-        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        let frameCount = AVAudioFrameCount(sampleCount)
-        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameCount) else {
-            return
-        }
-        pcmBuffer.frameLength = frameCount
-
-        guard let monoPtr = pcmBuffer.floatChannelData?[0] else { return }
-        let bytesPerSample = isFloat ? 4 : 2
-
-        if isNonInterleaved {
-            // Non-interleaved: each channel is a separate plane of `frameCount` samples.
-            // The CMBlockBuffer contains them sequentially: [ch0 frames][ch1 frames]...
-            let planeSize = Int(frameCount) * bytesPerSample
-            for frame in 0..<Int(frameCount) {
-                var sum: Float = 0.0
-                for ch in 0..<channelCount {
-                    let offset = ch * planeSize + frame * bytesPerSample
-                    guard offset + bytesPerSample <= totalLength else { break }
-                    if isFloat {
-                        var val: Float = 0.0
-                        memcpy(&val, data.advanced(by: offset), 4)
-                        sum += val
-                    } else {
-                        var val: Int16 = 0
-                        memcpy(&val, data.advanced(by: offset), 2)
-                        sum += Float(val) / 32768.0
-                    }
-                }
-                monoPtr[frame] = sum / Float(channelCount)
-            }
-        } else {
-            // Interleaved: samples are [ch0 ch1 ch0 ch1 ...]
-            for frame in 0..<Int(frameCount) {
-                var sum: Float = 0.0
-                for ch in 0..<channelCount {
-                    let offset = (frame * channelCount + ch) * bytesPerSample
-                    guard offset + bytesPerSample <= totalLength else { break }
-                    if isFloat {
-                        var val: Float = 0.0
-                        memcpy(&val, data.advanced(by: offset), 4)
-                        sum += val
-                    } else {
-                        var val: Int16 = 0
-                        memcpy(&val, data.advanced(by: offset), 2)
-                        sum += Float(val) / 32768.0
-                    }
-                }
-                monoPtr[frame] = sum / Float(channelCount)
-            }
-        }
-
         var sumSquares: Float = 0
         for frame in 0..<Int(frameCount) {
             let sample = monoPtr[frame]
@@ -441,6 +731,85 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             try file.write(from: pcmBuffer)
         } catch {
             fputs("stem write failed: \(error)\n", stderr)
+        }
+    }
+
+    private func reportSourceFormatOnce(
+        sourceName: String,
+        asbd: AudioStreamBasicDescription
+    ) {
+        let signature = sourceFormatSignature(sourceName: sourceName, asbd: asbd)
+        guard reportedSourceFormats.insert(signature).inserted else { return }
+        let flags = asbd.mFormatFlags
+        var payload: [String: Any] = [
+            "event": "audio_format",
+            "source": sourceName,
+            "sample_rate": asbd.mSampleRate,
+            "format_id": formatIDString(asbd.mFormatID),
+            "format_flags": flags,
+            "bits_per_channel": asbd.mBitsPerChannel,
+            "bytes_per_packet": asbd.mBytesPerPacket,
+            "bytes_per_frame": asbd.mBytesPerFrame,
+            "frames_per_packet": asbd.mFramesPerPacket,
+            "channels": asbd.mChannelsPerFrame,
+            "is_float": (flags & kAudioFormatFlagIsFloat) != 0,
+            "is_signed_integer": (flags & kAudioFormatFlagIsSignedInteger) != 0,
+            "is_big_endian": (flags & kAudioFormatFlagIsBigEndian) != 0,
+            "is_non_interleaved": (flags & kAudioFormatFlagIsNonInterleaved) != 0,
+            "is_aligned_high": (flags & kAudioFormatFlagIsAlignedHigh) != 0,
+        ]
+        if sourceName == "microphone" {
+            payload["device_name"] = selectedMicrophoneName ?? ""
+            if let selectedMicrophoneDeviceSampleRate {
+                payload["device_sample_rate"] = selectedMicrophoneDeviceSampleRate
+            }
+        }
+        queueSourceEvent(payload)
+    }
+
+    private func reportDecodeFailureOnce(
+        sourceName: String,
+        asbd: AudioStreamBasicDescription
+    ) {
+        let signature = sourceFormatSignature(sourceName: sourceName, asbd: asbd)
+        guard reportedDecodeFailures.insert(signature).inserted else { return }
+        let payload: [String: Any] = [
+            "event": "audio_format_unsupported",
+            "source": sourceName,
+            "format_id": formatIDString(asbd.mFormatID),
+            "format_flags": asbd.mFormatFlags,
+            "bits_per_channel": asbd.mBitsPerChannel,
+            "bytes_per_packet": asbd.mBytesPerPacket,
+            "bytes_per_frame": asbd.mBytesPerFrame,
+            "frames_per_packet": asbd.mFramesPerPacket,
+            "channels": asbd.mChannelsPerFrame,
+        ]
+        queueSourceEvent(payload)
+        fputs("unsupported \(sourceName) PCM layout; stem buffer withheld\n", stderr)
+    }
+
+    private func sourceFormatSignature(
+        sourceName: String,
+        asbd: AudioStreamBasicDescription
+    ) -> String {
+        [
+            sourceName,
+            String(asbd.mFormatID),
+            String(asbd.mFormatFlags),
+            String(asbd.mSampleRate),
+            String(asbd.mBitsPerChannel),
+            String(asbd.mBytesPerPacket),
+            String(asbd.mBytesPerFrame),
+            String(asbd.mFramesPerPacket),
+            String(asbd.mChannelsPerFrame),
+        ].joined(separator: ":")
+    }
+
+    private func queueSourceEvent(_ payload: [String: Any]) {
+        if protocolReady {
+            emitJSON(payload)
+        } else {
+            pendingSourceEvents.append(payload)
         }
     }
 
@@ -467,6 +836,13 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
            let json = String(data: data, encoding: .utf8) {
             print(json)
             fflush(stdout)
+        }
+
+        sampleQueue.async { [weak self] in
+            guard let self else { return }
+            self.protocolReady = true
+            self.pendingSourceEvents.forEach(emitJSON)
+            self.pendingSourceEvents.removeAll()
         }
     }
 
@@ -512,6 +888,11 @@ struct NativeCallRecordMain {
     }
 
     static func run() async {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--self-test-pcm-decoder" {
+            exit(runPCMDecoderSelfTest() ? 0 : 1)
+        }
+
         guard #available(macOS 15.0, *) else {
             fputs("ScreenCaptureKit recording output requires macOS 15.0 or newer.\n", stderr)
             exit(1)

@@ -10444,6 +10444,36 @@ fn recall_chat_stream_completed(
     !read_broke && matches!(exit_status, Some(status) if status.success())
 }
 
+const RECALL_NATIVE_AUTH_GUIDANCE: &str =
+    "Native chat keeps meeting context isolated, so it cannot use Claude's subscription login. \
+     Switch to Terminal mode with the keyboard button and run /login there, or configure a local \
+     Ollama or LM Studio provider for native chat.";
+
+const RECALL_NATIVE_SLASH_GUIDANCE: &str =
+    "Slash commands are interactive agent commands and do not run in native chat. Switch to \
+     Terminal mode with the keyboard button, then run the command there.";
+
+fn recall_native_message_is_slash_command(message: &str) -> bool {
+    message.trim_start().starts_with('/')
+}
+
+/// Claude's `--bare` mode deliberately refuses OAuth and keychain access. Its
+/// stream currently reports that as an assistant frame followed by an
+/// `is_error` result, both telling the user to run `/login`. Forwarding those
+/// frames makes native chat look interactive and sends the user into a loop,
+/// even though slash commands are disabled for this isolated invocation.
+fn recall_claude_frame_is_auth_failure(frame: &serde_json::Value) -> bool {
+    if frame.get("error").and_then(|value| value.as_str()) == Some("authentication_failed") {
+        return true;
+    }
+
+    frame.get("is_error").and_then(|value| value.as_bool()) == Some(true)
+        && frame
+            .get("result")
+            .and_then(|value| value.as_str())
+            .is_some_and(|result| result.contains("Not logged in") && result.contains("/login"))
+}
+
 /// Reap the child and report how it exited.
 ///
 /// The status used to be discarded. For a subprocess it is better evidence of
@@ -10514,6 +10544,10 @@ pub async fn cmd_recall_chat_send(
     message: String,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Read};
+
+    if recall_native_message_is_slash_command(&message) {
+        return Err(RECALL_NATIVE_SLASH_GUIDANCE.into());
+    }
 
     let workspace = crate::context::workspace_dir();
     if !workspace.exists() {
@@ -11168,6 +11202,7 @@ pub async fn cmd_recall_chat_send(
             let reader = BufReader::new(&mut limited);
             let mut full_response = String::new();
             let mut stream_failed = false;
+            let mut auth_failed = false;
             for line_result in reader.lines() {
                 if cancelled.load(Ordering::Relaxed) {
                     break;
@@ -11183,6 +11218,10 @@ pub async fn cmd_recall_chat_send(
                             break;
                         }
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if recall_claude_frame_is_auth_failure(&json) {
+                                auth_failed = true;
+                                continue;
+                            }
                             if json.get("type").and_then(|t| t.as_str()) == Some("assistant") {
                                 if let Some(arr) = json
                                     .get("message")
@@ -11240,12 +11279,15 @@ pub async fn cmd_recall_chat_send(
             // Reaped before the persistence decision, not after, because the
             // exit status is part of that decision.
             let exit_status = reap_recall_chat_child(&worker_turn, turn_id);
-            let stream_broke = !recall_chat_stream_completed(read_broke, exit_status);
+            let stream_broke =
+                auth_failed || !recall_chat_stream_completed(read_broke, exit_status);
 
             if !cancelled.load(Ordering::Relaxed) && stream_broke {
                 emit_recall_chat_stream_failure(
                     &app,
-                    if truncated {
+                    if auth_failed {
+                        RECALL_NATIVE_AUTH_GUIDANCE
+                    } else if truncated {
                         "The provider sent more than Recall will buffer, so the answer was cut \
                          off. Nothing was saved to this conversation."
                     } else if stream_failed {
@@ -12879,6 +12921,50 @@ mod tests {
         }
         assert!(stream_failed);
         assert!(!saw_terminator);
+    }
+
+    #[test]
+    fn native_recall_recognizes_slash_commands_before_provider_launch() {
+        assert!(recall_native_message_is_slash_command("/login"));
+        assert!(recall_native_message_is_slash_command("  /model sonnet"));
+        assert!(!recall_native_message_is_slash_command(
+            "How do I use /login?"
+        ));
+        assert!(!recall_native_message_is_slash_command(""));
+    }
+
+    #[test]
+    fn native_recall_recognizes_claude_bare_auth_failure_frames() {
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "error": "authentication_failed",
+            "message": {"content": [{"type": "text", "text": "Not logged in · Please run /login"}]}
+        });
+        let result = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": true,
+            "result": "Not logged in · Please run /login"
+        });
+
+        assert!(recall_claude_frame_is_auth_failure(&assistant));
+        assert!(recall_claude_frame_is_auth_failure(&result));
+    }
+
+    #[test]
+    fn native_recall_does_not_treat_model_login_discussion_as_auth_failure() {
+        let ordinary_answer = serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Use /login in Terminal mode."}]}
+        });
+        let unrelated_error = serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "result": "Provider quota exceeded"
+        });
+
+        assert!(!recall_claude_frame_is_auth_failure(&ordinary_answer));
+        assert!(!recall_claude_frame_is_auth_failure(&unrelated_error));
     }
 
     /// The storage rule, exercised through the function the worker actually

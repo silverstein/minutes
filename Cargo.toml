@@ -97,7 +97,7 @@ nnnoiseless = "0.5"
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
-getrandom = "0.3"
+getrandom = "0.4"
 interprocess = "2.4.2"
 
 # Speaker diarization (native, no Python). Use the crates.io release so the

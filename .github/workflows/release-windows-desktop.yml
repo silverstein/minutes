@@ -105,21 +105,15 @@ jobs:
         shell: bash
         run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
 
+      - name: Configure portable Windows CPU baseline
+        shell: bash
+        run: .github/scripts/export-windows-cpu-baseline.sh
+
       - name: Build desktop installer (unsigned)
         working-directory: tauri/src-tauri
         run: cargo tauri build --features parakeet --ci --bundles nsis --no-sign
         env:
           CARGO_NET_RETRY: 3
-          # Cap ggml/whisper.cpp at AVX2-class instructions for the shipped
-          # Windows binary. GitHub's Windows runners may expose AVX-512, and
-          # whisper-rs-sys forwards GGML_* env vars straight into CMake.
-          GGML_NATIVE: "OFF"
-          GGML_AVX: "ON"
-          GGML_AVX2: "ON"
-          GGML_AVX512: "OFF"
-          GGML_AVX512_VBMI: "OFF"
-          GGML_AVX512_VNNI: "OFF"
-          GGML_AVX512_BF16: "OFF"
 
       - name: Rename desktop binary
         shell: bash

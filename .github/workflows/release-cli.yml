@@ -81,6 +81,11 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> "$GITHUB_ENV"
 
+      - name: Configure portable Windows CPU baseline
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .github/scripts/export-windows-cpu-baseline.sh
+
       - name: Resolve runner image for cache scope
         id: runner-image
         shell: bash

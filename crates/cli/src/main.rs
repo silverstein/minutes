@@ -17002,8 +17002,10 @@ fn cmd_voices(delete: bool, json: bool) -> Result<()> {
         anyhow::bail!("voice deletion is unavailable under the active assistant policy");
     }
     let conn = voice::open_db().map_err(|e| anyhow::anyhow!("{}", e))?;
+    voice::migrate_legacy_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
     if delete {
-        let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let profiles =
+            voice::list_profiles_for_display(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
         if profiles.is_empty() {
             eprintln!("No voice profiles enrolled.");
             return Ok(());
@@ -17014,7 +17016,7 @@ fn cmd_voices(delete: bool, json: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let profiles = voice::list_profiles(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let profiles = voice::list_profiles_for_display(&conn).map_err(|e| anyhow::anyhow!("{}", e))?;
     if json {
         println!("{}", serde_json::to_string_pretty(&profiles)?);
         return Ok(());

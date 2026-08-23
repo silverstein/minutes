@@ -1006,6 +1006,57 @@ pub fn list_voice_enrollments(
     Ok(summaries)
 }
 
+/// List active model-scoped enrollments using the legacy `VoiceProfile` JSON shape.
+///
+/// `minutes voices --json` predates immutable voice samples, and the MCP
+/// `list_voices` tool consumes its field names. Keep that public shape while
+/// sourcing the rows from `voice_active_profiles`, which is the same canonical
+/// store used by `minutes voice status`, matching, and new enrollment.
+pub fn list_profiles_for_display(conn: &Connection) -> Result<Vec<VoiceProfile>, VoiceError> {
+    let mut stmt = conn.prepare(
+        "SELECT active.person_slug,
+                active.name,
+                COALESCE(
+                    (SELECT MIN(samples.created_at) FROM voice_samples samples
+                     WHERE samples.person_slug = active.person_slug
+                       AND samples.model_id = active.model_id
+                       AND samples.revoked_at IS NULL),
+                    active.updated_at),
+                active.updated_at,
+                active.sample_count,
+                COALESCE(
+                    (SELECT NULLIF(samples.capture_source, '') FROM voice_samples samples
+                     WHERE samples.person_slug = active.person_slug
+                       AND samples.model_id = active.model_id
+                       AND samples.revoked_at IS NULL
+                       AND samples.capture_source IS NOT NULL
+                     ORDER BY samples.created_at DESC, samples.id DESC LIMIT 1),
+                    (SELECT samples.trust_class FROM voice_samples samples
+                     WHERE samples.person_slug = active.person_slug
+                       AND samples.model_id = active.model_id
+                       AND samples.revoked_at IS NULL
+                     ORDER BY samples.created_at DESC, samples.id DESC LIMIT 1),
+                    'local-enrollment'),
+                active.model_id
+         FROM voice_active_profiles active
+         ORDER BY active.updated_at DESC, lower(active.name), active.model_id",
+    )?;
+    let profiles = stmt
+        .query_map([], |row| {
+            Ok(VoiceProfile {
+                person_slug: row.get(0)?,
+                name: row.get(1)?,
+                enrolled_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                sample_count: row.get(4)?,
+                source: row.get(5)?,
+                model_version: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(profiles)
+}
+
 /// Compare a probe only with profiles produced by the same embedding model.
 pub fn match_active_profiles(
     embedding: &[f32],
@@ -1606,6 +1657,30 @@ mod tests {
     }
 
     #[test]
+    fn voice_samples_listing_uses_canonical_active_profiles() {
+        let (conn, _tmp) = test_db();
+        insert_voice_sample(
+            &conn,
+            &voice_sample_input("mat", "Mat", &[1.0, 0.0], "model-a", "2026-01-01T00:00:00Z"),
+        )
+        .unwrap();
+        insert_voice_sample(
+            &conn,
+            &voice_sample_input("mat", "Mat", &[0.8, 0.2], "model-a", "2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+
+        let profiles = list_profiles_for_display(&conn).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].person_slug, "mat");
+        assert_eq!(profiles[0].sample_count, 2);
+        assert_eq!(profiles[0].model_version, "model-a");
+        assert_eq!(profiles[0].source, "test");
+        assert_eq!(profiles[0].enrolled_at, "2026-01-01T00:00:00Z");
+        assert!(!profiles[0].updated_at.is_empty());
+    }
+
+    #[test]
     fn voice_samples_different_models_are_isolated() {
         let (conn, _tmp) = test_db();
         insert_voice_sample(
@@ -1729,6 +1804,12 @@ mod tests {
         assert_eq!(sample_count, 2);
         assert!(active_profile(&conn, "mat", "model-a").unwrap().is_some());
         assert!(active_profile(&conn, "alex", "model-b").unwrap().is_some());
+        let displayed = list_profiles_for_display(&conn).unwrap();
+        assert_eq!(displayed.len(), 2);
+        assert!(displayed.iter().any(|profile| profile.person_slug == "mat"));
+        assert!(displayed
+            .iter()
+            .any(|profile| profile.person_slug == "alex"));
     }
 
     #[test]
@@ -2088,6 +2169,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(revoked, 1);
+        assert!(list_profiles_for_display(&conn).unwrap().is_empty());
     }
 
     #[test]

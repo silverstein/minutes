@@ -462,7 +462,7 @@ pub fn mic_status() -> HealthItem {
         state: if has_devices { "ready" } else { "attention" }.into(),
         detail: if has_devices {
             format!(
-                "{} audio input device{} detected.",
+                "{} audio input device{} detected. Device presence does not confirm usable signal; if enrollment reports silence, check mute and input level and, on Windows, turn off Audio enhancements for the microphone.",
                 devices.len(),
                 if devices.len() == 1 { "" } else { "s" }
             )

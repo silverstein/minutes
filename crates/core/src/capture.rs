@@ -1819,6 +1819,7 @@ pub fn record_to_wav_with_lifecycle(
     if let Some(intent) = preflight_intent {
         safety_guard = safety_guard.with_intent(intent);
     }
+    let mut peak_level = 0;
 
     // Wait for stop signal (Ctrl+C sets stop_flag, `minutes stop` writes sentinel)
     while !stop_flag.load(Ordering::Relaxed) {
@@ -1840,7 +1841,9 @@ pub fn record_to_wav_with_lifecycle(
 
         // Safety guard check (silence, time cap, disk space)
         let call_app_active = detect_active_call_app(config).is_some();
-        match safety_guard.check(audio_level(), call_app_active) {
+        let current_level = audio_level();
+        peak_level = peak_level.max(current_level);
+        match safety_guard.check(current_level, call_app_active) {
             SafetyAction::None => {}
             SafetyAction::Nudge(msg) => {
                 tracing::info!("{}", msg);
@@ -1977,9 +1980,7 @@ pub fn record_to_wav_with_lifecycle(
 
     eprintln!(
         "[minutes] Captured {} samples ({:.1}s), peak audio level during recording: {}",
-        total_samples,
-        duration_secs,
-        AUDIO_LEVEL.load(Ordering::Relaxed)
+        total_samples, duration_secs, peak_level
     );
 
     if total_samples == 0 {

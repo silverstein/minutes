@@ -7,7 +7,7 @@ use thiserror::Error;
 /// Connection type used by the local voice database APIs.
 pub type VoiceConnection = Connection;
 
-#[cfg(feature = "diarize")]
+#[cfg(any(feature = "diarize", test))]
 const SOLO_SAMPLE_RATE: u32 = 16_000;
 #[cfg(feature = "diarize")]
 const SOLO_WINDOW_SECONDS: f64 = 3.0;
@@ -19,6 +19,13 @@ const SOLO_MIN_SPEECH_SECONDS: f64 = 5.0;
 const SOLO_MIN_WINDOW_CONSISTENCY: f32 = 0.70;
 #[cfg(any(feature = "diarize", test))]
 const SOLO_MIN_SNR_DB: f32 = 8.0;
+/// Absolute 20 ms frame RMS needed before gain normalization can be trusted.
+///
+/// This is roughly -48 dBFS (audio meter level 8/100): low enough for a
+/// genuinely quiet microphone, but above the flat noise floor that Windows
+/// capture APOs can emit when they suppress the microphone entirely.
+#[cfg(any(feature = "diarize", test))]
+const SOLO_MIN_SIGNAL_RMS: f32 = 0.004;
 #[cfg(any(feature = "diarize", test))]
 const SOLO_MAX_CLIPPING_FRACTION: f32 = 0.05;
 
@@ -343,6 +350,24 @@ fn aggregate_solo_embeddings(
     })
 }
 
+#[cfg(any(feature = "diarize", test))]
+fn audio_level_from_rms(rms: f32) -> u32 {
+    (rms.max(0.0) * 2000.0).min(100.0) as u32
+}
+
+#[cfg(any(feature = "diarize", test))]
+fn ensure_usable_microphone_signal(peak_rms: f32) -> Result<(), VoiceError> {
+    if peak_rms >= SOLO_MIN_SIGNAL_RMS {
+        return Ok(());
+    }
+    Err(VoiceError::LowQuality {
+        reason: format!(
+            "microphone captured no usable signal (peak level {}/100); check hardware mute and microphone input level; on Windows, turn off Audio enhancements for this microphone before retrying",
+            audio_level_from_rms(peak_rms)
+        ),
+    })
+}
+
 #[cfg(feature = "diarize")]
 fn decode_wav_mono_16khz(path: &Path) -> Result<Vec<f32>, VoiceError> {
     let mut reader = hound::WavReader::open(path)
@@ -408,8 +433,8 @@ fn decode_wav_mono_16khz(path: &Path) -> Result<Vec<f32>, VoiceError> {
     Ok(resampled)
 }
 
-#[cfg(feature = "diarize")]
-fn solo_audio_quality(samples: &[f32]) -> (f64, f32, f32) {
+#[cfg(any(feature = "diarize", test))]
+fn solo_audio_quality(samples: &[f32]) -> (f64, f32, f32, f32) {
     let clipping = samples.iter().filter(|sample| sample.abs() >= 0.99).count() as f32
         / samples.len().max(1) as f32;
     let frame_len = (SOLO_SAMPLE_RATE / 50) as usize;
@@ -421,7 +446,7 @@ fn solo_audio_quality(samples: &[f32]) -> (f64, f32, f32) {
         })
         .collect::<Vec<_>>();
     if frame_rms.is_empty() {
-        return (0.0, 0.0, clipping);
+        return (0.0, 0.0, clipping, 0.0);
     }
     frame_rms.sort_by(f32::total_cmp);
     let peak_rms = *frame_rms.last().unwrap_or(&0.0);
@@ -447,7 +472,7 @@ fn solo_audio_quality(samples: &[f32]) -> (f64, f32, f32) {
     } else {
         20.0 * (signal_rms / noise_rms).log10()
     };
-    (speech_seconds, snr, clipping)
+    (speech_seconds, snr, clipping, peak_rms)
 }
 
 #[cfg(feature = "diarize")]
@@ -484,7 +509,8 @@ fn solo_embedding_windows(samples: &[f32]) -> Vec<Vec<i16>> {
 #[cfg(feature = "diarize")]
 pub fn embed_solo_clip(wav_path: &Path, config: &Config) -> Result<SoloEmbedding, VoiceError> {
     let samples = decode_wav_mono_16khz(wav_path)?;
-    let (speech_seconds, snr, clipping) = solo_audio_quality(&samples);
+    let (speech_seconds, snr, clipping, peak_rms) = solo_audio_quality(&samples);
+    ensure_usable_microphone_signal(peak_rms)?;
     if speech_seconds < SOLO_MIN_SPEECH_SECONDS {
         return aggregate_solo_embeddings(
             &[],
@@ -2126,6 +2152,51 @@ mod tests {
     }
 
     #[test]
+    fn voice_audio_quality_rejects_silence_with_microphone_remediation() {
+        let samples = vec![0.0; SOLO_SAMPLE_RATE as usize * 8];
+        let (speech_seconds, snr, clipping, peak_rms) = solo_audio_quality(&samples);
+        assert_eq!(speech_seconds, 0.0);
+        assert_eq!(snr, 0.0);
+        assert_eq!(clipping, 0.0);
+
+        let error = ensure_usable_microphone_signal(peak_rms).unwrap_err();
+        assert!(matches!(error, VoiceError::LowQuality { .. }));
+        assert!(error.to_string().contains("peak level 0/100"));
+        assert!(error.to_string().contains("Audio enhancements"));
+    }
+
+    #[test]
+    fn voice_audio_quality_rejects_flat_noise_that_looks_like_speech() {
+        let samples = vec![0.0035; SOLO_SAMPLE_RATE as usize * 8];
+        let (speech_seconds, snr, _clipping, peak_rms) = solo_audio_quality(&samples);
+        assert!(speech_seconds >= SOLO_MIN_SPEECH_SECONDS);
+        assert!(snr >= SOLO_MIN_SNR_DB);
+
+        let error = ensure_usable_microphone_signal(peak_rms).unwrap_err();
+        assert!(error.to_string().contains("no usable signal"));
+    }
+
+    #[test]
+    fn voice_audio_quality_accepts_very_low_gain_speech_signal() {
+        let sample_count = SOLO_SAMPLE_RATE as usize * 7;
+        let samples = (0..sample_count)
+            .map(|index| {
+                if index < SOLO_SAMPLE_RATE as usize {
+                    0.0
+                } else {
+                    let phase =
+                        index as f32 * 440.0 * std::f32::consts::TAU / SOLO_SAMPLE_RATE as f32;
+                    phase.sin() * 0.006
+                }
+            })
+            .collect::<Vec<_>>();
+        let (speech_seconds, _snr, _clipping, peak_rms) = solo_audio_quality(&samples);
+        assert!(speech_seconds >= SOLO_MIN_SPEECH_SECONDS);
+        assert!(peak_rms < 0.005, "fixture must remain a low-gain signal");
+        ensure_usable_microphone_signal(peak_rms).unwrap();
+    }
+
+    #[test]
     fn voice_match_evidence_uses_only_compatible_models() {
         let profiles = vec![
             ActiveProfile {
@@ -2211,6 +2282,28 @@ mod tests {
         let conn = open_db_at(&db).unwrap();
         assert!(list_profiles(&conn).unwrap().is_empty());
         assert!(list_voice_enrollments(&conn).unwrap().is_empty());
+    }
+
+    #[cfg(feature = "diarize")]
+    #[test]
+    fn voice_embed_solo_silent_wav_fails_before_model_loading() {
+        let root = tempfile::TempDir::new().unwrap();
+        let wav = root.path().join("silent.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: SOLO_SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&wav, spec).unwrap();
+        for _ in 0..SOLO_SAMPLE_RATE * 8 {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let error = embed_solo_clip(&wav, &Config::default()).unwrap_err();
+        assert!(matches!(error, VoiceError::LowQuality { .. }));
+        assert!(error.to_string().contains("no usable signal"));
     }
 
     #[cfg(feature = "diarize")]

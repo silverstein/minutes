@@ -1169,6 +1169,14 @@ is available as an advanced option but remains more fragile and permission-heavy
 **No speech detected / blank audio:**
 The most common cause is microphone permissions. Check System Settings → Privacy & Security → Microphone and ensure your terminal app (or Minutes.app) has access.
 
+On Windows, a microphone can be present and permitted but still deliver only a
+noise floor because of a vendor audio-effects layer. If enrollment reports
+`no usable signal`, open **Settings → System → Sound → Input**, select the
+microphone, and set **Audio enhancements** to **Off**. Also check the hardware
+mute switch and the Windows input-volume control. Minutes now rejects this
+signal before voice comparison so it will not misdiagnose a silent microphone
+as multiple or inconsistent speakers.
+
 **tmux users:** tmux server runs as a separate process that doesn't inherit your terminal's mic permission. Either run `minutes record` from a direct terminal window (not inside tmux), or use the Minutes.app desktop bundle which gets its own mic permission.
 
 **Build fails with C++ errors on macOS 26+:**

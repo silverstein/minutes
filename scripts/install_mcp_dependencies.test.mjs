@@ -6,9 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const sourceScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "install_mcp_dependencies.mjs");
+const scriptsDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(scriptsDirectory, "..");
+const sourceScript = path.join(scriptsDirectory, "install_mcp_dependencies.mjs");
 const permissionsScript = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
+  scriptsDirectory,
   "normalize_npm_pack_permissions.mjs",
 );
 
@@ -107,4 +109,12 @@ test("refuses a local SDK whose tarball differs from the committed lock", async 
   assert.match(result.stderr, /integrity does not match the MCP lockfile/);
   const log = await readFile(fixture.log, "utf8");
   assert.doesNotMatch(log, /ci --cache .*crates\/mcp/);
+});
+
+test("release bundle installs the SDK from the exact checkout", async () => {
+  const workflow = await readFile(path.join(repoRoot, ".github", "workflows", "release-cli.yml"), "utf8");
+  const bundleJob = workflow.match(/\n  mcpb:\n[\s\S]*?\n  checksums:/)?.[0];
+  assert.ok(bundleJob, "release workflow must contain the mcpb job");
+  assert.match(bundleJob, /node scripts\/install_mcp_dependencies\.mjs/);
+  assert.doesNotMatch(bundleJob, /working-directory: crates\/mcp\n\s+run: \|\n\s+npm ci/);
 });

@@ -313,11 +313,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install MCP dependencies from this exact checkout
+        run: node scripts/install_mcp_dependencies.mjs
+
       - name: Build the MCP server
         working-directory: crates/mcp
-        run: |
-          npm ci
-          npm run build
+        run: npm run build
 
       - name: Pack the bundle
         run: |

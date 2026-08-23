@@ -85,6 +85,7 @@ import {
   validatePathInDirectory,
 } from "./paths.js";
 import { isCliCompatible } from "./version.js";
+import { nodeChildEnvironment } from "./node-child.js";
 import {
   hasFeature,
   probeCapabilitiesSync,
@@ -6456,7 +6457,7 @@ export async function runIsolatedMcpProcessAudio(
         child = spawn(helper.binary, helper.args, {
           detached: true,
           stdio: ["pipe", "pipe", "pipe", "pipe"],
-          env: mcpCliChildEnv(),
+          env: nodeChildEnvironment(mcpCliChildEnv()),
         });
       } catch {
         rejectRun(new Error("process_audio helper could not be started safely"));

@@ -25,6 +25,7 @@ import {
   type BoundFileRevision,
   writeOperatorDiagnostic,
 } from "./secure-read.js";
+import { nodeChildEnvironment } from "./node-child.js";
 
 const MAX_AUTHORIZATION_ATTEMPTS = 2;
 const DEFAULT_FENCE_TIMEOUT_MS = 5_000;
@@ -1943,7 +1944,7 @@ async function dispatchStableCorpusLease<T>(
     detached: process.platform !== "win32",
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    env: { ...process.env },
+    env: nodeChildEnvironment(),
   });
   child.stderr?.resume();
   let resolveTermination!: () => void;

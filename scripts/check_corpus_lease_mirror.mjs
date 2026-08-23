@@ -33,6 +33,8 @@ const MIRRORED_FILES = [
   "corpus-lease-refusal.test.ts",
   "corpus-lease-poisoning.test.ts",
   "corpus-lease-worker.ts",
+  "node-child.ts",
+  "node-child.test.ts",
   "secure-read.ts",
 ];
 

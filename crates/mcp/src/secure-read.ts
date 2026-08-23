@@ -9,6 +9,8 @@ import {
 import { basename, dirname } from "path";
 import { TextDecoder } from "node:util";
 
+import { nodeChildEnvironment } from "./node-child.js";
+
 /**
  * Decode security-policy-bearing text without Unicode replacement.
  *
@@ -430,7 +432,7 @@ class BoundParentReader {
     });
     this.child = spawn(process.execPath, ["-e", BOUND_READER_SOURCE], {
       cwd: parent,
-      env: { ...process.env, MINUTES_BOUND_PARENT: parent },
+      env: nodeChildEnvironment({ ...process.env, MINUTES_BOUND_PARENT: parent }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

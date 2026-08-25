@@ -6209,6 +6209,13 @@ pub fn start_recording(
         }
     }
 
+    // A completed native session intentionally leaves its last source health
+    // available while processing. Clear it before the ordinary capture path so
+    // a later microphone recording keeps using the in-process microphone meter.
+    if let Ok(mut health) = call_capture_health.lock() {
+        *health = None;
+    }
+
     let wav_path = minutes_core::pid::current_wav_path();
     let recording_started_at = chrono::Local::now();
 
@@ -7187,11 +7194,12 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
         format!("{}:{:02}", e / 60, e % 60)
     });
 
-    let audio_level = if recording_active {
-        minutes_core::capture::audio_level()
-    } else {
-        0
-    };
+    let audio_level = capture_status_audio_level(
+        recording_active,
+        call_capture_health.as_ref(),
+        minutes_core::capture::audio_level(),
+        chrono::Utc::now(),
+    );
 
     let mut value = serde_json::json!({
         "recording": recording || (status.recording && !processing),
@@ -7279,6 +7287,40 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
     }
 
     value
+}
+
+const NATIVE_CALL_HEALTH_MAX_AGE_MS: i64 = 2_000;
+
+fn capture_status_audio_level(
+    recording_active: bool,
+    call_capture_health: Option<&crate::call_capture::CallSourceHealth>,
+    microphone_audio_level: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u32 {
+    if !recording_active {
+        return 0;
+    }
+
+    let Some(health) = call_capture_health else {
+        return microphone_audio_level;
+    };
+    let Ok(last_update) = chrono::DateTime::parse_from_rfc3339(&health.last_update) else {
+        return 0;
+    };
+    let age_ms = now
+        .signed_duration_since(last_update.with_timezone(&chrono::Utc))
+        .num_milliseconds();
+    if !(0..=NATIVE_CALL_HEALTH_MAX_AGE_MS).contains(&age_ms) {
+        return 0;
+    }
+
+    let mic_level = if health.mic_live { health.mic_level } else { 0 };
+    let call_audio_level = if health.call_audio_live {
+        health.call_audio_level
+    } else {
+        0
+    };
+    mic_level.max(call_audio_level).min(100)
 }
 
 #[tauri::command]
@@ -14913,6 +14955,74 @@ mod tests {
                 assert!(full.get(key).is_some(), "full status missing {key}");
             }
         });
+    }
+
+    fn call_health_at(
+        now: chrono::DateTime<chrono::Utc>,
+        mic_live: bool,
+        call_audio_live: bool,
+        mic_level: u32,
+        call_audio_level: u32,
+    ) -> crate::call_capture::CallSourceHealth {
+        crate::call_capture::CallSourceHealth {
+            backend: "screencapturekit-helper".into(),
+            mic_live,
+            call_audio_live,
+            mic_level,
+            call_audio_level,
+            last_update: now.to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn capture_status_uses_current_native_call_level() {
+        let now = chrono::Utc::now();
+        let health = call_health_at(now, true, true, 38, 72);
+
+        assert_eq!(capture_status_audio_level(true, Some(&health), 11, now), 72);
+    }
+
+    #[test]
+    fn capture_status_bounds_native_level_and_ignores_non_live_source() {
+        let now = chrono::Utc::now();
+        let health = call_health_at(now, false, true, 99, 140);
+        let no_live_sources = call_health_at(now, false, false, 99, 88);
+
+        assert_eq!(
+            capture_status_audio_level(true, Some(&health), 11, now),
+            100
+        );
+        assert_eq!(
+            capture_status_audio_level(true, Some(&no_live_sources), 11, now),
+            0
+        );
+    }
+
+    #[test]
+    fn capture_status_fails_stale_or_invalid_native_health_to_zero() {
+        let now = chrono::Utc::now();
+        let stale = call_health_at(
+            now - chrono::TimeDelta::milliseconds(NATIVE_CALL_HEALTH_MAX_AGE_MS + 1),
+            true,
+            true,
+            60,
+            70,
+        );
+        let mut invalid = call_health_at(now, true, true, 60, 70);
+        invalid.last_update = "not-a-timestamp".into();
+        let future = call_health_at(now + chrono::TimeDelta::milliseconds(1), true, true, 60, 70);
+
+        assert_eq!(capture_status_audio_level(true, Some(&stale), 11, now), 0);
+        assert_eq!(capture_status_audio_level(true, Some(&invalid), 11, now), 0);
+        assert_eq!(capture_status_audio_level(true, Some(&future), 11, now), 0);
+    }
+
+    #[test]
+    fn capture_status_preserves_ordinary_microphone_level() {
+        let now = chrono::Utc::now();
+
+        assert_eq!(capture_status_audio_level(true, None, 47, now), 47);
+        assert_eq!(capture_status_audio_level(false, None, 47, now), 0);
     }
 
     #[test]

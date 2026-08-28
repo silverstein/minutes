@@ -37,6 +37,8 @@ const MAIN_WINDOW_TRANSPARENT: bool = false;
 const MAIN_WINDOW_APPLY_VIBRANCY: bool = false;
 #[cfg(target_os = "macos")]
 const APPLE_SPEECH_TRANSPORT_ACCEPTANCE_ARG: &str = "--apple-speech-transport-acceptance";
+#[cfg(target_os = "macos")]
+const APPLE_SPEECH_RUNTIME_ACCEPTANCE_ARG: &str = "--apple-speech-runtime-acceptance";
 
 static CLEAN_EXIT_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -64,6 +66,42 @@ fn maybe_run_apple_speech_transport_acceptance() -> Option<i32> {
         }
         Err(error) => {
             eprintln!("Apple Speech signed byte-transport acceptance failed: {error}");
+            Some(1)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_run_apple_speech_runtime_acceptance() -> Option<i32> {
+    let mut arguments = std::env::args_os();
+    let _executable = arguments.next();
+    if arguments.next().as_deref()
+        != Some(std::ffi::OsStr::new(APPLE_SPEECH_RUNTIME_ACCEPTANCE_ARG))
+    {
+        return None;
+    }
+    if arguments.next().is_some() {
+        eprintln!("Apple Speech runtime acceptance accepts no caller-supplied input");
+        return Some(64);
+    }
+    match minutes_core::apple_speech_worker::run_signed_runtime_acceptance() {
+        Ok(receipt) => {
+            println!("apple-speech-signed-runtime=accepted");
+            println!("apple-speech-signed-runtime-supported=true");
+            println!("apple-speech-module={}", receipt.module_id);
+            println!("apple-speech-word-count={}", receipt.word_count);
+            println!("apple-speech-segment-count={}", receipt.segment_count);
+            println!(
+                "apple-speech-first-result-ms={}",
+                receipt
+                    .first_result_elapsed_ms
+                    .map_or_else(|| "null".to_string(), |value| value.to_string())
+            );
+            println!("apple-speech-total-elapsed-ms={}", receipt.total_elapsed_ms);
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("Apple Speech signed runtime acceptance failed: {error}");
             Some(1)
         }
     }
@@ -1639,6 +1677,10 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     if let Some(code) = maybe_run_apple_speech_transport_acceptance() {
+        std::process::exit(code);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = maybe_run_apple_speech_runtime_acceptance() {
         std::process::exit(code);
     }
     // Route whisper.cpp + ggml C-level logs through Rust `tracing` so they

@@ -63,6 +63,18 @@ pub(crate) struct TransportAcceptanceReceipt {
     pub runtime_supported: bool,
 }
 
+/// Content-free evidence from the fixed public-fixture runtime acceptance.
+/// The transcript itself never leaves the parent process.
+#[derive(Debug)]
+#[cfg(target_os = "macos")]
+pub struct SignedRuntimeAcceptanceReceipt {
+    pub module_id: String,
+    pub word_count: usize,
+    pub segment_count: usize,
+    pub first_result_elapsed_ms: Option<u64>,
+    pub total_elapsed_ms: u64,
+}
+
 /// FNV-1a over the little-endian sample bytes. Proves content integrity, not
 /// just that the declared byte structure arrived, which parse already checks.
 #[cfg(any(test, target_os = "macos"))]
@@ -294,6 +306,86 @@ pub fn run_signed_transport_acceptance() -> Result<bool, String> {
         return Err("Apple Speech acceptance did not preserve the product Whisper fallback".into());
     }
     Ok(receipt.runtime_supported)
+}
+
+/// Exercise the exact signed parent -> authenticated XPC -> worker -> Apple
+/// Speech analyzer path on real macOS hardware. The caller cannot supply audio,
+/// a path, a locale, or any worker configuration: the input is the checked-in
+/// public fixture embedded into the parent at compile time. Only content-free
+/// metrics leave this function, and the normal product gate must remain closed.
+#[cfg(target_os = "macos")]
+pub fn run_signed_runtime_acceptance() -> Result<SignedRuntimeAcceptanceReceipt, String> {
+    if crate::pipeline::apple_speech_private_audio_transport_supported() {
+        return Err("Apple Speech product selection must remain closed during acceptance".into());
+    }
+    if !crate::macos_graph_xpc::current_process_is_trusted_distribution() {
+        return Err("Apple Speech runtime acceptance requires a trusted signed app".into());
+    }
+    println!("apple-speech-signed-parent-trusted=true");
+
+    let samples = runtime_acceptance_samples()?;
+    let result = transcribe_samples(
+        samples.as_slice(),
+        Some("en-US"),
+        AppleSpeechMode::Speech,
+        true,
+    )
+    .map_err(|error| format!("signed Apple Speech worker runtime failed: {error}"))?;
+    if result.kind != "transcription"
+        || result.schema_version != REQUEST_SCHEMA_VERSION
+        || result.module_id != "speech-transcriber"
+        || !result.runtime_supported
+        || result.error.is_some()
+        || result.transcript.trim().is_empty()
+        || result.word_count < 10
+        || result.segments.is_empty()
+        || result.first_result_elapsed_ms.is_none()
+    {
+        return Err("signed Apple Speech worker did not produce a valid bounded transcript".into());
+    }
+
+    let mut config = crate::config::Config::default();
+    config.live_transcript.backend = "apple-speech".to_string();
+    if crate::pipeline::resolved_apple_speech_backend(config.effective_live_transcript_backend())
+        != "whisper"
+    {
+        return Err("Apple Speech acceptance did not preserve the product Whisper fallback".into());
+    }
+
+    Ok(SignedRuntimeAcceptanceReceipt {
+        module_id: result.module_id,
+        word_count: result.word_count,
+        segment_count: result.segments.len(),
+        first_result_elapsed_ms: result.first_result_elapsed_ms,
+        total_elapsed_ms: result.total_elapsed_ms,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_acceptance_samples() -> Result<zeroize::Zeroizing<Vec<f32>>, String> {
+    const FIXTURE: &[u8] = include_bytes!("../../assets/demo.wav");
+    let mut reader = hound::WavReader::new(std::io::Cursor::new(FIXTURE))
+        .map_err(|_| "embedded Apple Speech runtime fixture was invalid".to_string())?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.sample_rate != SAMPLE_RATE_HZ
+        || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int
+    {
+        return Err("embedded Apple Speech runtime fixture had an unexpected format".into());
+    }
+    let samples = reader
+        .samples::<i16>()
+        .map(|sample| {
+            sample.map(|value| f32::from(value) / 32768.0).map_err(|_| {
+                "embedded Apple Speech runtime fixture could not be decoded".to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if samples.is_empty() || samples.len() > SAMPLE_RATE_HZ as usize * MAX_UTTERANCE_SECONDS {
+        return Err("embedded Apple Speech runtime fixture exceeded its sample budget".into());
+    }
+    Ok(zeroize::Zeroizing::new(samples))
 }
 
 #[cfg(target_os = "macos")]
@@ -661,6 +753,15 @@ mod tests {
             "a single changed sample must change the checksum"
         );
         assert_eq!(transport_acceptance_checksum(&a).len(), 16);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn signed_runtime_fixture_is_bounded_canonical_pcm() {
+        let samples = runtime_acceptance_samples().unwrap();
+        assert_eq!(samples.len(), 170_013);
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        assert!(samples.iter().any(|sample| sample.abs() > 0.01));
     }
 
     #[cfg(target_os = "macos")]

@@ -7,14 +7,14 @@ import { readFileSync } from "node:fs";
 // Structural matches below are necessary but these goldens ensure a copied
 // comment or dead duplicate cannot silently replace the active boundary.
 const EXPECTED_SOURCE_SHA256 = {
-  worker: "b1cc9e5dd780d0fc116ba325155324783bef012b288a4c7e11381a110f3a613c",
+  worker: "65e487ed419c22dab849c7017db222c430c9fceb86f85e6cf25001653f890f08",
   xpc: "bfe9dfc1f015e6825adc02212305af52efe0f2faeff0d79c736cdce4e4c4d2aa",
   swift: "77310730cfa46ac8301c1a65622681005ebf00f0c699f24fdca757e2e02fcef4",
-  main: "8bbe7aa5fd3510cb61944e1df35f4b2ff2a2da8497fce3784f1ab0cdddbe254a",
+  main: "6c931ff9bac4e041ed2bcb48024313632b8972708c53eee7471808c5a72edc9b",
   acceptanceWorkflow:
     "8ae35943181c6d0f248f580587b894c53db9c30257f307c5aa5264a83f13969d",
   acceptanceHarness:
-    "dfbdf3e2f0290ee05063e44780a16a8af457ead00b6a687ed1dc2adffd3eeeba",
+    "034d8dd5a048b0d8abb6e8a7dfcd82295aa694a43367074b3c4a3a1babd117e0",
 };
 
 const files = {
@@ -208,6 +208,7 @@ function validate(candidate, checkGoldens = true) {
     "setitimer",
     "parse_private_audio_request",
     "run_signed_transport_acceptance",
+    "run_signed_runtime_acceptance",
     "private_audio_parser_accepts_only_exact_finite_pcm_cardinality",
     "private_audio_parser_rejects_magic_metadata_schema_and_budget_attacks",
   ]) {
@@ -402,6 +403,8 @@ function validate(candidate, checkGoldens = true) {
   for (const value of [
     "--apple-speech-transport-acceptance",
     "run_signed_transport_acceptance()",
+    "--apple-speech-runtime-acceptance",
+    "run_signed_runtime_acceptance()",
     "acceptance accepts no caller-supplied input",
   ]) {
     requireText(
@@ -428,6 +431,9 @@ function validate(candidate, checkGoldens = true) {
     "os.O_NOFOLLOW",
     "raw_f32",
     "pcm_i16",
+    "runtime_fixture_patterns",
+    "apple-speech-signed-runtime=accepted",
+    "signedWorkerRuntime",
     "namedAudioCanaryObserved",
     "productGateExpectedClosed",
   ]) {

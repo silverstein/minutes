@@ -17,6 +17,9 @@ export default defineConfig({
     // Demonstrated rather than reasoned about: an operation stalled to its own
     // timeout fails here at 15_000 and passes at 30_000, unchanged otherwise.
     // A harness must outlive what it measures, or it reports itself.
-    testTimeout: 30_000,
+    // The explicit repository test harness may grant corpus authorization up
+    // to 60 seconds on a loaded runner. Keep Vitest outside that deadline so
+    // the lease, not the harness, still reports any real timeout.
+    testTimeout: 75_000,
   },
 });

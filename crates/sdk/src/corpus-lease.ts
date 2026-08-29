@@ -30,6 +30,7 @@ import { nodeChildEnvironment } from "./node-child.js";
 const MAX_AUTHORIZATION_ATTEMPTS = 2;
 const DEFAULT_FENCE_TIMEOUT_MS = 5_000;
 const DEFAULT_AUTHORIZATION_TIMEOUT_MS = 15_000;
+const MAX_TEST_HARNESS_AUTHORIZATION_TIMEOUT_MS = 120_000;
 const MAX_ACTIVE_WATCHERS = 64;
 // Snapshot content is retained as JavaScript strings, whose backing storage
 // may require two bytes per source byte. Reserve that worst case for the full
@@ -411,12 +412,56 @@ function resolveFenceTimeout(timeoutMs: number | undefined): number {
   return Math.min(requested, DEFAULT_FENCE_TIMEOUT_MS);
 }
 
-function authorizationDeadline(timeoutMs: number | undefined): bigint {
-  const requested = timeoutMs ?? DEFAULT_AUTHORIZATION_TIMEOUT_MS;
+function resolveAuthorizationTimeoutMs(
+  timeoutMs: number | undefined,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env
+): number {
+  const configuredOverride = environment.MINUTES_CORPUS_AUTH_TIMEOUT_MS;
+  // A longer deadline is test infrastructure, not application configuration.
+  // Requiring both markers keeps an ambient production environment variable
+  // from weakening the fail-closed 15 second cap. Only the repository's test
+  // harness sets this pair; the spawned lease worker inherits it from the
+  // parent. Invalid gated values fail closed instead of silently relaxing or
+  // changing the requested budget.
+  const testHarnessOverride =
+    environment.NODE_ENV === "test" &&
+    environment.MINUTES_TEST_HARNESS === "1" &&
+    configuredOverride !== undefined
+      ? configuredOverride
+      : undefined;
+  if (
+    testHarnessOverride !== undefined &&
+    !/^[1-9]\d*$/.test(testHarnessOverride)
+  ) {
+    throw new Error("Access denied: invalid meeting corpus authorization timeout");
+  }
+  const cap =
+    testHarnessOverride === undefined
+      ? DEFAULT_AUTHORIZATION_TIMEOUT_MS
+      : Math.min(
+          Number(testHarnessOverride),
+          MAX_TEST_HARNESS_AUTHORIZATION_TIMEOUT_MS
+        );
+  const requested = timeoutMs ?? cap;
   if (!Number.isSafeInteger(requested) || requested < 1) {
     throw new Error("Access denied: invalid meeting corpus authorization timeout");
   }
-  return process.hrtime.bigint() + BigInt(Math.min(requested, DEFAULT_AUTHORIZATION_TIMEOUT_MS)) * 1_000_000n;
+  return Math.min(requested, cap);
+}
+
+/** @internal Pure policy seam for test-harness gate regression coverage. */
+export function resolveAuthorizationTimeoutMsForTest(
+  timeoutMs: number | undefined,
+  environment: Readonly<NodeJS.ProcessEnv>
+): number {
+  return resolveAuthorizationTimeoutMs(timeoutMs, environment);
+}
+
+function authorizationDeadline(timeoutMs: number | undefined): bigint {
+  return (
+    process.hrtime.bigint() +
+    BigInt(resolveAuthorizationTimeoutMs(timeoutMs)) * 1_000_000n
+  );
 }
 
 function remainingAuthorizationMs(deadline: bigint): number {
@@ -1858,8 +1903,20 @@ export async function withStableCorpusLease<T>(
   ) => T | Promise<T>,
   hooks: CorpusLeaseHooks = {}
 ): Promise<T> {
+  const authorizationStarted = process.hrtime.bigint();
   try {
-    return await dispatchStableCorpusLease(root, operation, hooks);
+    const result = await dispatchStableCorpusLease(root, operation, hooks);
+    const durationMs = Number(
+      (process.hrtime.bigint() - authorizationStarted + 999_999n) / 1_000_000n
+    );
+    // Match denial diagnostics: content-free, operator-visible, deferred, and
+    // unable to turn an authorization result into an application failure.
+    setImmediate(() => {
+      writeOperatorDiagnostic(
+        `[corpus-lease] authorized (authorization duration ${durationMs}ms)\n`
+      );
+    });
+    return result;
   } catch (error) {
     if (error instanceof CorpusLeaseChangedError) {
       throw new Error(

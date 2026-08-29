@@ -615,6 +615,10 @@ jobs:
 
       - name: SDK corpus policy tests
         working-directory: crates/sdk
+        env:
+          NODE_ENV: test
+          MINUTES_TEST_HARNESS: '1'
+          MINUTES_CORPUS_AUTH_TIMEOUT_MS: '60000'
         run: npx vitest run src/corpus-lease.test.ts src/secure-read.test.ts
 
       - name: Build SDK production module
@@ -633,6 +637,10 @@ jobs:
 
       - name: MCP corpus policy tests
         working-directory: crates/mcp
+        env:
+          NODE_ENV: test
+          MINUTES_TEST_HARNESS: '1'
+          MINUTES_CORPUS_AUTH_TIMEOUT_MS: '60000'
         run: >-
           npx vitest run
           src/index.test.ts

@@ -22,6 +22,7 @@ import { realpath } from "node:fs/promises";
 import {
   DEFAULT_CORPUS_READ_BUDGETS,
   awaitDeferredCorpusReleasesForTests,
+  resolveAuthorizationTimeoutMsForTest,
   withStableCorpusLease,
 } from "./corpus-lease.js";
 
@@ -167,6 +168,49 @@ describe("stable corpus lease", () => {
       expect(result.files).toEqual([["meeting.md", "stable corpus canary"]]);
       expect(result.root).toBe(await realpath(root));
     });
+  });
+
+  it("ignores an ambient authorization override and keeps the production cap", () => {
+    const requested = Number.MAX_SAFE_INTEGER;
+    expect(
+      resolveAuthorizationTimeoutMsForTest(requested, {
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+      })
+    ).toBe(15_000);
+    expect(
+      resolveAuthorizationTimeoutMsForTest(requested, {
+        NODE_ENV: "test",
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+      })
+    ).toBe(15_000);
+    expect(
+      resolveAuthorizationTimeoutMsForTest(requested, {
+        MINUTES_TEST_HARNESS: "1",
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+      })
+    ).toBe(15_000);
+  });
+
+  it("applies and clamps the explicitly gated test-harness authorization override", () => {
+    const harness = {
+      NODE_ENV: "test",
+      MINUTES_TEST_HARNESS: "1",
+      MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+    };
+    expect(resolveAuthorizationTimeoutMsForTest(undefined, harness)).toBe(60_000);
+    expect(resolveAuthorizationTimeoutMsForTest(5_000, harness)).toBe(5_000);
+    expect(
+      resolveAuthorizationTimeoutMsForTest(Number.MAX_SAFE_INTEGER, {
+        ...harness,
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "999999",
+      })
+    ).toBe(120_000);
+    expect(() =>
+      resolveAuthorizationTimeoutMsForTest(undefined, {
+        ...harness,
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "invalid",
+      })
+    ).toThrow("invalid meeting corpus authorization timeout");
   });
 
   it("reassembles paced chunks before strict UTF-8 decoding", async () => {
@@ -856,7 +900,7 @@ describe("stable corpus lease", () => {
     });
   });
 
-  it("accepts a bounded retry whose earlier attempt produced no snapshot", async () => {
+  it("accepts a bounded retry and reports its authorization duration", async () => {
     await withCorpus(async (root) => {
       const fixture = join(root, "skipped-attempt-worker.mjs");
       writeFileSync(
@@ -888,27 +932,41 @@ describe("stable corpus lease", () => {
       );
       let phaseCalls = 0;
       let operationCalls = 0;
-      await expect(
-        withStableCorpusLease(
-          root,
-          (_snapshot, attempt) => {
-            operationCalls += 1;
-            expect(attempt).toBe(2);
-            return "authorized retry";
-          },
-          {
-            // De-raced only: this one already fails loudly rather than
-            // passing falsely, because it asserts positive phase and
-            // operation counts.
-            timeoutMs: 5_000,
-            workerScriptForTest: fixture,
-            onWatcherReady: ({ attempt }) => {
-              phaseCalls += 1;
+      const original = process.stderr.write;
+      let diagnostics = "";
+      (process.stderr as unknown as { write: unknown }).write = (chunk: unknown) => {
+        diagnostics += String(chunk);
+        return true;
+      };
+      try {
+        await expect(
+          withStableCorpusLease(
+            root,
+            (_snapshot, attempt) => {
+              operationCalls += 1;
               expect(attempt).toBe(2);
+              return "authorized retry";
             },
-          }
-        )
-      ).resolves.toBe("authorized retry");
+            {
+              // De-raced only: this one already fails loudly rather than
+              // passing falsely, because it asserts positive phase and
+              // operation counts.
+              timeoutMs: 5_000,
+              workerScriptForTest: fixture,
+              onWatcherReady: ({ attempt }) => {
+                phaseCalls += 1;
+                expect(attempt).toBe(2);
+              },
+            }
+          )
+        ).resolves.toBe("authorized retry");
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(diagnostics).toMatch(
+          /\[corpus-lease\] authorized \(authorization duration \d+ms\)/
+        );
+      } finally {
+        (process.stderr as unknown as { write: unknown }).write = original;
+      }
       expect(phaseCalls).toBe(1);
       expect(operationCalls).toBe(1);
     });

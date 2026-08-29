@@ -32,13 +32,14 @@
   "scripts": {
     "build": "tsc && vite build",
     "build:ui": "vite build",
-    "test": "npm run build && node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs && node test/mcp_http_transport_test.mjs && node test/surface_parity_test.mjs",
-    "test:unit": "vitest run",
+    "test": "npm run build && node ../../scripts/run_corpus_test_harness.mjs npm run test:integration",
+    "test:integration": "node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs && node test/mcp_http_transport_test.mjs && node test/surface_parity_test.mjs",
+    "test:unit": "node ../../scripts/run_corpus_test_harness.mjs npx vitest run",
     "test:host-compat": "node test/live_events_host_compat.mjs",
     "test:copilot": "node test/copilot_mcp_contract.mjs",
     "test:http": "node test/mcp_http_transport_test.mjs",
     "test:surface-parity": "node test/surface_parity_test.mjs",
-    "test:all": "vitest run && npm run build && node test/mcp_tools_test.mjs && node test/copilot_mcp_contract.mjs && node test/mcp_http_transport_test.mjs && node test/surface_parity_test.mjs",
+    "test:all": "npm run test:unit && npm test",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts"
   },

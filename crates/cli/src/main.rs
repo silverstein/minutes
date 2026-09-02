@@ -9,7 +9,7 @@ use minutes_core::autoresearch::{
     DecodeHintEvalComparisonRequest, DecodeHintEvalOptions, DecodeHintEvalRequest,
 };
 use minutes_core::capture::RecordingIntent;
-use minutes_core::config::{ConsentMode, VALID_PARAKEET_MODELS};
+use minutes_core::config::{ConsentMode, DefaultAudioRetention, VALID_PARAKEET_MODELS};
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::parakeet;
 use minutes_core::{CaptureMode, Config, ContentType};
@@ -212,6 +212,7 @@ struct RecordingConsent {
     notice: Option<String>,
     reminder: Option<String>,
     warning: Option<String>,
+    announced_at: Option<chrono::DateTime<Local>>,
 }
 
 fn parse_recording_consent_basis(raw: &str) -> Result<ConsentBasis> {
@@ -232,6 +233,7 @@ fn prepare_recording_consent(
     config: &Config,
     consent_arg: Option<&str>,
     consent_notice: Option<&str>,
+    announced: bool,
     stdin_is_tty: bool,
     prompt_for_consent: impl FnOnce() -> Result<bool>,
 ) -> Result<RecordingConsent> {
@@ -251,12 +253,14 @@ fn prepare_recording_consent(
             notice: explicit_notice,
             reminder: None,
             warning: None,
+            announced_at: announced.then(Local::now),
         }),
         ConsentMode::Remind => Ok(RecordingConsent {
             basis: resolved_basis.unwrap_or(ConsentBasis::Unattested),
             notice: explicit_notice,
             reminder: Some(config.consent.disclosure_script.clone()),
             warning: None,
+            announced_at: announced.then(Local::now),
         }),
         ConsentMode::Require if !stdin_is_tty => Ok(RecordingConsent {
             basis: resolved_basis.unwrap_or(ConsentBasis::Unattested),
@@ -265,6 +269,7 @@ fn prepare_recording_consent(
             warning: Some(
                 "consent gate skipped: non-interactive session; recording as unattested".into(),
             ),
+            announced_at: announced.then(Local::now),
         }),
         ConsentMode::Require => {
             if let Some(basis) = resolved_basis {
@@ -273,6 +278,7 @@ fn prepare_recording_consent(
                     notice: explicit_notice,
                     reminder: None,
                     warning: None,
+                    announced_at: announced.then(Local::now),
                 });
             }
             if prompt_for_consent()? {
@@ -281,6 +287,7 @@ fn prepare_recording_consent(
                     notice: explicit_notice,
                     reminder: None,
                     warning: None,
+                    announced_at: Some(Local::now()),
                 })
             } else {
                 anyhow::bail!(
@@ -300,6 +307,71 @@ fn prompt_for_recording_consent() -> Result<bool> {
         input.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+fn surface_recording_disclosure(config: &Config) {
+    if config.consent.mode == ConsentMode::Off {
+        return;
+    }
+    if config.consent.mode == ConsentMode::Remind {
+        if let Some(jurisdiction) = config
+            .consent
+            .jurisdiction
+            .as_deref()
+            .and_then(minutes_core::consent_jurisdictions::lookup)
+        {
+            eprintln!("[minutes] {}", jurisdiction.note);
+            eprintln!(
+                "[minutes] Suggested consent basis to record: {}",
+                jurisdiction.recommended_basis.as_str()
+            );
+            eprintln!(
+                "[minutes] Informational reminder only; it is not legal advice. Confirm the rules that apply to you."
+            );
+        }
+    }
+    let script = config.consent.disclosure_script.trim();
+    if script.is_empty() {
+        return;
+    }
+    eprintln!("[minutes] Disclosure script: {}", script);
+    if copy_disclosure_to_clipboard(script) {
+        eprintln!("[minutes] Disclosure script copied to clipboard.");
+    }
+}
+
+fn copy_disclosure_to_clipboard(script: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &[&str])] = &[("pbcopy", &[])];
+    #[cfg(target_os = "linux")]
+    let candidates: &[(&str, &[&str])] = &[
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &[&str])] = &[("clip.exe", &[])];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let candidates: &[(&str, &[&str])] = &[];
+
+    for (program, args) in candidates {
+        let Ok(mut child) = std::process::Command::new(program)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(script.as_bytes()).is_ok());
+        if wrote && child.wait().is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// minutes — conversation memory for AI assistants.
@@ -363,6 +435,14 @@ enum Commands {
         /// Exact disclosure text to stamp into meeting frontmatter.
         #[arg(long, value_name = "TEXT")]
         consent_notice: Option<String>,
+
+        /// Confirm that the disclosure was announced; stamps consent_announced_at.
+        #[arg(long)]
+        announced: bool,
+
+        /// Delete this meeting's job-owned audio after durable finalization.
+        #[arg(long)]
+        no_keep_audio: bool,
 
         /// Transcription language (e.g. "en", "ur", "es"). Overrides config.toml setting.
         #[arg(short, long)]
@@ -1048,6 +1128,13 @@ enum Commands {
         /// Output raw JSON instead of formatted table
         #[arg(long)]
         json: bool,
+    },
+
+    /// Show the effective recording-consent reminder configuration.
+    Consent {
+        /// Consent action.
+        #[arg(default_value = "show", value_parser = ["show"])]
+        action: String,
     },
 
     /// Run a demo recording to verify the pipeline works (uses bundled audio, no mic needed)
@@ -1953,6 +2040,8 @@ fn main() -> Result<()> {
             skip_audio_probe,
             consent,
             consent_notice,
+            announced,
+            no_keep_audio,
             language,
             device,
             source,
@@ -2021,6 +2110,8 @@ fn main() -> Result<()> {
                     skip_audio_probe.as_deref(),
                     consent.as_deref(),
                     consent_notice.as_deref(),
+                    announced,
+                    no_keep_audio,
                     template,
                     &config,
                 )
@@ -2416,6 +2507,7 @@ fn main() -> Result<()> {
         }
         Commands::Logs { errors, lines } => cmd_logs(errors, lines),
         Commands::Health { json } => cmd_health(json),
+        Commands::Consent { action } => cmd_consent(&action, &config),
         Commands::Demo { full, clean, query } => {
             if clean {
                 let removed = demo_data::clean_demo_meetings(&config.output_dir)?;
@@ -2874,6 +2966,8 @@ fn cmd_record(
     skip_audio_probe: Option<&str>,
     consent: Option<&str>,
     consent_notice: Option<&str>,
+    announced: bool,
+    no_keep_audio: bool,
     template_slug: Option<String>,
     config: &Config,
 ) -> Result<()> {
@@ -2912,19 +3006,20 @@ fn cmd_record(
 
     let recording_consent = if capture_mode == CaptureMode::Meeting {
         eprintln!("Recording + transcribing locally — audio stays on your device.");
+        surface_recording_disclosure(config);
         let resolved = prepare_recording_consent(
             config,
             consent,
             consent_notice,
+            announced,
             std::io::stdin().is_terminal(),
             prompt_for_recording_consent,
         )?;
         if let Some(warning) = resolved.warning.as_deref() {
             eprintln!("[minutes] {}", warning);
         }
-        if let Some(script) = resolved.reminder.as_deref() {
+        if resolved.reminder.is_some() {
             eprintln!("[minutes] Reminder: ensure everyone present consents where required.");
-            eprintln!("[minutes] Disclosure script: {}", script);
         }
         Some(resolved)
     } else {
@@ -2974,9 +3069,16 @@ fn cmd_record(
     minutes_core::notes::save_recording_start()?;
     minutes_core::notes::clear_consent();
     if let Some(recording_consent) = recording_consent.as_ref() {
-        minutes_core::notes::save_consent(
-            Some(recording_consent.basis),
-            recording_consent.notice.as_deref(),
+        let audio_retention = (no_keep_audio
+            || config.retention.default_audio_retention == DefaultAudioRetention::None)
+            .then(|| "none".to_string());
+        minutes_core::notes::save_recording_privacy(
+            &minutes_core::notes::RecordingPrivacyMetadata {
+                consent: Some(recording_consent.basis),
+                consent_notice: recording_consent.notice.clone(),
+                audio_retention,
+                consent_announced_at: recording_consent.announced_at,
+            },
         )?;
     }
 
@@ -3042,10 +3144,10 @@ fn cmd_record(
     let recording_finished_at = Local::now();
     let user_notes = minutes_core::notes::read_notes();
     let pre_context = minutes_core::notes::read_context();
-    let (consent, consent_notice) = if capture_mode == CaptureMode::Meeting {
-        minutes_core::notes::load_consent()
+    let privacy = if capture_mode == CaptureMode::Meeting {
+        minutes_core::notes::load_recording_privacy()
     } else {
-        (None, None)
+        minutes_core::notes::RecordingPrivacyMetadata::default()
     };
     // Don't block the stop path with a calendar query (can take 10s if Calendar.app hangs).
     // The pipeline already falls back to events_overlapping_now() during background processing.
@@ -3062,8 +3164,10 @@ fn cmd_record(
             context_session_id.clone(),
             calendar_event,
             template_slug.clone(),
-            consent,
-            consent_notice,
+            privacy.consent,
+            privacy.consent_notice,
+            privacy.audio_retention,
+            privacy.consent_announced_at,
             startup_recording_health.clone(),
         )?;
 
@@ -3413,7 +3517,21 @@ fn cmd_jobs(include_terminal: bool, json_mode: bool, limit: usize) -> Result<()>
             println!("  error: {}", error);
         }
         println!("  created: {}", job.created_at.to_rfc3339());
-        println!("  audio: {}", job.audio_path);
+        if job.audio_deleted_at.is_some() {
+            println!("  audio: not kept (by request)");
+        } else if job
+            .audio_retention
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            && matches!(
+                job.state,
+                minutes_core::jobs::JobState::Failed | minutes_core::jobs::JobState::NeedsReview
+            )
+        {
+            println!("  audio: held for transcription retry");
+        } else {
+            println!("  audio: {}", job.audio_path);
+        }
         println!();
     }
 
@@ -9082,6 +9200,7 @@ mod tests {
             &config,
             Some("verbal_all_parties"),
             Some("Read aloud."),
+            true,
             false,
             || panic!("prompt should not run for explicit basis"),
         )
@@ -9094,13 +9213,34 @@ mod tests {
             Some(config.consent.disclosure_script.as_str())
         );
         assert_eq!(resolved.warning, None);
+        assert!(resolved.announced_at.is_some());
+    }
+
+    #[test]
+    fn record_parses_announcement_and_ephemeral_audio_flags() {
+        let parsed = parse_cli(["minutes", "record", "--announced", "--no-keep-audio"])
+            .expect("record privacy flags must parse");
+        match parsed.command {
+            Commands::Record {
+                announced,
+                no_keep_audio,
+                ..
+            } => {
+                assert!(announced);
+                assert!(no_keep_audio);
+            }
+            _ => panic!("expected record command"),
+        }
+
+        let consent = parse_cli(["minutes", "consent", "show"]).expect("consent show must parse");
+        assert!(matches!(consent.command, Commands::Consent { .. }));
     }
 
     #[test]
     fn recording_consent_does_not_fabricate_notice_from_disclosure_script() {
         let config = Config::default();
 
-        let resolved = prepare_recording_consent(&config, Some("na"), None, false, || {
+        let resolved = prepare_recording_consent(&config, Some("na"), None, false, false, || {
             panic!("prompt should not run for explicit basis")
         })
         .unwrap();
@@ -9117,7 +9257,7 @@ mod tests {
         config.consent.mode = ConsentMode::Require;
         let prompt_calls = AtomicUsize::new(0);
 
-        let resolved = prepare_recording_consent(&config, None, None, false, || {
+        let resolved = prepare_recording_consent(&config, None, None, false, false, || {
             prompt_calls.fetch_add(1, Ordering::SeqCst);
             Ok(true)
         })
@@ -9145,6 +9285,7 @@ mod tests {
                 &config,
                 Some("notice_in_invite"),
                 Some("Included in the invite."),
+                false,
                 false,
                 || panic!("prompt should not run for explicit basis"),
             )
@@ -16678,6 +16819,23 @@ fn cmd_health(json: bool) -> Result<()> {
             eprintln!("  {} {}{}", icon, item.label, opt);
             eprintln!("    {}", item.detail);
         }
+        for job in minutes_core::jobs::display_jobs(None, true)
+            .into_iter()
+            .filter(|job| {
+                job.audio_retention
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            })
+        {
+            if job.audio_deleted_at.is_some() {
+                eprintln!("  audio: not kept (by request)");
+            } else if matches!(
+                job.state,
+                minutes_core::jobs::JobState::Failed | minutes_core::jobs::JobState::NeedsReview
+            ) {
+                eprintln!("  audio: held for transcription retry");
+            }
+        }
         if all_ready {
             eprintln!("\nAll systems ready.");
         } else {
@@ -16708,7 +16866,51 @@ fn health_json_report(
         "all_ready": attention_count == 0,
         "attention_count": attention_count,
         "items": items,
+        "ephemeral_audio": minutes_core::jobs::display_jobs(None, true).into_iter().filter_map(|job| {
+            job.audio_retention.as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+                .then(|| serde_json::json!({
+                    "job_id": job.id,
+                    "status": if job.audio_deleted_at.is_some() {
+                        "not kept (by request)"
+                    } else if matches!(job.state, minutes_core::jobs::JobState::Failed | minutes_core::jobs::JobState::NeedsReview) {
+                        "held for transcription retry"
+                    } else {
+                        "pending"
+                    }
+                }))
+        }).collect::<Vec<_>>(),
     })
+}
+
+fn cmd_consent(action: &str, config: &Config) -> Result<()> {
+    if action != "show" {
+        anyhow::bail!("unknown consent action: {action}. Use show.");
+    }
+    let mode = match config.consent.mode {
+        ConsentMode::Off => "off",
+        ConsentMode::Remind => "remind",
+        ConsentMode::Require => "require",
+    };
+    println!("mode: {mode}");
+    match config.consent.jurisdiction.as_deref() {
+        Some(code) => {
+            println!("jurisdiction: {code}");
+            if let Some(row) = minutes_core::consent_jurisdictions::lookup(code) {
+                println!("reminder: {}", row.note);
+                println!("recommended_basis: {}", row.recommended_basis.as_str());
+                println!("source: {}", row.source_url);
+            } else {
+                println!("reminder: no built-in row for this jurisdiction");
+            }
+        }
+        None => println!("jurisdiction: not configured"),
+    }
+    println!("disclosure_script: {}", config.consent.disclosure_script);
+    println!(
+        "Minutes shows this as a reminder. It is not legal advice, and laws change; confirm the rules that apply to you."
+    );
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────

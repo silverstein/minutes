@@ -56,6 +56,9 @@ schema version bump. Additive fields do not.
 | `debrief` | enum | Optional debrief state. `pending` means the saved artifact still needs a written debrief. |
 | `consent` | enum | Optional capture basis: `verbal_all_parties`, `notice_in_invite`, `recorded_disclosed`, `na`, or `unattested`. |
 | `consent_notice` | string | Exact disclosure text used for the recording, when provided or configured. |
+| `consent_announced_at` | datetime | Time when the recorder confirmed that they announced the disclosure. This is a human attestation, not an automatic consent decision. |
+| `audio_retention` | string | Raw-audio policy: `keep`, `none`, `pinned`, or `none (held: transcription failed)` when retryability wins. |
+| `audio_deleted_at` | datetime | Time when all audio paths proven to be owned by the job were deleted after durable Markdown finalization. |
 | `visibility` | enum | `private` (default) or `team`. Informational; Minutes does not enforce ACLs. |
 | `calendar_event` | string | Calendar event id (Google Calendar, Outlook) when matched. |
 | `recording_health` | object | Optional capture/diarization diagnostics. See [Recording health](#recording-health) below. Omitted when no warnings or capture-health metadata are present. |

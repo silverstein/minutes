@@ -4532,6 +4532,20 @@
       white-space: nowrap;
     }
 
+    .call-detected-copy {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .call-detected-disclosure {
+      margin-top: 2px;
+      color: var(--text-secondary);
+      font-size: var(--text-meta);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .call-detected-close {
       flex-shrink: 0;
       width: 22px;
@@ -5932,8 +5946,13 @@
     <!-- Call detected banner -->
     <div class="call-detected" id="call-detected-banner">
       <div class="call-detected-icon">📞</div>
-      <div class="call-detected-title" id="call-detected-title">Call detected</div>
+      <div class="call-detected-copy">
+        <div class="call-detected-title" id="call-detected-title">Call detected</div>
+        <div class="call-detected-disclosure" id="call-detected-disclosure" hidden></div>
+      </div>
       <div class="call-detected-actions">
+        <button class="btn btn-secondary btn-sm" id="btn-copy-call-disclosure" hidden>Copy</button>
+        <button class="btn btn-secondary btn-sm" id="btn-call-announced" hidden>Announced</button>
         <button class="btn btn-primary btn-sm" id="btn-record-call">Record</button>
         <button class="call-detected-close" id="btn-dismiss-call" aria-label="Dismiss call notification" title="Dismiss">×</button>
       </div>
@@ -6282,6 +6301,10 @@
       <div class="readiness-scroll">
         <p class="consent-script-label">Your disclosure script, when the moment comes:</p>
         <p class="consent-disclosure" id="recording-consent-disclosure"></p>
+        <label class="settings-toggle-row" for="recording-consent-no-keep-audio">
+          <input type="checkbox" id="recording-consent-no-keep-audio">
+          Never keep this meeting&apos;s audio after the transcript is safely written
+        </label>
       </div>
       <div class="readiness-actions consent-actions">
         <button class="btn btn-primary btn-sm" id="recording-consent-confirm">I&apos;ll make sure, start recording</button>
@@ -7518,6 +7541,7 @@
     const recordingConsentDisclosure = document.getElementById('recording-consent-disclosure');
     const recordingConsentConfirm = document.getElementById('recording-consent-confirm');
     const recordingConsentCancel = document.getElementById('recording-consent-cancel');
+    const recordingConsentNoKeepAudio = document.getElementById('recording-consent-no-keep-audio');
     const jobsButton = document.getElementById('btn-jobs');
     const jobsCount = document.getElementById('jobs-count');
     const jobsOverlay = document.getElementById('jobs-overlay');
@@ -9613,7 +9637,11 @@
     // ── Recording controls ──
     function recordingStartArgsForCurrentUi() {
       if (activeCallSession && !activeCallSession.dismissed && callBanner.classList.contains('active')) {
-        return { intent: 'call', source: 'call_detect' };
+        return {
+          intent: 'call',
+          source: 'call_detect',
+          announced: !!activeCallSession.announced,
+        };
       }
       return undefined;
     }
@@ -9628,6 +9656,7 @@
     function showRecordingConsentModal(disclosure, args) {
       pendingRecordingStartArgs = args || {};
       recordingConsentDisclosure.textContent = disclosure || '';
+      recordingConsentNoKeepAudio.checked = !!pendingRecordingStartArgs.noKeepAudio;
       recordingConsentOverlay.classList.add('active');
       recordingConsentConfirm.focus();
     }
@@ -9738,7 +9767,10 @@
     setTimeout(() => applyCaptureMode(captureMode, { persist: false }), 0);
 
     recordingConsentConfirm.addEventListener('click', async () => {
-      const args = pendingRecordingStartArgs || {};
+      const args = {
+        ...(pendingRecordingStartArgs || {}),
+        noKeepAudio: !!recordingConsentNoKeepAudio.checked,
+      };
       closeRecordingConsentModal();
       try {
         setFooterCaptureMode(true, 'starting');
@@ -15567,7 +15599,26 @@
     // ── Call detection banner ──
     const callBanner = document.getElementById('call-detected-banner');
     const callTitle = document.getElementById('call-detected-title');
+    const callDisclosure = document.getElementById('call-detected-disclosure');
+    const callDisclosureCopy = document.getElementById('btn-copy-call-disclosure');
+    const callAnnounced = document.getElementById('btn-call-announced');
     let activeCallSession = null;
+
+    async function loadCallConsentAffordance(session) {
+      try {
+        const settings = await invoke('cmd_get_settings');
+        if (activeCallSession !== session) return;
+        const mode = settings.consent?.mode || 'remind';
+        const disclosure = (settings.consent?.disclosure_script || '').trim();
+        session.disclosure = mode === 'off' ? '' : disclosure;
+        callDisclosure.textContent = session.disclosure;
+        callDisclosure.hidden = !session.disclosure;
+        callDisclosureCopy.hidden = !session.disclosure;
+        callAnnounced.hidden = !session.disclosure;
+      } catch (error) {
+        console.error('call consent disclosure:', error);
+      }
+    }
 
     // Used by the recording-bar health chips (line ~5806). The call-detected
     // banner used to call this too with stale "waiting" placeholders, but
@@ -15583,9 +15634,16 @@
       activeCallSession = {
         app_name,
         dismissed: false,
+        announced: false,
+        disclosure: '',
       };
       callTitle.textContent = `${app_name} call detected`;
       callBanner.classList.add('active');
+      callDisclosure.hidden = true;
+      callDisclosureCopy.hidden = true;
+      callAnnounced.hidden = true;
+      callAnnounced.textContent = 'Announced';
+      loadCallConsentAffordance(activeCallSession);
 
       // Only steal focus on first detection, not periodic reminders
       if (!is_reminder) {
@@ -15600,12 +15658,33 @@
         // Mark the session as call-detection-initiated so stop_when_call_ends
         // knows this recording is eligible for the auto-stop prompt when the
         // call app exits. Manual `minutes record` / hotkey starts never set this.
-        await startDesktopRecordingWithArgs({ intent: 'call', source: 'call_detect' });
+        await startDesktopRecordingWithArgs({
+          intent: 'call',
+          source: 'call_detect',
+          announced: !!activeCallSession?.announced,
+        });
       } catch (e) {
         console.error('Call recording:', e);
         showRecordingStartError(e);
         setFooterCaptureMode(false);
       }
+    });
+
+    callDisclosureCopy.addEventListener('click', async () => {
+      if (!activeCallSession?.disclosure) return;
+      try {
+        await navigator.clipboard.writeText(activeCallSession.disclosure);
+        callDisclosureCopy.textContent = 'Copied';
+        setTimeout(() => { callDisclosureCopy.textContent = 'Copy'; }, 1200);
+      } catch (error) {
+        console.error('copy disclosure:', error);
+      }
+    });
+
+    callAnnounced.addEventListener('click', () => {
+      if (!activeCallSession) return;
+      activeCallSession.announced = true;
+      callAnnounced.textContent = 'Announced ✓';
     });
 
     document.getElementById('btn-dismiss-call').addEventListener('click', () => {

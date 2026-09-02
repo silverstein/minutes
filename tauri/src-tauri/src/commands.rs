@@ -6,7 +6,8 @@ use minutes_core::capture::{
     should_bypass_preflight_block_for_native_call_capture, RecordingIntent,
 };
 use minutes_core::config::{
-    ConsentMode, CopilotArmingBehavior, VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS,
+    ConsentMode, CopilotArmingBehavior, DefaultAudioRetention, VALID_LIVE_TRANSCRIPT_BACKENDS,
+    VALID_PARAKEET_MODELS,
 };
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::{CaptureMode, Config, ContentType};
@@ -3196,10 +3197,10 @@ fn queue_native_call_capture_for_processing(
             minutes_core::health::append_native_call_capture_warning(health, extra_warning);
         }
     }
-    let (consent, consent_notice) = if mode == CaptureMode::Meeting {
-        minutes_core::notes::load_consent()
+    let privacy = if mode == CaptureMode::Meeting {
+        minutes_core::notes::load_recording_privacy()
     } else {
-        (None, None)
+        minutes_core::notes::RecordingPrivacyMetadata::default()
     };
 
     minutes_core::jobs::queue_live_capture_with_recording_health(
@@ -3213,8 +3214,10 @@ fn queue_native_call_capture_for_processing(
         context_session_id,
         calendar_event,
         None,
-        consent,
-        consent_notice,
+        privacy.consent,
+        privacy.consent_notice,
+        privacy.audio_retention,
+        privacy.consent_announced_at,
         recording_health,
     )
     .map_err(|error| error.to_string())
@@ -3630,7 +3633,6 @@ fn start_native_call_recording(
         .ok();
     crate::sync_tray_state(app_handle);
     minutes_core::notes::save_recording_start().ok();
-    maybe_save_and_show_recording_consent(app_handle, mode, config);
     // Native capture writes audio to per-source stems instead of handing samples
     // to the recording path, so the live sidecar had no source and live
     // consumers received nothing during a call (#576). Tail the stems and feed
@@ -4499,6 +4501,7 @@ fn maybe_save_and_show_recording_consent(
     app_handle: &tauri::AppHandle,
     mode: CaptureMode,
     config: &Config,
+    recording_privacy: DesktopRecordingPrivacy,
 ) {
     minutes_core::notes::clear_consent();
     if mode != CaptureMode::Meeting {
@@ -4513,7 +4516,17 @@ fn maybe_save_and_show_recording_consent(
         (!disclosure.is_empty()).then_some(disclosure)
     };
 
-    if let Err(error) = minutes_core::notes::save_consent(Some(basis), notice) {
+    let audio_retention = (recording_privacy.no_keep_audio
+        || config.retention.default_audio_retention == DefaultAudioRetention::None)
+        .then(|| "none".to_string());
+    if let Err(error) = minutes_core::notes::save_recording_privacy(
+        &minutes_core::notes::RecordingPrivacyMetadata {
+            consent: Some(basis),
+            consent_notice: notice.map(str::to_string),
+            audio_retention,
+            consent_announced_at: recording_privacy.announced.then(chrono::Local::now),
+        },
+    ) {
         minutes_core::notes::clear_consent();
         tracing::warn!(error = %error, "failed to save recording consent sidecar");
     }
@@ -4523,6 +4536,21 @@ fn maybe_save_and_show_recording_consent(
         ConsentMode::Remind => {
             let mut body =
                 "Recording + transcribing locally - audio stays on your device.".to_string();
+            if let Some(jurisdiction) = config
+                .consent
+                .jurisdiction
+                .as_deref()
+                .and_then(minutes_core::consent_jurisdictions::lookup)
+            {
+                body.push('\n');
+                body.push_str(jurisdiction.note);
+                body.push_str(" Suggested consent basis: ");
+                body.push_str(jurisdiction.recommended_basis.as_str());
+                body.push('.');
+                body.push_str(
+                    " Informational reminder only; it is not legal advice. Confirm the rules that apply to you.",
+                );
+            }
             if let Some(disclosure) = notice {
                 body.push('\n');
                 body.push_str(disclosure);
@@ -6197,6 +6225,7 @@ pub fn start_recording(
     allow_degraded: bool,
     requested_title: Option<String>,
     language_override: Option<String>,
+    recording_privacy: DesktopRecordingPrivacy,
 ) {
     // Drop on any exit path (early returns, panic, normal exit) clears the
     // session flags so a subsequent manual recording isn't auto-stopped.
@@ -6269,6 +6298,7 @@ pub fn start_recording(
     for warning in &preflight.warnings {
         eprintln!("[minutes] {}", warning);
     }
+    maybe_save_and_show_recording_consent(&app_handle, mode, &config, recording_privacy);
 
     #[cfg(target_os = "macos")]
     if preflight.intent == RecordingIntent::Call && native_call_capture_available {
@@ -6373,7 +6403,6 @@ pub fn start_recording(
     crate::sync_tray_state(&app_handle);
 
     minutes_core::notes::save_recording_start().ok();
-    maybe_save_and_show_recording_consent(&app_handle, mode, &config);
     eprintln!("{} started...", mode.noun());
 
     // Inject live transcript context into the assistant workspace so the Recall
@@ -6433,10 +6462,10 @@ pub fn start_recording(
                 let recording_finished_at = chrono::Local::now();
                 let user_notes = minutes_core::notes::read_notes();
                 let pre_context = minutes_core::notes::read_context();
-                let (consent, consent_notice) = if mode == CaptureMode::Meeting {
-                    minutes_core::notes::load_consent()
+                let privacy = if mode == CaptureMode::Meeting {
+                    minutes_core::notes::load_recording_privacy()
                 } else {
-                    (None, None)
+                    minutes_core::notes::RecordingPrivacyMetadata::default()
                 };
                 // Don't block the stop path with a calendar query (can take 10s if Calendar.app hangs).
                 // The pipeline already falls back to events_overlapping_now() during background processing.
@@ -6453,8 +6482,10 @@ pub fn start_recording(
                     context_session_id.clone(),
                     calendar_event,
                     None,
-                    consent,
-                    consent_notice,
+                    privacy.consent,
+                    privacy.consent_notice,
+                    privacy.audio_retention,
+                    privacy.consent_announced_at,
                     None,
                 ) {
                     Ok(job) => {
@@ -6616,6 +6647,13 @@ pub enum LaunchOutcome {
     ConsentRequested,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+/// Per-launch privacy choices supplied by the existing desktop consent surface.
+pub(crate) struct DesktopRecordingPrivacy {
+    announced: bool,
+    no_keep_audio: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn launch_recording(
     app: tauri::AppHandle,
@@ -6656,6 +6694,7 @@ pub fn launch_recording(
         language_override,
         hotkey_runtime,
         discard_short_hotkey_capture,
+        DesktopRecordingPrivacy::default(),
     );
 
     Ok(LaunchOutcome::Started)
@@ -6672,6 +6711,7 @@ fn spawn_reserved_recording(
     language_override: Option<String>,
     hotkey_runtime: Option<Arc<Mutex<HotkeyRuntime>>>,
     discard_short_hotkey_capture: Option<Arc<AtomicBool>>,
+    recording_privacy: DesktopRecordingPrivacy,
 ) {
     let rec = state.recording.clone();
     let starting = state.starting.clone();
@@ -6709,6 +6749,7 @@ fn spawn_reserved_recording(
             allow_degraded,
             requested_title,
             language_override,
+            recording_privacy,
         );
         crate::sync_tray_state(&app_done);
     });
@@ -7022,6 +7063,8 @@ pub fn cmd_start_recording(
     language: Option<String>,
     source: Option<String>,
     consent_confirmed: Option<bool>,
+    announced: Option<bool>,
+    no_keep_audio: Option<bool>,
 ) -> Result<StartRecordingOutcome, String> {
     let capture_mode = parse_capture_mode(mode.as_deref())?;
     let requested_intent = parse_recording_intent(intent.as_deref())?;
@@ -7073,6 +7116,10 @@ pub fn cmd_start_recording(
         language,
         None,
         None,
+        DesktopRecordingPrivacy {
+            announced: announced.unwrap_or(false),
+            no_keep_audio: no_keep_audio.unwrap_or(false),
+        },
     );
     Ok(StartRecordingOutcome::Started)
 }
@@ -12913,6 +12960,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "mode": consent_mode_as_str(config.consent.mode),
             "disclosure_script": config.consent.disclosure_script,
             "default_basis": config.consent.default_basis,
+            "jurisdiction": config.consent.jurisdiction,
         },
         "assistant": {
             "agent": config.assistant.agent,
@@ -13175,7 +13223,6 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("consent", "default_basis") => {
             config.consent.default_basis = parse_optional_consent_basis_setting(&value)?;
         }
-
         // Diarization
         ("diarization", "engine") => config.diarization.engine = value.clone(),
 
@@ -17504,6 +17551,9 @@ mod tests {
             retry_count: 0,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
         };
 
@@ -17976,6 +18026,9 @@ mod tests {
             filter_diagnosis: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -18042,6 +18095,9 @@ mod tests {
             filter_diagnosis: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -18099,6 +18155,9 @@ mod tests {
             filter_diagnosis: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
             processing_warnings: Vec::new(),
         };
@@ -18495,6 +18554,9 @@ mod tests {
             retry_count: 0,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
         };
 
@@ -18535,6 +18597,9 @@ mod tests {
             retry_count: 0,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
         };
 
@@ -18577,6 +18642,9 @@ mod tests {
             retry_count: 0,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             recording_health: None,
         };
 
@@ -18624,6 +18692,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
 
@@ -18667,6 +18738,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
             let older_job = minutes_core::jobs::ProcessingJob {
@@ -18695,6 +18769,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
 
@@ -18738,6 +18815,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();
@@ -18779,6 +18859,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();
@@ -18822,6 +18905,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();
@@ -18881,6 +18967,9 @@ mod tests {
                 retry_count: 0,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 recording_health: None,
             };
             minutes_core::jobs::write_job(&job).unwrap();

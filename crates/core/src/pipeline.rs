@@ -3109,6 +3109,10 @@ pub struct BackgroundPipelineContext {
     pub consent: Option<crate::markdown::ConsentBasis>,
     /// Exact disclosure text loaded from the record-start sidecar, if any.
     pub consent_notice: Option<String>,
+    /// Per-meeting raw-audio retention request captured at record start.
+    pub audio_retention: Option<String>,
+    /// Time when the recorder confirmed the disclosure had been announced.
+    pub consent_announced_at: Option<DateTime<Local>>,
     pub calendar_event: Option<crate::calendar::CalendarEvent>,
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
@@ -3119,6 +3123,73 @@ pub struct BackgroundPipelineContext {
     /// Optional template applied to summarization. Recorded in frontmatter
     /// so Phase 2 reprocessing knows which template produced this file.
     pub template: Option<crate::template::Template>,
+}
+
+fn markdown_audio_is_pinned(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (frontmatter, _) = markdown::split_frontmatter(&content);
+    serde_yaml::from_str::<Frontmatter>(frontmatter)
+        .ok()
+        .and_then(|parsed| parsed.audio_retention)
+        .is_some_and(|value| value.eq_ignore_ascii_case("pinned"))
+}
+
+fn resolve_audio_retention(
+    requested: Option<&str>,
+    existing_is_pinned: bool,
+    needs_review: bool,
+) -> Option<String> {
+    if existing_is_pinned {
+        if requested.is_some_and(|value| value.eq_ignore_ascii_case("none")) {
+            tracing::warn!("audio_retention pinned overrides the requested ephemeral-audio policy");
+        }
+        return Some("pinned".into());
+    }
+    if requested.is_some_and(|value| value.eq_ignore_ascii_case("none")) && needs_review {
+        return Some("none (held: transcription failed)".into());
+    }
+    requested.map(str::to_string)
+}
+
+fn audio_retention_allows_voice_learning(frontmatter: &Frontmatter) -> bool {
+    !frontmatter
+        .audio_retention
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("none"))
+}
+
+#[cfg(test)]
+mod audio_retention_tests {
+    use super::*;
+
+    #[test]
+    fn pinned_retention_overrides_ephemeral_requests() {
+        assert_eq!(
+            resolve_audio_retention(Some("none"), true, false).as_deref(),
+            Some("pinned")
+        );
+        assert_eq!(
+            resolve_audio_retention(Some("none"), false, true).as_deref(),
+            Some("none (held: transcription failed)")
+        );
+    }
+
+    #[test]
+    fn ephemeral_retention_disables_voice_learning() {
+        for retention in ["none", "none (held: transcription failed)"] {
+            let mut frontmatter: Frontmatter = serde_yaml::from_str(&format!(
+                "title: test\ntype: meeting\ndate: {}\naudio_retention: \"{retention}\"\n",
+                Local::now().to_rfc3339()
+            ))
+            .unwrap();
+            assert!(!audio_retention_allows_voice_learning(&frontmatter));
+
+            frontmatter.audio_retention = Some("pinned".into());
+            assert!(audio_retention_allows_voice_learning(&frontmatter));
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -4828,6 +4899,12 @@ fn write_transcript_artifact_with_authority(
         &[],
     );
 
+    let existing_audio_is_pinned = existing_output_path.is_some_and(markdown_audio_is_pinned);
+    let audio_retention = resolve_audio_retention(
+        context.audio_retention.as_deref(),
+        existing_audio_is_pinned,
+        status == Some(OutputStatus::NoSpeech),
+    );
     let frontmatter = Frontmatter {
         title: auto_title,
         r#type: content_type,
@@ -4859,6 +4936,9 @@ fn write_transcript_artifact_with_authority(
         debrief: None,
         consent: context.consent,
         consent_notice: context.consent_notice.clone(),
+        audio_retention,
+        audio_deleted_at: None,
+        consent_announced_at: context.consent_announced_at,
         visibility: None,
         speaker_map: vec![],
         name_corrections: Vec::new(),
@@ -5485,7 +5565,7 @@ where
         );
     }
 
-    if !diarization_embeddings.is_empty() {
+    if !diarization_embeddings.is_empty() && audio_retention_allows_voice_learning(&frontmatter) {
         crate::voice::save_meeting_embeddings(&result.path, &diarization_embeddings);
     }
 
@@ -6184,6 +6264,9 @@ where
         debrief: None,
         consent: None,
         consent_notice: None,
+        audio_retention: None,
+        audio_deleted_at: None,
+        consent_announced_at: None,
         visibility: None,
         speaker_map,
         name_corrections,
@@ -6254,7 +6337,7 @@ where
         );
     }
     // Save per-speaker embeddings as sidecar (for Level 3 confirmed learning)
-    if !diarization_embeddings.is_empty() {
+    if !diarization_embeddings.is_empty() && audio_retention_allows_voice_learning(&frontmatter) {
         crate::voice::save_meeting_embeddings(&result.path, &diarization_embeddings);
     }
 
@@ -9049,6 +9132,9 @@ mod tests {
             debrief: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            audio_deleted_at: None,
+            consent_announced_at: None,
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),
@@ -11396,6 +11482,9 @@ mod tests {
             debrief: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            audio_deleted_at: None,
+            consent_announced_at: None,
             visibility: None,
             speaker_map: vec![diarize::SpeakerAttribution {
                 speaker_label: "SPEAKER_1".into(),

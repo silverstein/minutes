@@ -103,6 +103,15 @@ pub struct ProcessingJob {
     /// Exact disclosure text captured at record start, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consent_notice: Option<String>,
+    /// Per-meeting raw-audio retention request captured at record start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_retention: Option<String>,
+    /// Time when the recorder confirmed the disclosure had been announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_announced_at: Option<DateTime<Local>>,
+    /// Time when finalization deleted every audio file owned by this job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_deleted_at: Option<DateTime<Local>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar_event: Option<CalendarEvent>,
     /// Slug of the template selected at record time, if any. Read by the
@@ -175,6 +184,8 @@ pub fn queue_live_capture(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -192,6 +203,8 @@ pub fn queue_live_capture_with_recording_health(
     template_slug: Option<String>,
     consent: Option<crate::markdown::ConsentBasis>,
     consent_notice: Option<String>,
+    audio_retention: Option<String>,
+    consent_announced_at: Option<DateTime<Local>>,
     recording_health: Option<crate::markdown::RecordingHealth>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
@@ -224,6 +237,9 @@ pub fn queue_live_capture_with_recording_health(
         pre_context,
         consent,
         consent_notice,
+        audio_retention,
+        consent_announced_at,
+        audio_deleted_at: None,
         calendar_event,
         template_slug,
         recording_health,
@@ -483,12 +499,13 @@ fn move_stems_with_audio(src_audio: &Path, dest_audio: &Path) -> std::io::Result
     Ok(())
 }
 
-fn preserve_sidecar_stems(audio_src: &Path, audio_dest: &Path) {
+fn preserve_sidecar_stems(audio_src: &Path, audio_dest: &Path) -> Vec<PathBuf> {
+    let mut preserved = Vec::new();
     let Some(src_stems) = crate::capture::stem_paths_for(audio_src) else {
-        return;
+        return preserved;
     };
     let Some(dest_stems) = crate::capture::stem_paths_for(audio_dest) else {
-        return;
+        return preserved;
     };
 
     for (src, dest) in [
@@ -516,7 +533,9 @@ fn preserve_sidecar_stems(audio_src: &Path, audio_dest: &Path) {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dest, fs::Permissions::from_mode(0o600)).ok();
         }
+        preserved.push(dest);
     }
+    preserved
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,6 +672,9 @@ fn enqueue_capture_job_with_id(
         pre_context,
         consent: None,
         consent_notice: None,
+        audio_retention: None,
+        consent_announced_at: None,
+        audio_deleted_at: None,
         calendar_event,
         template_slug,
         recording_health: None,
@@ -1316,22 +1338,23 @@ fn apply_transcript_artifact_metadata(
 /// Move the captured audio alongside the output markdown so users can reprocess later.
 /// e.g. ~/meetings/2026-04-02-standup.md → ~/meetings/2026-04-02-standup.wav
 /// or, for native call captures, ~/meetings/2026-04-02-call.mov.
-fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
+fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) -> Vec<PathBuf> {
+    let mut preserved = Vec::new();
     let Some(ref output_path) = job.output_path else {
-        return;
+        return preserved;
     };
     let output = PathBuf::from(output_path);
     let audio_src = PathBuf::from(&job.audio_path);
     if !audio_src.exists() {
-        return;
+        return preserved;
     }
     if let Some(role) = native_stem_role(&audio_src) {
         let audio_dest = output.with_extension(format!("{role}.wav"));
         let Some(src_group) = native_stem_group_for_survivor(&audio_src) else {
-            return;
+            return preserved;
         };
         let Some(dest_group) = native_stem_group_for_survivor(&audio_dest) else {
-            return;
+            return preserved;
         };
         let source_screens_dir = crate::screen::screens_dir_for(&src_group.anchor);
         let preserved_anchor = dest_group.anchor.clone();
@@ -1360,6 +1383,7 @@ fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&dest, fs::Permissions::from_mode(0o600)).ok();
             }
+            preserved.push(dest);
         }
         if !config.screen_context.keep_after_summary && source_screens_dir.exists() {
             fs::remove_dir_all(source_screens_dir).ok();
@@ -1373,7 +1397,7 @@ fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
             survivor = %audio_dest.display(),
             "preserved native-call capture group alongside transcript"
         );
-        return;
+        return preserved;
     }
     let audio_dest = match audio_src.extension().filter(|ext| !ext.is_empty()) {
         Some(ext) => output.with_extension(ext),
@@ -1388,7 +1412,7 @@ fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
                 error = %e2,
                 "failed to preserve audio alongside output (rename: {}, copy: {})", e, e2
             );
-            return;
+            return preserved;
         }
         fs::remove_file(&audio_src).ok();
     }
@@ -1413,11 +1437,104 @@ fn preserve_audio_alongside_output(job: &ProcessingJob, config: &Config) {
         j.audio_path = dest_str;
     })
     .ok();
-    preserve_sidecar_stems(&audio_src, &audio_dest);
+    preserved.push(audio_dest.clone());
+    preserved.extend(preserve_sidecar_stems(&audio_src, &audio_dest));
     tracing::info!(
         path = %audio_dest.display(),
         "preserved audio alongside transcript"
     );
+    preserved
+}
+
+fn owned_audio_paths(audio_path: &Path) -> Vec<PathBuf> {
+    if let Some(group) = native_stem_group_for_survivor(audio_path) {
+        return vec![group.anchor, group.voice, group.system];
+    }
+    let mut paths = vec![audio_path.to_path_buf()];
+    if let Some(stems) = crate::capture::stem_paths_for(audio_path) {
+        paths.push(stems.voice);
+        paths.push(stems.system);
+    }
+    paths
+}
+
+fn durable_markdown_round_trip(path: &Path) -> Result<crate::markdown::Frontmatter, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("could not open finalized markdown: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("could not sync finalized markdown: {error}"))?;
+    drop(file);
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("could not sync finalized markdown directory: {error}"))?;
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("could not re-read finalized markdown: {error}"))?;
+    let (frontmatter, _) = crate::markdown::split_frontmatter(&content);
+    serde_yaml::from_str(frontmatter)
+        .map_err(|error| format!("finalized markdown did not round-trip: {error}"))
+}
+
+fn finalize_ephemeral_audio(
+    job: &ProcessingJob,
+    output_path: &Path,
+    original_audio_path: &Path,
+    preserved_paths: &[PathBuf],
+) -> Result<Option<DateTime<Local>>, String> {
+    let frontmatter = durable_markdown_round_trip(output_path)?;
+    let retention = frontmatter.audio_retention.as_deref().unwrap_or("keep");
+    if retention.eq_ignore_ascii_case("pinned") {
+        if job
+            .audio_retention
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+        {
+            tracing::warn!(job_id = %job.id, "audio_retention pinned overrides none");
+        }
+        return Ok(None);
+    }
+    if !retention.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    if job.state != JobState::Complete {
+        return Ok(None);
+    }
+
+    // The original path is inside this job's private queue directory. Paths
+    // beside the final note are deleted only when preservation returned a
+    // receipt proving that this job wrote them.
+    let mut paths = owned_audio_paths(original_audio_path);
+    paths.extend(preserved_paths.iter().cloned());
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "could not delete job-owned audio {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    let deleted_at = Local::now();
+    crate::markdown::update_frontmatter(output_path, |frontmatter| {
+        frontmatter.audio_retention = Some("none".into());
+        frontmatter.audio_deleted_at = Some(deleted_at);
+    })
+    .map_err(|error| format!("audio was deleted but the markdown stamp failed: {error}"))?;
+    let stamped = durable_markdown_round_trip(output_path)?;
+    if stamped.audio_deleted_at != Some(deleted_at) {
+        return Err("audio deletion stamp did not round-trip".into());
+    }
+    Ok(Some(deleted_at))
 }
 
 fn sync_processing_status() {
@@ -1483,6 +1600,8 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         pre_context: job.pre_context.clone(),
         consent: job.consent,
         consent_notice: job.consent_notice.clone(),
+        audio_retention: job.audio_retention.clone(),
+        consent_announced_at: job.consent_announced_at,
         calendar_event: job.calendar_event.clone(),
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
@@ -1739,13 +1858,38 @@ fn process_pending_jobs_with_transcriber(
                 ));
                 // Graph consumers project the newly written Markdown on use.
                 refresh_qmd_collection(config);
-                // Run post_record hook (async, non-blocking)
-                pipeline::run_post_record_hook(config, &result.path);
-                if completed_job.state == JobState::Complete {
-                    preserve_audio_alongside_output(&completed_job, config);
-                }
+                let preserved_paths = if completed_job.state == JobState::Complete {
+                    preserve_audio_alongside_output(&completed_job, config)
+                } else {
+                    Vec::new()
+                };
                 // Reload job after preserve may have updated audio_path
-                let final_job = load_job(&completed_job.id).unwrap_or(completed_job);
+                let mut final_job = load_job(&completed_job.id).unwrap_or(completed_job);
+                if final_job.state == JobState::Complete {
+                    match finalize_ephemeral_audio(
+                        &final_job,
+                        &result.path,
+                        &audio_path,
+                        &preserved_paths,
+                    ) {
+                        Ok(Some(deleted_at)) => {
+                            if let Some(updated) = update_job_state(&final_job.id, |job| {
+                                job.audio_deleted_at = Some(deleted_at);
+                            })? {
+                                final_job = updated;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => tracing::warn!(
+                            job_id = %final_job.id,
+                            error = %error,
+                            "ephemeral audio finalization did not complete"
+                        ),
+                    }
+                }
+                // The hook sees the finalized privacy state. In ephemeral
+                // mode, no sibling audio remains by the time it runs.
+                pipeline::run_post_record_hook(config, &result.path);
                 maybe_mark_context_session_complete(&final_job, result.content_type);
                 sync_processing_status();
                 on_job_update(&final_job);
@@ -1856,6 +2000,9 @@ mod tests {
                 debrief: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                audio_deleted_at: None,
+                consent_announced_at: None,
                 visibility: None,
                 speaker_map: vec![],
                 name_corrections: vec![],
@@ -1868,6 +2015,54 @@ mod tests {
             },
             String::new(),
         )
+    }
+
+    fn write_retention_markdown(path: &Path, retention: &str) {
+        let mut frontmatter = fake_no_speech_artifact(path).frontmatter;
+        frontmatter.status = None;
+        frontmatter.audio_retention = Some(retention.into());
+        frontmatter.filter_diagnosis = None;
+        let yaml = serde_yaml::to_string(&frontmatter).unwrap();
+        fs::write(path, format!("---\n{}---\n# Transcript\n", yaml)).unwrap();
+    }
+
+    fn retention_job(
+        id: &str,
+        audio_path: &Path,
+        output_path: &Path,
+        state: JobState,
+    ) -> ProcessingJob {
+        ProcessingJob {
+            id: id.into(),
+            mode: CaptureMode::Meeting,
+            content_type: ContentType::Meeting,
+            title: Some("retention fixture".into()),
+            audio_path: audio_path.display().to_string(),
+            output_path: Some(output_path.display().to_string()),
+            state,
+            stage: None,
+            created_at: Local::now(),
+            started_at: None,
+            finished_at: None,
+            notice_dismissed_at: None,
+            recording_started_at: None,
+            recording_finished_at: None,
+            context_session_id: None,
+            user_notes: None,
+            pre_context: None,
+            consent: None,
+            consent_notice: None,
+            audio_retention: Some("none".into()),
+            consent_announced_at: None,
+            audio_deleted_at: None,
+            calendar_event: None,
+            template_slug: None,
+            recording_health: None,
+            word_count: None,
+            error: None,
+            owner_pid: None,
+            retry_count: 0,
+        }
     }
 
     #[test]
@@ -2296,6 +2491,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
                 Some(health.clone()),
             )
             .unwrap();
@@ -2313,6 +2510,7 @@ mod tests {
                 fs::create_dir_all(parent).unwrap();
             }
             fs::write(&current_wav, b"fake-wav").unwrap();
+            let announced_at = Local::now();
 
             let job = queue_live_capture_with_recording_health(
                 CaptureMode::Meeting,
@@ -2327,6 +2525,8 @@ mod tests {
                 None,
                 Some(crate::markdown::ConsentBasis::NoticeInInvite),
                 Some("Shared in the invite.".into()),
+                Some("none".into()),
+                Some(announced_at),
                 None,
             )
             .unwrap();
@@ -2340,6 +2540,8 @@ mod tests {
                 loaded.consent_notice.as_deref(),
                 Some("Shared in the invite.")
             );
+            assert_eq!(loaded.audio_retention.as_deref(), Some("none"));
+            assert_eq!(loaded.consent_announced_at, Some(announced_at));
 
             let context = job_context(&loaded);
             assert_eq!(
@@ -2350,6 +2552,8 @@ mod tests {
                 context.consent_notice.as_deref(),
                 Some("Shared in the invite.")
             );
+            assert_eq!(context.audio_retention.as_deref(), Some("none"));
+            assert_eq!(context.consent_announced_at, Some(announced_at));
         });
     }
 
@@ -2389,6 +2593,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2409,6 +2616,78 @@ mod tests {
             assert!(!audio_path.exists());
             assert!(!stems.voice.exists());
             assert!(!stems.system.exists());
+        });
+    }
+
+    #[test]
+    fn ephemeral_audio_waits_for_durable_markdown_then_deletes_only_receipted_files() {
+        with_temp_home(|tmp| {
+            let queued_audio = tmp.path().join("job-audio.wav");
+            let preserved_audio = tmp.path().join("meeting.wav");
+            let unrelated_audio = tmp.path().join("meeting.voice.wav");
+            let output_path = tmp.path().join("meeting.md");
+            fs::write(&queued_audio, b"queued").unwrap();
+            fs::write(&preserved_audio, b"preserved").unwrap();
+            fs::write(&unrelated_audio, b"not owned by this job").unwrap();
+            fs::write(&output_path, "# incomplete markdown").unwrap();
+            let job = retention_job(
+                "ephemeral-success",
+                &preserved_audio,
+                &output_path,
+                JobState::Complete,
+            );
+
+            let error = finalize_ephemeral_audio(
+                &job,
+                &output_path,
+                &queued_audio,
+                std::slice::from_ref(&preserved_audio),
+            )
+            .unwrap_err();
+            assert!(error.contains("round-trip") || error.contains("frontmatter"));
+            assert!(queued_audio.exists());
+            assert!(preserved_audio.exists());
+
+            write_retention_markdown(&output_path, "none");
+            let deleted_at = finalize_ephemeral_audio(
+                &job,
+                &output_path,
+                &queued_audio,
+                std::slice::from_ref(&preserved_audio),
+            )
+            .unwrap()
+            .expect("completed ephemeral capture should be deleted");
+
+            assert!(!queued_audio.exists());
+            assert!(!preserved_audio.exists());
+            assert!(unrelated_audio.exists(), "unreceipted sibling must survive");
+            let stamped = durable_markdown_round_trip(&output_path).unwrap();
+            assert_eq!(stamped.audio_retention.as_deref(), Some("none"));
+            assert_eq!(stamped.audio_deleted_at, Some(deleted_at));
+        });
+    }
+
+    #[test]
+    fn ephemeral_audio_is_held_for_failure_or_review_and_pinned_wins() {
+        with_temp_home(|tmp| {
+            for (state, retention) in [
+                (JobState::Failed, "none"),
+                (JobState::NeedsReview, "none (held: transcription failed)"),
+                (JobState::Complete, "pinned"),
+            ] {
+                let suffix = format!("{state:?}");
+                let audio_path = tmp.path().join(format!("{suffix}.wav"));
+                let output_path = tmp.path().join(format!("{suffix}.md"));
+                fs::write(&audio_path, b"must survive").unwrap();
+                write_retention_markdown(&output_path, retention);
+                let job = retention_job(&suffix, &audio_path, &output_path, state);
+
+                assert_eq!(
+                    finalize_ephemeral_audio(&job, &output_path, &audio_path, &[]).unwrap(),
+                    None
+                );
+                assert!(audio_path.exists(), "{state:?} audio must be retained");
+            }
         });
     }
 
@@ -2448,6 +2727,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2512,6 +2794,9 @@ mod tests {
                     pre_context: None,
                     consent: None,
                     consent_notice: None,
+                    audio_retention: None,
+                    consent_announced_at: None,
+                    audio_deleted_at: None,
                     calendar_event: None,
                     template_slug: None,
                     recording_health: None,
@@ -2574,6 +2859,9 @@ mod tests {
                 debrief: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                audio_deleted_at: None,
+                consent_announced_at: None,
                 visibility: None,
                 speaker_map: vec![],
                 name_corrections: Vec::new(),
@@ -2617,6 +2905,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2662,6 +2953,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2718,6 +3012,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2760,6 +3057,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2806,6 +3106,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2852,6 +3155,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2895,6 +3201,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2923,6 +3232,9 @@ mod tests {
                 pre_context: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                consent_announced_at: None,
+                audio_deleted_at: None,
                 calendar_event: None,
                 template_slug: None,
                 recording_health: None,
@@ -2966,6 +3278,9 @@ mod tests {
             pre_context: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            consent_announced_at: None,
+            audio_deleted_at: None,
             calendar_event: None,
             template_slug: None,
             recording_health: None,
@@ -3013,6 +3328,9 @@ mod tests {
                 debrief: None,
                 consent: None,
                 consent_notice: None,
+                audio_retention: None,
+                audio_deleted_at: None,
+                consent_announced_at: None,
                 visibility: None,
                 speaker_map: vec![],
                 name_corrections: Vec::new(),

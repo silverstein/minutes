@@ -33,6 +33,7 @@ parakeet = ["whisper", "minutes-core/parakeet"]
 # `minutes setup --sherpa` works without this feature (path helpers are ungated);
 # this feature compiles the actual engine so `engine = "sherpa"` transcribes.
 engine-sherpa = ["minutes-core/engine-sherpa"]
+pocketstation-capture = ["minutes-core/pocketstation-capture"]
 # Streaming Silero VAD via ort. Pulls minutes-core's vad-ort. Also
 # wires the setup-time download for silero-vad-v6.2.0.onnx.
 vad-ort = ["minutes-core/vad-ort", "dep:ort"]

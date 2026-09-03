@@ -78,6 +78,11 @@ pub mod partial_quality;
 pub(crate) mod person_identity;
 pub mod pid;
 pub mod pipeline;
+#[cfg(all(
+    feature = "pocketstation-capture",
+    any(target_os = "linux", target_os = "windows")
+))]
+mod pocketstation_capture;
 pub mod policy_fs;
 pub mod process_trace;
 pub mod resummarize;

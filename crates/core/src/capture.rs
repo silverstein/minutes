@@ -439,6 +439,7 @@ struct DualCapturePlan {
     voice_device_name: String,
     call_override: String,
     call_device_name: String,
+    call_capture_backend: crate::system_audio_backend::CaptureBackendKind,
 }
 
 #[derive(Debug, Clone)]
@@ -469,7 +470,13 @@ impl CapturePlan {
         match self {
             Self::Single(plan) => is_system_audio_route(host, &plan.device_name),
             #[cfg(feature = "streaming")]
-            Self::Dual(plan) => is_system_audio_route(host, &plan.call_device_name),
+            Self::Dual(plan) => match plan.call_capture_backend {
+                crate::system_audio_backend::CaptureBackendKind::Cpal => {
+                    is_system_audio_route(host, &plan.call_device_name)
+                }
+                crate::system_audio_backend::CaptureBackendKind::CoreAudioTap
+                | crate::system_audio_backend::CaptureBackendKind::PocketStation => true,
+            },
         }
     }
 }
@@ -557,8 +564,7 @@ fn resolve_capture_plan(config: &Config) -> Result<CapturePlan, CaptureError> {
 }
 
 pub fn resolve_system_audio_probe_device(config: &Config) -> Result<Option<String>, String> {
-    let use_core_audio_tap = crate::system_audio_backend::configured_capture_backend(config)?
-        == crate::system_audio_backend::CaptureBackendKind::CoreAudioTap;
+    let capture_backend = crate::system_audio_backend::configured_capture_backend(config)?;
     let Some(call_override) = config
         .recording
         .sources
@@ -570,7 +576,7 @@ pub fn resolve_system_audio_probe_device(config: &Config) -> Result<Option<Strin
         return Ok(None);
     };
 
-    if use_core_audio_tap {
+    if capture_backend == crate::system_audio_backend::CaptureBackendKind::CoreAudioTap {
         if crate::system_audio_backend::core_audio_tap_source_is_supported(call_override) {
             return Ok(Some(
                 crate::system_audio_backend::CORE_AUDIO_TAP_CAPTURE_BACKEND.to_string(),
@@ -581,6 +587,16 @@ pub fn resolve_system_audio_probe_device(config: &Config) -> Result<Option<Strin
             crate::system_audio_backend::CORE_AUDIO_TAP_CAPTURE_BACKEND,
             call_override
         ));
+    }
+
+    if capture_backend == crate::system_audio_backend::CaptureBackendKind::PocketStation {
+        if call_override.eq_ignore_ascii_case("auto") {
+            return Err(
+                "recording.capture_backend = 'pocketstation' requires an application name, application ID, or pid:<process id> in [recording.sources] call"
+                    .to_string(),
+            );
+        }
+        return Ok(Some(call_override.to_string()));
     }
 
     if call_override.eq_ignore_ascii_case("auto") {
@@ -621,10 +637,9 @@ fn resolve_capture_plan_with_host(
     #[cfg(feature = "streaming")]
     if let Some(call_override) = call_override {
         let (_, voice_name) = select_device_with_override(host, voice_override.as_deref())?;
-        let use_core_audio_tap = crate::system_audio_backend::configured_capture_backend(config)
-            .map_err(|error| CaptureError::Io(std::io::Error::other(error)))?
-            == crate::system_audio_backend::CaptureBackendKind::CoreAudioTap;
-        if use_core_audio_tap {
+        let capture_backend = crate::system_audio_backend::configured_capture_backend(config)
+            .map_err(|error| CaptureError::Io(std::io::Error::other(error)))?;
+        if capture_backend == crate::system_audio_backend::CaptureBackendKind::CoreAudioTap {
             if !crate::system_audio_backend::core_audio_tap_source_is_supported(call_override) {
                 return Err(CaptureError::Io(std::io::Error::other(format!(
                     "recording.capture_backend = '{}' captures the default system output; set [recording.sources] call = \"auto\" instead of '{}'",
@@ -637,6 +652,21 @@ fn resolve_capture_plan_with_host(
                 voice_device_name: voice_name,
                 call_override: crate::system_audio_backend::CORE_AUDIO_TAP_CAPTURE_BACKEND.into(),
                 call_device_name: crate::system_audio_backend::CORE_AUDIO_TAP_ROUTE_NAME.into(),
+                call_capture_backend: capture_backend,
+            }));
+        }
+        if capture_backend == crate::system_audio_backend::CaptureBackendKind::PocketStation {
+            if call_override.eq_ignore_ascii_case("auto") {
+                return Err(CaptureError::Io(std::io::Error::other(
+                    "recording.capture_backend = 'pocketstation' requires an application name, application ID, or pid:<process id> in [recording.sources] call",
+                )));
+            }
+            return Ok(CapturePlan::Dual(DualCapturePlan {
+                voice_override,
+                voice_device_name: voice_name,
+                call_override: call_override.to_string(),
+                call_device_name: format!("PocketStation application: {call_override}"),
+                call_capture_backend: capture_backend,
             }));
         }
         let resolved_call = if call_override.eq_ignore_ascii_case("auto") {
@@ -657,6 +687,7 @@ fn resolve_capture_plan_with_host(
             voice_device_name: voice_name,
             call_override: resolved_call,
             call_device_name: call_name,
+            call_capture_backend: capture_backend,
         }));
     }
 
@@ -3397,6 +3428,36 @@ mod tests {
         let error = resolve_system_audio_probe_device(&config).unwrap_err();
 
         assert!(error.contains("call = \"auto\""));
+    }
+
+    #[test]
+    fn given_pocketstation_application_when_probe_route_resolves_then_value_is_preserved() {
+        let mut config = Config::default();
+        config.recording.capture_backend =
+            crate::system_audio_backend::POCKETSTATION_CAPTURE_BACKEND.into();
+        config.recording.sources = Some(crate::config::SourcesConfig {
+            voice: Some("default".into()),
+            call: Some("Zoom".into()),
+        });
+
+        let route = resolve_system_audio_probe_device(&config).unwrap();
+
+        assert_eq!(route.as_deref(), Some("Zoom"));
+    }
+
+    #[test]
+    fn given_pocketstation_auto_selection_when_probe_route_resolves_then_error_explains_choice() {
+        let mut config = Config::default();
+        config.recording.capture_backend =
+            crate::system_audio_backend::POCKETSTATION_CAPTURE_BACKEND.into();
+        config.recording.sources = Some(crate::config::SourcesConfig {
+            voice: Some("default".into()),
+            call: Some("auto".into()),
+        });
+
+        let error = resolve_system_audio_probe_device(&config).unwrap_err();
+
+        assert!(error.contains("application name"));
     }
 
     #[test]

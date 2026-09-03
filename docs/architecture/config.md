@@ -151,18 +151,24 @@ session cadence and confidence gates. See
 | `min_disk_space_mb` | `500` | Auto-stop when free disk space drops below this; 0 = off |
 | `auto_call_intent` | `false` | Infer call intent from process detection (high false-positive rate) |
 | `allow_degraded_call_capture` | `false` | Allow call capture when selected input isn't a system-audio route |
-| `capture_backend` | `"cpal"` | System-audio backend: `"cpal"` for loopback devices, or opt-in `"core-audio-tap"` on macOS 14.4+ |
+| `capture_backend` | `"cpal"` | `"cpal"` for loopback devices, `"core-audio-tap"` on macOS 14.4+, or opt-in `"pocketstation"` application capture on Windows and Linux |
 
 ### `[recording.sources]` — multi-source capture
 
 | key | default | meaning |
 |---|---|---|
 | `voice` | unset | Voice (mic) device name, or `"default"` |
-| `call` | unset | Call (system audio) device name, or `"auto"` to detect loopback |
+| `call` | unset | Call audio device, or `"auto"` to detect loopback. PocketStation accepts an application name, application ID, or `pid:<process id>` |
 
 When `capture_backend = "core-audio-tap"`, set `call = "auto"`. The backend
 captures the default macOS system output via Core Audio Process Tap instead of
 opening a named loopback input device.
+
+When `capture_backend = "pocketstation"`, choose the application in `call`.
+Minutes then records that application and the selected microphone as separate
+stems on Windows or Linux. See
+[PocketStation capture](pocketstation-capture.md) for build and configuration
+instructions.
 
 ### `[consent]` — recording disclosure aid
 

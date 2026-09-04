@@ -29,7 +29,6 @@ import { nodeChildEnvironment } from "./node-child.js";
 
 const MAX_AUTHORIZATION_ATTEMPTS = 2;
 const DEFAULT_FENCE_TIMEOUT_MS = 5_000;
-const DEFAULT_AUTHORIZATION_TIMEOUT_MS = 15_000;
 const MAX_TEST_HARNESS_AUTHORIZATION_TIMEOUT_MS = 120_000;
 const MAX_ACTIVE_WATCHERS = 64;
 // Snapshot content is retained as JavaScript strings, whose backing storage
@@ -89,6 +88,35 @@ export const DEFAULT_CORPUS_READ_BUDGETS: Readonly<CorpusReadBudgets> =
     maxWatcherCount: 512,
     maxReaderCount: 64,
   });
+
+// One successful attempt materializes a baseline, verifies it before the
+// final fence, then verifies it again at the authorization point. Every
+// manifest reads each file twice to prove the bytes were stable while its
+// descriptor was held. The complete sequence may retry once under the same
+// cumulative deadline.
+const CORPUS_MANIFESTS_PER_AUTHORIZATION_ATTEMPT = 3;
+const CORPUS_PHYSICAL_READS_PER_MANIFEST = 2;
+
+// Match the native corpus reader's documented storage floor. Meeting libraries
+// may live on synced folders, external disks, and ordinary spinning disks; a
+// corpus inside every published resource ceiling must not require fast local
+// SSD throughput merely to pass authorization.
+const MIN_ASSUMED_CORPUS_READ_BYTES_PER_SECOND = 16 * 1024 * 1024;
+
+// This deadline is a backstop, not the primary safety control. File, byte,
+// directory, watcher, reader, retained-memory, and worker-process ceilings
+// still bound what one request may consume. Deriving the wall-clock ceiling
+// from that work envelope keeps those promises consistent when a pass count or
+// byte ceiling changes. At today's limits this is 60 seconds, rather than the
+// old hardcoded 15 seconds that denied valid large or slow corpora (#933).
+const DEFAULT_AUTHORIZATION_TIMEOUT_MS = Math.ceil(
+  (DEFAULT_CORPUS_READ_BUDGETS.maxCorpusBytes *
+    CORPUS_MANIFESTS_PER_AUTHORIZATION_ATTEMPT *
+    CORPUS_PHYSICAL_READS_PER_MANIFEST *
+    MAX_AUTHORIZATION_ATTEMPTS *
+    1_000) /
+    MIN_ASSUMED_CORPUS_READ_BYTES_PER_SECOND
+);
 
 export type CorpusVerificationStats = Readonly<{
   fileCount: number;
@@ -417,12 +445,12 @@ function resolveAuthorizationTimeoutMs(
   environment: Readonly<NodeJS.ProcessEnv> = process.env
 ): number {
   const configuredOverride = environment.MINUTES_CORPUS_AUTH_TIMEOUT_MS;
-  // A longer deadline is test infrastructure, not application configuration.
-  // Requiring both markers keeps an ambient production environment variable
-  // from weakening the fail-closed 15 second cap. Only the repository's test
-  // harness sets this pair; the spawned lease worker inherits it from the
-  // parent. Invalid gated values fail closed instead of silently relaxing or
-  // changing the requested budget.
+  // A deadline beyond the derived production envelope is test infrastructure,
+  // not application configuration. Requiring both markers keeps an ambient
+  // production environment variable from relaxing the fail-closed cap. Only
+  // the repository's test harness sets this pair; the spawned lease worker
+  // inherits it from the parent. Invalid gated values fail closed instead of
+  // silently relaxing or changing the requested budget.
   const testHarnessOverride =
     environment.NODE_ENV === "test" &&
     environment.MINUTES_TEST_HARNESS === "1" &&
@@ -457,11 +485,27 @@ export function resolveAuthorizationTimeoutMsForTest(
   return resolveAuthorizationTimeoutMs(timeoutMs, environment);
 }
 
-function authorizationDeadline(timeoutMs: number | undefined): bigint {
-  return (
-    process.hrtime.bigint() +
-    BigInt(resolveAuthorizationTimeoutMs(timeoutMs)) * 1_000_000n
-  );
+/** @internal Pure policy seam that pins the derived production envelope. */
+export function authorizationWorkEnvelopeForTest() {
+  return Object.freeze({
+    maxCorpusBytes: DEFAULT_CORPUS_READ_BUDGETS.maxCorpusBytes,
+    manifestsPerAttempt: CORPUS_MANIFESTS_PER_AUTHORIZATION_ATTEMPT,
+    physicalReadsPerManifest: CORPUS_PHYSICAL_READS_PER_MANIFEST,
+    maxAttempts: MAX_AUTHORIZATION_ATTEMPTS,
+    minimumReadBytesPerSecond: MIN_ASSUMED_CORPUS_READ_BYTES_PER_SECOND,
+    timeoutMs: DEFAULT_AUTHORIZATION_TIMEOUT_MS,
+  });
+}
+
+function authorizationWindow(timeoutMs: number | undefined): {
+  budgetMs: number;
+  deadline: bigint;
+} {
+  const budgetMs = resolveAuthorizationTimeoutMs(timeoutMs);
+  return {
+    budgetMs,
+    deadline: process.hrtime.bigint() + BigInt(budgetMs) * 1_000_000n,
+  };
 }
 
 function remainingAuthorizationMs(deadline: bigint): number {
@@ -1450,7 +1494,7 @@ async function withStableCorpusLeaseInProcess<T>(
   hooks: CorpusLeaseHooks = {}
 ): Promise<T> {
   const budgets = resolveCorpusReadBudgets(hooks.budgets);
-  const deadline = authorizationDeadline(hooks.timeoutMs);
+  const { deadline } = authorizationWindow(hooks.timeoutMs);
   const fenceTimeoutMs = resolveFenceTimeout(hooks.timeoutMs);
   const memoryReservation = reserveCorpusMemory(budgets);
 
@@ -1948,7 +1992,8 @@ async function dispatchStableCorpusLease<T>(
     );
   }
   const budgets = resolveCorpusReadBudgets(hooks.budgets);
-  const deadline = authorizationDeadline(hooks.timeoutMs);
+  const { budgetMs: authorizationBudgetMs, deadline } =
+    authorizationWindow(hooks.timeoutMs);
   const timeoutMs = remainingAuthorizationMs(deadline);
   const invocation = corpusWorkerInvocation(hooks.workerScriptForTest);
   const reservation = reserveCorpusMemory(budgets);
@@ -2074,14 +2119,22 @@ async function dispatchStableCorpusLease<T>(
             // "0ms remained" rather than an overrun.
             const overran = remainingNs < 0n;
             const magnitudeMs = Number((overran ? -remainingNs : remainingNs) / 1_000_000n);
-            const budget = overran
+            const remainingBudget = overran
               ? `authorization budget overrun by ${magnitudeMs}ms`
               : `${magnitudeMs}ms of authorization budget remained`;
             // Shared with the bound-reader refusal path, because a plain
             // try/catch here never covered an asynchronous EPIPE: that
             // arrives as an 'error' event on a later tick and is fatal
             // without a listener.
-            writeOperatorDiagnostic(`[corpus-lease] denied: ${message} (${budget})\n`);
+            const elapsedMs = overran
+              ? authorizationBudgetMs + magnitudeMs
+              : Math.max(0, authorizationBudgetMs - magnitudeMs);
+            writeOperatorDiagnostic(
+              `[corpus-lease] denied: ${message} (` +
+                `authorization duration ${elapsedMs}ms; ` +
+                `${authorizationBudgetMs}ms authorization budget; ` +
+                `${remainingBudget})\n`
+            );
           } catch {
             // A broken stderr must never turn a clean denial into a crash.
           }

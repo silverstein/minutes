@@ -79,9 +79,9 @@ function minutesCli(args) {
   try {
     const result = execFileSync(bin, args, {
       encoding: "utf-8",
-      // Match the production MCP runner. Native corpus authorization has its
-      // own stricter 15-second monotonic deadline; the harness must report
-      // that real exit rather than kill a valid large-corpus command first.
+      // This helper exercises small checked-in fixtures. Keep a bounded but
+      // generous test timeout without claiming to match the native reader's
+      // larger production authorization envelope.
       timeout: 30000,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, RUST_LOG: "error" },

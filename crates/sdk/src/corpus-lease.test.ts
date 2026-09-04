@@ -21,6 +21,7 @@ import { realpath } from "node:fs/promises";
 
 import {
   DEFAULT_CORPUS_READ_BUDGETS,
+  authorizationWorkEnvelopeForTest,
   awaitDeferredCorpusReleasesForTests,
   resolveAuthorizationTimeoutMsForTest,
   withStableCorpusLease,
@@ -170,25 +171,40 @@ describe("stable corpus lease", () => {
     });
   });
 
-  it("ignores an ambient authorization override and keeps the production cap", () => {
+  it("derives the production deadline from the complete read envelope", () => {
+    const envelope = authorizationWorkEnvelopeForTest();
+    const physicalBytes =
+      envelope.maxCorpusBytes *
+      envelope.manifestsPerAttempt *
+      envelope.physicalReadsPerManifest *
+      envelope.maxAttempts;
+    expect(envelope.timeoutMs).toBe(
+      Math.ceil(
+        (physicalBytes * 1_000) / envelope.minimumReadBytesPerSecond
+      )
+    );
+    expect(envelope.timeoutMs).toBe(60_000);
+  });
+
+  it("ignores an ambient authorization override and keeps the derived production cap", () => {
     const requested = Number.MAX_SAFE_INTEGER;
     expect(
       resolveAuthorizationTimeoutMsForTest(requested, {
-        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "120000",
       })
-    ).toBe(15_000);
+    ).toBe(60_000);
     expect(
       resolveAuthorizationTimeoutMsForTest(requested, {
         NODE_ENV: "test",
-        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "120000",
       })
-    ).toBe(15_000);
+    ).toBe(60_000);
     expect(
       resolveAuthorizationTimeoutMsForTest(requested, {
         MINUTES_TEST_HARNESS: "1",
-        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "60000",
+        MINUTES_CORPUS_AUTH_TIMEOUT_MS: "120000",
       })
-    ).toBe(15_000);
+    ).toBe(60_000);
   });
 
   it("applies and clamps the explicitly gated test-harness authorization override", () => {
@@ -730,6 +746,54 @@ describe("stable corpus lease", () => {
         // scheduled diagnostic run before asserting it was attempted.
         await new Promise((resolve) => setImmediate(resolve));
         expect(attempted).toBeGreaterThan(0);
+      } finally {
+        (process.stderr as unknown as { write: unknown }).write = original;
+      }
+    });
+  });
+
+  it("reports elapsed time and the bounded budget only to the operator", async () => {
+    await withCorpus(async (root) => {
+      const privateCanary = "PRIVATE_DIAGNOSTIC_CANARY";
+      writeFileSync(join(root, "meeting.md"), privateCanary);
+      const original = process.stderr.write;
+      let diagnostics = "";
+      (process.stderr as unknown as { write: unknown }).write = (chunk: unknown) => {
+        diagnostics += String(chunk);
+        return true;
+      };
+      try {
+        let forceOperationDeadline!: () => void;
+        const operationDeadline = new Promise<void>((resolve) => {
+          forceOperationDeadline = resolve;
+        });
+        let failure: unknown;
+        try {
+          await withStableCorpusLease(
+            root,
+            (_snapshot, _attempt, signal) =>
+              new Promise((_resolve, reject) => {
+                signal.addEventListener("abort", () => reject(signal.reason), {
+                  once: true,
+                });
+                forceOperationDeadline();
+              }),
+            { timeoutMs: 10_000, operationDeadlineForTest: operationDeadline }
+          );
+        } catch (error) {
+          failure = error;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toBe(
+          "Access denied: stable meeting corpus authorization failed"
+        );
+        expect(diagnostics).toMatch(
+          /\[corpus-lease\] denied: meeting corpus authorization deadline elapsed \(authorization duration \d+ms; 10000ms authorization budget; \d+ms of authorization budget remained\)/
+        );
+        expect(diagnostics).not.toContain(privateCanary);
+        expect(diagnostics).not.toContain(root);
       } finally {
         (process.stderr as unknown as { write: unknown }).write = original;
       }

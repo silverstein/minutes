@@ -41,6 +41,14 @@ route from the signed app while a same-UID process watches and holds newly
 created temporary files. The resulting content-free receipt is acceptance
 evidence only after that protected workflow actually runs for the exact SHA.
 
+On real macOS hardware, the separate fixed-input
+`--apple-speech-runtime-acceptance` route closes the analyzer confound without
+opening the product gate. It embeds the checked-in public speech fixture in the
+parent, sends its bounded PCM bytes through the authenticated XPC worker, and
+emits only content-free timing and count metrics. It accepts no caller audio,
+path, locale, or executable and runs under the same same-UID open-holder
+watcher.
+
 ## Fallback behavior
 
 Standalone live transcript and dictation currently resolve Apple Speech to:

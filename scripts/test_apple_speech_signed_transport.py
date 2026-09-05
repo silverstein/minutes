@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 
 
 MAX_HELD_FILE_BYTES = 64 * 1024 * 1024
@@ -48,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, type=pathlib.Path)
     parser.add_argument("--candidate-sha", required=True)
+    parser.add_argument(
+        "--runtime",
+        action="store_true",
+        help="run the fixed public-fixture analyzer path instead of the transport-only canary",
+    )
     return parser.parse_args()
 
 
@@ -192,7 +198,11 @@ class SameUidOpenHolder:
         while not self.stop.is_set():
             for root in self.roots:
                 for directory, _, names in os.walk(root, followlinks=False):
+                    if self.stop.is_set():
+                        return
                     for name in names:
+                        if self.stop.is_set():
+                            return
                         path = pathlib.Path(directory) / name
                         try:
                             info = path.lstat()
@@ -224,6 +234,23 @@ def canary_patterns() -> tuple[bytes, bytes]:
         for value in bits
     )
     return raw_f32, pcm_i16
+
+
+def runtime_fixture_patterns() -> tuple[bytes, bytes]:
+    fixture = pathlib.Path(__file__).resolve().parent.parent / "crates/assets/demo.wav"
+    with wave.open(str(fixture)) as source:
+        if (
+            source.getnchannels() != 1
+            or source.getsampwidth() != 2
+            or source.getframerate() != 16000
+        ):
+            raise RuntimeError("fixed Apple Speech runtime fixture format changed")
+        pcm = source.readframes(source.getnframes())
+    values = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+    raw_f32 = b"".join(struct.pack("<f", value / 32768.0) for value in values)
+    # A bounded interior slice detects a named WAV/PCM spool without requiring
+    # the watcher to retain or compare an entire file.
+    return raw_f32[16_384:32_768], pcm[8_192:24_576]
 
 
 def decode_stream(stream) -> str:
@@ -419,8 +446,9 @@ def emit_failure_diagnostics(
     Diagnostics must never reach stdout: the workflow tees stdout into
     ``signed-runtime-provenance.json``, so anything printed there would corrupt
     the receipt. This is safe to emit in full because the runtime job holds no
-    secrets and the only audio in the process is the synthetic canary, so no
-    signing material and no private utterance can appear here.
+    secrets and the only audio in the process is either the synthetic canary or
+    the checked-in public fixture, so no signing material and no private
+    utterance can appear here.
     """
     def write(line: str) -> None:
         print(line, file=sys.stderr)
@@ -481,9 +509,15 @@ def main() -> int:
         environment = os.environ.copy()
         environment["TMPDIR"] = str(isolated_temp)
         started_at = time.time()
+        result = None
         try:
+            acceptance_argument = (
+                "--apple-speech-runtime-acceptance"
+                if args.runtime
+                else "--apple-speech-transport-acceptance"
+            )
             result = subprocess.run(
-                [str(executable), "--apple-speech-transport-acceptance"],
+                [str(executable), acceptance_argument],
                 env=environment,
                 capture_output=True,
                 text=True,
@@ -519,7 +553,16 @@ def main() -> int:
             raise
         finally:
             time.sleep(0.1)
-            held_contents = watcher.close()
+            try:
+                held_contents = watcher.close()
+            except Exception:
+                # A failed observer cannot qualify acceptance, but must not
+                # hide the signed child's result behind its cleanup error.
+                if result is not None:
+                    emit_failure_diagnostics(
+                        started_at, result.returncode, result.stdout, result.stderr, worker
+                    )
+                raise
 
     if result.returncode != 0:
         emit_failure_diagnostics(
@@ -529,7 +572,12 @@ def main() -> int:
             "signed Apple Speech transport acceptance failed with "
             f"exit {result.returncode}: {result.stderr[-2000:]}"
         )
-    if "apple-speech-signed-byte-transport=accepted" not in result.stdout:
+    expected_marker = (
+        "apple-speech-signed-runtime=accepted"
+        if args.runtime
+        else "apple-speech-signed-byte-transport=accepted"
+    )
+    if expected_marker not in result.stdout:
         raise RuntimeError("signed app did not emit the content-free acceptance receipt")
     runtime_supported_match = re.search(
         r"^apple-speech-signed-runtime-supported=(true|false)$",
@@ -539,6 +587,8 @@ def main() -> int:
     if runtime_supported_match is None:
         raise RuntimeError("signed app did not report whether the Speech runtime was supported")
     runtime_supported = runtime_supported_match.group(1) == "true"
+    if args.runtime and not runtime_supported:
+        raise RuntimeError("signed Apple Speech worker did not run the analyzer")
     if "apple-speech-signed-parent-trusted=true" not in result.stdout:
         raise RuntimeError(
             "signed app did not confirm it evaluated its signing authority as trusted"
@@ -550,11 +600,13 @@ def main() -> int:
         f"apple-speech-signed-runtime-supported={str(runtime_supported).lower()}",
         file=sys.stderr,
     )
-    raw_f32, pcm_i16 = canary_patterns()
+    raw_f32, pcm_i16 = (
+        runtime_fixture_patterns() if args.runtime else canary_patterns()
+    )
     for contents in held_contents:
         if raw_f32 in contents or pcm_i16 in contents:
             raise RuntimeError(
-                "same-UID open holder recovered the synthetic utterance from a named file"
+                "same-UID open holder recovered acceptance audio from a named file"
             )
 
     receipt = {
@@ -569,20 +621,30 @@ def main() -> int:
         "namedAudioCanaryObserved": False,
         "productGateExpectedClosed": True,
         "signedByteTransport": "accepted",
-        # "accepted" attests that the exact authenticated canary bytes crossed
-        # the parent -> XPC -> worker transport and the worker returned a
-        # content receipt whose checksum matched. It does NOT attest that the
-        # Speech analyzer ran: a hosted runner has no Speech assets and cannot
-        # transcribe, and constructing the analyzer aborts the sandboxed XPC
-        # worker, so acceptance proves the transport and the analyzer is
-        # verified separately on real hardware. runtimeSupported is therefore
-        # false here; a transcript is proven by verify_apple_speech_hardware.sh.
+        "signedWorkerRuntime": "accepted" if args.runtime else "not-run",
+        # Transport-only acceptance intentionally leaves runtimeSupported
+        # false. Runtime mode is a real-hardware-only successor that sends the
+        # fixed public fixture through the same worker and requires true.
         "runtimeSupported": runtime_supported,
         # The worker derives its peer requirement from the same trusted-
         # distribution verdict, and fails closed when that evaluation cannot
         # complete, so a trusted parent means no identifier-only downgrade.
         "parentTrustedDistribution": True,
     }
+    if args.runtime:
+        for field, pattern in (
+            ("moduleId", r"^apple-speech-module=(.+)$"),
+            ("wordCount", r"^apple-speech-word-count=([0-9]+)$"),
+            ("segmentCount", r"^apple-speech-segment-count=([0-9]+)$"),
+            ("firstResultElapsedMs", r"^apple-speech-first-result-ms=([0-9]+)$"),
+            ("totalElapsedMs", r"^apple-speech-total-elapsed-ms=([0-9]+)$"),
+        ):
+            match = re.search(pattern, result.stdout, re.MULTILINE)
+            if match is None:
+                raise RuntimeError(f"signed runtime receipt omitted {field}")
+            receipt[field] = (
+                match.group(1) if field == "moduleId" else int(match.group(1))
+            )
     print(json.dumps(receipt, sort_keys=True))
     return 0
 

@@ -198,7 +198,11 @@ class SameUidOpenHolder:
         while not self.stop.is_set():
             for root in self.roots:
                 for directory, _, names in os.walk(root, followlinks=False):
+                    if self.stop.is_set():
+                        return
                     for name in names:
+                        if self.stop.is_set():
+                            return
                         path = pathlib.Path(directory) / name
                         try:
                             info = path.lstat()
@@ -505,6 +509,7 @@ def main() -> int:
         environment = os.environ.copy()
         environment["TMPDIR"] = str(isolated_temp)
         started_at = time.time()
+        result = None
         try:
             acceptance_argument = (
                 "--apple-speech-runtime-acceptance"
@@ -548,7 +553,16 @@ def main() -> int:
             raise
         finally:
             time.sleep(0.1)
-            held_contents = watcher.close()
+            try:
+                held_contents = watcher.close()
+            except Exception:
+                # A failed observer cannot qualify acceptance, but must not
+                # hide the signed child's result behind its cleanup error.
+                if result is not None:
+                    emit_failure_diagnostics(
+                        started_at, result.returncode, result.stdout, result.stderr, worker
+                    )
+                raise
 
     if result.returncode != 0:
         emit_failure_diagnostics(

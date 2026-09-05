@@ -40,6 +40,7 @@ jobs:
           python3 scripts/seal_graph_worker_hash.py --self-test
           node scripts/check_apple_speech_worker_packaging.mjs
           node scripts/check_apple_speech_worker_packaging.mjs --self-test
+          python3 scripts/test_apple_speech_watcher.py
           python3 scripts/seal_apple_speech_worker_hash.py --self-test
 
       - name: Check sherpa archive packaging

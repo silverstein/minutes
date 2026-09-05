@@ -56,7 +56,7 @@ const capabilityColumns = [
     items: [
       [
         "Local transcription",
-        "whisper.cpp with GPU acceleration. Your audio stays on your machine.",
+        "Whisper or Parakeet, depending on your platform and installed models. Your audio stays on your machine.",
       ],
       [
         "Streaming results",
@@ -374,10 +374,7 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          fixes{" "}
-          the launch that briefly claimed you had no meetings: the list now says
-          it is loading, and it loads about 25× faster (1.8 s to 0.07 s on a
-          977-meeting library).{" "}
+          keeps consistency reports in the meeting folder you selected and lets you try sample recall without downloading speech models. On Apple Silicon, automatic transcription can use Parakeet when its plugin and model are ready.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"

@@ -11,7 +11,7 @@ Minutes is free, open-source meeting memory for the AI tools you already use. Re
 - License: MIT
 - Languages: Rust (core engine), TypeScript (MCP server)
 - Platforms: darwin, win32, linux
-- Version: 0.25.6
+- Version: 0.26.0
 - Source: https://github.com/silverstein/minutes
 - Website: https://useminutes.app
 - Privacy: https://useminutes.app/privacy

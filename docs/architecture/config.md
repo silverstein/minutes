@@ -177,6 +177,7 @@ a non-TTY process without `--consent`, Minutes records the basis as
 | `mode` | `"remind"` | `"off"` skips reminder text, `"remind"` prints the script, `"require"` asks for an interactive acknowledgement only when stdin is a TTY |
 | `disclosure_script` | built-in local transcript disclosure | One-line script to read aloud or paste before recording |
 | `default_basis` | unset | Optional basis stamped when no `--consent` flag is provided |
+| `jurisdiction` | unset | Optional ISO-3166-2-style code for an informational all-party reminder; never sets a basis or blocks recording |
 
 Supported basis values are `verbal_all_parties`, `notice_in_invite`,
 `recorded_disclosed`, `na`, and `unattested`.
@@ -186,6 +187,7 @@ Supported basis values are `verbal_all_parties`, `notice_in_invite`,
 mode = "remind"
 disclosure_script = "Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't."
 # default_basis = "notice_in_invite"
+# jurisdiction = "US-CA"
 ```
 
 CLI flags override the config for a single recording:
@@ -193,7 +195,11 @@ CLI flags override the config for a single recording:
 ```bash
 minutes record --consent verbal_all_parties
 minutes record --consent notice_in_invite --consent-notice "Notice was included in the calendar invite."
+minutes record --announced --no-keep-audio
 ```
+
+See [Recording consent and ephemeral audio](../security/consent.md) for the
+before/during/after flow and frontmatter proof.
 
 ### Sensitive meeting frontmatter
 
@@ -220,6 +226,7 @@ unless pinned.
 
 | key | default | meaning |
 |---|---|---|
+| `default_audio_retention` | `"keep"` | `"none"` deletes job-owned meeting audio only after the final Markdown is durably written and re-read; failed or needs-review audio is held for recovery |
 | `successful_audio_days` | `30` | Days to keep raw audio for successfully processed recordings |
 | `failed_audio_days` | `90` | Days to keep raw audio for failed or needs-review recordings |
 | `restricted_audio_days` | `7` | Days to keep raw audio for `sensitivity: restricted` meetings (tighter window for sensitive content) |

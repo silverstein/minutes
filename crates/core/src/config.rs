@@ -746,6 +746,9 @@ pub struct ConsentConfig {
     /// pass one, such as a team with notice baked into every calendar invite.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_basis: Option<String>,
+    /// Optional ISO-3166-2-style jurisdiction code used for informational reminders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<String>,
 }
 
 /// Pre-record consent prompt behavior.
@@ -756,6 +759,17 @@ pub enum ConsentMode {
     #[default]
     Remind,
     Require,
+}
+
+/// Default raw-audio handling for newly recorded meetings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultAudioRetention {
+    /// Preserve audio under the ordinary day-based retention policy.
+    #[default]
+    Keep,
+    /// Delete job-owned audio after the finished markdown is durable and verified.
+    None,
 }
 
 /// Post-pass name correction behavior.
@@ -794,6 +808,8 @@ pub enum NameCorrectionMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RetentionConfig {
+    /// Default per-meeting audio policy. `keep` preserves existing behavior.
+    pub default_audio_retention: DefaultAudioRetention,
     /// Keep successful recording audio for this many days by default.
     pub successful_audio_days: u32,
     /// Keep failed/needs-review audio longer so the user can recover it.
@@ -860,6 +876,7 @@ impl Default for ConsentConfig {
             mode: ConsentMode::Remind,
             disclosure_script: "Heads up: I'm using Minutes to transcribe this conversation locally on my device for my own notes. Let me know if you'd prefer I didn't.".into(),
             default_basis: None,
+            jurisdiction: None,
         }
     }
 }
@@ -867,6 +884,7 @@ impl Default for ConsentConfig {
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
+            default_audio_retention: DefaultAudioRetention::Keep,
             successful_audio_days: 30,
             failed_audio_days: 90,
             restricted_audio_days: 7,
@@ -2261,6 +2279,10 @@ mod tests {
             mode = "require"
             disclosure_script = "Please acknowledge recording."
             default_basis = "notice_in_invite"
+            jurisdiction = "US-CA"
+
+            [retention]
+            default_audio_retention = "none"
             "#,
         )
         .unwrap();
@@ -2274,6 +2296,11 @@ mod tests {
             parsed.consent.default_basis.as_deref(),
             Some("notice_in_invite")
         );
+        assert_eq!(parsed.consent.jurisdiction.as_deref(), Some("US-CA"));
+        assert_eq!(
+            parsed.retention.default_audio_retention,
+            DefaultAudioRetention::None
+        );
     }
 
     #[test]
@@ -2282,6 +2309,11 @@ mod tests {
 
         assert_eq!(parsed.consent.mode, ConsentMode::Remind);
         assert!(parsed.consent.default_basis.is_none());
+        assert!(parsed.consent.jurisdiction.is_none());
+        assert_eq!(
+            parsed.retention.default_audio_retention,
+            DefaultAudioRetention::Keep
+        );
     }
 
     #[test]

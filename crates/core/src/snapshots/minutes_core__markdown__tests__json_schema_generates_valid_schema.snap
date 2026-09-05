@@ -1,5 +1,6 @@
 ---
 source: crates/core/src/markdown.rs
+assertion_line: 3126
 expression: schema
 ---
 {
@@ -21,6 +22,21 @@ expression: schema
       }
     },
     "attendees_raw": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "audio_deleted_at": {
+      "description": "Time at which all job-owned audio was deleted after durable finalization.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "audio_retention": {
+      "description": "Whether raw audio should be kept, deleted, or held for retry.",
       "type": [
         "string",
         "null"
@@ -60,6 +76,14 @@ expression: schema
           "type": "null"
         }
       ]
+    },
+    "consent_announced_at": {
+      "description": "Time at which the recorder attested that the disclosure was announced.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
     },
     "consent_notice": {
       "description": "The exact disclosure the user gave or used, if any.",

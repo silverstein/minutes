@@ -25,6 +25,7 @@ pub(crate) mod bounded_inference;
 pub mod calendar;
 pub mod capture;
 pub mod config;
+pub mod consent_jurisdictions;
 pub mod context_store;
 pub mod copilot;
 pub mod daily_notes;

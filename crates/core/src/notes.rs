@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::markdown::ConsentBasis;
+use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -50,6 +51,23 @@ struct ConsentSidecar {
     basis: Option<ConsentBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_retention: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    announced_at: Option<DateTime<Local>>,
+}
+
+/// Privacy choices captured at recording start and carried into the queued job.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordingPrivacyMetadata {
+    /// Attested basis for capture, if one was recorded.
+    pub consent: Option<ConsentBasis>,
+    /// Exact disclosure text shown or supplied for the capture.
+    pub consent_notice: Option<String>,
+    /// Per-meeting audio retention request, when it differs from ordinary keep behavior.
+    pub audio_retention: Option<String>,
+    /// Time when the recorder confirmed the disclosure had been announced.
+    pub consent_announced_at: Option<DateTime<Local>>,
 }
 
 /// Save the recording start timestamp (epoch seconds).
@@ -148,16 +166,29 @@ pub fn save_context(text: &str) -> std::io::Result<()> {
 
 /// Save consent metadata for the current recording.
 pub fn save_consent(basis: Option<ConsentBasis>, notice: Option<&str>) -> std::io::Result<()> {
+    save_recording_privacy(&RecordingPrivacyMetadata {
+        consent: basis,
+        consent_notice: notice.map(str::to_string),
+        ..RecordingPrivacyMetadata::default()
+    })
+}
+
+/// Save all recording-start privacy metadata in one sidecar write.
+pub fn save_recording_privacy(metadata: &RecordingPrivacyMetadata) -> std::io::Result<()> {
     let path = consent_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let sidecar = ConsentSidecar {
-        basis,
-        notice: notice
+        basis: metadata.consent,
+        notice: metadata
+            .consent_notice
+            .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        audio_retention: metadata.audio_retention.clone(),
+        announced_at: metadata.consent_announced_at,
     };
     let json = serde_json::to_string_pretty(&sidecar)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -195,23 +226,29 @@ pub fn read_context() -> Option<String> {
 
 /// Load consent metadata for the current recording.
 pub fn load_consent() -> (Option<ConsentBasis>, Option<String>) {
+    let metadata = load_recording_privacy();
+    (metadata.consent, metadata.consent_notice)
+}
+
+/// Load all recording-start privacy metadata, accepting legacy consent-only sidecars.
+pub fn load_recording_privacy() -> RecordingPrivacyMetadata {
     let path = consent_path();
     if !path.exists() {
-        return (None, None);
+        return RecordingPrivacyMetadata::default();
     }
     fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str::<ConsentSidecar>(&raw).ok())
-        .map(|sidecar| {
-            (
-                sidecar.basis,
-                sidecar
-                    .notice
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty()),
-            )
+        .map(|sidecar| RecordingPrivacyMetadata {
+            consent: sidecar.basis,
+            consent_notice: sidecar
+                .notice
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            audio_retention: sidecar.audio_retention,
+            consent_announced_at: sidecar.announced_at,
         })
-        .unwrap_or((None, None))
+        .unwrap_or_default()
 }
 
 /// Clean up notes and context files after recording completes.
@@ -360,6 +397,22 @@ mod tests {
 
             cleanup();
             assert_eq!(load_consent(), (None, None));
+        });
+    }
+
+    #[test]
+    fn recording_privacy_sidecar_round_trips_ephemeral_and_announcement_metadata() {
+        with_temp_home(|_| {
+            let announced_at = Local::now();
+            let expected = RecordingPrivacyMetadata {
+                consent: Some(ConsentBasis::VerbalAllParties),
+                consent_notice: Some("Read aloud before joining.".into()),
+                audio_retention: Some("none".into()),
+                consent_announced_at: Some(announced_at),
+            };
+
+            save_recording_privacy(&expected).unwrap();
+            assert_eq!(load_recording_privacy(), expected);
         });
     }
 

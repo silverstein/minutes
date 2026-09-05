@@ -1208,6 +1208,23 @@ pub struct Frontmatter {
     /// The exact disclosure the user gave or used, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consent_notice: Option<String>,
+    /// Whether raw audio should be kept, deleted, or held for retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_retention: Option<String>,
+    /// Time at which all job-owned audio was deleted after durable finalization.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_local_datetime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audio_deleted_at: Option<DateTime<Local>>,
+    /// Time at which the recorder attested that the disclosure was announced.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_local_datetime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub consent_announced_at: Option<DateTime<Local>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2899,6 +2916,9 @@ mod tests {
             debrief: None,
             consent: None,
             consent_notice: None,
+            audio_retention: None,
+            audio_deleted_at: None,
+            consent_announced_at: None,
             visibility: None,
             speaker_map: vec![],
             name_corrections: Vec::new(),

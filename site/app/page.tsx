@@ -46,7 +46,7 @@ const featureGrid = [
     label: "For recall",
     title: "Answers from raw output",
     description:
-      "Competitors hide the transcript. Minutes keeps timestamps, speakers, and action items visible so the source stays readable.",
+      "Minutes keeps timestamps, speakers, and action items visible so you can check an answer against the source.",
   },
 ] as const;
 
@@ -116,20 +116,12 @@ const capabilityColumns = [
   },
 ] as const;
 
-// Competitor cells reflect public docs spot-checked in August 2026. Refresh quarterly.
+// Public product documentation reviewed September 5, 2026. See linked comparisons.
 const comparisons = [
-  ["Local transcription", "No (cloud)", "No (cloud)", "Yes", "Yes"],
-  ["Open source", "No", "No", "MIT", "MIT"],
-  ["Free", "Freemium", "Freemium", "Free", "Free"],
-  ["Agent surface", "Hosted MCP", "Hosted integrations", "Local app", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
-  ["Cross-meeting intelligence", "Cloud chat", "Cloud chat", "No", "Policy-safe search"],
-  ["Consent provenance", "No", "No", "No", "In every file"],
-  ["Dictation mode", "No", "No", "No", "Yes"],
-  ["Voice memos", "No", "No", "No", "iPhone pipeline"],
-  ["People memory", "No", "No", "No", "Bounded profiles"],
-  ["Data ownership", "Their servers", "Their servers", "Local", "Local"],
-  ["Data format", "Cloud DB", "Cloud DB", "Local files", "Markdown + YAML"],
-  ["Agent-agnostic", "No", "No", "Partially", "Yes"],
+  ["Product", "Hosted meeting notepad", "Hosted meeting assistant", "Local meeting notepad", "Local conversation memory"],
+  ["Agent access", "Hosted MCP", "Hosted integrations", "CLI + MCP", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
+  ["Primary storage", "Hosted workspace", "Hosted workspace", "Local SQLite + files", "Local Markdown + YAML"],
+  ["Local AI", "Cloud transcription", "Cloud transcription", "With local providers", "Local transcription; AI provider of your choice"],
 ] as const;
 
 
@@ -207,7 +199,7 @@ function TranscriptCard() {
 const dictationEntries = [
   ["08:14", "Remind me to send the Q3 numbers to the board before Friday."],
   ["11:02", "Onboarding idea: defer the model download until the first recording."],
-  ["15:47", "Dana owns the pricing experiment — review the results next week."],
+  ["15:47", "Dana owns the pricing experiment; review the results next week."],
 ] as const;
 
 function DictationCard() {
@@ -260,8 +252,8 @@ const cloudFlow: HomeFlowStep[] = [
 
 const minutesFlow: HomeFlowStep[] = [
   { label: "Capture from your mic", detail: "device audio, on your Mac" },
-  { label: "Transcribe", detail: "on-device — sealed local whisper.cpp" },
-  { label: "Store transcripts + notes", detail: "your disk — markdown in ~/meetings" },
+  { label: "Transcribe", detail: "on-device; sealed local whisper.cpp" },
+  { label: "Store transcripts + notes", detail: "your disk; markdown in ~/meetings" },
 ];
 
 function HomeFlowCard({
@@ -414,12 +406,14 @@ export default function Home() {
           <div className="mt-6 flex flex-wrap justify-center gap-3">
           <a
             href={APPLE_SILICON_DOWNLOAD_PATH}
+            data-download-target="mac"
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
             Mac (Apple Silicon)
           </a>
           <a
             href={WINDOWS_SETUP_EXE}
+            data-download-target="windows"
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
             Windows
@@ -436,13 +430,15 @@ export default function Home() {
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <CopyButton
             label="Homebrew (desktop)"
+            acquisitionTarget="desktop_cli"
             cmd="brew install --cask silverstein/tap/minutes"
           />
           <CopyButton
             label="Homebrew (CLI)"
+            acquisitionTarget="desktop_cli"
             cmd="brew tap silverstein/tap && brew install minutes"
           />
-          <CopyButton label="MCP server" cmd="npx minutes-mcp" />
+          <CopyButton label="MCP server" cmd="npx minutes-mcp" acquisitionTarget="mcp" />
         </div>
 
         <p className="mt-3 text-[12px] text-[var(--text-secondary)]">
@@ -488,14 +484,13 @@ export default function Home() {
         </h2>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
           Hold the hotkey, speak, release. The text lands at your cursor and in
-          your daily note — no app to open, no tool to switch. It&apos;s the
-          habit most people start with, and it runs on the same local engine as
-          every meeting and memo.
+          your daily note. Dictation uses the same local transcription pipeline
+          as your meetings and memos.
         </p>
         <p className="mt-4 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Other dictation tools hand you text and forget it. Minutes keeps every
-          word — transcribed on your machine, part of the same owned memory your
-          AI can search later. Your voice never touches a server.
+          Minutes saves your dictation locally so it can become part of the
+          history your AI searches later. You choose which context to share
+          with a connected assistant.
         </p>
         <div className="mt-8">
           <DictationCard />
@@ -505,26 +500,25 @@ export default function Home() {
       <section id="local" className="border-t border-[color:var(--border)] py-16">
         <SectionLabel n="02" label="On-device" heading={false} />
         <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          Your conversation never leaves your machine.
+          Local capture. You choose what to share.
         </h2>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Every other tool sends your audio somewhere to be understood — a cloud
-          transcriber, a hosted AI, a server that keeps the result. Minutes
-          doesn&apos;t. Transcription runs on your Mac and the record is markdown
-          on your own disk. There is no server to trust, breach, or subpoena.
+          Capture, transcription, and storage run locally. Your recordings become
+          Markdown files on your own disk. If you choose a cloud AI assistant
+          or summarizer, the meeting context you authorize is sent to that provider.
         </p>
         <div className="mt-8 grid gap-5 lg:grid-cols-2">
           <HomeFlowCard
             name="Cloud notetakers"
             leavesDevice
             steps={cloudFlow}
-            footnote="Even the privacy-conscious ones capture locally, then stream your audio to the cloud to transcribe and store the result on their servers."
+            footnote="A hosted transcription workflow sends audio to a provider. Other tools also offer local processing; check the model and storage settings you select."
           />
           <HomeFlowCard
             name="Minutes"
             leavesDevice={false}
             steps={minutesFlow}
-            footnote="Audio, transcript, and notes never leave your machine. You hold the only copy — nothing to upload, sell, or lose in an acquisition."
+            footnote="Recording and transcription stay local. Use local AI or skip summarization to keep processing on-device. Cloud assistants receive the context you authorize; file sync and backups have their own settings."
           />
         </div>
       </section>
@@ -590,7 +584,7 @@ export default function Home() {
           Transcription runs locally through sealed whisper.cpp. Existing
           Parakeet and Apple Speech preferences resolve to Whisper until their
           secure byte transports pass their release gates.
-          Summarization is optional — Claude can do it conversationally when
+          Summarization is optional; Claude can do it conversationally when
           you ask, using your existing subscription. No API keys are required
           to get useful output.
         </p>
@@ -714,19 +708,16 @@ export default function Home() {
                   </td>
                   {values.map((value, index) => {
                     const isMinutes = index === 3;
-                    const isNo = value === "No";
                     return (
                       <td
                         key={`${feature}-${index}-${value}`}
                         className={`border-b border-[color:var(--border)] p-3 ${
                           isMinutes
                             ? "font-semibold text-[var(--text)]"
-                            : isNo
-                              ? "text-[var(--text-tertiary)]"
-                              : "text-[var(--text-secondary)]"
+                            : "text-[var(--text-secondary)]"
                         }`}
                       >
-                        {isNo ? "—" : value}
+                        {value}
                       </td>
                     );
                   })}
@@ -763,12 +754,10 @@ export default function Home() {
           Built in, not retrofitted.
         </h2>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          If you take notes on client conversations for a living — legal,
-          clinical, financial — a cloud recorder isn&apos;t a preference, it&apos;s
-          a compliance problem. Minutes keeps both the audio and the record on
-          your own machine, and puts governance in the record itself: every file
-          states the consent it was captured under, because its primary reader is
-          now an agent.
+          Client conversations need deliberate choices about recording, access,
+          storage, and AI providers. Minutes keeps capture and transcription
+          local and records consent metadata alongside the conversation. Local
+          processing alone does not establish legal or regulatory compliance.
         </p>
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">

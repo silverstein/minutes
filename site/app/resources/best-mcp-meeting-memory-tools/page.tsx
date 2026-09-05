@@ -38,9 +38,20 @@ const shortlist = [
     summary:
       "Best when you want a hosted meeting assistant with centralized transcripts, collaboration, and broader team/admin posture.",
   },
+  {
+    name: "Anarlog",
+    bestFor: "A local notepad with CLI and MCP",
+    summary: "An editable meeting app backed by local SQLite, with Markdown export and a local CLI/MCP surface. Select local or hosted AI providers separately.",
+  },
+  {
+    name: "Vexa",
+    bestFor: "Self-hosted capture infrastructure",
+    summary: "A meeting-bot API with live transcripts and MCP for people operating their own capture stack. Evaluate the operational setup before choosing it over a desktop app.",
+  },
 ] as const;
 
 const criteria = [
+  "This is a maintainer-written fit guide, not a hands-on benchmark. Anarlog and Vexa were checked against their repositories on September 5, 2026; confirm hosted product plans in the linked docs.",
   "Is the MCP support real and current, not just vague integration language?",
   "Does the MCP layer expose durable meeting memory or just a narrow hosted slice?",
   "Can the output be inspected and reused outside one app?",
@@ -48,6 +59,8 @@ const criteria = [
 ] as const;
 
 const sources = [
+  { label: "Anarlog CLI and MCP", href: "https://github.com/fastrepl/anarlog" },
+  { label: "Vexa MCP and capture", href: "https://github.com/Vexa-ai/vexa" },
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
   { label: "Granola MCP", href: "https://help.granola.ai/article/granola-mcp" },
@@ -57,7 +70,7 @@ const sources = [
 ] as const;
 
 
-const LAST_REVIEWED = "2026-04-09";
+const LAST_REVIEWED = "2026-09-05";
 
 export default function BestMcpMeetingMemoryToolsPage() {
   return (
@@ -114,9 +127,7 @@ export default function BestMcpMeetingMemoryToolsPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the strongest local-first MCP meeting memory layer,{" "}
-            <span className="font-medium text-[var(--text)]">Minutes</span> is the best fit in this
-            group.
+            Consider <span className="font-medium text-[var(--text)]">Minutes</span> for local meeting records stored as Markdown and searched through your preferred MCP client. Compare Anarlog too if you want an editable local notepad.
           </p>
           <p>
             If you want a more polished hosted AI note-taking product with MCP access,{" "}
@@ -185,7 +196,7 @@ export default function BestMcpMeetingMemoryToolsPage() {
             polished product experience.
           </p>
           <p>
-            It is strongest when you care about local ownership, open artifacts, and agent
+            It fits workflows that need local ownership, open artifacts, and agent
             readability. If that is not the job, one of the hosted tools in this category may be a
             better fit.
           </p>

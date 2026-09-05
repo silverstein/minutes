@@ -1,15 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import { trackAcquisition, type AcquisitionTarget } from "@/lib/acquisition";
 
 export function CopyButton({
   label,
   cmd,
   compact = false,
+  acquisitionTarget,
 }: {
   label: string;
   cmd: string;
   compact?: boolean;
+  acquisitionTarget?: AcquisitionTarget;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -18,6 +21,7 @@ export function CopyButton({
       onClick={() => {
         navigator.clipboard.writeText(cmd).then(() => {
           setCopied(true);
+          if (acquisitionTarget) trackAcquisition("setup_intent", acquisitionTarget);
           setTimeout(() => setCopied(false), 1500);
         });
       }}

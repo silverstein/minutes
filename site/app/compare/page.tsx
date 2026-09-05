@@ -30,10 +30,10 @@ const pages = [
       "Best if you want a clear tradeoff between a hosted meeting assistant with integrations and a local-first memory layer for agents.",
   },
   {
-    title: "Minutes vs Hyprnote",
+    title: "Minutes vs Anarlog (formerly Hyprnote)",
     href: "/compare/hyprnote-vs-minutes",
     blurb:
-      "Best if you are choosing between two open-source local-first tools: a notepad you write in versus a memory layer your agents query.",
+      "Compare two local tools with agent access: Anarlog stores sessions in SQLite and files; Minutes uses Markdown with policy-aware MCP access.",
   },
   {
     title: "Minutes vs superwhisper",

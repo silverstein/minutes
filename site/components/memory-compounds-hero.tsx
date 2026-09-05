@@ -97,7 +97,7 @@ function MemorySequence() {
           </div>
           <pre>
             <code>{`---
-title: Pricing Strategy — Monthly Test
+title: Pricing Strategy; Monthly Test
 type: meeting
 consent: verbal_all_parties
 decisions:
@@ -191,28 +191,28 @@ export function MemoryCompoundsHero() {
             Open source · Local first · MIT
           </p>
           <h1 id="home-title">
-            Your AI remembers every conversation&nbsp;—
-            <span>and no one can take it from you.</span>
+            Your conversations. Your memory.
+            <span>Ready for the AI you use.</span>
           </h1>
           <p className="marketing-lede">
-            Minutes turns meetings, voice memos, and dictation into durable
-            local context—owned by you, readable by every AI you use. Nothing
-            is uploaded.
+            Minutes is a free, open-source conversation memory app. Record and
+            transcribe meetings, voice memos, and dictation locally. Let Claude,
+            Codex, and other AI assistants search the history you choose to share.
           </p>
 
           <div className="marketing-actions">
             <a href="#install" className="marketing-primary-action">
               Download Minutes
             </a>
-            <a href="#product" className="marketing-secondary-action">
-              See Minutes in motion
+            <a href="/for-agents#try" className="marketing-secondary-action">
+              Try it with your AI
             </a>
           </div>
 
           <p className="marketing-proof-line">
             {GITHUB_STARS} stars · {GITHUB_FORKS} forks ·{" "}
             {GITHUB_CONTRIBUTORS} contributors · {NPM_MONTHLY_DOWNLOADS} npm
-            installs/mo
+            downloads/mo
           </p>
 
           <div className="marketing-works-with">
@@ -243,9 +243,9 @@ export function MemoryCompoundsHero() {
             <p>Readable without Minutes. Ten years from now, grep still works.</p>
           </div>
           <div>
-            <span>Network</span>
-            <strong>0 uploads</strong>
-            <p>Capture, transcription, and storage stay on your machine.</p>
+            <span>Processing</span>
+            <strong>Local by design</strong>
+            <p>Capture and transcription stay local. Cloud AI receives only the context you authorize.</p>
           </div>
           <div>
             <span>Command surfaces</span>

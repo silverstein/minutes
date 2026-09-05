@@ -1,31 +1,38 @@
-# Minutes vs Hyprnote (Anarlog)
+# Minutes vs Anarlog (formerly Hyprnote)
 
-Last reviewed: 2026-06-10
+Last reviewed: 2026-09-05
 
-## Quick verdict
+Anarlog, formerly Hyprnote, and Minutes both support local meeting workflows and external AI tools. Anarlog centers on an editable notepad backed by SQLite. Minutes centers on conversation records stored as Markdown with source and consent metadata. Choose by the workflow you will actually use.
 
-- Choose **Hyprnote** if you want a polished local notepad for taking and enhancing your own meeting notes, and the app itself is where you want to live.
-- Choose **Minutes** if you want a durable, agent-readable corpus: files on your disk, MCP tools, a CLI, and consent and provenance metadata your tools can rely on.
+| Area | Anarlog | Minutes |
+|---|---|---|
+| Best fit | An editable meeting notepad | A conversation corpus for your existing AI |
+| License | MIT community app; commercial enterprise components | MIT |
+| Storage | Local SQLite, recordings and attachments; Markdown export | Markdown with YAML frontmatter as the primary record |
+| AI processing | Local or hosted transcription and intelligence providers | Local transcription; optional local or cloud AI |
+| Agent access | Local CLI, MCP server, and agent skills | MCP, CLI, SDK, and portable agent skills |
 
-## Where Hyprnote wins
+## Workflow
 
-- The in-meeting note-taking experience is the product: you write, it listens and enhances
-- Larger community today with a tight focus on the notepad job
-- Simpler if you only need meeting notes (no voice memos, dictation, or agent surface)
+Both projects now expose a CLI and MCP. Having MCP alone is not a reason to prefer Minutes. Evaluate setup, retrieval quality, and what your assistant is allowed to read.
 
-## Where Minutes wins
+In Minutes, try the sample pricing reversal through your own assistant, request source files, then repeat with a real conversation. A sample success does not establish recording reliability.
 
-- Built for what happens after the meeting: structured markdown with YAML frontmatter that agents query across months of conversations
-- Broader agent surface: MCP server, CLI, SDK, live transcript reads, Claude Code plugin
-- Governance lives in the data: consent basis stamped into every recording, sensitive no-capture meetings supported, and restricted meetings excluded from agents by default with audited overrides
+## Limitations
 
-## When Minutes is not the right fit
+Minutes may add unnecessary setup if you only want polished notes inside one app.
 
-- When you mainly want to write notes during meetings and have AI clean them up
-- When MCP, CLIs, and agent memory are not part of your workflow
+Check platform-specific capture support before committing to either tool.
 
-## Notes
+## Evidence
 
-Both projects are open source (MIT) and process audio locally, so the privacy floor is similar. The fork in the road is the output contract: Hyprnote's durable artifact is your enhanced notes; Minutes' durable artifact is a diarized transcript plus extracted decisions, action items, and people, written as plain files that outlive any one app. Running both is coherent.
+Reviewed September 5, 2026 using the official repositories and documentation. This is a maintainer-written comparison, not a hands-on benchmark.
 
-Full comparison: https://useminutes.app/compare/hyprnote-vs-minutes
+Anarlog is the maintained open-source project formerly called Hyprnote. Char is a separate current product from its team.
+
+## Sources
+
+- [Anarlog repository and licensing](https://github.com/fastrepl/anarlog)
+- [Anarlog documentation](https://docs.anarlog.so)
+- [Minutes agent workflow](https://useminutes.app/for-agents)
+- [Minutes proof and limitations](https://useminutes.app/proof)

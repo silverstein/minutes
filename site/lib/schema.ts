@@ -63,7 +63,7 @@ export function softwareApplicationSchema() {
     applicationSubCategory: "Conversation memory and meeting transcription",
     operatingSystem: "macOS, Linux, Windows",
     description:
-      "Captures meetings, voice memos, and dictation, transcribes locally with whisper.cpp, diarizes speakers with local ONNX models, and outputs searchable markdown with structured action items and decisions. Nothing is uploaded.",
+      "Free, open-source conversation memory for Claude, Codex, and other AI assistants. Capture, transcription, and Markdown storage run locally. Optional cloud AI receives the meeting context you authorize.",
     license: "https://opensource.org/licenses/MIT",
     isAccessibleForFree: true,
     offers: {

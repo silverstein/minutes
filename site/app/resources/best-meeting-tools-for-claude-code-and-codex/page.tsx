@@ -38,9 +38,20 @@ const tools = [
     summary:
       "Best when you want a hosted meeting assistant with centralized transcripts, collaboration, and team-oriented admin and integration surfaces.",
   },
+  {
+    name: "Anarlog",
+    bestFor: "A local notepad with CLI and MCP",
+    summary: "An editable meeting app backed by local SQLite, with Markdown export and a local CLI/MCP surface. Select local or hosted AI providers separately.",
+  },
+  {
+    name: "Vexa",
+    bestFor: "Self-hosted capture infrastructure",
+    summary: "A meeting-bot API with live transcripts and MCP for people operating their own capture stack. Evaluate the operational setup before choosing it over a desktop app.",
+  },
 ] as const;
 
 const criteria = [
+  "This is a maintainer-written fit guide, not a hands-on benchmark. Anarlog and Vexa were checked against their repositories on September 5, 2026; confirm hosted product plans in the linked docs.",
   "How good is the MCP / agent workflow, not just whether MCP exists?",
   "Do you own the output as inspectable files or mostly as data inside one app?",
   "Is the product built for developers/operators, or for general hosted note-taking?",
@@ -52,7 +63,7 @@ const shortlist = [
   {
     category: "Best for local-first agent memory",
     winner: "Minutes",
-    why: "It is the most purpose-built for durable local memory, inspectable markdown, and agent workflows across MCP, CLI, desktop, SDK, and plugin surfaces.",
+    why: "It stores a durable Markdown corpus and exposes it through MCP, CLI, desktop, SDK, and plugin surfaces. Check its sample workflow and platform requirements before choosing.",
   },
   {
     category: "Best for polished AI note-taking",
@@ -72,6 +83,8 @@ const shortlist = [
 ] as const;
 
 const sources = [
+  { label: "Anarlog CLI and MCP", href: "https://github.com/fastrepl/anarlog" },
+  { label: "Vexa MCP and capture", href: "https://github.com/Vexa-ai/vexa" },
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
   { label: "Minutes error reference", href: "https://useminutes.app/docs/errors" },
@@ -85,7 +98,7 @@ const sources = [
 ] as const;
 
 
-const LAST_REVIEWED = "2026-04-09";
+const LAST_REVIEWED = "2026-09-05";
 
 export default function BestMeetingToolsPage() {
   return (
@@ -140,9 +153,7 @@ export default function BestMeetingToolsPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the best local-first meeting memory layer for Claude Code, Codex, and other
-            MCP workflows, <span className="font-medium text-[var(--text)]">Minutes</span> is the
-            strongest fit in this group.
+            Consider <span className="font-medium text-[var(--text)]">Minutes</span> when Claude Code, Codex, or another MCP client is your main interface to meeting history. Its primary record is a local Markdown corpus. Compare Anarlog for an editable local notepad with agent access.
           </p>
           <p>
             If you want a more polished hosted AI notepad,{" "}
@@ -233,7 +244,7 @@ export default function BestMeetingToolsPage() {
             polished product experience.
           </p>
           <p>
-            It is strongest when you care about local ownership, open artifacts, agent readability,
+            It fits workflows that need local ownership, open artifacts, agent readability,
             and multi-surface workflows. If that is not the job, one of the hosted products on this
             page may be the better choice.
           </p>

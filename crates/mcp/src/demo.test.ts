@@ -42,6 +42,7 @@ describe("`minutes-mcp --demo`", () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("Demo corpus ready at:");
       expect(result.stdout).toContain("MEETINGS_DIR");
+      expect(result.stdout).toContain('"MINUTES_MCP_AUTO_SETUP": "0"');
       expect(result.stdout).toContain("npx");
       expect(result.stdout).toContain("minutes-mcp");
 

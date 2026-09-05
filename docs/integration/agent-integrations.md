@@ -33,6 +33,10 @@ plugin but no Parakeet model triggers plain `minutes setup`. That installs the
 Parakeet model and the Whisper tiny fallback without changing explicit engine
 choices.
 
+For a host that only reads existing transcripts, set `MINUTES_MCP_AUTO_SETUP` to `"0"` in the MCP server's environment to skip speech-model health checks and downloads. The generated `minutes-mcp --demo` configuration sets this option. The CLI remains required for meeting access rules and can still be installed automatically. Before recording, use the desktop setup or `minutes setup` to prepare the speech model.
+
+`MEETINGS_DIR` selects the corpus for MCP recall tools, including consistency reports. The server passes that folder explicitly to `minutes consistency --dir <folder>` and requires a CLI with the `consistency_corpus_root_v1` capability. An older CLI must be updated before it can produce this report; the server does not fall back to a different meeting library.
+
 ## Surfaces
 
 | Surface | Use when | Examples |

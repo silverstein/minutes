@@ -661,6 +661,10 @@ enum Commands {
 
     /// Flag conflicting decisions and stale commitments across normal meetings
     Consistency {
+        /// Read this meeting corpus instead of the configured output directory
+        #[arg(long)]
+        dir: Option<PathBuf>,
+
         /// Filter stale commitments by owner / person
         #[arg(long)]
         owner: Option<String>,
@@ -2161,9 +2165,15 @@ fn main() -> Result<()> {
             include_restricted,
         } => cmd_actions(assignee.as_deref(), include_restricted, &config),
         Commands::Consistency {
+            dir,
             owner,
             stale_after_days,
-        } => cmd_consistency(owner.as_deref(), stale_after_days, &config),
+        } => {
+            if let Some(dir) = dir {
+                config.output_dir = dir;
+            }
+            cmd_consistency(owner.as_deref(), stale_after_days, &config)
+        }
         Commands::Person { name } => cmd_person(&name, &config),
         Commands::People {
             action,
@@ -6954,6 +6964,7 @@ fn build_capability_report_with_parakeet(
     features.insert("add_note".into(), true);
     features.insert("confirm_speaker".into(), true);
     features.insert("consistency_report".into(), true);
+    features.insert("consistency_corpus_root_v1".into(), true);
     features.insert("copilot_realtime".into(), true);
     features.insert("events_since_seq".into(), true);
     features.insert("get_meeting".into(), true);

@@ -181,7 +181,7 @@ async function withPackedPackage(root, directory, callback, { localSdkTarball } 
       }
       await exec(
         "npm",
-        ["install", localSdkTarball, "--no-save", "--package-lock=false"],
+        ["install", localSdkTarball, "--no-save"],
         { cwd: path.join(root, directory) },
       );
     }
@@ -218,7 +218,10 @@ async function testMcpAgainstSdkTarball(root, tarball, sdkIntegrity) {
     const installedIntegrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
     if (installedIntegrity !== sdkIntegrity) throw new Error("SDK tarball changed between packing and MCP validation");
 
-    await exec("npm", ["install", tarball, "--no-save", "--package-lock=false"], {
+    // Keep the committed dependency graph while overlaying this exact SDK.
+    // --no-save prevents manifest and lockfile writes; disabling the lockfile
+    // also discards its dependency resolutions and can pull unrelated peers.
+    await exec("npm", ["install", tarball, "--no-save"], {
       cwd: path.join(root, MCP_DIRECTORY),
     });
     await exec("npm", ["run", "build"], { cwd: path.join(root, MCP_DIRECTORY) });

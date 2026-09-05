@@ -127,9 +127,7 @@ export default function BestMcpMeetingMemoryToolsPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the strongest local-first MCP meeting memory layer,{" "}
-            <span className="font-medium text-[var(--text)]">Minutes</span> is the best fit in this
-            group.
+            Consider <span className="font-medium text-[var(--text)]">Minutes</span> for local meeting records stored as Markdown and searched through your preferred MCP client. Compare Anarlog too if you want an editable local notepad.
           </p>
           <p>
             If you want a more polished hosted AI note-taking product with MCP access,{" "}
@@ -198,7 +196,7 @@ export default function BestMcpMeetingMemoryToolsPage() {
             polished product experience.
           </p>
           <p>
-            It is strongest when you care about local ownership, open artifacts, and agent
+            It fits workflows that need local ownership, open artifacts, and agent
             readability. If that is not the job, one of the hosted tools in this category may be a
             better fit.
           </p>

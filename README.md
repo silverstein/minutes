@@ -147,7 +147,7 @@ See the [security documentation](docs/security/) and
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Minutes is MIT licensed and staying that way: no relicensing, no paid tier for anything in this repo.
 
-MIT; Built by [Mat Silverstein](https://github.com/silverstein), founder of
+MIT. Built by [Mat Silverstein](https://github.com/silverstein), founder of
 [X1 Wealth](https://x1wealth.com).
 
 ## Star History

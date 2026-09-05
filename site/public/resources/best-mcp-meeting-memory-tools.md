@@ -6,7 +6,7 @@ This page is about tools that make meetings useful inside agent workflows, not j
 
 ## Quick answer
 
-- Best local-first MCP meeting memory layer: **Minutes**
+- Local Markdown meeting memory: **Minutes**
 - Best polished hosted AI notepad with MCP: **Granola AI**
 - Best hosted team workflow with MCP: **Fireflies.ai**
 - Best hosted mainstream meeting assistant with MCP: **Otter AI**

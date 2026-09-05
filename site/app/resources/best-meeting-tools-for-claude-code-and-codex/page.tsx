@@ -153,9 +153,7 @@ export default function BestMeetingToolsPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the best local-first meeting memory layer for Claude Code, Codex, and other
-            MCP workflows, <span className="font-medium text-[var(--text)]">Minutes</span> is the
-            strongest fit in this group.
+            Consider <span className="font-medium text-[var(--text)]">Minutes</span> when Claude Code, Codex, or another MCP client is your main interface to meeting history. Its primary record is a local Markdown corpus. Compare Anarlog for an editable local notepad with agent access.
           </p>
           <p>
             If you want a more polished hosted AI notepad,{" "}
@@ -246,7 +244,7 @@ export default function BestMeetingToolsPage() {
             polished product experience.
           </p>
           <p>
-            It is strongest when you care about local ownership, open artifacts, agent readability,
+            It fits workflows that need local ownership, open artifacts, agent readability,
             and multi-surface workflows. If that is not the job, one of the hosted products on this
             page may be the better choice.
           </p>

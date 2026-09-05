@@ -11,7 +11,7 @@ import {
 import skillsCatalog from "@/lib/skills-catalog.json";
 
 export const metadata: Metadata = {
-  title: "Minutes; local conversation infrastructure for agents",
+  title: "Minutes: local conversation infrastructure for agents",
   description:
     "Open-source conversation infrastructure for agents: local audio capture exposed as plain files, MCP tools, CLI commands, and live transcript streams.",
   alternates: { canonical: "/for-agents" },

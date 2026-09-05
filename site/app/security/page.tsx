@@ -3,9 +3,9 @@ import { PublicFooter } from "@/components/public-footer";
 import { SectionLabel } from "@/components/section-label";
 
 export const metadata: Metadata = {
-  title: "Security — audio that never leaves your device",
+  title: "Security and privacy: local capture, explicit AI sharing",
   description:
-    "Capture, transcription, diarization, and storage run on your own machine. No vendor cloud to trust or subpoena, and the code is open to check.",
+    "Capture, transcription, and storage run locally. Learn what stays on your device and what a connected cloud AI provider can receive.",
   alternates: {
     canonical: "/security",
   },
@@ -22,7 +22,7 @@ const pipeline = [
   },
   {
     step: "Diarize",
-    detail: "pyannote ONNX models, local — speaker labels never computed in a cloud",
+    detail: "pyannote ONNX models, local; speaker labels never computed in a cloud",
   },
   {
     step: "Store",
@@ -32,20 +32,20 @@ const pipeline = [
 
 const guarantees = [
   {
-    title: "No audio upload, ever",
-    body: "There is no code path that sends your recordings to a server. Transcription is not 'private-by-policy' — the cloud client simply doesn't exist.",
+    title: "Local recording and transcription",
+    body: "The recording and transcription pipeline processes audio on your device. Optional AI assistants and summarizers are a separate boundary: a cloud provider receives the context you authorize.",
   },
   {
     title: "Files you own outright",
-    body: "The durable record is plain markdown in ~/meetings on your disk, written with 0600 permissions. Grep it, back it up, delete it — no export button between you and your data.",
+    body: "The durable record is plain markdown in ~/meetings on your disk, written with 0600 permissions. Grep it, back it up, delete it; no export button between you and your data.",
   },
   {
     title: "No account, no vendor database",
-    body: "There's nothing to sign up for, so there's no server-side profile of your conversations to breach or subpoena.",
+    body: "Minutes does not require an account to capture and store conversations. Your device security, backups, file-sync services, and chosen AI providers still matter.",
   },
   {
     title: "Open source, MIT",
-    body: "Every claim on this page is verifiable in the repository — capture, transcription, and storage are readable Rust, not a trust-center PDF.",
+    body: "Every claim on this page is verifiable in the repository; capture, transcription, and storage are readable Rust, not a trust-center PDF.",
   },
 ] as const;
 
@@ -82,15 +82,14 @@ export default function SecurityPage() {
           Security &amp; Privacy
         </p>
         <h1 className="mt-4 font-serif text-[40px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[58px]">
-          Nothing to trust. Nothing to breach. Nothing to subpoena.
+          Your records stay local. Your AI connections are your choice.
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
-          Cloud notetakers answer the security question with policies: encryption in transit,
-          deletion windows, SOC 2 reports, BAAs. Minutes answers it with architecture. Your
-          conversations are captured, transcribed, diarized, and stored on your own machine — so
-          the promises those policies exist to make are simply not needed. &ldquo;We delete your
-          audio after processing&rdquo; is a policy. &ldquo;We never had your audio&rdquo; is an
-          architecture.
+          Minutes captures, transcribes, and stores conversations on your own machine.
+          If you connect a cloud AI assistant or summarizer, the meeting context you
+          authorize is sent to that provider. Use a local model or skip summarization
+          for an on-device workflow. Local storage does not remove your responsibility
+          for access controls, consent, backups, or retention.
         </p>
       </section>
 
@@ -152,21 +151,16 @@ export default function SecurityPage() {
         <SectionLabel label="What Does Touch The Network" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            A useful security page has to name the exceptions, so here is the complete list.
-            Minutes downloads transcription and diarization models once, at setup.
-            If you install updates, those come over the network too. And if you enable automated
-            summarization — it is off by default — your transcript text goes wherever you point
-            it: a local model via Ollama, an agent CLI you&rsquo;ve signed into (claude, codex,
-            gemini — which round-trips through that provider&rsquo;s cloud), or a cloud API if
-            you supply a key.
+            Setup and updates can download models and software. Connected AI
+            assistants and summarizers may send authorized transcript context to
+            their model provider. A local model keeps that processing on-device.
+            Review each assistant and provider configuration before sharing a meeting.
           </p>
           <p>
-            What is never in that traffic: your audio and your transcripts, unless you yourself
-            configured a summarizer to receive them. Out of the box, Minutes needs no API key and
-            sends conversation content nowhere. When Claude summarizes a meeting through MCP, it
-            reads local files through tools you granted — visible in your agent&rsquo;s tool log,
-            not a background sync — and what it reads travels to your agent&rsquo;s model
-            provider as conversation context, like anything else you show your agent.
+            Files copied into a synced folder follow that service&apos;s settings.
+            Your browser also uses website analytics on this site, separately from
+            the desktop recording pipeline. Website download and setup events contain
+            an action category and page path, not meeting content or clipboard text.
           </p>
         </div>
       </section>
@@ -175,29 +169,15 @@ export default function SecurityPage() {
         <SectionLabel label="For Regulated Work" />
         <div className="space-y-4 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            <span className="font-medium text-[var(--text)]">Healthcare.</span> HIPAA&rsquo;s
-            business-associate machinery exists because vendors receive PHI. On-device processing
-            means no vendor receives anything — there is no business associate, so there is no BAA
-            to negotiate. Your own obligations (disk encryption, access control, recording consent)
-            remain, exactly as they do for the workstation your EHR runs on. See our full analysis:{" "}
-            <a
-              href="/resources/is-otter-ai-hipaa-compliant"
-              className="text-[var(--accent)] hover:underline"
-            >
-              Is Otter.ai HIPAA compliant?
-            </a>
+            Local processing is a deployment choice, not a compliance certification.
+            Review recording consent, device access, encryption, retention, backup
+            destinations, and any cloud AI provider with the people responsible
+            for your organization&apos;s requirements.
           </p>
           <p>
-            <span className="font-medium text-[var(--text)]">Legal.</span> Privilege analyses get
-            harder every time a third party touches client communications. A transcript that never
-            leaves the attorney&rsquo;s machine involves no third-party disclosure to argue about.
-            (Informational, not legal advice — run it past your ethics counsel.)
-          </p>
-          <p>
-            <span className="font-medium text-[var(--text)]">EU / GDPR.</span> Cloud notetakers
-            make you evaluate a processor, sign a DPA, and check data-residency maps. With
-            on-device processing there is no processor and no transfer — the data never leaves the
-            controller&rsquo;s machine.
+            Do not infer that local files are immune from disclosure obligations
+            or that connecting a cloud assistant creates no third-party access.
+            See the <a href="/docs/agent-integrations" className="text-[var(--accent)] hover:underline">agent integration guide</a> for the data path.
           </p>
         </div>
       </section>
@@ -211,7 +191,7 @@ export default function SecurityPage() {
             transcription in{" "}
             <code className="rounded-[3px] bg-[var(--bg-hover)] px-1.5 py-0.5 font-mono text-[13px]">crates/core/src/transcribe.rs</code>,
             and output permissions where files are written. Don&rsquo;t take an SEO page&rsquo;s
-            word for an architecture claim — read the code, or have your security team do it.
+            word for an architecture claim; read the code, or have your security team do it.
             That&rsquo;s the point of shipping it open.
           </p>
         </div>

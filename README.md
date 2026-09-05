@@ -7,12 +7,14 @@
 
 [useminutes.app](https://useminutes.app)
 
-Open-source, local-first Granola / Otter alternative that Claude Code, Codex, Cursor, and any MCP client can query. Records meetings, calls, and voice memos, transcribes on-device, writes markdown you own to `~/meetings/`. Nothing is uploaded.
+Minutes is a free, open-source conversation memory app for the AI you already use. Record and transcribe meetings, calls, voice memos, and dictation on your device, then let Claude Code, Codex, Cursor, or another MCP client search the history you choose to share. Your records are Markdown files you own in `~/meetings/`.
 
-**Your AI remembers the conversations you authorize — and no one can take them from you.**
+Capture, transcription, and storage run locally. If you choose a cloud AI assistant or summarizer, the meeting context you authorize is sent to that provider.
+
+**Your conversations. Your memory. Ready for the AI you use.**
 
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="minutes demo — record, dictate, phone sync, AI recall" width="750">
+  <img src="docs/assets/demo.gif" alt="minutes demo; record, dictate, phone sync, AI recall" width="750">
 </p>
 
 ## Install
@@ -60,23 +62,14 @@ Mistral Vibe · Cowork · Dispatch · Obsidian · Logseq · any MCP client
 
 ## How it compares
 
-| Feature | Granola | Otter.ai | Anarlog (ex-Hyprnote) | minutes |
+| Workflow | Granola | Otter.ai | Anarlog (formerly Hyprnote) | Minutes |
 |---|---|---|---|---|
-| Local transcription | No (cloud) | No (cloud) | Yes | Yes |
-| Open source | No | No | MIT | MIT |
-| Free | Freemium | Freemium | Free | Free |
-| Agent surface | Hosted MCP | Hosted integrations | Local app | Files + 34 MCP tools |
-| Cross-meeting intelligence | Cloud chat | Cloud chat | No | Policy-safe search |
-| Consent provenance | No | No | No | In every file |
-| Dictation mode | No | No | No | Yes |
-| Voice memos | No | No | No | iPhone pipeline |
-| People memory | No | No | No | Bounded profiles |
-| Data ownership | Their servers | Their servers | Local | Local |
-| Data format | Cloud DB | Cloud DB | Local files | Markdown + YAML |
-| Agent-agnostic | No | No | Partially | Yes |
-| Speaker labels | Cloud | Cloud | Not verified | Free, on-device |
+| Product | Hosted meeting notepad | Hosted meeting assistant | Local meeting notepad | Local conversation memory |
+| Agent access | Hosted MCP | Hosted integrations | CLI + MCP | Local files, MCP, CLI, SDK |
+| Primary storage | Hosted workspace | Hosted workspace | Local SQLite + files | Local Markdown + YAML |
+| Local AI | Cloud transcription | Cloud transcription | With local providers | Local transcription; AI provider of your choice |
 
-Competitor cells follow public product documentation spot-checked in September 2026. Corrections welcome as issues.
+Reviewed September 5, 2026 against [Granola MCP](https://docs.granola.ai/help-center/sharing/integrations/mcp), [Otter privacy and security](https://otter.ai/privacy-security), and the [Anarlog repository](https://github.com/fastrepl/anarlog). Anarlog's community app is MIT; its enterprise components use a commercial license. See [the detailed comparison](https://useminutes.app/compare/hyprnote-vs-minutes) and [open-source alternatives](https://useminutes.app/resources/open-source-alternatives-to-granola-ai) for fit and limitations.
 
 ## Who it's for
 
@@ -154,7 +147,7 @@ See the [security documentation](docs/security/) and
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Minutes is MIT licensed and staying that way: no relicensing, no paid tier for anything in this repo.
 
-MIT — Built by [Mat Silverstein](https://github.com/silverstein), founder of
+MIT; Built by [Mat Silverstein](https://github.com/silverstein), founder of
 [X1 Wealth](https://x1wealth.com).
 
 ## Star History

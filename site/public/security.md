@@ -1,39 +1,23 @@
-# Minutes — Security & Privacy
+# Minutes security and privacy
 
-Last reviewed: 2026-07-11
+Last reviewed: 2026-09-05
 
-Cloud notetakers answer the security question with policies: encryption in transit, deletion windows, SOC 2 reports, BAAs. Minutes answers it with architecture. Your conversations are captured, transcribed, diarized, and stored on your own machine. "We delete your audio after processing" is a policy. "We never had your audio" is an architecture.
+Capture, transcription, diarization, and storage run locally. If you choose a cloud AI assistant or summarizer, the meeting context you authorize is sent to that provider. Use a local model or skip summarization for an on-device workflow.
 
-## The pipeline — every step on your device
+## What stays local
 
-1. **Capture** — mic (cpal) and system audio (native macOS capture in the desktop app, or a loopback device), recorded on your machine
-2. **Transcribe** — sealed local whisper.cpp, running on your CPU/GPU
-3. **Diarize** — pyannote ONNX models, local; speaker labels never computed in a cloud
-4. **Store** — markdown + YAML frontmatter on your own disk, 0600 owner-only permissions
+The recording and transcription pipeline processes audio on your device. Minutes writes Markdown and YAML records to your own disk. You can inspect the source, choose your storage folder, and read the files without Minutes.
 
-## What that buys you
+## What can use the network
 
-- **No audio upload, ever.** There is no code path that sends recordings to a server. The cloud client doesn't exist.
-- **Files you own outright.** The durable record is plain markdown in ~/meetings, written with 0600 permissions. Grep it, back it up, delete it.
-- **No account, no vendor database.** Nothing to sign up for; no server-side profile of your conversations to breach or subpoena.
-- **Open source, MIT.** Every claim here is verifiable in the repository — readable Rust, not a trust-center PDF.
+Setup and updates can download models and software. Connected cloud assistants and summarizers receive authorized meeting context. Files copied into synced folders follow the sync provider's settings. The website uses analytics separately from the desktop recording pipeline. Website download and setup events contain an action category and page path, not meeting content or clipboard text.
 
-## What does touch the network
+## Your responsibilities
 
-- Transcription and diarization models are downloaded once, at setup
-- Updates, if you install them
-- If you enable automated summarization (off by default), transcript text goes where you point it — a local model via Ollama, an agent CLI you've signed into (claude/codex/gemini — which round-trips through that provider's cloud), or a cloud API if you supply a key
+Local processing is not a compliance certification. Review device access, encryption, consent, retention, backups, sync, and AI providers against your organization's requirements. Local files are not immune from disclosure obligations.
 
-What is never in that traffic: your audio and transcripts, unless you yourself configured a summarizer to receive them. Out of the box, Minutes needs no API key and sends conversation content nowhere. When Claude summarizes a meeting through MCP, it reads local files through tools you granted — visible in your agent's tool log, not a background sync — and what it reads travels to your agent's model provider as conversation context, like anything else you show your agent.
+## Verify the data path
 
-## For regulated work
-
-- **Healthcare.** HIPAA's business-associate machinery exists because vendors receive PHI. On-device processing means no vendor receives anything — no business associate, no BAA to negotiate. Your own obligations (disk encryption, access control, recording consent) remain, as they do for your EHR workstation. See: https://useminutes.app/resources/is-otter-ai-hipaa-compliant
-- **Legal.** A transcript that never leaves the attorney's machine involves no third-party disclosure to argue about. (Informational, not legal advice.)
-- **EU / GDPR.** No processor, no DPA, no transfer — the data never leaves the controller's machine.
-
-## Verify it yourself
-
-Minutes is MIT-licensed and the pipeline is readable Rust: audio capture in `crates/core/src/capture.rs`, transcription in `crates/core/src/transcribe.rs`. Don't take a web page's word for an architecture claim — read the code, or have your security team do it.
-
-- https://github.com/silverstein/minutes
+- [Source code](https://github.com/silverstein/minutes)
+- [Agent integration guide](https://useminutes.app/docs/agent-integrations)
+- [Security page](https://useminutes.app/security)

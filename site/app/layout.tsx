@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Script from "next/script";
+import { AcquisitionEvents } from "@/components/acquisition-events";
 import { Instrument_Serif } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
@@ -81,6 +82,7 @@ export default function RootLayout({
       </head>
       <body className="font-sans antialiased">
         {children}
+        <AcquisitionEvents />
         <Script
           src="https://www.googletagmanager.com/gtag/js?id=G-998FBH4EMM"
           strategy="afterInteractive"

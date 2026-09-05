@@ -2,102 +2,25 @@ import type { Metadata } from "next";
 import { ComparePage } from "@/components/compare-page";
 
 export const metadata: Metadata = {
-  title: "Minutes vs Hyprnote",
-  description:
-    "A fit-based comparison of Minutes and Hyprnote for local-first meeting notes, agent workflows, consent provenance, and inspectable markdown output.",
-  alternates: {
-    canonical: "/compare/hyprnote-vs-minutes",
-  },
+  title: "Minutes vs Anarlog (formerly Hyprnote)",
+  description: "Compare two open-source meeting apps: Anarlog's editable local notepad and Minutes' Markdown conversation memory for your existing AI.",
+  alternates: { canonical: "/compare/hyprnote-vs-minutes" },
 };
 
-const comparisonRows = [
-  {
-    label: "Best for",
-    competitor: "A local-first AI notepad for people who take notes during meetings",
-    minutes: "Local conversation infrastructure for agent workflows and inspectable output",
-  },
-  {
-    label: "Open source",
-    competitor: "Yes, GPL-3.0",
-    minutes: "Yes, MIT",
-  },
-  {
-    label: "Local-first processing",
-    competitor: "Core part of the product",
-    minutes: "Core part of the product",
-  },
-  {
-    label: "Product shape",
-    competitor: "Notepad app: you write, it listens and enhances your notes",
-    minutes: "Memory layer: recordings become structured markdown your agents query",
-  },
-  {
-    label: "Agent surface",
-    competitor: "Desktop app first",
-    minutes: "Files, 34 MCP tools, CLI, SDK, live transcript reads, Claude Code plugin",
-  },
-  {
-    label: "Consent provenance",
-    competitor: "Not a stated focus",
-    minutes: "Consent basis stamped into every recording's frontmatter",
-  },
-  {
-    label: "Voice memos and dictation",
-    competitor: "Meeting-centered",
-    minutes: "iPhone voice memo pipeline, dictation hotkey, daily notes",
-  },
-  {
-    label: "Cross-meeting memory",
-    competitor: "Notes organized per meeting",
-    minutes: "People, decisions, and commitments from policy-authorized live sources",
-  },
-] as const;
-
-const sources = [
-  { label: "Hyprnote repository", href: "https://github.com/bahodirr/hyprnote" },
-  { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
-  { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
-] as const;
-
-export default function HyprnoteVsMinutesPage() {
-  return (
-    <ComparePage
-      competitorName="Hyprnote"
-      competitorLabel="Hyprnote"
-      markdownHref="/compare/hyprnote-vs-minutes.md"
-      lastReviewed="2026-08-24"
-      heroSummary="Hyprnote and Minutes are friendly neighbors: both are open source, local-first, and serious about privacy. The practical difference is the job. Hyprnote is a notepad you write in during meetings, with AI that enhances what you wrote. Minutes is a memory layer: it turns everything you record into structured markdown you own, then exposes policy-authorized normal sources to Claude, Codex, and MCP clients while excluding restricted meetings by default, with consent provenance in every file."
-      quickVerdictCompetitor="you want a polished local notepad for taking and enhancing your own meeting notes, and the app itself is where you want to live."
-      quickVerdictMinutes="you want a durable, agent-readable corpus: files on your disk, MCP tools, a CLI, and consent and provenance metadata your tools can rely on."
-      comparisonRows={comparisonRows as any}
-      competitorWins={[
-        "Hyprnote's in-meeting note-taking experience is the product. If you think while writing, its enhance-my-notes flow is the better fit.",
-        "It has a larger community today and a tight focus on the notepad job.",
-        "If you only ever need meeting notes (not voice memos, dictation, or an agent surface), it is the simpler tool.",
-      ]}
-      minutesWins={[
-        "Minutes is built for what happens after the meeting: a corpus of markdown with YAML frontmatter that agents query across months of conversations.",
-        "The agent surface is broader: MCP server, CLI, SDK, live transcript reads for mid-meeting coaching, and a Claude Code plugin.",
-        "Governance lives in the data: consent basis is stamped into every recording, sensitive no-capture meetings are supported, and restricted meetings are excluded from agents by default with audited overrides.",
-      ]}
-      workflowSection={[
-        "Both projects process audio locally, so the privacy floor is similar. The fork in the road is the output contract. Hyprnote's durable artifact is your enhanced notes. Minutes' durable artifact is a structured, diarized transcript plus extracted decisions, action items, and people, written as plain files that outlive any one app.",
-        "If your assistant should answer 'what did we decide about pricing in April', the question is whether the record it reads was designed for that. Minutes' files, policy-bound MCP/search surfaces, and bounded live relationship projection are built for that query.",
-      ]}
-      chooseSection={[
-        "Pick Hyprnote if the notepad is the product you want: you write, it listens, your notes get better.",
-        "Pick Minutes if the corpus is the product you want: recordings become owned memory with provenance, normal sources are agent-readable by default, and restricted sources fail closed.",
-        "Running both is coherent: they solve adjacent jobs, and neither locks your data away.",
-      ]}
-      notRightFitSection={[
-        "Minutes is not the right first choice if you mainly want to write notes during meetings and have AI clean them up. That is Hyprnote's home turf.",
-        "It is also more tool than you need if you have no interest in MCP, CLIs, or giving your AI assistants a memory of your conversations.",
-      ]}
-      evaluatedSection={[
-        "This page is based on public repository and product information, reviewed on 2026-08-24. It is a fit-based comparison between two open-source projects, not a teardown; we genuinely like that Hyprnote exists.",
-        "The Minutes side is grounded in the public agent-facing docs surface and generated MCP reference, not hand-maintained marketing copy.",
-      ]}
-      sources={sources as any}
-    />
-  );
+export default function AnarlogVsMinutesPage() {
+  return <ComparePage
+    competitorName="Anarlog" competitorLabel="Anarlog (formerly Hyprnote)"
+    markdownHref="/compare/hyprnote-vs-minutes.md" lastReviewed="2026-09-05"
+    heroSummary={"Anarlog, formerly Hyprnote, and Minutes both support local meeting workflows and external AI tools. Anarlog centers on an editable notepad backed by SQLite. Minutes centers on conversation records stored as Markdown with source and consent metadata. Choose by the workflow you will actually use."}
+    quickVerdictCompetitor={"you want to write and edit meeting notes in a local app, with local or hosted AI and optional sync."}
+    quickVerdictMinutes={"you want meetings, voice memos, and dictation in a file-based corpus that your preferred assistant can search."}
+    competitorWins={["Anarlog makes the editable meeting notepad its main interface.", "It offers Markdown export, local AI choices, and opt-in sync and sharing."]}
+    minutesWins={["Minutes writes the primary conversation record as inspectable Markdown and YAML.", "Its capture, voice memo, and dictation workflows feed the same authorized meeting corpus."]}
+    workflowSection={["Both projects now expose a CLI and MCP. Having MCP alone is not a reason to prefer Minutes. Evaluate setup, retrieval quality, and what your assistant is allowed to read.", "In Minutes, try the sample pricing reversal through your own assistant, request source files, then repeat with a real conversation. A sample success does not establish recording reliability."]}
+    chooseSection={["Choose Anarlog for the editable notepad workflow. Choose Minutes for a Markdown-first conversation archive.", "With either product, verify transcription and AI provider settings separately. Optional cloud AI can receive meeting context."]}
+    notRightFitSection={["Minutes may add unnecessary setup if you only want polished notes inside one app.", "Check platform-specific capture support before committing to either tool."]}
+    evaluatedSection={["Reviewed September 5, 2026 using the official repositories and documentation. This is a maintainer-written comparison, not a hands-on benchmark.", "Anarlog is the maintained open-source project formerly called Hyprnote. Char is a separate current product from its team."]}
+    comparisonRows={[{"label": "Best fit", "competitor": "An editable meeting notepad", "minutes": "A conversation corpus for your existing AI"}, {"label": "License", "competitor": "MIT community app; commercial enterprise components", "minutes": "MIT"}, {"label": "Storage", "competitor": "Local SQLite, recordings and attachments; Markdown export", "minutes": "Markdown with YAML frontmatter as the primary record"}, {"label": "AI processing", "competitor": "Local or hosted transcription and intelligence providers", "minutes": "Local transcription; optional local or cloud AI"}, {"label": "Agent access", "competitor": "Local CLI, MCP server, and agent skills", "minutes": "MCP, CLI, SDK, and portable agent skills"}]}
+    sources={[{"label": "Anarlog repository and licensing", "href": "https://github.com/fastrepl/anarlog"}, {"label": "Anarlog documentation", "href": "https://docs.anarlog.so"}, {"label": "Minutes agent workflow", "href": "https://useminutes.app/for-agents"}, {"label": "Minutes proof and limitations", "href": "https://useminutes.app/proof"}]}
+  />;
 }

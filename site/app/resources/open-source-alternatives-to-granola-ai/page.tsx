@@ -21,10 +21,10 @@ const alternatives = [
       "Best if you want local conversation memory, inspectable markdown, MCP, CLI, desktop, and plugin workflows.",
   },
   {
-    name: "Hyprnote",
+    name: "Anarlog (formerly Hyprnote)",
     bestFor: "Open-source private AI notepad",
     summary:
-      "Best if you want a local-first AI notepad for private meetings, with offline models and optional approved third-party APIs.",
+      "An editable local notepad with SQLite storage, Markdown export, CLI and MCP. Local AI is a provider choice; community code is MIT and enterprise components are commercial.",
   },
   {
     name: "Meetily",
@@ -32,22 +32,34 @@ const alternatives = [
     summary:
       "Best if you want a privacy-first open-source meeting assistant centered on local transcription and summaries.",
   },
+  {
+    name: "Omi",
+    bestFor: "Conversation memory across desktop, phone, and wearables",
+    summary: "An MIT project with apps and wearable hardware. The desktop quick start uses Omi's cloud backend; evaluate its data path separately from its open-source license.",
+  },
+  {
+    name: "Vexa",
+    bestFor: "Self-hosted meeting capture infrastructure",
+    summary: "An Apache-2.0 meeting-bot API for Meet, Teams, and Zoom, with transcripts and MCP. Suitable when you want to operate capture services; it is a different setup from a personal desktop notepad.",
+  },
 ] as const;
 
 const sources = [
+  { label: "Omi repository and setup", href: "https://github.com/BasedHardware/omi" },
+  { label: "Vexa repository and license", href: "https://github.com/Vexa-ai/vexa" },
   { label: "Granola pricing", href: "https://www.granola.ai/pricing/" },
   { label: "Granola MCP", href: "https://help.granola.ai/article/granola-mcp" },
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
-  { label: "Hyprnote open source", href: "https://hyprnote.com/opensource" },
-  { label: "Hyprnote GitHub", href: "https://github.com/bahodirr/hyprnote" },
-  { label: "Hyprnote docs", href: "https://hyprnote.com/docs/about/what-is-hyprnote/" },
+  { label: "Anarlog (formerly Hyprnote) open source", href: "https://github.com/fastrepl/anarlog/blob/main/LICENSING.md" },
+  { label: "Anarlog (formerly Hyprnote) GitHub", href: "https://github.com/fastrepl/anarlog" },
+  { label: "Anarlog (formerly Hyprnote) docs", href: "https://docs.anarlog.so" },
   { label: "Meetily website", href: "https://meetily.ai/" },
   { label: "Meetily GitHub", href: "https://github.com/Zackriya-Solutions/meetily" },
 ] as const;
 
 
-const LAST_REVIEWED = "2026-08-24";
+const LAST_REVIEWED = "2026-09-05";
 
 export default function OpenSourceAlternativesToGranolaPage() {
   return (
@@ -102,13 +114,11 @@ export default function OpenSourceAlternativesToGranolaPage() {
         </p>
         <div className="mt-4 space-y-3 text-[15px] leading-8 text-[var(--text-secondary)]">
           <p>
-            If you want the strongest open-source option for agent-ready local meeting memory,{" "}
-            <span className="font-medium text-[var(--text)]">Minutes</span> is the strongest fit in
-            this group.
+            Consider <span className="font-medium text-[var(--text)]">Minutes</span> when you want meetings stored as Markdown that your existing AI can search. This guide is written by the Minutes maintainer; compare the setup and limitations before choosing.
           </p>
           <p>
             If you want an open-source private AI notepad that feels closer to the “AI notepad”
-            concept, <span className="font-medium text-[var(--text)]">Hyprnote</span>{" "}
+            concept, <span className="font-medium text-[var(--text)]">Anarlog (formerly Hyprnote)</span>{" "}
             is a closer conceptual match. If you want a privacy-first open-source meeting assistant
             centered on local transcription and summary workflows,{" "}
             <span className="font-medium text-[var(--text)]">Meetily</span> is also worth a look.
@@ -145,7 +155,7 @@ export default function OpenSourceAlternativesToGranolaPage() {
             workflows.
           </p>
           <p>
-            Pick <span className="font-medium text-[var(--text)]">Hyprnote</span> if you
+            Pick <span className="font-medium text-[var(--text)]">Anarlog (formerly Hyprnote)</span> if you
             want a more classic “private AI notepad” shape but still care about open-source and
             local-first principles.
           </p>

@@ -1,27 +1,23 @@
 # Open-source alternatives to Granola AI
 
-Last reviewed: 2026-04-09
+Last reviewed: 2026-09-05
 
-## Quick answer
+Minutes, Anarlog, and Meetily are candidates for a personal open-source meeting app. Omi adds phone and wearable conversation memory. Vexa serves people who want to operate meeting capture infrastructure. This is a maintainer-written guide based on public documentation, not a hands-on benchmark.
 
-- Best open-source option for agent-ready local meeting memory: **Minutes**
-- Closest open-source private AI notepad concept: **Hyprnote (now Char)**
-- Best open-source local meeting assistant for transcription/summaries: **Meetily**
+| Project | Fit | Boundary to check |
+|---|---|---|
+| Minutes | Local Markdown conversation memory for an existing AI assistant | Cloud AI receives authorized meeting context; capture support differs by platform |
+| Anarlog (formerly Hyprnote) | Editable local notepad with SQLite, Markdown export, CLI and MCP | Local AI depends on provider settings; MIT community code and commercial enterprise components |
+| Meetily | Local transcription and summaries | Community and Pro capabilities differ; hosted AI is also selectable |
+| Omi | Desktop, phone, and wearable memory | MIT code does not mean local by default; desktop quick start uses the cloud backend |
+| Vexa | Self-hosted meeting-bot API, transcripts, and MCP | Apache-2.0 infrastructure that you operate, rather than a personal notepad |
 
-## Notes
-
-- This is a shortlist, not an exhaustive list of every open-source note tool.
-- It is aimed at people specifically considering Granola AI and asking what an open-source alternative would actually look like.
-- Open-source does not automatically mean better; it means a different set of tradeoffs around control, inspectability, and workflow fit.
+Try [Minutes with sample meetings](https://useminutes.app/for-agents#try), check the [proof limits](https://useminutes.app/proof), and compare the actual workflow on your machine.
 
 ## Sources
 
-- https://www.granola.ai/pricing/
-- https://help.granola.ai/article/granola-mcp
-- https://useminutes.app/for-agents
-- https://useminutes.app/docs/mcp/tools
-- https://hyprnote.com/opensource
-- https://github.com/fastrepl/hyprnote
-- https://hyprnote.com/docs/about/what-is-hyprnote/
-- https://meetily.ai/de/
-- https://github.com/Zackriya-Solutions/meeting-minutes
+- [Anarlog](https://github.com/fastrepl/anarlog)
+- [Meetily](https://github.com/Zackriya-Solutions/meetily)
+- [Omi](https://github.com/BasedHardware/omi)
+- [Vexa](https://github.com/Vexa-ai/vexa)
+- [Minutes](https://github.com/silverstein/minutes)

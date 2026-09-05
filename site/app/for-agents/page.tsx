@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { CopyButton } from "@/components/copy-button";
 import { PublicFooter } from "@/components/public-footer";
-import { NumberedSectionLabel as SectionLabel } from "@/components/section-label";
+import { SectionLabel as PlainSectionLabel, NumberedSectionLabel as SectionLabel } from "@/components/section-label";
 import surfaces from "@/lib/product-surfaces.json";
 import {
   MINUTES_MCP_PROMPT_COUNT,
@@ -11,7 +11,7 @@ import {
 import skillsCatalog from "@/lib/skills-catalog.json";
 
 export const metadata: Metadata = {
-  title: "Minutes — local conversation infrastructure for agents",
+  title: "Minutes; local conversation infrastructure for agents",
   description:
     "Open-source conversation infrastructure for agents: local audio capture exposed as plain files, MCP tools, CLI commands, and live transcript streams.",
   alternates: { canonical: "/for-agents" },
@@ -313,7 +313,7 @@ export default function ForAgentsPage() {
             <code className="flex-1 overflow-x-auto">
               npx minutes-mcp --demo
             </code>
-            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" compact />
+            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" acquisitionTarget="demo" compact />
           </div>
           <p className="mt-4 text-[12px] leading-6 text-[var(--text-secondary)]">
             Paste the printed config into your agent host. Try:{" "}
@@ -323,6 +323,20 @@ export default function ForAgentsPage() {
             </em>
           </p>
         </div>
+      </section>
+
+      <section className="mt-10 max-w-[760px]" id="first-recall">
+        <PlainSectionLabel label="From a sample to your own meeting" />
+        <h2 className="font-serif text-[30px] leading-tight text-[var(--text)]">Find what changed, with the meetings to back it up.</h2>
+        <ol className="mt-5 list-decimal space-y-4 pl-5 text-[15px] leading-7 text-[var(--text-secondary)]">
+          <li>Try the sample above. Ask which pricing decision is current and request the dates and source files. The sample launch on February 28 is reversed on March 25.</li>
+          <li>Ask a question the samples cannot answer, such as the signed annual contract value. A useful answer says the record is insufficient instead of inventing a number.</li>
+          <li>Install Minutes and record a conversation with the participants&apos; agreement. Confirm transcription has finished before asking your agent to find it.</li>
+          <li>Use the normal MCP configuration below for your own meetings. The demo configuration points to a separate sample folder; it does not automatically include your recordings.</li>
+          <li>After a later conversation changes the decision, ask for the current answer and both sources. Check the source text yourself before relying on it.</li>
+        </ol>
+        <p className="mt-5 text-[14px] leading-7 text-[var(--text-secondary)]">For an Obsidian workflow, connect your vault using the <a href="https://github.com/silverstein/minutes/blob/main/docs/architecture/config.md#vault--obsidian--logseq--markdown-vault-sync" className="text-[var(--accent)] hover:underline">vault configuration</a>. Local files remain readable without Minutes. A cloud assistant receives the context you authorize; vault sync has its own privacy settings.</p>
+        <p className="mt-4 text-[14px] leading-7 text-[var(--text-secondary)]">Start with the <a href="/#install" className="text-[var(--accent)] hover:underline">Mac desktop app</a> or CLI. Check the <a href="https://github.com/silverstein/minutes/blob/main/docs/install.md" className="text-[var(--accent)] hover:underline">platform requirements</a> for your capture setup. Windows capture differs from macOS. This walkthrough is an evaluation recipe, not a claim that every recording or AI answer succeeds.</p>
       </section>
 
       <section className="mt-10 max-w-[760px]">
@@ -384,7 +398,7 @@ export default function ForAgentsPage() {
               Agent-memory SDKs
             </div>
             <div className="text-[var(--text)]">
-              Cloud-hosted memory. Proprietary SDK. API key required.
+              Memory infrastructure for building applications. Open-source and hosted options exist; recording is a separate component.
             </div>
             <div className="font-mono text-[var(--accent)]">Minutes</div>
             <div className="text-[var(--text)]">
@@ -439,7 +453,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Claude Desktop</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools + MCP App</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
@@ -465,14 +479,14 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Pi</td>
                   <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
                   <td className="py-2">
                     <code className="text-[11px]">agent_command = "pi"</code>
                   </td>
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Cursor</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
@@ -492,7 +506,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr>
                   <td className="py-2 pr-3">Any MCP client</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">—</td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
@@ -629,7 +643,7 @@ export default function ForAgentsPage() {
             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
               MCP config
             </span>
-            <CopyButton label="Copy" cmd={mcpConfig} compact />
+            <CopyButton label="Copy" cmd={mcpConfig} acquisitionTarget="agent_config" compact />
           </div>
           <pre className="overflow-x-auto px-5 py-4 font-mono text-[12px] leading-6 text-[var(--text)]">
             {mcpConfig}
@@ -668,7 +682,7 @@ export default function ForAgentsPage() {
               </p>
               <div className="mt-3 flex items-center gap-2 rounded-[4px] bg-[var(--bg)] px-3 py-2 font-mono text-[12px] text-[var(--text)]">
                 <code className="flex-1 overflow-x-auto">{s.install}</code>
-                <CopyButton label="Copy" cmd={s.install} compact />
+                <CopyButton label="Copy" cmd={s.install} acquisitionTarget="agent_config" compact />
               </div>
               <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
                 {s.note}
@@ -733,8 +747,8 @@ export default function ForAgentsPage() {
         <p className="mb-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           Every meeting saves as markdown with YAML frontmatter. The frontmatter
           is the structured data. Action items and decisions are queryable through
-          MCP tools and the CLI. The full field-by-field schema — every required
-          and optional field, with examples and stability guarantees — is at{" "}
+          MCP tools and the CLI. The full field-by-field schema; every required
+          and optional field, with examples and stability guarantees; is at{" "}
           <a
             href="https://github.com/silverstein/minutes/blob/main/docs/architecture/frontmatter-schema.md"
             className="text-[var(--accent)] hover:underline"

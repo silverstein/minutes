@@ -3871,7 +3871,7 @@ name = "minutes-app"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "dirs 6.0.0",
  "futures-util",
@@ -3909,7 +3909,7 @@ dependencies = [
 name = "minutes-archive-app"
 version = "0.2.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "libc",
  "minisign-verify",
@@ -4040,7 +4040,7 @@ dependencies = [
 name = "minutes-core"
 version = "0.26.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "block2",
  "cap-std",
  "chacha20poly1305",

@@ -18,7 +18,7 @@ const pipeline = [
   },
   {
     step: "Transcribe",
-    detail: "sealed local whisper.cpp, running on your CPU/GPU",
+    detail: "On-device speech models, selected for your platform and configuration",
   },
   {
     step: "Diarize",

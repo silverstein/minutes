@@ -11,7 +11,7 @@ Minutes is free, open-source meeting memory for the AI tools you already use. Re
 34 tools • 11 resources • Interactive MCP App dashboard • 6 prompt templates
 
 What you get:
-• On-device transcription with sealed local whisper.cpp and optional on-device summarization (Apple Foundation Models on macOS 26+) ; your audio never leaves the machine. Retained Parakeet and Apple Speech preferences resolve to Whisper until their secure byte transports pass their release gates.
+• On-device transcription and optional on-device summarization. Engine selection depends on the platform, build, installed models, and configuration.
 • Re-run the AI pass on edited meetings and memos with preview-first output, backup-on-apply writes, and edit-preserving merges.
 • A native chat panel that recalls policy-authorized meetings, with token streaming and read-only policy-bound search.
 • Dictation that types straight at your cursor, on the same local engine.

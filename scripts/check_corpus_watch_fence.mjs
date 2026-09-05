@@ -37,13 +37,14 @@ try {
   );
 
   for (let index = 0; index < AUTHORIZATION_COUNT; index += 1) {
+    // Exercise the implementation's production deadline. A fixture-only
+    // two-second override rejects valid authorizations on loaded hosts.
     const result = await loaded.withStableCorpusLease(
       root,
       (snapshot) => ({
         paths: snapshot.files.map((file) => file.relativePath),
         contents: snapshot.files.map((file) => file.content),
-      }),
-      { timeoutMs: 2_000 }
+      })
     );
     if (
       result.paths.length !== 1 ||

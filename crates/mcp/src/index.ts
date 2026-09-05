@@ -173,6 +173,7 @@ function handleDemoSetup(): void {
           args: ["minutes-mcp"],
           env: {
             MEETINGS_DIR: demoDir,
+            MINUTES_MCP_AUTO_SETUP: "0",
           },
         },
       },
@@ -195,7 +196,7 @@ function handleDemoSetup(): void {
   console.log("  • What action items are still open, and who owns each?");
   console.log("  • Summarize the Northwind customer thread.");
   console.log("");
-  console.log("Note: some structured tools (consistency report, person profile) auto-install the Minutes CLI on first use.");
+  console.log("The server installs the Minutes CLI if needed to enforce meeting access rules. This demo config disables speech model auto-downloads.");
   console.log("Full setup (real audio capture, transcription, real meetings): https://useminutes.app");
   console.log("");
   process.exit(0);
@@ -2552,6 +2553,7 @@ async function configFileExists(): Promise<boolean> {
 type WhisperModelCheckState = { done: boolean };
 
 export type EnsureWhisperModelOptions = {
+  autoSetup?: string;
   checkState?: WhisperModelCheckState;
   health?: () => Promise<string>;
   configFileExists?: () => Promise<boolean>;
@@ -2562,6 +2564,9 @@ export type EnsureWhisperModelOptions = {
 export async function ensureWhisperModel(
   options: EnsureWhisperModelOptions = {}
 ): Promise<void> {
+  // Reading existing transcripts does not need a speech model. Demo and
+  // recall-only hosts can opt out without changing the user's capture config.
+  if ((options.autoSetup ?? process.env.MINUTES_MCP_AUTO_SETUP) === "0") return;
   const checkState = options.checkState;
   if (checkState ? checkState.done : modelCheckDone) return;
   if (checkState) checkState.done = true;
@@ -5780,7 +5785,12 @@ registerDocsAppTool(
     if (!(await isCliAvailable())) {
       return { content: [{ type: "text" as const, text: `Consistency reports require the full CLI for structured intent analysis.\n\n${CLI_INSTALL_MSG}` }] };
     }
-    const args = ["consistency", "--stale-after-days", String(stale_after_days)];
+    const capabilities = await ensureCliCapabilities(["consistency_corpus_root_v1"]);
+    if (capabilities.kind !== "report" || !hasFeature(capabilities, "consistency_corpus_root_v1")) {
+      throw new Error("Consistency reports require a Minutes CLI that supports the selected meeting folder. Update Minutes, then try again.");
+    }
+    const meetingsDir = await getEffectiveMeetingsDir();
+    const args = ["consistency", "--dir", meetingsDir, "--stale-after-days", String(stale_after_days)];
     if (owner) args.push("--owner", owner);
 
     const { stdout, stderr } = await runMinutes(args);

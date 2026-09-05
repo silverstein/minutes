@@ -201,6 +201,18 @@ describe("dictation model preflight errors", () => {
 });
 
 describe("Whisper model auto-setup", () => {
+  it("does not probe or download models when the host opts out", async () => {
+    const checkState = { done: false };
+    await ensureWhisperModel({
+      autoSetup: "0",
+      checkState,
+      health: async () => { throw new Error("health must not run"); },
+      setup: async () => { throw new Error("setup must not run"); },
+      log: () => { throw new Error("no background setup should run"); },
+    });
+    expect(checkState.done).toBe(false);
+  });
+
   const readyItem = { label: "Speech model", state: "ready", detail: "medium" };
   const missingItem = { label: "Speech model", state: "attention", detail: "missing" };
 

@@ -305,9 +305,9 @@ export default function ForAgentsPage() {
             , prints the MCP config with a{" "}
             <code className="font-mono text-[12px] text-[var(--text)]">MEETINGS_DIR</code>{" "}
             env override, and lists questions to ask. No signup, no API key.
-            Basic search and list tools work immediately. Structured tools
-            (consistency report, person profiles) auto-install the Minutes CLI
-            on first call.
+            The server installs the Minutes CLI if needed to enforce meeting
+            access rules. Reading existing transcripts does not require a
+            speech model. Recording and transcription need separate setup.
           </p>
           <div className="mt-4 flex items-center gap-2 rounded-[6px] bg-[var(--bg)] px-4 py-3 font-mono text-[13px] text-[var(--text)]">
             <code className="flex-1 overflow-x-auto">

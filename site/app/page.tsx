@@ -22,7 +22,7 @@ const featureGrid = [
     label: "For developers",
     title: "Local and inspectable",
     description:
-      "sealed local whisper.cpp transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
+      "On-device transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
   },
   {
     label: "For meetings",
@@ -252,7 +252,7 @@ const cloudFlow: HomeFlowStep[] = [
 
 const minutesFlow: HomeFlowStep[] = [
   { label: "Capture from your mic", detail: "device audio, on your Mac" },
-  { label: "Transcribe", detail: "on-device; sealed local whisper.cpp" },
+  { label: "Transcribe", detail: "on-device speech model" },
   { label: "Store transcripts + notes", detail: "your disk; markdown in ~/meetings" },
 ];
 
@@ -577,13 +577,12 @@ export default function Home() {
         <pre className="mt-6 overflow-x-auto rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 font-mono text-[13px] leading-7 text-[var(--text-secondary)] shadow-[var(--shadow-panel)]">
 {`Audio -> Transcribe -> Diarize -> Summarize -> Markdown -> Policy-safe Search
        (local)      (local)    (your LLM)  (decisions,   (live authorized,
-      whisper.cpp   pyannote   Claude /     action items) bounded reads)
+      speech model  pyannote   Claude /     action items) bounded reads)
                                 Ollama`}
         </pre>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Transcription runs locally through sealed whisper.cpp. Existing
-          Parakeet and Apple Speech preferences resolve to Whisper until their
-          secure byte transports pass their release gates.
+          Transcription runs locally. The engine depends on your platform, build,
+          and installed models.
           Summarization is optional; Claude can do it conversationally when
           you ask, using your existing subscription. No API keys are required
           to get useful output.

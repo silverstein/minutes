@@ -17,7 +17,7 @@
     "name": "Claude Code plugin",
     "when": "User works in Claude Code and wants meeting lifecycle skills and proactive hooks.",
     "install": "claude plugin marketplace add silverstein/minutes",
-    "note": "19 skills (brief, prep, debrief, graph, video review, and the rest of the meeting lifecycle) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.",
+    "note": "Meeting lifecycle skills (brief, prep, debrief, graph, video review, and the rest of the meeting lifecycle) plus a meeting-analyst agent and SessionStart/PostToolUse hooks.",
     "activation": "Best for workflow guidance, prep, debrief, and meeting coaching."
   },
   {
@@ -31,7 +31,7 @@
     "name": "Desktop app",
     "when": "User wants a menu bar app with one-click recording, Recall, and artifact drafting.",
     "install": "brew install --cask silverstein/tap/minutes",
-    "note": "Tauri v2, macOS only today. Includes command palette, dictation hotkey, and live mode toggle. Updates remain manual until a hosted manifest and rollback UX exist.",
+    "note": "Tauri v2 desktop app for macOS, with an unsigned Windows preview installer. Calendar suggestions, call detection, and the native dictation hotkey are macOS-only. Updates remain manual until a hosted manifest and rollback UX exist.",
     "activation": "Best for first recording, live capture, and post-meeting artifact work."
   }
 ]

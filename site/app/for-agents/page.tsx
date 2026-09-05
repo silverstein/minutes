@@ -453,7 +453,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Claude Desktop</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">N/A</td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools + MCP App</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
@@ -479,14 +479,14 @@ export default function ForAgentsPage() {
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Pi</td>
                   <td className="py-2 pr-3">{skillCount} skills via <code className="text-[11px]">.agents/</code></td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">N/A</td>
                   <td className="py-2">
                     <code className="text-[11px]">agent_command = "pi"</code>
                   </td>
                 </tr>
                 <tr className="border-b border-[color:var(--border)]">
                   <td className="py-2 pr-3">Cursor</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">N/A</td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>{" "}
@@ -506,7 +506,7 @@ export default function ForAgentsPage() {
                 </tr>
                 <tr>
                   <td className="py-2 pr-3">Any MCP client</td>
-                  <td className="py-2 pr-3 text-[var(--text-secondary)]">; </td>
+                  <td className="py-2 pr-3 text-[var(--text-secondary)]">N/A</td>
                   <td className="py-2 pr-3">{MINUTES_MCP_TOOL_COUNT} tools</td>
                   <td className="py-2">
                     <code className="text-[11px]">npx minutes-mcp</code>
@@ -608,9 +608,9 @@ export default function ForAgentsPage() {
         <div className="space-y-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           <p>
             Minutes records meetings and voice memos, transcribes them locally
-            with sealed whisper.cpp, and saves structured markdown. Speakers are
-            identified with pyannote-rs. No audio leaves the machine unless you
-            explicitly choose a cloud summarization backend.
+            with an on-device speech model, and saves structured markdown. Speakers are
+            identified with pyannote-rs. A connected cloud assistant or summarizer
+            receives the meeting context you authorize.
           </p>
           <p>
             Output goes to{" "}
@@ -747,8 +747,8 @@ export default function ForAgentsPage() {
         <p className="mb-4 text-[15px] leading-7 text-[var(--text-secondary)]">
           Every meeting saves as markdown with YAML frontmatter. The frontmatter
           is the structured data. Action items and decisions are queryable through
-          MCP tools and the CLI. The full field-by-field schema; every required
-          and optional field, with examples and stability guarantees; is at{" "}
+          MCP tools and the CLI. The full field-by-field schema, including required
+          and optional fields, examples, and stability guarantees, is at{" "}
           <a
             href="https://github.com/silverstein/minutes/blob/main/docs/architecture/frontmatter-schema.md"
             className="text-[var(--accent)] hover:underline"

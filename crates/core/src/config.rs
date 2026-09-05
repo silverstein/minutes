@@ -1071,8 +1071,8 @@ pub struct RecordingConfig {
     /// Allow Minutes to start a call capture even when the selected input
     /// looks like a plain microphone rather than a system-audio route.
     pub allow_degraded_call_capture: bool,
-    /// System-audio capture backend. "cpal" keeps the current loopback-device
-    /// path. "core-audio-tap" opts into Apple's macOS Process Tap backend.
+    /// Selects CPAL loopback capture, the macOS Core Audio tap, or
+    /// PocketStation application capture on Windows and Linux.
     pub capture_backend: String,
     /// Multi-source capture: explicit voice + call device names.
     /// When set, `device` is ignored. CLI `--source` flags override this.
@@ -1086,7 +1086,8 @@ pub struct RecordingConfig {
 pub struct SourcesConfig {
     /// Voice (microphone) device name, or "default" for system default.
     pub voice: Option<String>,
-    /// Call (system audio) device name, or "auto" to detect loopback devices.
+    /// Call audio device. PocketStation accepts an application name,
+    /// application ID, or `pid:<process id>` here.
     pub call: Option<String>,
 }
 

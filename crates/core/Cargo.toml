@@ -26,6 +26,7 @@ hipblas = ["whisper-rs/hipblas"]
 metal = ["whisper-rs/metal"]
 vulkan = ["whisper-rs/vulkan"]
 streaming = ["dep:crossbeam-channel"]
+pocketstation-capture = ["streaming", "dep:pocketstation"]
 denoise = ["dep:nnnoiseless"]
 # Streaming Silero VAD via ort. Implies streaming because every consumer
 # (recording sidecar) needs streaming audio. ort + ndarray are already
@@ -104,6 +105,7 @@ mach2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5.14.0"
+pocketstation = { version = "=1.1.8", default-features = false, features = ["native-capture"], optional = true }
 # sherpa-rs moved to crates/sherpa-plugin (#685).
 
 # Native hotkey (CGEventTap) uses raw FFI — no extra crate deps needed.
@@ -111,6 +113,7 @@ zbus = "5.14.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+pocketstation = { version = "=1.1.8", default-features = false, features = ["native-capture"], optional = true }
 # Dynamic on Windows, as before the macOS static fix (CI builds this gate on
 # all three platforms; static archives are only wired up for macOS).
 # sherpa-rs moved to crates/sherpa-plugin (#685).

@@ -30,7 +30,7 @@ dirs = "6"
 libc = "0.2"
 which = { workspace = true }
 portable-pty = "0.9"
-base64 = "0.22"
+base64 = "0.23"
 futures-util = "0.3"
 minisign-verify = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

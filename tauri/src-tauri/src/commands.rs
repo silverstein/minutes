@@ -15454,12 +15454,11 @@ mod tests {
         assert!(agents.contains("## Live Transcript Active"));
         assert!(claude.contains("gates stored meeting context, not an active live transcript"));
         assert!(agents.contains("gates stored meeting context, not an active live transcript"));
-        assert!(
-            claude.contains("read this live transcript even when `CURRENT_MEETING.md` is absent")
-        );
-        assert!(
-            agents.contains("read this live transcript even when `CURRENT_MEETING.md` is absent")
-        );
+        assert!(claude.contains(crate::context::LIVE_TRANSCRIPT_GUIDANCE));
+        assert_eq!(claude, agents);
+        assert!(!claude.contains("| tail -5"));
+        assert!(!claude.contains("**JSONL file:**"));
+        assert!(!workspace.join(crate::context::ACTIVE_MEETING_FILE).exists());
 
         update_assistant_live_context(workspace, false);
 
@@ -15469,6 +15468,39 @@ mod tests {
         assert!(!agents.contains("## Live Transcript Active"));
         assert!(claude.contains("## Deferred meeting context"));
         assert!(agents.contains("## Deferred meeting context"));
+    }
+
+    #[test]
+    fn live_context_replaces_old_reader_instructions_without_duplicating_them() {
+        let temp = TempDir::new().unwrap();
+        for file_name in crate::context::ASSISTANT_INSTRUCTION_FILES {
+            let path = temp.path().join(file_name);
+            std::fs::write(
+                &path,
+                "# User instructions\n<!-- LIVE_TRANSCRIPT_START -->\ncat /old/live.jsonl | tail -5\n<!-- LIVE_TRANSCRIPT_END -->\nKeep this footer.\n",
+            )
+            .unwrap();
+            update_assistant_live_context_file(&path, true);
+            update_assistant_live_context_file(&path, true);
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(content.matches("LIVE_TRANSCRIPT_START").count(), 1);
+            assert_eq!(
+                content
+                    .matches(crate::context::LIVE_TRANSCRIPT_GUIDANCE)
+                    .count(),
+                1
+            );
+            assert!(!content.contains("/old/live.jsonl"));
+            assert!(content.contains("# User instructions"));
+            assert!(content.contains("Keep this footer."));
+
+            update_assistant_live_context_file(&path, false);
+            let stopped = std::fs::read_to_string(&path).unwrap();
+            assert!(!stopped.contains("LIVE_TRANSCRIPT_START"));
+            assert!(!stopped.contains("--include-current"));
+            assert!(stopped.contains("# User instructions"));
+            assert!(stopped.contains("Keep this footer."));
+        }
     }
 
     /// Arms that have no current caller but are deliberately kept pending a
@@ -21244,8 +21276,7 @@ pub fn cmd_live_transcript_status(state: tauri::State<AppState>) -> serde_json::
 }
 
 /// Update the assistant instruction files to mention (or un-mention)
-/// the live transcript. This makes any agent aware of the live JSONL file
-/// without requiring MCP.
+/// the bounded live-evidence reader without requiring MCP.
 pub fn handle_live_shortcut_event(
     app: &tauri::AppHandle,
     shortcut_state: tauri_plugin_global_shortcut::ShortcutState,
@@ -21632,35 +21663,7 @@ fn update_assistant_live_context_file(path: &std::path::Path, live_active: bool)
     };
 
     let updated = if live_active {
-        let jsonl_path = minutes_core::pid::live_transcript_jsonl_path();
-        let section = format!(
-            "\n{marker_start}\n\
-            ## Live Transcript Active\n\
-            \n\
-            A live meeting transcript is being recorded right now.\n\
-            \n\
-            This section is exact-session live evidence. When the user explicitly asks about the \
-            current call, read this live transcript even when `CURRENT_MEETING.md` is absent. The \
-            missing file means stored meeting metadata and verified speaker identities are \
-            unavailable; it does not block bounded live-transcript coaching.\n\
-            \n\
-            **JSONL file:** `{path}`\n\
-            \n\
-            Each line is a JSON object with: `line` (sequence number), `ts` (wall clock), \
-            `offset_ms` (ms since session start), `duration_ms`, `text`, `speaker` (null for now).\n\
-            \n\
-            To read the latest utterances:\n\
-            - **File:** `cat {path} | tail -5` (last 5 utterances)\n\
-            - **CLI:** `minutes transcript --since 5m` (last 5 minutes)\n\
-            - **MCP:** Use `read_live_transcript` tool with `since: \"5m\"`\n\
-            \n\
-            The user may ask for coaching during the meeting. Read the recent transcript \
-            to understand what's being discussed, then provide tactical advice.\n\
-            {marker_end}\n",
-            marker_start = marker_start,
-            marker_end = marker_end,
-            path = jsonl_path.display(),
-        );
+        let section = crate::context::live_transcript_section();
         format!("{}{}", cleaned.trim_end(), section)
     } else {
         cleaned

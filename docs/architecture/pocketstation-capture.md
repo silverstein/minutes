@@ -15,7 +15,7 @@ Enable the `pocketstation-capture` feature:
 cargo build --release -p minutes-cli --features pocketstation-capture
 ```
 
-The feature uses PocketStation 1.1.8 from crates.io. It does not require a
+The feature uses PocketStation 1.1.10 from crates.io. It does not require a
 PocketStation source checkout.
 
 ## Choose an application
@@ -55,9 +55,11 @@ Minutes writes:
 - `meeting.voice.wav`, the microphone;
 - `meeting.system.wav`, the selected application.
 
-The three files use the same 16 kHz timeline. If either source is briefly late,
-Minutes writes silence for that source instead of shifting the stems out of
-alignment.
+Minutes writes all three files at 16 kHz and groups both live sources into
+100 ms chunks. Each source begins with chunk zero when that source starts.
+This experimental backend does not yet measure a common start time between the
+microphone and application capture, so a delayed application start is not
+backfilled with silence from the microphone's start time.
 
 ## Failure behavior
 
@@ -67,8 +69,10 @@ and groups it into 100 ms chunks.
 
 Minutes keeps 64 call-audio chunks in memory, which is 6.4 seconds at this
 format. If the recording loop cannot keep up, new application chunks are
-dropped and the total is written to the log. Capture errors stop the current
-PocketStation session; Minutes can then use its existing restart handling.
+dropped and the total is written to the log. Capture errors cancel the current
+PocketStation Session; Minutes can then use its existing restart handling.
+Stopping a recording also cancels this polled-audio Session before Minutes
+waits for the capture worker, so finalization does not drain pending delivery.
 
 Application capture does not bypass microphone permissions, operating-system
 audio permissions, or Minutes' recording consent settings.

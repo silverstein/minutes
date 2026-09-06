@@ -5279,9 +5279,9 @@ dependencies = [
 
 [[package]]
 name = "pocketstation"
-version = "1.1.8"
+version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "419bd4c5dac0735627be925273e2c92d4ab4c8d75982c248707797ff01eaafa5"
+checksum = "eeb23694072ba182d17175e966fe75c67a18632de517e7d78d6197af3d23a127"
 dependencies = [
  "alsa",
  "cc",

@@ -255,7 +255,11 @@ impl PocketStationCaptureStream {
                         break;
                     }
                 }
-                if !running.stop().is_success() {
+                // This Endpoint is polled by Minutes and has no accepted work
+                // that must be drained. Cancellation keeps Stop Recording
+                // independent from downstream delivery and asks Core to close
+                // its capture resources immediately.
+                if !running.cancel().is_success() {
                     failed.store(true, Ordering::Relaxed);
                 }
             })
@@ -287,7 +291,7 @@ impl SystemAudioStreamHandle for PocketStationCaptureStream {
     }
 }
 
-/// Drop invariant — request Session shutdown before joining its owning thread,
+/// Drop invariant — request cancellation before joining the capture worker,
 /// report delivery loss, and never panic.
 impl Drop for PocketStationCaptureStream {
     fn drop(&mut self) {
@@ -391,6 +395,8 @@ fn capture_error(operation: &str, error: impl std::fmt::Display) -> CaptureError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DROP_DEADLINE: Duration = Duration::from_secs(1);
 
     #[test]
     fn given_supported_application_values_when_parsed_then_selection_succeeds() {
@@ -504,5 +510,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(dropped_chunks_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn given_running_session_when_capture_stream_is_dropped_then_shutdown_is_prompt() {
+        let session = Session::builder()
+            .audio_frame_duration(AudioFrameDuration::Ms10)
+            .build();
+        let input = session
+            .audio_input(
+                pocketstation::AudioInputConfig::new(
+                    pocketstation::SampleSpec::new(
+                        POCKETSTATION_SAMPLE_RATE_HZ,
+                        1,
+                        pocketstation::SampleFormat::F32Interleaved,
+                    ),
+                    2,
+                    480,
+                )
+                .expect("valid test audio input"),
+            )
+            .expect("application-owned test input");
+        let output = session.polled_audio().expect("test audio output");
+        input.output().send(output).expect("test audio route");
+        let running = session.start().expect("running test Session");
+        let (sink, _receiver) = crossbeam_channel::bounded(1);
+        let stream = PocketStationCaptureStream::start(
+            running,
+            sink,
+            RouteDescription {
+                capture_backend: POCKETSTATION_CAPTURE_BACKEND.into(),
+                device_name: Some("application-owned test input".into()),
+            },
+        )
+        .expect("capture worker");
+
+        let started = Instant::now();
+        drop(stream);
+
+        assert!(
+            started.elapsed() < DROP_DEADLINE,
+            "dropping PocketStation capture must not wait for orderly delivery"
+        );
     }
 }

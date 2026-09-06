@@ -57,6 +57,15 @@ type ImmutableUnixExecutableSnapshot = (
     [u8; 32],
 );
 
+#[cfg(windows)]
+type ImmutableWindowsExecutableSnapshot = (
+    std::fs::File,
+    PathBuf,
+    Arc<WindowsExecutableSnapshotOwner>,
+    u64,
+    [u8; 32],
+);
+
 impl BoundExecutable {
     #[cfg(target_os = "linux")]
     fn verify(&self) -> std::io::Result<()> {
@@ -332,13 +341,7 @@ fn copy_executable_snapshot(
 #[cfg(windows)]
 fn immutable_windows_executable_snapshot(
     source: &std::fs::File,
-) -> std::io::Result<(
-    std::fs::File,
-    PathBuf,
-    Arc<WindowsExecutableSnapshotOwner>,
-    u64,
-    [u8; 32],
-)> {
+) -> std::io::Result<ImmutableWindowsExecutableSnapshot> {
     use sha2::{Digest, Sha256};
     use std::io::{Seek, SeekFrom};
     use std::os::windows::fs::OpenOptionsExt;

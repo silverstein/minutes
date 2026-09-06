@@ -508,6 +508,7 @@ impl MeetingMutation {
         }
         #[cfg(windows)]
         {
+            let _ = writable;
             use windows_sys::Win32::Foundation::GENERIC_READ;
             use windows_sys::Win32::Storage::FileSystem::{
                 DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -763,6 +764,9 @@ impl MeetingMutation {
         after_atomic_claim: impl FnOnce(),
         after_atomic_promotion: impl FnOnce(),
     ) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        let _ = (source_path, destination_path);
+
         #[cfg(unix)]
         {
             // POSIX cannot rename an opened file handle. First atomically claim

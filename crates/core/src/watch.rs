@@ -241,6 +241,7 @@ fn wait_for_settle(path: &Path, delay_ms: u64) -> bool {
     true
 }
 
+#[cfg(any(not(windows), test))]
 fn atomic_noreplace_unavailable(
     source: &Path,
     destination: &Path,

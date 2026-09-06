@@ -171,6 +171,19 @@ jobs:
         # breakage here only surfaces when Prompter next runs cargo build.
         run: cargo build -p minutes-core --no-default-features --features streaming
 
+      - name: Build PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo build -p minutes-core --no-default-features --features pocketstation-capture
+
+      - name: Test PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo test -p minutes-core --no-default-features --features pocketstation-capture --lib -- --test-threads=1 --nocapture
+        timeout-minutes: 15
+
+      - name: Clippy PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
+
       - name: Build core with parakeet (cross-platform)
         # Guards against Linux-parakeet breakage that today only surfaces
         # at tag push via release-cli.yml. The parakeet feature compiles

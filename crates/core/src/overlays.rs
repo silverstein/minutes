@@ -366,7 +366,7 @@ mod windows_private {
             }
             let mut descriptor = Box::new(unsafe { zeroed::<SECURITY_DESCRIPTOR>() });
             let descriptor_ptr = descriptor.as_mut() as *mut SECURITY_DESCRIPTOR as *mut c_void;
-            if unsafe {
+            let initialized = unsafe {
                 InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) != 0
                     && SetSecurityDescriptorOwner(descriptor_ptr, sid, 0) != 0
                     && SetSecurityDescriptorDacl(descriptor_ptr, 1, acl, 0) != 0
@@ -375,8 +375,8 @@ mod windows_private {
                         SE_DACL_PROTECTED,
                         SE_DACL_PROTECTED,
                     ) != 0
-            } == false
-            {
+            };
+            if !initialized {
                 unsafe { LocalFree(acl.cast()) };
                 return Err(io::Error::last_os_error());
             }

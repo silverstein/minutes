@@ -4242,13 +4242,13 @@ fn qmd_file_identity_and_links(file: &File) -> Option<(QmdObjectIdentity, u64)> 
         if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
             return None;
         }
-        return Some((
+        Some((
             QmdObjectIdentity {
                 scope: u64::from(info.dwVolumeSerialNumber),
                 object: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
             },
             u64::from(info.nNumberOfLinks),
-        ));
+        ))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -11565,7 +11565,7 @@ fn set_restrictive_permissions(path: &Path) -> std::io::Result<()> {
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        return create_private_dir_all_no_follow(path);
+        create_private_dir_all_no_follow(path)
     }
     #[cfg(not(windows))]
     fs::create_dir_all(path)?;

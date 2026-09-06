@@ -415,6 +415,7 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
     Ok(conn)
 }
 
+#[cfg(unix)]
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);

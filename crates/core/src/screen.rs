@@ -323,14 +323,18 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        return Err(std::io::Error::other(
-            "screen capture not supported on this platform",
-        ));
+        Ok(())
     }
 
-    Ok(())
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err(std::io::Error::other(
+            "screen capture not supported on this platform",
+        ))
+    }
 }
 
 /// Derive the screenshots directory for a given audio recording path.

@@ -1463,7 +1463,7 @@ mod windows_graph_journal {
             let next = u32::from_le_bytes(buffer[offset..offset + 4].try_into().ok()?) as usize;
             let name_bytes =
                 u32::from_le_bytes(buffer[offset + 8..offset + 12].try_into().ok()?) as usize;
-            if name_bytes == 0 || name_bytes % 2 != 0 {
+            if name_bytes == 0 || !name_bytes.is_multiple_of(2) {
                 return None;
             }
             let name_end = header_end.checked_add(name_bytes)?;
@@ -1487,7 +1487,7 @@ mod windows_graph_journal {
             if next == 0 {
                 break;
             }
-            if next < name_end - offset || next % 4 != 0 {
+            if next < name_end - offset || !next.is_multiple_of(4) {
                 return None;
             }
             offset = offset.checked_add(next)?;

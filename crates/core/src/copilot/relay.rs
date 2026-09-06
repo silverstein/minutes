@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 const RELAY_PROTOCOL_VERSION: u32 = 1;
 const DISCOVERY_FILE: &str = "capture-relay.json";
 const OWNER_LOCK_FILE: &str = "capture-relay.lock";
+#[cfg(not(windows))]
 const UNIX_SOCKET_FILE: &str = "capture-relay.sock";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const HEARTBEAT_STALE_AFTER: Duration = Duration::from_secs(5);

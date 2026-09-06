@@ -1177,11 +1177,11 @@ fn finalize_wav_writer(
         .map_err(|e| CaptureError::Io(std::io::Error::other(format!("WAV finalize: {}", e))))
 }
 
-fn set_capture_permissions(path: &Path) {
+fn set_capture_permissions(_path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+        std::fs::set_permissions(_path, std::fs::Permissions::from_mode(0o600)).ok();
     }
 }
 

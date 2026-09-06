@@ -840,7 +840,7 @@ fn build_capture_stream(
     sample_count: &Arc<std::sync::atomic::AtomicU64>,
     err_flag: &Arc<AtomicBool>,
     live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
-) -> Result<cpal::Stream, CaptureError> {
+) -> Result<(cpal::Stream, Arc<crate::resample::InputStreamDiagnostics>), CaptureError> {
     let writer_clone = Arc::clone(writer);
     let sample_count_clone = Arc::clone(sample_count);
     let live_tx_clone = live_tx.clone();
@@ -855,7 +855,7 @@ fn build_capture_stream(
     // based on 16kHz: ~1600 samples for 10 updates/sec.
     let level_interval: u32 = 1600; // 16000 / 10
 
-    let (stream, _device_name, _config) = crate::resample::build_resampled_input_stream(
+    let (stream, _device_name, stream_config) = crate::resample::build_resampled_input_stream(
         device,
         stop_flag,
         err_flag,
@@ -907,7 +907,7 @@ fn build_capture_stream(
         },
     )?;
 
-    Ok(stream)
+    Ok((stream, stream_config.diagnostics))
 }
 
 /// Try to reconnect to the current default audio device.
@@ -920,7 +920,11 @@ fn try_reconnect(
     sample_count: &Arc<std::sync::atomic::AtomicU64>,
     err_flag: &Arc<AtomicBool>,
     live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
-) -> Option<(cpal::Stream, String)> {
+) -> Option<(
+    cpal::Stream,
+    String,
+    Arc<crate::resample::InputStreamDiagnostics>,
+)> {
     use cpal::traits::DeviceTrait;
 
     // Reset error flag for the new stream
@@ -939,9 +943,9 @@ fn try_reconnect(
         .map_or_else(|_| "unknown".to_string(), |d| d.name().to_string());
 
     match build_capture_stream(&device, writer, stop_flag, sample_count, err_flag, live_tx) {
-        Ok(stream) => {
+        Ok((stream, diagnostics)) => {
             tracing::info!(device = %name, "audio stream reconnected");
-            Some((stream, name))
+            Some((stream, name, diagnostics))
         }
         Err(e) => {
             tracing::warn!(device = %name, "reconnect: build stream failed: {}", e);
@@ -1893,6 +1897,10 @@ pub fn record_to_wav_with_lifecycle(
             }
         }
 
+        if let Some((_, diagnostics)) = &stream {
+            diagnostics.report_pending();
+        }
+
         // Check for stream error or device change → attempt reconnection
         let should_reconnect = if err_flag.load(Ordering::Relaxed) {
             tracing::warn!("audio stream error detected — checking for device change");
@@ -1945,11 +1953,11 @@ pub fn record_to_wav_with_lifecycle(
             });
 
             match reconnected {
-                Some((new_stream, new_name)) => {
+                Some((new_stream, new_name, diagnostics)) => {
                     let old_name = current_device_name.clone();
                     current_device_name = new_name;
                     device_monitor.update_device(&current_device_name);
-                    stream = Some(new_stream);
+                    stream = Some((new_stream, diagnostics));
                     safety_guard.extend(); // reset silence timers after reconnect
 
                     eprintln!(
@@ -1972,7 +1980,10 @@ pub fn record_to_wav_with_lifecycle(
         }
     }
 
-    // Stop and finalize
+    // Stop and finalize. Report any final overloads outside the audio callback.
+    if let Some((_, diagnostics)) = &stream {
+        diagnostics.report_pending();
+    }
     drop(stream);
     // Capture is authoritative. Abort optional recognition immediately, then
     // seal the WAV before waiting for the sidecar thread to retire.

@@ -35,12 +35,27 @@ impl InputStreamDiagnostics {
     }
 
     pub fn report_pending(&self) {
+        self.report_pending_with(|entry| {
+            // The desktop has no tracing subscriber. Persist content-free
+            // diagnostics here, never from the realtime audio callback.
+            if let Err(error) = crate::logging::append_log(&entry) {
+                tracing::warn!(%error, "failed to write audio overload diagnostic");
+            }
+        });
+    }
+
+    fn report_pending_with(&self, mut report: impl FnMut(serde_json::Value)) {
         let xruns = self.xruns.swap(0, Ordering::Relaxed);
         if xruns > 0 {
-            tracing::warn!(
-                xruns,
-                "audio input overload: possible audio gaps; continuing the existing stream; review the saved recording"
-            );
+            let message = "audio input overload: possible audio gaps; continuing the existing stream; review the saved recording";
+            tracing::warn!(xruns, message);
+            report(serde_json::json!({
+                "ts": chrono::Local::now().to_rfc3339(),
+                "level": "warn",
+                "step": "audio_input_overload",
+                "xruns": xruns,
+                "message": message,
+            }));
         }
     }
 }
@@ -237,8 +252,18 @@ mod overload_tests {
         }
         assert!(!fatal.load(Ordering::Relaxed));
         assert_eq!(diagnostics.xruns.load(Ordering::Relaxed), 3);
-        diagnostics.report_pending();
+        let mut reports = Vec::new();
+        diagnostics.report_pending_with(|entry| reports.push(entry));
         assert_eq!(diagnostics.xruns.load(Ordering::Relaxed), 0);
+        diagnostics.report_pending_with(|entry| reports.push(entry));
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["level"], "warn");
+        assert_eq!(reports[0]["step"], "audio_input_overload");
+        assert_eq!(reports[0]["xruns"], 3);
+        assert!(reports[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("possible audio gaps"));
     }
 
     #[test]

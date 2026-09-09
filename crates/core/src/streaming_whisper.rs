@@ -1,6 +1,6 @@
 use crate::transcribe::{set_abort_callback, streaming_whisper_params};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use whisper_rs::WhisperContext;
@@ -42,6 +42,18 @@ use whisper_rs::WhisperContext;
 //   - Transcription runs on a background thread; audio capture
 //     continues uninterrupted on the main thread.
 // ──────────────────────────────────────────────────────────────
+
+/// Whisper passes that returned an error since the last reset. Read by the
+/// recording sidecar's session summary; reset when a sidecar starts.
+static WHISPER_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn failure_count() -> u64 {
+    WHISPER_FAILURES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn reset_failure_count() {
+    WHISPER_FAILURES.store(0, Ordering::Relaxed);
+}
 
 /// How often to run partial transcription (in audio samples at 16kHz).
 const PARTIAL_INTERVAL_SAMPLES: usize = 16000 * 2; // Every 2 seconds
@@ -218,6 +230,26 @@ impl StreamingWhisper {
         let transcription_audio = &self.audio_buffer[window_start..];
         if let Err(e) = state.full(params, transcription_audio) {
             tracing::warn!("streaming whisper failed: {}", e);
+            // The desktop app has no tracing subscriber; persist a bounded
+            // trail so a whisper pass that fails on every utterance is
+            // visible in minutes.log rather than only as a thin transcript.
+            let failures = WHISPER_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if crate::live_transcript::should_persist_repeat(failures) {
+                crate::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "warn",
+                    "step": "streaming_whisper_failed",
+                    "file": "",
+                    "message": "streaming whisper pass failed; the utterance produced no text",
+                    "extra": {
+                        "error": e.to_string(),
+                        "failures": failures,
+                        "is_final": is_final,
+                        "audio_secs": format!("{:.1}", transcription_audio.len() as f64 / 16000.0),
+                    },
+                }))
+                .ok();
+            }
             return None;
         }
 

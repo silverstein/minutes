@@ -255,6 +255,62 @@ fn emit_live_engine_fallback_warning(source: &'static str, detail: &str) {
     .ok();
 }
 
+/// Persist one sidecar diagnostic to `~/.minutes/logs/minutes.log`.
+///
+/// The desktop app installs no tracing subscriber, so every `tracing::warn!`
+/// in this module vanishes there. Anything that explains a missing or thin
+/// live transcript goes through here as well, so a user or a support thread
+/// can read it back after the call instead of reconstructing it from the WAV.
+fn persist_sidecar_log(
+    level: &'static str,
+    step: &'static str,
+    message: &str,
+    extra: serde_json::Value,
+) {
+    crate::logging::append_log(&serde_json::json!({
+        "ts": Local::now().to_rfc3339(),
+        "level": level,
+        "step": step,
+        "file": "",
+        "message": message,
+        "extra": extra,
+    }))
+    .ok();
+}
+
+/// Per-utterance failures repeat at speech cadence. Persist the 1st, 10th,
+/// and 100th, then every 1000th, so a broken engine leaves a clear trail
+/// without flooding the log.
+pub(crate) fn should_persist_repeat(count: u64) -> bool {
+    matches!(count, 1 | 10 | 100) || (count >= 1000 && count.is_multiple_of(1000))
+}
+
+/// Explain a VAD engine that resolved to something other than what the config
+/// asked for. `None` when the request was honored.
+fn vad_downgrade_message(requested: &str, resolved: &str) -> Option<String> {
+    let requested = requested.trim().to_lowercase();
+    let want_ort = matches!(requested.as_str(), "ort-silero" | "ort" | "silero-ort");
+    match resolved {
+        "energy" => Some(format!(
+            "VAD engine \"{requested}\" unavailable; using energy VAD, which segments on volume alone"
+        )),
+        "silero" if want_ort => Some(
+            "VAD engine \"ort-silero\" unavailable (this build lacks the vad-ort feature or silero-vad-v6.2.0.onnx is missing from model_path); using whisper-silero"
+                .into(),
+        ),
+        _ => None,
+    }
+}
+
+/// Utterances the recording sidecar skipped because no whisper model could be
+/// loaded. Reset at sidecar start; reported in the session summary.
+static SIDECAR_SKIPPED_UTTERANCES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Detected speech below which an empty session is just a quiet room rather
+/// than a silent engine failure (100 ms VAD windows, so 300 is 30 s).
+const SIDECAR_SUMMARY_SPEECH_WINDOWS_FLOOR: usize = 300;
+
 #[cfg(all(feature = "whisper", target_os = "macos"))]
 fn emit_apple_speech_fallback_warning(source: &'static str, detail: &str) {
     eprintln!(
@@ -2319,6 +2375,18 @@ fn transcribe_utterance_for_sidecar(
                     error = %error,
                     "whisper model unavailable for live sidecar — skipping utterance"
                 );
+                let skipped = SIDECAR_SKIPPED_UTTERANCES.fetch_add(1, Ordering::Relaxed) + 1;
+                if should_persist_repeat(skipped) {
+                    persist_sidecar_log(
+                        "warn",
+                        "live_sidecar_utterance_skipped",
+                        "whisper model unavailable for the live sidecar; utterance skipped",
+                        serde_json::json!({
+                            "error": error.to_string(),
+                            "skipped_utterances": skipped,
+                        }),
+                    );
+                }
                 return None;
             }
         },
@@ -3109,6 +3177,26 @@ fn run_sidecar_inner_mpsc(
         current_speech_drafts = partial_publisher.is_some(),
         "live sidecar started (recording mode)"
     );
+    SIDECAR_SKIPPED_UTTERANCES.store(0, Ordering::Relaxed);
+    crate::streaming_whisper::reset_failure_count();
+    let vad_downgrade = vad_downgrade_message(&config.transcription.vad_engine, vad.mode_name());
+    persist_sidecar_log(
+        if vad_downgrade.is_some() {
+            "warn"
+        } else {
+            "info"
+        },
+        "live_sidecar_started",
+        vad_downgrade
+            .as_deref()
+            .unwrap_or("live transcript sidecar started"),
+        serde_json::json!({
+            "vad_requested": config.transcription.vad_engine,
+            "vad_resolved": vad.mode_name(),
+            "backend": sidecar_backend,
+            "current_speech_drafts": partial_publisher.is_some(),
+        }),
+    );
 
     loop {
         if let Some(result) = draft_results.take() {
@@ -3249,6 +3337,35 @@ fn run_sidecar_inner_mpsc(
         draft_jobs_replaced = draft_jobs.replaced.load(Ordering::Relaxed),
         draft_results_replaced = draft_results.replaced.load(Ordering::Relaxed),
         "live sidecar ended (recording mode)"
+    );
+    let dropped_utterances = queue_counters.dropped.load(Ordering::Relaxed);
+    let no_output_despite_speech =
+        lines == 0 && gating_stats.speaking_windows >= SIDECAR_SUMMARY_SPEECH_WINDOWS_FLOOR;
+    persist_sidecar_log(
+        if no_output_despite_speech || dropped_utterances > 0 {
+            "warn"
+        } else {
+            "info"
+        },
+        "live_sidecar_ended",
+        if no_output_despite_speech {
+            "live transcript sidecar ended with no lines despite detected speech"
+        } else if dropped_utterances > 0 {
+            "live transcript sidecar ended; some utterances were dropped because transcription could not keep up"
+        } else {
+            "live transcript sidecar ended"
+        },
+        serde_json::json!({
+            "lines": lines,
+            "duration_secs": format!("{:.1}", duration),
+            "vad_mode": vad.mode_name(),
+            "speaking_windows": gating_stats.speaking_windows,
+            "silence_windows": gating_stats.silence_windows,
+            "speech_secs": gating_stats.speaking_windows / 10,
+            "dropped_utterances": dropped_utterances,
+            "skipped_utterances": SIDECAR_SKIPPED_UTTERANCES.load(Ordering::Relaxed),
+            "whisper_failures": crate::streaming_whisper::failure_count(),
+        }),
     );
 
     if input_disconnected_unexpectedly {
@@ -3940,6 +4057,27 @@ mod tests {
                 .unwrap()
                 .contains("(1 line(s) so far)"));
         });
+    }
+
+    #[test]
+    fn repeated_failures_persist_on_a_log_scale() {
+        let persisted: Vec<u64> = (1..=3000).filter(|n| should_persist_repeat(*n)).collect();
+        assert_eq!(persisted, vec![1, 10, 100, 1000, 2000, 3000]);
+        assert!(!should_persist_repeat(0));
+    }
+
+    #[test]
+    fn vad_downgrade_is_explained_only_when_the_request_was_not_honored() {
+        assert_eq!(vad_downgrade_message("whisper-silero", "silero"), None);
+        assert_eq!(vad_downgrade_message("ort-silero", "ort-silero"), None);
+        assert_eq!(vad_downgrade_message("", "silero"), None);
+
+        let ort_fallback = vad_downgrade_message("ort-silero", "silero").unwrap();
+        assert!(ort_fallback.contains("vad-ort"));
+        assert!(ort_fallback.contains("whisper-silero"));
+
+        let energy = vad_downgrade_message("whisper-silero", "energy").unwrap();
+        assert!(energy.contains("energy VAD"));
     }
 
     #[test]

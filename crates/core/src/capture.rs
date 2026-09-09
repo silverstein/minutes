@@ -1607,6 +1607,16 @@ fn record_to_wav_dual_source(
             dropped_chunks = sidecar_drops,
             "live transcript sidecar: chunks dropped (sidecar channel full, transcript may have gaps)"
         );
+        // Persist as well: the desktop app has no tracing subscriber.
+        crate::logging::append_log(&serde_json::json!({
+            "ts": chrono::Local::now().to_rfc3339(),
+            "level": "warn",
+            "step": "live_sidecar_chunks_dropped",
+            "file": "",
+            "message": "live transcript sidecar dropped audio chunks because it could not keep up; the live transcript may have gaps (the recording is unaffected)",
+            "extra": {"dropped_chunks": sidecar_drops},
+        }))
+        .ok();
     }
 
     let (total_samples, stem_contents) = writers.finalize()?;

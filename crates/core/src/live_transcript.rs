@@ -881,16 +881,21 @@ fn run_with_partials_internal(
         }
     };
 
-    // Check conflicts: recording must not be active
-    if let Ok(Some(_)) = pid::check_recording() {
+    // Check conflicts: recording must not be active. `inspect_pid_file`, not
+    // `check_recording`: the recorder holds its PID file under a mandatory
+    // exclusive lock on Windows, so a read-based check errors there and
+    // `if let Ok(Some(_))` read that as "no recording" while one was running.
+    // That let a standalone live session start alongside a recording and
+    // write the same live-transcript.jsonl, the #258 hazard in reverse.
+    if pid::inspect_pid_file(&pid::pid_path()).is_active() {
         let error: MinutesError = LiveTranscriptError::RecordingActive.into();
         mark_precreated_session_failed(&error);
         return Err(error);
     }
 
-    // Check conflicts: dictation must not be active
+    // Check conflicts: dictation must not be active (same lock semantics).
     let dict_pid = pid::dictation_pid_path();
-    if let Ok(Some(_)) = pid::check_pid_file(&dict_pid) {
+    if pid::inspect_pid_file(&dict_pid).is_active() {
         let error: MinutesError = LiveTranscriptError::DictationActive.into();
         mark_precreated_session_failed(&error);
         return Err(error);

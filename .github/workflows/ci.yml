@@ -197,7 +197,7 @@ jobs:
         # lived in exactly this code and shipped through three releases with
         # green CI. No model is required; tests that need one are #[ignore].
         # whisper-rs is already compiled by the parakeet build above.
-        run: cargo test -p minutes-core --features streaming --lib -- live_transcript:: streaming_whisper:: --test-threads=1
+        run: "cargo test -p minutes-core --features streaming --lib -- live_transcript:: streaming_whisper:: --test-threads=1"
 
       - name: Ensure cmake for sherpa-rs (Linux)
         if: runner.os == 'Linux'

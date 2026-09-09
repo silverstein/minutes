@@ -189,6 +189,16 @@ jobs:
         # build above, so this adds little time.
         run: cargo test -p whisper-guard --features whisper --lib -- --test-threads=1
 
+      - name: Test live transcript and streaming whisper (whisper + streaming)
+        # live_transcript.rs and streaming_whisper.rs are gated on
+        # all(streaming, whisper), so the --no-default-features test run
+        # below compiles none of their tests: the whisper-rs abort callback
+        # regression (#951) and the always-healthy status file (#952) both
+        # lived in exactly this code and shipped through three releases with
+        # green CI. No model is required; tests that need one are #[ignore].
+        # whisper-rs is already compiled by the parakeet build above.
+        run: cargo test -p minutes-core --features streaming --lib -- live_transcript:: streaming_whisper:: --test-threads=1
+
       - name: Ensure cmake for sherpa-rs (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 20

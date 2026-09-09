@@ -308,8 +308,8 @@ static SIDECAR_SKIPPED_UTTERANCES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Detected speech below which an empty session is just a quiet room rather
-/// than a silent engine failure (100 ms VAD windows, so 300 is 30 s).
-const SIDECAR_SUMMARY_SPEECH_WINDOWS_FLOOR: usize = 300;
+/// than a silent engine failure: 30 s of 16 kHz samples.
+const SIDECAR_SUMMARY_SPEECH_SAMPLES_FLOOR: usize = 16_000 * 30;
 
 #[cfg(all(feature = "whisper", target_os = "macos"))]
 fn emit_apple_speech_fallback_warning(source: &'static str, detail: &str) {
@@ -3340,7 +3340,7 @@ fn run_sidecar_inner_mpsc(
     );
     let dropped_utterances = queue_counters.dropped.load(Ordering::Relaxed);
     let no_output_despite_speech =
-        lines == 0 && gating_stats.speaking_windows >= SIDECAR_SUMMARY_SPEECH_WINDOWS_FLOOR;
+        lines == 0 && speech_samples_total >= SIDECAR_SUMMARY_SPEECH_SAMPLES_FLOOR;
     persist_sidecar_log(
         if no_output_despite_speech || dropped_utterances > 0 {
             "warn"
@@ -3361,7 +3361,7 @@ fn run_sidecar_inner_mpsc(
             "vad_mode": vad.mode_name(),
             "speaking_windows": gating_stats.speaking_windows,
             "silence_windows": gating_stats.silence_windows,
-            "speech_secs": gating_stats.speaking_windows / 10,
+            "speech_secs": speech_samples_total / 16_000,
             "dropped_utterances": dropped_utterances,
             "skipped_utterances": SIDECAR_SKIPPED_UTTERANCES.load(Ordering::Relaxed),
             "whisper_failures": crate::streaming_whisper::failure_count(),

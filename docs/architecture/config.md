@@ -27,6 +27,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `language` | auto-detect | BCP-47 tag (e.g. `"en"`, `"es"`) to force a specific language |
 | `noise_reduction` | `true` | RNNoise pre-filter (requires `denoise` feature) |
 | `vad_model` | `"silero-v6.2.0"` | Silero VAD model name; empty string disables |
+| `vad_engine` | `"whisper-silero"` | Recording sidecar VAD. `"ort-silero"` is opt-in and needs a build with the `vad-ort` feature plus `silero-vad-v6.2.0.onnx` in `model_path`; otherwise it falls back to whisper-silero with a warning |
 | `min_words` | `3` | Drop utterances with fewer than this many words |
 | `parakeet_binary` | `"parakeet"` | PATH lookup or absolute path to the parakeet binary |
 | `parakeet_sidecar_enabled` | auto | Records future warm-sidecar intent. The current pathname-only process cannot receive Minutes' anonymous/sealed private-audio capability, so Linux, macOS, and Windows all use Whisper. Auto/`true` cannot bypass this gate; `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295). |

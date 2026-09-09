@@ -247,41 +247,37 @@ pub struct TranscriptionConfig {
     pub vad_model: String,
     /// VAD engine for the recording sidecar.
     ///
-    /// **`"ort-silero"` (default, known-risk experimental, not
-    /// recommended as a general default)**. A 20-WAV stratified
-    /// screen of internal meeting audio truncated to 5 min each
-    /// found 6/20 samples had at least one substantive regression
-    /// vs whisper-silero. The Wilson 95% CI on the per-WAV rate is
-    /// [15%, 52%], with a 30% point estimate. Per-utterance the
-    /// rate is approximately 1.4% as secondary context. Regression
-    /// types observed: named-entity loss (`"Claude"` -> `"cloth"`,
-    /// real participant names redacted from this comment ->
-    /// nonsense words), nonword hallucination at chunk boundaries,
-    /// and content-word loss in the first ~30s of recordings.
+    /// **`"whisper-silero"` (default)**: whisper-rs's bundled Silero,
+    /// full-buffer rescan per 100 ms call. About 10 ms per call on Apple
+    /// Silicon, so it keeps up comfortably. Did not show the longer-chunk
+    /// regression class in the 20-WAV screen described below.
     ///
-    /// Mechanism: streaming Silero via ort, O(new_audio) per call.
-    /// Requires the `vad-ort` build feature AND
-    /// `silero-vad-v6.2.0.onnx` in `model_path`. About 2x faster
-    /// than whisper-silero on the recording sidecar's hot path
-    /// (median 2.16x on the same 20-WAV screen). Recommended only
-    /// for users who explicitly accept the regression tradeoff.
-    /// FSM tuning (candidates: max-chunk cap or chunk-boundary
-    /// smoothing) is needed before promotion to the general
-    /// default; see `docs/plans/vad-refactor.md` and the harness at
-    /// `crates/core/examples/dogfood_vad_engines.rs`.
+    /// **`"ort-silero"` (opt-in, known-risk experimental)**: streaming
+    /// Silero via ort, O(new_audio) per call and about 2x faster than
+    /// whisper-silero on the sidecar's hot path (median 2.16x on the same
+    /// 20-WAV screen). Requires a build with the `vad-ort` feature AND
+    /// `silero-vad-v6.2.0.onnx` in `model_path`; the release desktop app
+    /// has neither, so setting this there only produces a startup warning
+    /// and the whisper-silero fallback. A 20-WAV stratified screen of
+    /// internal meeting audio truncated to 5 min each found 6/20 samples
+    /// with at least one substantive regression vs whisper-silero (Wilson
+    /// 95% CI [15%, 52%] per WAV, about 1.4% per utterance): named-entity
+    /// loss (`"Claude"` -> `"cloth"`), nonword hallucination at chunk
+    /// boundaries, and content-word loss in the first ~30 s. FSM tuning
+    /// (max-chunk cap or chunk-boundary smoothing) is needed before it can
+    /// be the default again; see `docs/plans/vad-refactor.md` and the
+    /// harness at `crates/core/examples/dogfood_vad_engines.rs`.
     ///
-    /// **`"whisper-silero"`**: whisper-rs's bundled Silero,
-    /// full-buffer rescan per 100ms call. Slower; did not show the
-    /// longer-chunk regression class in the 20-WAV screen. Set this
-    /// in `~/.config/minutes/config.toml` to opt out of ort-silero
-    /// on a per-process basis.
+    /// This was the default from May to September 2026. It went back to
+    /// whisper-silero because every shipped build fell through to
+    /// whisper-silero anyway, silently, which left the config describing an
+    /// engine nobody was running.
     ///
     /// **Fallback chain**: when `"ort-silero"` is requested but the
-    /// `vad-ort` feature is off OR the ONNX is missing, the
-    /// dispatcher logs a warning and falls through to
-    /// `"whisper-silero"`. Unknown values log and fall through to
-    /// `"whisper-silero"` as well. Energy is the dispatcher's
-    /// emergency fallback; not a user-selectable engine here.
+    /// `vad-ort` feature is off OR the ONNX is missing, the dispatcher logs
+    /// a warning and falls through to `"whisper-silero"`. Unknown values log
+    /// and fall through to `"whisper-silero"` as well. Energy is the
+    /// dispatcher's emergency fallback; not a user-selectable engine here.
     pub vad_engine: String,
     /// Enable noise reduction via nnnoiseless (RNNoise) before transcription.
     /// Requires the `denoise` feature flag. Default: true.
@@ -1385,7 +1381,7 @@ impl Default for TranscriptionConfig {
             min_words: 3,
             language: None,
             vad_model: "silero-v6.2.0".into(),
-            vad_engine: "ort-silero".into(),
+            vad_engine: "whisper-silero".into(),
             noise_reduction: true,
             compressed_decode_fallback: true,
             parakeet_binary: "parakeet".into(),
@@ -2030,13 +2026,13 @@ mod tests {
         );
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
-        // The recording sidecar's default VAD engine is the streaming
-        // ort-Silero impl. The dispatcher falls through to whisper-Silero
-        // when the `vad-ort` build feature is off or the ONNX is missing,
-        // so users on older builds see no behavior change. Pinning the
-        // string here means a future refactor cannot silently revert
-        // the default without a failing test.
-        assert_eq!(config.transcription.vad_engine, "ort-silero");
+        // The recording sidecar's default VAD engine is whisper-Silero.
+        // ort-Silero was the default from May to September 2026, but no
+        // shipped build carried the `vad-ort` feature or the ONNX, so every
+        // session silently fell through to whisper-Silero. Pinning the
+        // string here means a future flip has to be deliberate and come
+        // with the build and setup changes that make it real.
+        assert_eq!(config.transcription.vad_engine, "whisper-silero");
         assert_eq!(config.transcription.vad_model, "silero-v6.2.0");
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
         assert_eq!(config.transcription.parakeet_model, "tdt-600m");

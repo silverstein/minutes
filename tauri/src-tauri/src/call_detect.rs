@@ -2,7 +2,11 @@
 //!
 //! Detection strategy: poll for known call-app processes while any audio input
 //! is actively capturing. Two signals together (process running + mic active)
-//! give high confidence with minimal false positives.
+//! give high confidence with minimal false positives. When CoreAudio can
+//! attribute the capture to a process, the mic signal is narrowed to the
+//! process family of the app (native binary or browser) being checked, so a
+//! dictation tool holding the mic does not validate an idle call app or a
+//! stale meeting tab (#244).
 //!
 //! Currently macOS-only. The detection functions (`running_process_names`,
 //! `is_mic_in_use`) use CoreAudio and `ps`. Windows/Linux would need
@@ -54,10 +58,12 @@ pub struct CallDetector {
     browser_probe_backoff_until: Mutex<HashMap<String, Instant>>,
     /// Recent successful browser-based Meet detection. Prevents fast native-app
     /// polling from immediately relabeling the same active session as Slack.
-    recent_google_meet_until: Mutex<Option<Instant>>,
+    /// Remembers which browser produced the hit so the window only counts
+    /// while that browser holds input (see `browser_hit_has_active_input`).
+    recent_google_meet_until: Mutex<Option<BrowserSticky>>,
     /// Recent successful browser-based Teams detection. Same role as the Meet
     /// sticky field but for Microsoft Teams in a browser tab.
-    recent_teams_web_until: Mutex<Option<Instant>>,
+    recent_teams_web_until: Mutex<Option<BrowserSticky>>,
     /// Log mic-gate transitions once instead of spamming every poll.
     last_mic_live: Mutex<Option<bool>>,
 }
@@ -201,19 +207,36 @@ fn detected_for(provider: MeetingProvider) -> DetectActiveCallResult {
     }
 }
 
-fn remember_sticky(sticky: &Mutex<Option<Instant>>, ttl: Duration) {
-    *sticky.lock().unwrap() = Some(Instant::now() + ttl);
+/// A browser-tab meeting hit that is still trusted between two probes.
+#[derive(Debug, Clone, Copy)]
+struct BrowserSticky {
+    until: Instant,
+    /// Browser whose tab produced the hit. The window only counts while this
+    /// browser, not any process, holds input (`browser_hit_has_active_input`).
+    browser: &'static BrowserSpec,
 }
 
-fn sticky_alive(sticky: &Mutex<Option<Instant>>) -> bool {
+fn remember_sticky(
+    sticky: &Mutex<Option<BrowserSticky>>,
+    ttl: Duration,
+    browser: &'static BrowserSpec,
+) {
+    *sticky.lock().unwrap() = Some(BrowserSticky {
+        until: Instant::now() + ttl,
+        browser,
+    });
+}
+
+/// The sticky hit while its window is open; clears the slot once expired.
+fn sticky_alive(sticky: &Mutex<Option<BrowserSticky>>) -> Option<BrowserSticky> {
     let mut guard = sticky.lock().unwrap();
     match *guard {
-        Some(until) if Instant::now() < until => true,
+        Some(hit) if Instant::now() < hit.until => Some(hit),
         Some(_) => {
             *guard = None;
-            false
+            None
         }
-        None => false,
+        None => None,
     }
 }
 
@@ -239,6 +262,20 @@ fn process_name_matches_config_app(config_app: &str, process_name: &str) -> bool
         || process_lower.starts_with(&format!("{} ", config_lower))
 }
 
+/// Add every descendant (through ppid, transitively) of the pids already in
+/// `family`.
+fn expand_process_family(family: &mut HashSet<u32>, processes: &[RunningProcess]) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for process in processes {
+            if family.contains(&process.ppid) && family.insert(process.pid) {
+                changed = true;
+            }
+        }
+    }
+}
+
 fn native_app_candidate_process_pids(
     config_app: &str,
     processes: &[RunningProcess],
@@ -248,17 +285,7 @@ fn native_app_candidate_process_pids(
         .filter(|process| process_name_matches_config_app(config_app, &process.name))
         .map(|process| process.pid)
         .collect();
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for process in processes {
-            if candidates.contains(&process.ppid) && candidates.insert(process.pid) {
-                changed = true;
-            }
-        }
-    }
-
+    expand_process_family(&mut candidates, processes);
     candidates
 }
 
@@ -273,9 +300,53 @@ fn native_app_has_active_input(
         .any(|pid| active_input_pids.contains(pid))
 }
 
+/// PIDs of the browser process family rooted at the processes whose binary
+/// name is exactly `root`, expanded through pid/ppid. Exact on purpose: the
+/// prefix matcher used for native apps would let "Google Chrome" absorb
+/// "Google Chrome Canary" and its whole tree, so Canary holding the mic would
+/// validate a stale Chrome sticky.
+fn browser_family_pids(root: &str, processes: &[RunningProcess]) -> HashSet<u32> {
+    let mut family: HashSet<u32> = processes
+        .iter()
+        .filter(|process| process.name.eq_ignore_ascii_case(root))
+        .map(|process| process.pid)
+        .collect();
+    expand_process_family(&mut family, processes);
+    family
+}
+
+/// Whether a browser-tab meeting hit (fresh probe result or open sticky
+/// window) is backed by input from the browser that produced it.
+///
+/// Attribution-gated when the browser has a dogfooded process-family root and
+/// per-process input attribution is available: some pid in that family must
+/// be capturing. Otherwise any live mic passes, which keeps the pre-#244
+/// behavior for Safari and for roots not dogfooded yet.
+fn browser_hit_has_active_input(
+    browser: &BrowserSpec,
+    mic_live: bool,
+    processes: Option<&[RunningProcess]>,
+    active_input_pids: Option<&HashSet<u32>>,
+) -> bool {
+    match (browser.attribution, processes, active_input_pids) {
+        (BrowserAttribution::ProcessFamily { root }, Some(processes), Some(active_input_pids)) => {
+            browser_family_pids(root, processes)
+                .iter()
+                .any(|pid| active_input_pids.contains(pid))
+        }
+        _ => mic_live,
+    }
+}
+
 enum BrowserMeetProbe {
-    Detected { provider: MeetingProvider },
-    PermissionDenied { browser_app: String },
+    Detected {
+        provider: MeetingProvider,
+        /// Browser whose tab matched; the hit is gated on its input.
+        browser: &'static BrowserSpec,
+    },
+    PermissionDenied {
+        browser_app: String,
+    },
     Error,
     NoBrowserProcesses,
     NoMatch,
@@ -756,7 +827,19 @@ impl CallDetector {
             |detector, running, has_google_meet, has_teams_web| {
                 if has_google_meet || has_teams_web {
                     detector.schedule_next_browser_probe();
-                    Some(detector.detect_browser_meeting(running, has_google_meet, has_teams_web))
+                    Some(detector.detect_browser_meeting(
+                        running,
+                        has_google_meet,
+                        has_teams_web,
+                        |browser| {
+                            browser_hit_has_active_input(
+                                browser,
+                                mic_live,
+                                Some(processes.as_slice()),
+                                active_input_pids.as_ref(),
+                            )
+                        },
+                    ))
                 } else {
                     None
                 }
@@ -833,11 +916,20 @@ impl CallDetector {
             .filter(|app| app.as_str() != "google-meet" && app.as_str() != "teams-web")
             .collect();
 
-        if has_google_meet && mic_live && sticky_alive(&self.recent_google_meet_until) {
+        // A sticky only bridges probes while the browser that produced it is
+        // still the one holding input; a dictation tool grabbing the mic must
+        // not re-arm it (#244). A rejected sticky is left to expire on its own.
+        let sticky_gate = |sticky: &Mutex<Option<BrowserSticky>>| {
+            sticky_alive(sticky).is_some_and(|hit| {
+                browser_hit_has_active_input(hit.browser, mic_live, processes, active_input_pids)
+            })
+        };
+
+        if has_google_meet && sticky_gate(&self.recent_google_meet_until) {
             return detected_for(MeetingProvider::GoogleMeet);
         }
 
-        if has_teams_web && mic_live && sticky_alive(&self.recent_teams_web_until) {
+        if has_teams_web && sticky_gate(&self.recent_teams_web_until) {
             return detected_for(MeetingProvider::TeamsWeb);
         }
 
@@ -848,13 +940,28 @@ impl CallDetector {
         if (has_google_meet || has_teams_web) && (force_browser_probe || self.browser_probe_due()) {
             if let Some(probe) = browser_probe(self, running, has_google_meet, has_teams_web) {
                 match probe {
-                    BrowserMeetProbe::Detected { provider } => {
-                        let sticky = match provider {
-                            MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
-                            MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
-                        };
-                        remember_sticky(sticky, provider.sticky_duration());
-                        return detected_for(provider);
+                    BrowserMeetProbe::Detected { provider, browser } => {
+                        // The production probe already skips browsers without
+                        // attributed input; gating here as well keeps the rule
+                        // in one place for fresh hits and stickies, and is
+                        // what the snapshot tests exercise.
+                        if browser_hit_has_active_input(
+                            browser,
+                            mic_live,
+                            processes,
+                            active_input_pids,
+                        ) {
+                            let sticky = match provider {
+                                MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
+                                MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
+                            };
+                            remember_sticky(sticky, provider.sticky_duration(), browser);
+                            return detected_for(provider);
+                        }
+                        // A matching tab in a browser that is not holding the
+                        // mic (stale tab plus a dictation tool, or another
+                        // browser on the call) is not a call. Fall through to
+                        // the native checks.
                     }
                     BrowserMeetProbe::PermissionDenied { browser_app } => {
                         return DetectActiveCallResult::PermissionWarning { browser_app };
@@ -1029,32 +1136,51 @@ impl CallDetector {
         );
     }
 
+    /// Probe the running browsers' tabs for a meeting. `browser_has_input`
+    /// decides, per browser and before any AppleScript runs, whether that
+    /// browser is a plausible mic holder right now. Browsers failing it are
+    /// skipped, so a stale Meet tab in an idle browser is never queried and
+    /// cannot shadow a live call in the next browser of the table.
     fn detect_browser_meeting(
         &self,
         running: &[String],
         want_meet: bool,
         want_teams: bool,
+        browser_has_input: impl Fn(&BrowserSpec) -> bool,
     ) -> BrowserMeetProbe {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
         let matched = browsers_to_probe(&running_lower);
         let saw_browser = !matched.is_empty();
 
-        for (app_name, kind) in matched {
+        for spec in matched {
+            let app_name = spec.app_name;
             if !self.browser_probe_allowed_for(app_name) {
                 continue;
             }
+            if !browser_has_input(spec) {
+                log_call_detect_event(
+                    "info",
+                    "browser_probe_skipped_no_attributed_input",
+                    None,
+                    Some(app_name),
+                    serde_json::json!({}),
+                );
+                continue;
+            }
 
-            match query_browser_tabs(app_name, kind) {
+            match query_browser_tabs(app_name, spec.kind) {
                 AppleScriptProbe::Tabs(tabs) => {
                     for tab in &tabs {
                         if want_meet && looks_like_google_meet_meeting_url(&tab.url) {
                             return BrowserMeetProbe::Detected {
                                 provider: MeetingProvider::GoogleMeet,
+                                browser: spec,
                             };
                         }
                         if want_teams && looks_like_teams_meeting_tab(&tab.url, &tab.title) {
                             return BrowserMeetProbe::Detected {
                                 provider: MeetingProvider::TeamsWeb,
+                                browser: spec,
                             };
                         }
                     }
@@ -1100,45 +1226,99 @@ fn display_name_for(process: &str) -> String {
     }
 }
 
+/// How active-input attribution applies to one browser of the probe table.
+#[derive(Debug, Clone, Copy)]
+enum BrowserAttribution {
+    /// Input is attributed to the process family rooted at the processes whose
+    /// binary name is exactly `root` (the main browser process), expanded
+    /// through pid/ppid. In the Chromium family the capturing pid is the
+    /// sandboxed Audio Service utility process, a direct child of the main
+    /// process. Only roots dogfooded on a real call are listed this way.
+    ProcessFamily { root: &'static str },
+    /// The hit is trusted whenever any process holds the mic. Used for Safari,
+    /// whose WebContent and GPU processes are reparented to launchd so
+    /// pid/ppid cannot attribute them without private SPI, and for Chromium
+    /// roots that have not been dogfooded yet.
+    GenericGate,
+}
+
+/// One row of the browser probe table.
+#[derive(Debug)]
+struct BrowserSpec {
+    /// Lowercased fragment matched against running process names.
+    fragment: &'static str,
+    /// AppleScript application name, also the key of the probe backoff map.
+    app_name: &'static str,
+    kind: BrowserKind,
+    /// Require a full process-name match instead of a substring hit. The probe
+    /// launches the app when it is not already running, so a substring hit on
+    /// an unrelated background process would open a browser the user never
+    /// started.
+    exact: bool,
+    attribution: BrowserAttribution,
+}
+
+const BROWSERS: &[BrowserSpec] = &[
+    BrowserSpec {
+        fragment: "google chrome",
+        app_name: "Google Chrome",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::ProcessFamily {
+            root: "Google Chrome",
+        },
+    },
+    // Canary, Chromium and Arc stay on the generic gate until each root has
+    // been dogfooded on a real call (#244). Enabling one is a table edit plus
+    // a snapshot test.
+    BrowserSpec {
+        fragment: "chrome canary",
+        app_name: "Google Chrome Canary",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    BrowserSpec {
+        fragment: "chromium",
+        app_name: "Chromium",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    // Arc's binary is exactly "Arc"; substring match would catch
+    // searchpartyd / searchpartyuseragent / TrialArchivingService.
+    BrowserSpec {
+        fragment: "arc",
+        app_name: "Arc",
+        kind: BrowserKind::ChromeLike,
+        exact: true,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    // Safari's binary is exactly "Safari"; substring match would catch
+    // always-running system agents (SafariBookmarksSyncAgent,
+    // SafariLaunchAgent, com.apple.Safari.History, ...), so the probe
+    // would launch Safari even when the user never opened it.
+    BrowserSpec {
+        fragment: "safari",
+        app_name: "Safari",
+        kind: BrowserKind::Safari,
+        exact: true,
+        attribution: BrowserAttribution::GenericGate,
+    },
+];
+
 /// Select the browsers whose tabs the AppleScript meeting probe may inspect,
-/// given a lowercased snapshot of running process names. Entries flagged
-/// exact must match a process name in full: the probe launches the app when
-/// it is not already running, so a substring hit on an unrelated background
-/// process would open a browser the user never started.
-fn browsers_to_probe(running_lower: &[String]) -> Vec<(&'static str, BrowserKind)> {
-    const BROWSERS: &[(&str, &str, BrowserKind, bool)] = &[
-        (
-            "google chrome",
-            "Google Chrome",
-            BrowserKind::ChromeLike,
-            false,
-        ),
-        (
-            "chrome canary",
-            "Google Chrome Canary",
-            BrowserKind::ChromeLike,
-            false,
-        ),
-        ("chromium", "Chromium", BrowserKind::ChromeLike, false),
-        // Arc's binary is exactly "Arc"; substring match would catch
-        // searchpartyd / searchpartyuseragent / TrialArchivingService.
-        ("arc", "Arc", BrowserKind::ChromeLike, true),
-        // Safari's binary is exactly "Safari"; substring match would catch
-        // always-running system agents (SafariBookmarksSyncAgent,
-        // SafariLaunchAgent, com.apple.Safari.History, ...), so the probe
-        // would launch Safari even when the user never opened it.
-        ("safari", "Safari", BrowserKind::Safari, true),
-    ];
+/// given a lowercased snapshot of running process names.
+fn browsers_to_probe(running_lower: &[String]) -> Vec<&'static BrowserSpec> {
     BROWSERS
         .iter()
-        .filter(|(fragment, _, _, exact)| {
-            if *exact {
-                running_lower.iter().any(|p| p == fragment)
+        .filter(|spec| {
+            if spec.exact {
+                running_lower.iter().any(|p| p == spec.fragment)
             } else {
-                running_lower.iter().any(|p| p.contains(fragment))
+                running_lower.iter().any(|p| p.contains(spec.fragment))
             }
         })
-        .map(|(_, app_name, kind, _)| (*app_name, *kind))
         .collect()
 }
 
@@ -1588,6 +1768,20 @@ mod tests {
         }
     }
 
+    fn browser_spec(app_name: &str) -> &'static BrowserSpec {
+        BROWSERS
+            .iter()
+            .find(|spec| spec.app_name == app_name)
+            .unwrap_or_else(|| panic!("no browser spec named {app_name}"))
+    }
+
+    fn probe_names(running: &[String]) -> Vec<(&'static str, BrowserKind)> {
+        browsers_to_probe(running)
+            .into_iter()
+            .map(|spec| (spec.app_name, spec.kind))
+            .collect()
+    }
+
     #[test]
     fn safari_background_agents_alone_do_not_select_safari_for_probe() {
         // macOS runs Safari-named agents even when Safari itself is closed;
@@ -1608,10 +1802,7 @@ mod tests {
     #[test]
     fn safari_app_process_selects_safari_for_probe() {
         let running = vec!["safari".to_string()];
-        assert_eq!(
-            browsers_to_probe(&running),
-            vec![("Safari", BrowserKind::Safari)]
-        );
+        assert_eq!(probe_names(&running), vec![("Safari", BrowserKind::Safari)]);
     }
 
     #[test]
@@ -1620,7 +1811,7 @@ mod tests {
         // match is intentional for the ChromeLike entries.
         let running = vec!["google chrome helper (renderer)".to_string()];
         assert_eq!(
-            browsers_to_probe(&running),
+            probe_names(&running),
             vec![("Google Chrome", BrowserKind::ChromeLike)]
         );
     }
@@ -1676,7 +1867,7 @@ mod tests {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -1755,15 +1946,19 @@ mod tests {
         remember_sticky(
             &detector.recent_google_meet_until,
             MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
-        assert!(sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
 
         {
             let mut sticky = detector.recent_google_meet_until.lock().unwrap();
-            *sticky = Some(Instant::now() - Duration::from_secs(1));
+            *sticky = Some(BrowserSticky {
+                until: Instant::now() - Duration::from_secs(1),
+                browser: browser_spec("Google Chrome"),
+            });
         }
 
-        assert!(!sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_none());
     }
 
     #[test]
@@ -1821,6 +2016,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -1847,6 +2043,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -2107,6 +2304,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -2125,7 +2323,7 @@ mod tests {
             "TrialArchivingService".into(),
         ];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -2141,7 +2339,7 @@ mod tests {
         // accidentally satisfy the check on its own.
         let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoMatch
         ));
     }
@@ -2156,6 +2354,7 @@ mod tests {
         remember_sticky(
             &detector.recent_google_meet_until,
             MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
         let running = ["Safari".into()];
         let config = detector.current_config();
@@ -2176,7 +2375,7 @@ mod tests {
         });
 
         assert!(!native_detected);
-        assert!(sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
     }
 
     #[test]
@@ -2561,14 +2760,272 @@ mod tests {
         remember_sticky(
             &detector.recent_teams_web_until,
             MeetingProvider::TeamsWeb.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
-        assert!(sticky_alive(&detector.recent_teams_web_until));
+        assert!(sticky_alive(&detector.recent_teams_web_until).is_some());
 
         {
             let mut sticky = detector.recent_teams_web_until.lock().unwrap();
-            *sticky = Some(Instant::now() - Duration::from_secs(1));
+            *sticky = Some(BrowserSticky {
+                until: Instant::now() - Duration::from_secs(1),
+                browser: browser_spec("Google Chrome"),
+            });
         }
 
-        assert!(!sticky_alive(&detector.recent_teams_web_until));
+        assert!(sticky_alive(&detector.recent_teams_web_until).is_none());
+    }
+
+    // --- #244: browser-tab hits are gated on the browser that produced them ---
+
+    fn process(pid: u32, ppid: u32, name: &str) -> RunningProcess {
+        RunningProcess {
+            pid,
+            ppid,
+            name: name.into(),
+        }
+    }
+
+    /// Chrome with its sandboxed Audio Service child (the pid CoreAudio
+    /// attributes the capture to) plus a dictation tool.
+    fn chrome_and_dictation_tool() -> Vec<RunningProcess> {
+        vec![
+            process(100, 1, "Google Chrome"),
+            process(110, 100, "Google Chrome Helper"),
+            process(200, 1, "superwhisper"),
+        ]
+    }
+
+    fn meet_hit_from(
+        browser: &'static BrowserSpec,
+    ) -> impl FnMut(&CallDetector, &[String], bool, bool) -> Option<BrowserMeetProbe> {
+        move |_detector, _running, _want_meet, _want_teams| {
+            Some(BrowserMeetProbe::Detected {
+                provider: MeetingProvider::GoogleMeet,
+                browser,
+            })
+        }
+    }
+
+    fn no_probe(
+        _detector: &CallDetector,
+        _running: &[String],
+        _want_meet: bool,
+        _want_teams: bool,
+    ) -> Option<BrowserMeetProbe> {
+        None
+    }
+
+    #[test]
+    fn chrome_audio_service_input_with_meet_tab_detects_meet() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+        let active_input_pids = HashSet::from([110]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+        let sticky = sticky_alive(&detector.recent_google_meet_until).expect("sticky armed");
+        assert_eq!(sticky.browser.app_name, "Google Chrome");
+    }
+
+    #[test]
+    fn stale_meet_tab_with_dictation_tool_input_is_rejected_on_fresh_probe() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+        // superwhisper holds the mic; Chrome only has a leftover Meet tab.
+        let active_input_pids = HashSet::from([200]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_none());
+    }
+
+    #[test]
+    fn stale_meet_tab_with_dictation_tool_input_is_rejected_on_live_sticky() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
+        );
+        let processes = chrome_and_dictation_tool();
+        let active_input_pids = HashSet::from([200]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            no_probe,
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+        // The window is left to expire on its own; only the gate said no.
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
+    }
+
+    #[test]
+    fn arc_input_does_not_validate_a_chrome_tab_hit() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            process(100, 1, "Google Chrome"),
+            process(300, 1, "Arc"),
+            process(310, 300, "Arc Helper"),
+        ];
+        // Arc is on the call; the tab hit came from Chrome.
+        let active_input_pids = HashSet::from([310]);
+
+        let fresh = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+        assert_eq!(fresh, DetectActiveCallResult::None);
+
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
+        );
+        let sticky = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            no_probe,
+        );
+        assert_eq!(sticky, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn meet_tab_hit_falls_back_to_generic_gate_without_attribution() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            None,
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
+    fn safari_webkit_input_follows_generic_gate() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        // WebKit content processes are reparented to launchd, so pid/ppid
+        // cannot tie the capture back to Safari; the generic gate applies.
+        let processes = vec![
+            process(500, 1, "Safari"),
+            process(501, 1, "com.apple.WebKit.WebContent"),
+        ];
+        let active_input_pids = HashSet::from([501]);
+
+        let live = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Safari")),
+        );
+        assert_eq!(live, detected_for(MeetingProvider::GoogleMeet));
+        assert_eq!(
+            sticky_alive(&detector.recent_google_meet_until)
+                .expect("sticky armed")
+                .browser
+                .app_name,
+            "Safari"
+        );
+
+        // Same sticky, mic released: the generic gate is the only gate.
+        let idle = detector.detect_active_call_from_process_snapshot(
+            &config,
+            false,
+            &processes,
+            Some(&HashSet::new()),
+            false,
+            no_probe,
+        );
+        assert_eq!(idle, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn chrome_family_root_does_not_absorb_canary() {
+        let processes = vec![
+            process(100, 1, "Google Chrome"),
+            process(400, 1, "Google Chrome Canary"),
+            process(410, 400, "Google Chrome Canary Helper"),
+        ];
+
+        assert_eq!(
+            browser_family_pids("Google Chrome", &processes),
+            HashSet::from([100])
+        );
+        assert_eq!(
+            browser_family_pids("Google Chrome Canary", &processes),
+            HashSet::from([400, 410])
+        );
+
+        // Consequence: Canary holding the mic does not validate a Chrome hit.
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([410])),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn browser_probe_consults_the_input_gate_before_querying_tabs() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let running: Vec<String> = vec!["Google Chrome".into(), "Arc".into()];
+        let offered = std::cell::RefCell::new(Vec::new());
+
+        // Rejecting every browser must keep the probe away from AppleScript
+        // (which would launch the app) while still reporting that browsers
+        // were seen.
+        let result = detector.detect_browser_meeting(&running, true, false, |spec| {
+            offered.borrow_mut().push(spec.app_name);
+            false
+        });
+
+        assert!(matches!(result, BrowserMeetProbe::NoMatch));
+        assert_eq!(offered.into_inner(), vec!["Google Chrome", "Arc"]);
     }
 }

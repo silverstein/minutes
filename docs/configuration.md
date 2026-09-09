@@ -2,6 +2,31 @@
 
 Optional — minutes works out of the box.
 
+## Meeting libraries on slow storage
+
+The MCP server and JavaScript SDK use a bounded verification deadline before returning meeting results. The standard profile allows 60 seconds. A library with thousands of small files on a spinning disk can exceed this even when its total size is small, because file seeks and reader round trips add work beyond byte throughput.
+
+Set `MINUTES_CORPUS_STORAGE_PROFILE=slow` in the environment of the MCP server or SDK process to allow up to 240 seconds. For example, add this entry to the existing MCP server configuration's `env` object, then restart the server:
+
+```json
+{
+  "MINUTES_CORPUS_STORAGE_PROFILE": "slow"
+}
+```
+
+For a direct source build in PowerShell:
+
+```powershell
+$env:MINUTES_CORPUS_STORAGE_PROFILE = "slow"
+node crates/mcp/dist/index.js
+```
+
+Use a client request timeout of at least 300 seconds for this profile, where the client supports configuring it. The verification cap does not extend a client's own timeout. A client timeout also does not guarantee the server has stopped its work; verification retains its own bounded deadline. Calls that complete sooner return immediately. Remove the setting or use `standard` to restore the 60-second profile. Other values are rejected.
+
+The slow profile changes only the time allowance. It preserves all file and memory limits, full rereads, watcher fences, and worker termination. It does not make a library that exceeds resource limits valid, guarantee completion on every disk, or change native CLI search deadlines. The separate numeric `MINUTES_CORPUS_AUTH_TIMEOUT_MS` variable remains test-harness-only and is not a production setting.
+
+## Capture and processing
+
 ```toml
 # By default: ~/.config/minutes/config.toml
 # Or: $XDG_CONFIG_HOME/minutes/config.toml when XDG_CONFIG_HOME is set

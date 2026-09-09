@@ -1,4 +1,4 @@
-use crate::transcribe::streaming_whisper_params;
+use crate::transcribe::{set_abort_callback, streaming_whisper_params};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -200,8 +200,16 @@ impl StreamingWhisper {
         let mut params = streaming_whisper_params();
         params.set_n_threads(self.n_threads);
         params.set_language(self.language.as_deref());
-        if let Some(abort_signal) = self.abort_signal.as_ref().map(Arc::clone) {
-            params.set_abort_callback_safe(move || abort_signal.load(Ordering::Relaxed));
+        // Stack-owned so it outlives `state.full`; whisper-rs's closure
+        // setter is unsound for capturing closures (see `set_abort_callback`).
+        let abort_signal = self.abort_signal.clone();
+        let abort_when_stopped = move || {
+            abort_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::Relaxed))
+        };
+        if self.abort_signal.is_some() {
+            set_abort_callback(&mut params, &abort_when_stopped);
         }
 
         let start = std::time::Instant::now();

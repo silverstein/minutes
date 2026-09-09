@@ -28,7 +28,9 @@ compile_error!("the parakeet feature requires whisper because Whisper is its run
 // Re-export from whisper-guard for public API compatibility
 pub use whisper_guard::audio::{normalize_audio, resample, strip_silence};
 #[cfg(feature = "whisper")]
-pub use whisper_guard::params::{default_whisper_params, streaming_whisper_params};
+pub use whisper_guard::params::{
+    default_whisper_params, set_abort_callback, streaming_whisper_params,
+};
 pub use whisper_guard::segments::{clean_transcript, CleanStats};
 
 /// Diagnostics from the transcription filtering pipeline.

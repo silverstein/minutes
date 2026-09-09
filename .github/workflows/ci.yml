@@ -180,6 +180,15 @@ jobs:
         # on non-macOS until release.
         run: cargo build -p minutes-core --no-default-features --features parakeet
 
+      - name: Test whisper-guard with the whisper feature (abort callback shim)
+        # The only tests that exercise whisper_guard::params::set_abort_callback.
+        # Every other test job runs --no-default-features, which is how the
+        # whisper-rs set_abort_callback_safe regression (every live sidecar
+        # pass aborted, v0.25.4 through v0.26.1) shipped through three
+        # releases unseen. whisper-rs is already compiled by the parakeet
+        # build above, so this adds little time.
+        run: cargo test -p whisper-guard --features whisper --lib -- --test-threads=1
+
       - name: Ensure cmake for sherpa-rs (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 20

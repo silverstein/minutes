@@ -14004,8 +14004,13 @@ mod tests {
         assert!(html.contains("let recallTerminalInputReliable = true;"));
         assert!(html.contains("recallTerminalInputReliable = false;"));
         assert!(html.contains(
-            "pendingRecallTerminalMeetingPath && (!question || !recallTerminalInputReliable)"
+            "recallTerminalContextPending && (!question || !recallTerminalInputReliable)"
         ));
+        // General mode has no meeting path but still owes its first question
+        // the same fail-closed input checks before any context is written.
+        assert!(
+            html.contains("await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath });")
+        );
         assert!(html.contains("No meeting context was read"));
     }
 

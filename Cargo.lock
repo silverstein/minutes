@@ -907,9 +907,9 @@ dependencies = [
 
 [[package]]
 name = "cidre"
-version = "0.20.2"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61b7cf71a45138ed8b12d3c1b3e9bf67c27b16ef46d982acdacb5d5afa810e4d"
+checksum = "31470ed932ba5f701eff2d33b972d93ff359d1e4b68b05e76144f5db371beecd"
 dependencies = [
  "cc",
  "cidre-macros",

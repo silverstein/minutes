@@ -1377,6 +1377,108 @@ fn transcribe_whisper_samples(
 ///
 /// When `force_disable_vad` is true, Silero VAD is not passed to whisper even if
 /// the model exists. Used for retry after VAD-enabled transcription produced a blank.
+/// Whisper made no decoding progress for this long: the pass is hung, not
+/// slow. One 30 s decode window on a CPU-only machine running large-v3
+/// finishes in a few minutes, so 20 minutes leaves a wide margin while still
+/// bounding a genuine hang.
+#[cfg(feature = "whisper")]
+const WHISPER_PROGRESS_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Stall detector for a batch whisper pass.
+///
+/// The progress callback stamps the elapsed time on every completed decode
+/// window; the abort callback aborts once that stamp is older than
+/// [`WHISPER_PROGRESS_STALL_LIMIT`]. Both callbacks read shared atomics, so
+/// the watchdog itself lives on the caller's stack for the duration of
+/// `WhisperState::full` (required by `set_abort_callback`).
+#[cfg(feature = "whisper")]
+struct WhisperWatchdog {
+    started: std::time::Instant,
+    last_progress_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    warned: std::sync::atomic::AtomicBool,
+}
+
+/// The half of the watchdog handed to whisper's progress callback, which
+/// whisper-rs requires to be `'static`.
+#[cfg(feature = "whisper")]
+struct WhisperProgressMarker {
+    started: std::time::Instant,
+    last_progress_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(feature = "whisper")]
+impl WhisperProgressMarker {
+    fn mark(&self) {
+        self.last_progress_ms.store(
+            self.started.elapsed().as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(feature = "whisper")]
+impl WhisperWatchdog {
+    fn start() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            last_progress_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            warned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn progress_marker(&self) -> WhisperProgressMarker {
+        WhisperProgressMarker {
+            started: self.started,
+            last_progress_ms: std::sync::Arc::clone(&self.last_progress_ms),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    fn since_progress(&self) -> std::time::Duration {
+        let last = std::time::Duration::from_millis(
+            self.last_progress_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        self.elapsed().saturating_sub(last)
+    }
+
+    /// Polled by ggml from whisper's compute threads; `true` aborts the pass.
+    fn should_abort(&self) -> bool {
+        let stalled = whisper_pass_stalled(self.since_progress(), WHISPER_PROGRESS_STALL_LIMIT);
+        if stalled && !self.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            let running_secs = self.elapsed().as_secs();
+            tracing::warn!(
+                stall_limit_secs = WHISPER_PROGRESS_STALL_LIMIT.as_secs(),
+                running_secs,
+                "whisper made no decoding progress; aborting the pass"
+            );
+            // The desktop app has no tracing subscriber; persist the abort.
+            crate::logging::append_log(&serde_json::json!({
+                "ts": chrono::Local::now().to_rfc3339(),
+                "level": "warn",
+                "step": "whisper_batch_stalled",
+                "file": "",
+                "message": "whisper made no decoding progress; aborting the transcription pass",
+                "extra": {
+                    "stall_limit_secs": WHISPER_PROGRESS_STALL_LIMIT.as_secs(),
+                    "running_secs": running_secs,
+                },
+            }))
+            .ok();
+        }
+        stalled
+    }
+}
+
+/// Pure decision so the stall policy is testable without a model.
+#[cfg(feature = "whisper")]
+fn whisper_pass_stalled(since_progress: std::time::Duration, limit: std::time::Duration) -> bool {
+    since_progress >= limit
+}
+
 #[cfg(feature = "whisper")]
 fn transcribe_with_whisper(
     ctx: &whisper_rs::WhisperContext,
@@ -1421,35 +1523,35 @@ fn transcribe_with_whisper(
         params.set_initial_prompt(&initial_prompt);
     }
 
-    // Abort callback: prevents infinite hangs on large models with problematic audio.
-    // Timeout: base 5 min + 3x audio length, capped at 1 hour.
-    // The small model transcribes ~15-30x faster than realtime on Apple Silicon,
-    // so 3x is generous. The old 10x formula gave 7-hour timeouts for 43-min recordings.
+    // Watchdog: abort only when whisper stops making progress, never merely
+    // because the machine is slow. The previous deadline (5 min + 3x audio,
+    // capped at 1 h) was installed through whisper-rs's unsound
+    // `set_abort_callback_safe` and never fired (see `set_abort_callback`);
+    // wiring it correctly would have started aborting long recordings on
+    // CPU-only devices with large models, which is slow, not hung. A pass
+    // that reports no decoding progress for `WHISPER_PROGRESS_STALL_LIMIT`
+    // is hung.
     let audio_duration_secs = samples.len() as f64 / 16000.0;
-    let timeout_secs = (300.0 + (audio_duration_secs * 3.0)).min(3600.0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_secs);
-    params.set_abort_callback_safe(move || {
-        let exceeded = std::time::Instant::now() > deadline;
-        if exceeded {
-            tracing::warn!(
-                timeout_secs = format!("{:.0}", timeout_secs),
-                "whisper transcription timed out — aborting"
-            );
-        }
-        exceeded
-    });
+    let watchdog = WhisperWatchdog::start();
+    let progress_marker = watchdog.progress_marker();
+    params.set_progress_callback_safe(move |_progress: i32| progress_marker.mark());
+    let abort_when_stalled = || watchdog.should_abort();
+    set_abort_callback(&mut params, &abort_when_stalled);
 
     crate::process_trace::stage_with_extra(
         "whisper.full.start",
-        serde_json::json!({"timeout_secs": timeout_secs}),
+        serde_json::json!({"stall_limit_secs": WHISPER_PROGRESS_STALL_LIMIT.as_secs()}),
     );
     state.full(params, samples).map_err(|e| {
         let msg = format!("{}", e);
         if msg.contains("abort") {
             TranscribeError::TranscriptionFailed(format!(
-                "transcription timed out after {:.0}s (audio was {:.0}s). \
+                "transcription stalled: whisper made no decoding progress for {}s \
+                     (audio was {:.0}s, pass ran for {:.0}s). \
                      Try a smaller model or ensure Silero VAD is installed: minutes setup",
-                timeout_secs, audio_duration_secs
+                WHISPER_PROGRESS_STALL_LIMIT.as_secs(),
+                audio_duration_secs,
+                watchdog.elapsed().as_secs_f64()
             ))
         } else {
             TranscribeError::TranscriptionFailed(msg)
@@ -4056,6 +4158,33 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn whisper_pass_stalls_only_after_the_progress_limit() {
+        use std::time::Duration;
+        let limit = WHISPER_PROGRESS_STALL_LIMIT;
+        assert!(!whisper_pass_stalled(Duration::ZERO, limit));
+        assert!(!whisper_pass_stalled(limit - Duration::from_secs(1), limit));
+        assert!(whisper_pass_stalled(limit, limit));
+        assert!(whisper_pass_stalled(limit * 3, limit));
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn watchdog_measures_from_the_last_progress_mark_not_the_start() {
+        let watchdog = WhisperWatchdog::start();
+        assert!(!watchdog.should_abort(), "a fresh pass is not stalled");
+
+        // A progress mark moves the reference point forward: the stall clock
+        // restarts at the mark rather than at the beginning of the pass.
+        let marker = watchdog.progress_marker();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        marker.mark();
+        assert!(watchdog.since_progress() < watchdog.elapsed());
+        assert!(watchdog.since_progress() < std::time::Duration::from_millis(20));
+        assert!(!watchdog.should_abort());
+    }
 
     #[cfg(feature = "parakeet")]
     #[test]

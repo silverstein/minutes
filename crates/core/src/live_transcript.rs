@@ -313,6 +313,11 @@ struct LiveTranscriptWriter {
     wav_failed: bool,
     pending_utterances: u64,
     dropped_utterances: u64,
+    /// Milliseconds of VAD-detected speech the session has seen so far, as
+    /// reported by the audio loop, and the value it had at the last written
+    /// line. Their difference is how much speech produced nothing.
+    speech_ms_total: u64,
+    speech_ms_at_last_line: u64,
     diagnostic: Option<String>,
     last_status_write: Instant,
     /// Apple Speech shadow measurement, `None` unless the session opted in
@@ -350,6 +355,10 @@ const SHADOW_MAX_SAMPLES: usize = 16_000 * 120;
 pub enum LiveStatusState {
     Starting,
     Healthy,
+    /// The session is alive and audio is flowing, but the engine has not
+    /// produced a line for an implausibly long stretch of detected speech.
+    /// Live reads still work; the diagnostic says what stalled.
+    Degraded,
     Failed,
     Stopped,
 }
@@ -377,6 +386,12 @@ pub struct LiveStatus {
 }
 
 const SIDECAR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+/// Detected speech (not wall-clock time) without a single transcribed line
+/// before the heartbeat reports `degraded`. Speech-based so a quiet waiting
+/// room never trips it; 90 s is three max-length utterances, well past any
+/// model load. A backlog (`pending_utterances > 0`) is a slow engine, not a
+/// stalled one, and keeps reporting `healthy` with its own diagnostic.
+const SIDECAR_STALL_SPEECH_MS: u64 = 90_000;
 const SIDECAR_HEALTH_STALE_AFTER_SECS: i64 = 3;
 const SIDECAR_STARTUP_TIMEOUT_SECS: i64 = 10;
 
@@ -435,6 +450,8 @@ impl LiveTranscriptWriter {
             wav_failed: false,
             pending_utterances: 0,
             dropped_utterances: 0,
+            speech_ms_total: 0,
+            speech_ms_at_last_line: 0,
             diagnostic: None,
             last_status_write: Instant::now()
                 .checked_sub(SIDECAR_HEARTBEAT_INTERVAL)
@@ -597,6 +614,26 @@ impl LiveTranscriptWriter {
         self.diagnostic = diagnostic;
     }
 
+    /// Record how much speech the audio loop has detected so far.
+    fn set_speech_stats(&mut self, speech_ms_total: u64) {
+        self.speech_ms_total = speech_ms_total;
+    }
+
+    /// Speech has kept arriving but nothing has been written: the engine is
+    /// failing silently rather than merely running behind.
+    fn stall_diagnostic(&self) -> Option<String> {
+        let speech_ms = self
+            .speech_ms_total
+            .saturating_sub(self.speech_ms_at_last_line);
+        (self.pending_utterances == 0 && speech_ms >= SIDECAR_STALL_SPEECH_MS).then(|| {
+            format!(
+                "live transcription stalled: {}s of speech detected since the last transcribed line ({} line(s) so far); the transcription engine is not producing output",
+                speech_ms / 1000,
+                self.line_count
+            )
+        })
+    }
+
     fn mark_healthy(&mut self) {
         self.write_status(LiveStatusState::Healthy, 0, None);
     }
@@ -607,7 +644,12 @@ impl LiveTranscriptWriter {
 
     fn maybe_write_heartbeat(&mut self) {
         if self.last_status_write.elapsed() >= SIDECAR_HEARTBEAT_INTERVAL {
-            self.write_status(LiveStatusState::Healthy, 0, None);
+            match self.stall_diagnostic() {
+                Some(diagnostic) => {
+                    self.write_status(LiveStatusState::Degraded, 0, Some(&diagnostic))
+                }
+                None => self.write_status(LiveStatusState::Healthy, 0, None),
+            }
         }
     }
 
@@ -622,6 +664,7 @@ impl LiveTranscriptWriter {
         }
 
         self.line_count += 1;
+        self.speech_ms_at_last_line = self.speech_ms_total;
         let offset = self.start_time.elapsed();
         let line = TranscriptLine {
             line: self.line_count,
@@ -1037,6 +1080,7 @@ fn run_inner(
 
     let mut was_speaking = false;
     let mut utterance_samples: usize = 0;
+    let mut speech_samples_total: usize = 0;
     let max_utterance_secs = config.live_transcript.max_utterance_secs.max(5);
     let max_utterance_samples = (max_utterance_secs as usize).saturating_mul(16000);
 
@@ -1100,6 +1144,7 @@ fn run_inner(
     tracing::info!("live transcript session started");
 
     loop {
+        writer.set_speech_stats(samples_to_ms(speech_samples_total));
         writer.maybe_write_heartbeat();
         // Check stop flag
         if stop_flag.load(Ordering::Relaxed) {
@@ -1353,6 +1398,7 @@ fn run_inner(
         if vad_result.speaking {
             was_speaking = true;
             utterance_samples += chunk.samples.len();
+            speech_samples_total += chunk.samples.len();
             if let Some(publisher) = partial_publisher.as_mut() {
                 publisher.begin_utterance(audio_received_at);
             }
@@ -3047,6 +3093,7 @@ fn run_sidecar_inner_mpsc(
     };
 
     let mut samples_received = 0usize;
+    let mut speech_samples_total = 0usize;
     let mut draft_gate = partial_publisher
         .as_ref()
         .map(|_| RecordingDraftGate::new(config));
@@ -3087,6 +3134,7 @@ fn run_sidecar_inner_mpsc(
                         queue_counters.pending.load(Ordering::Relaxed),
                         queue_counters.dropped.load(Ordering::Relaxed),
                     );
+                    w.set_speech_stats(samples_to_ms(speech_samples_total));
                     w.maybe_write_heartbeat();
                 }
             }
@@ -3147,6 +3195,7 @@ fn run_sidecar_inner_mpsc(
 
         if vad_result.speaking {
             was_speaking = true;
+            speech_samples_total += samples.len();
             utterance.extend_from_slice(&samples);
 
             if utterance.len() >= max_utterance_samples {
@@ -3327,13 +3376,20 @@ fn derive_session_status(
         (false, None)
     };
     let diagnostic = if standalone_active {
-        live_status.as_ref().and_then(|status| {
-            (status.state == LiveStatusState::Failed).then(|| {
+        live_status.as_ref().and_then(|status| match status.state {
+            LiveStatusState::Failed => Some(
                 status
                     .diagnostic
                     .clone()
-                    .unwrap_or_else(|| "live transcript failed".into())
-            })
+                    .unwrap_or_else(|| "live transcript failed".into()),
+            ),
+            LiveStatusState::Degraded => Some(
+                status
+                    .diagnostic
+                    .clone()
+                    .unwrap_or_else(|| "live transcription stalled".into()),
+            ),
+            _ => None,
         })
     } else {
         sidecar_diagnostic
@@ -3437,10 +3493,23 @@ fn evaluate_recording_sidecar_status(
     };
 
     match status.state {
-        LiveStatusState::Healthy => {
+        LiveStatusState::Healthy | LiveStatusState::Degraded => {
             let age = (now - status.updated_at).num_seconds().max(0);
             if age > SIDECAR_HEALTH_STALE_AFTER_SECS {
                 (false, Some("sidecar heartbeat stale".into()))
+            } else if status.state == LiveStatusState::Degraded {
+                // Audio still flows and existing lines stay readable, so the
+                // session is active; the diagnostic says the engine stalled.
+                (
+                    true,
+                    Some(
+                        status
+                            .diagnostic
+                            .clone()
+                            .filter(|msg| !msg.trim().is_empty())
+                            .unwrap_or_else(|| "live transcription stalled".into()),
+                    ),
+                )
             } else {
                 (true, None)
             }
@@ -3812,6 +3881,59 @@ mod tests {
             assert_eq!(status.pending_utterances, None);
             assert_eq!(status.dropped_utterances, None);
             assert_eq!(status.diagnostic, None);
+        });
+    }
+
+    #[test]
+    fn status_file_reports_degraded_when_speech_outpaces_lines() {
+        with_temp_home(|| {
+            let config = Config::default();
+            let mut writer =
+                LiveTranscriptWriter::new(&config, None, TranscriptSource::RecordingSidecar)
+                    .unwrap();
+            let force_heartbeat = |writer: &mut LiveTranscriptWriter| {
+                writer.last_status_write = Instant::now() - SIDECAR_HEARTBEAT_INTERVAL * 2;
+                writer.maybe_write_heartbeat();
+                read_live_status(&pid::live_transcript_status_path()).unwrap()
+            };
+
+            // Silence, or speech below the threshold, is healthy.
+            writer.set_speech_stats(SIDECAR_STALL_SPEECH_MS - 1);
+            let status = force_heartbeat(&mut writer);
+            assert_eq!(status.state, LiveStatusState::Healthy);
+            assert_eq!(status.diagnostic, None);
+
+            // Enough speech with nothing written is a stalled engine.
+            writer.set_speech_stats(SIDECAR_STALL_SPEECH_MS);
+            let status = force_heartbeat(&mut writer);
+            assert_eq!(status.state, LiveStatusState::Degraded);
+            assert!(status
+                .diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("live transcription stalled: 90s of speech"));
+
+            // A backlog means the engine is slow, not stalled.
+            writer.set_backlog_stats(1, 0);
+            let status = force_heartbeat(&mut writer);
+            assert_eq!(status.state, LiveStatusState::Healthy);
+            writer.set_backlog_stats(0, 0);
+
+            // A written line resets the stall window.
+            assert!(writer.write_utterance("finally some text", 1.0));
+            let status = force_heartbeat(&mut writer);
+            assert_eq!(status.state, LiveStatusState::Healthy);
+            assert_eq!(status.diagnostic, None);
+
+            // ...and the next stretch of unproductive speech trips it again.
+            writer.set_speech_stats(SIDECAR_STALL_SPEECH_MS * 2);
+            let status = force_heartbeat(&mut writer);
+            assert_eq!(status.state, LiveStatusState::Degraded);
+            assert!(status
+                .diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("(1 line(s) so far)"));
         });
     }
 
@@ -4812,6 +4934,33 @@ mod tests {
         assert_eq!(status.pid, Some(std::process::id()));
         assert_eq!(status.line_count, 3);
         assert_eq!(status.diagnostic, None);
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn sidecar_stays_active_but_surfaces_the_diagnostic_when_degraded() {
+        let dir = tempdir().unwrap();
+        let status_path = dir.path().join("live-status.json");
+        let mut live_status = live_status_with_state(LiveStatusState::Degraded);
+        live_status.diagnostic = Some("live transcription stalled: 120s of speech".into());
+        std::fs::write(&status_path, serde_json::to_string(&live_status).unwrap()).unwrap();
+
+        let status = derive_session_status(
+            pid::PidFileState::Inactive,
+            Some(std::process::id()),
+            &status_path,
+            &dir.path().join("live.jsonl"),
+        );
+
+        assert!(
+            status.active,
+            "audio still flows; existing lines stay readable"
+        );
+        assert_eq!(status.source, Some(TranscriptSource::RecordingSidecar));
+        assert_eq!(
+            status.diagnostic.as_deref(),
+            Some("live transcription stalled: 120s of speech")
+        );
     }
 
     #[cfg(all(feature = "whisper", feature = "streaming"))]

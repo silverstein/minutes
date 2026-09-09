@@ -9584,6 +9584,9 @@ fn sync_workspace_for_mode(
 ) -> Result<(), String> {
     // write_assistant_context preserves live transcript markers if present (U2/T3)
     crate::context::write_assistant_context(workspace, config)?;
+    // The general Terminal context is materialized per question, never
+    // carried across mode changes.
+    crate::context::clear_general_assistant_context(workspace)?;
 
     match mode {
         "assistant" => crate::context::clear_active_meeting_context(workspace),
@@ -12168,13 +12171,15 @@ pub fn cmd_recall_chat_clear(state: tauri::State<'_, AppState>) {
     h.clear();
 }
 
-/// Materialize the selected meeting only at the terminal's first real user
-/// question. The PTY must already exist, and Claude subscription auth is
-/// checked before the meeting file is read. Slash commands bypass this command
-/// in the frontend, so `/login` never causes meeting context to be collected.
+/// Materialize the terminal's context only at its first real user question:
+/// the selected meeting when one was chosen, otherwise the general
+/// meeting-directory context. The PTY must already exist, and Claude
+/// subscription auth is checked before anything under the meeting directory
+/// is read. Slash commands bypass this command in the frontend, so `/login`
+/// never causes meeting context to be collected.
 fn prepare_recall_terminal_meeting(
     pty_manager: &Arc<Mutex<crate::pty::PtyManager>>,
-    meeting_path: String,
+    meeting_path: Option<String>,
 ) -> Result<(), String> {
     let (agent_command, agent_cwd) = {
         let manager = pty_manager
@@ -12210,16 +12215,38 @@ fn prepare_recall_terminal_meeting(
     }
 
     let config = Config::load_strict()?;
-    let meeting = PathBuf::from(&meeting_path);
-    minutes_core::notes::validate_meeting_path(&meeting, &config.output_dir)?;
     let workspace = crate::context::workspace_dir();
-    crate::context::write_active_meeting_context(&workspace, &meeting, &config)
+    materialize_recall_terminal_context(&workspace, &config, meeting_path.as_deref())
+}
+
+/// Write exactly one of the two Terminal context files and clear the other, so
+/// a focus left by an earlier session cannot leak into this question. Without
+/// a selected meeting the session used to get nothing at all, and the
+/// instruction stub then had the assistant announce a missing
+/// `CURRENT_MEETING.md` on every general question.
+fn materialize_recall_terminal_context(
+    workspace: &Path,
+    config: &Config,
+    meeting_path: Option<&str>,
+) -> Result<(), String> {
+    match meeting_path {
+        Some(path) => {
+            let meeting = PathBuf::from(path);
+            minutes_core::notes::validate_meeting_path(&meeting, &config.output_dir)?;
+            crate::context::clear_general_assistant_context(workspace)?;
+            crate::context::write_active_meeting_context(workspace, &meeting, config)
+        }
+        None => {
+            crate::context::clear_active_meeting_context(workspace)?;
+            crate::context::write_general_assistant_context(workspace, config)
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn cmd_prepare_recall_terminal_meeting(
     state: tauri::State<'_, AppState>,
-    meeting_path: String,
+    meeting_path: Option<String>,
 ) -> Result<(), String> {
     let pty_manager = state.pty_manager.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -15429,15 +15456,57 @@ mod tests {
         )
         .unwrap();
 
+        std::fs::write(
+            workspace
+                .path()
+                .join(crate::context::ASSISTANT_CONTEXT_FILE),
+            "stale general context",
+        )
+        .unwrap();
+
         sync_workspace_for_mode(workspace.path(), &Config::default(), "deferred", None).unwrap();
 
         assert!(!workspace
             .path()
             .join(crate::context::ACTIVE_MEETING_FILE)
             .exists());
+        assert!(!workspace
+            .path()
+            .join(crate::context::ASSISTANT_CONTEXT_FILE)
+            .exists());
         let instructions = std::fs::read_to_string(workspace.path().join("CLAUDE.md")).unwrap();
         assert!(instructions.contains("No meeting context has been loaded yet"));
         assert!(!instructions.contains("stale private context"));
+    }
+
+    #[test]
+    fn general_terminal_question_materializes_the_meeting_directory_not_a_meeting() {
+        let workspace = TempDir::new().unwrap();
+        let corpus = TempDir::new().unwrap();
+        let config = Config {
+            output_dir: corpus.path().to_path_buf(),
+            ..Config::default()
+        };
+        std::fs::write(
+            workspace.path().join(crate::context::ACTIVE_MEETING_FILE),
+            "stale private context",
+        )
+        .unwrap();
+
+        materialize_recall_terminal_context(workspace.path(), &config, None).unwrap();
+
+        assert!(!workspace
+            .path()
+            .join(crate::context::ACTIVE_MEETING_FILE)
+            .exists());
+        let general = std::fs::read_to_string(
+            workspace
+                .path()
+                .join(crate::context::ASSISTANT_CONTEXT_FILE),
+        )
+        .unwrap();
+        assert!(general.contains("## Meeting Directory"));
+        assert!(!general.contains("stale private context"));
     }
 
     #[test]

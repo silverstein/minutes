@@ -5,6 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const ACTIVE_MEETING_FILE: &str = "CURRENT_MEETING.md";
+/// General meeting-directory context for a Terminal session that opened
+/// without a selected meeting. Written only after the provider is verified
+/// and the user submits a real question, like `CURRENT_MEETING.md`.
+pub const ASSISTANT_CONTEXT_FILE: &str = "ASSISTANT_CONTEXT.md";
 pub const ACTIVE_ARTIFACT_FILE: &str = "CURRENT_ARTIFACT.md";
 pub const ASSISTANT_INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 pub(crate) const LIVE_TRANSCRIPT_GUIDANCE: &str = include_str!("live_transcript_guidance.md");
@@ -579,8 +583,11 @@ pub fn write_deferred_assistant_context(workspace: &Path) -> Result<(), String> 
 You are running inside Minutes Recall. No meeting context has been loaded yet.\n\n\
 ## Deferred meeting context\n\n\
 Before answering every user question, check whether `{ACTIVE_MEETING_FILE}` exists in this directory. \
-If it exists, read it first and treat it as the current stored meeting focus. If it does not exist and \
-there is no `Live Transcript Active` section below, explain that Minutes has not shared stored meeting \
+If it exists, read it first and treat it as the current stored meeting focus. If it does not exist, check \
+whether `{ASSISTANT_CONTEXT_FILE}` exists: that is the general meeting-directory context Minutes writes after \
+verifying the provider, so read it and work in general assistant mode across all meetings without \
+announcing that no meeting is selected. Only when neither file exists, there is no `Live Transcript Active` \
+section below, and the question depends on stored meetings, say that Minutes has not shared meeting \
 context with this session yet.\n\n\
 `{ACTIVE_MEETING_FILE}` gates stored meeting context, not an active live transcript. If a \
 `Live Transcript Active` section exists and the user explicitly asks about the current call, use one \
@@ -639,6 +646,23 @@ pub fn write_active_artifact_context(workspace: &Path, artifact_path: &Path) -> 
     write_atomic(&workspace.join(ACTIVE_ARTIFACT_FILE), &md)
 }
 
+/// Write the general meeting-directory context for a Terminal session that has
+/// no selected meeting. Same gate as `write_active_meeting_context`: the caller
+/// has verified the provider and the user has submitted a real question.
+pub fn write_general_assistant_context(workspace: &Path, config: &Config) -> Result<(), String> {
+    let md = generate_assistant_context(config)?;
+    write_atomic(&workspace.join(ASSISTANT_CONTEXT_FILE), &md)
+}
+
+pub fn clear_general_assistant_context(workspace: &Path) -> Result<(), String> {
+    let path = workspace.join(ASSISTANT_CONTEXT_FILE);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to clear general assistant context: {}", e))?;
+    }
+    Ok(())
+}
+
 pub fn clear_active_meeting_context(workspace: &Path) -> Result<(), String> {
     let active_path = workspace.join(ACTIVE_MEETING_FILE);
     if active_path.exists() {
@@ -661,6 +685,7 @@ pub fn clear_active_artifact_context(workspace: &Path) -> Result<(), String> {
 pub fn cleanup_stale_workspaces() {
     let workspace = workspace_dir();
     clear_active_meeting_context(&workspace).ok();
+    clear_general_assistant_context(&workspace).ok();
     clear_active_artifact_context(&workspace).ok();
 
     if let Ok(entries) = std::fs::read_dir(&workspace) {
@@ -756,6 +781,8 @@ mod tests {
             let content = std::fs::read_to_string(workspace.path().join(file_name)).unwrap();
             assert!(content.contains(ACTIVE_MEETING_FILE));
             assert!(content.contains("No meeting context has been loaded yet"));
+            assert!(content.contains(ASSISTANT_CONTEXT_FILE));
+            assert!(content.contains("without announcing that no meeting is selected"));
             assert!(content.contains("gates stored meeting context, not an active live transcript"));
             assert!(content.contains("it does not mean the live transcript is unavailable"));
             assert!(content.contains("/login"));
@@ -763,6 +790,23 @@ mod tests {
             assert!(!content.contains("## Recent Meetings"));
             assert!(!content.contains("## Open Action Items"));
         }
+    }
+
+    #[test]
+    fn general_assistant_context_is_written_on_request_and_cleared() {
+        let (_corpus, config) = test_config();
+        let workspace = tempfile::tempdir().unwrap();
+
+        write_general_assistant_context(workspace.path(), &config).unwrap();
+        let path = workspace.path().join(ASSISTANT_CONTEXT_FILE);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("## Meeting Directory"));
+        assert!(content.contains(&config.output_dir.display().to_string()));
+
+        clear_general_assistant_context(workspace.path()).unwrap();
+        assert!(!path.exists());
+        // Clearing an absent file is not an error.
+        clear_general_assistant_context(workspace.path()).unwrap();
     }
 
     #[test]

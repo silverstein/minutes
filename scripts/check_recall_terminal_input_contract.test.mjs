@@ -21,10 +21,11 @@ function extractFunction(name) {
   throw new Error(`unterminated ${name} in ${PANEL}`);
 }
 
-function createHarness() {
+function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
   const source = `
     (() => {
-      let pendingRecallTerminalMeetingPath = '/meetings/private.md';
+      let pendingRecallTerminalMeetingPath = ${JSON.stringify(meetingPath)};
+      let recallTerminalContextPending = true;
       let recallTerminalInputDraft = '';
       let recallTerminalInputReliable = true;
       const SESSION_ID = 'recall';
@@ -51,6 +52,7 @@ function createHarness() {
         send: forwardRecallTerminalData,
         state: () => ({
           pending: pendingRecallTerminalMeetingPath,
+          contextPending: recallTerminalContextPending,
           draft: recallTerminalInputDraft,
           reliable: recallTerminalInputReliable,
           calls: structuredClone(calls),
@@ -96,6 +98,31 @@ test("the first plain question prepares the meeting before Return", async () => 
     ["cmd_pty_input", "cmd_prepare_recall_terminal_meeting", "cmd_pty_input"],
   );
   assert.equal(state.calls[2].args.data, "\r");
+});
+
+test("a general question with no selected meeting prepares the meeting directory once", async () => {
+  const harness = createHarness({ meetingPath: null });
+  await harness.send("What did I commit to this week?\r", true);
+  await harness.send("And last week?\r", true);
+
+  const state = harness.state();
+  const prepares = commands(harness, "cmd_prepare_recall_terminal_meeting");
+  assert.equal(prepares.length, 1, "the general context is materialized exactly once");
+  assert.deepEqual(prepares[0].args, { meetingPath: null });
+  assert.equal(state.pending, null);
+  assert.equal(state.contextPending, false);
+  assert.match(state.notices.at(-1).message, /meeting directory is ready/);
+  assert.equal(state.calls.at(-1).args.data, "\r");
+});
+
+test("a general question still cannot bypass the privacy checks", async () => {
+  const harness = createHarness({ meetingPath: null });
+  await harness.send("\r", true);
+
+  const state = harness.state();
+  assert.equal(commands(harness, "cmd_prepare_recall_terminal_meeting").length, 0);
+  assert.equal(state.contextPending, true);
+  assert.match(state.notices.at(-1).message, /complete question or command/);
 });
 
 test("startup terminal replies do not poison the first real question", async () => {

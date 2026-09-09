@@ -14342,6 +14342,10 @@
     let recallReadiness = null;
     let recallSelectedMeetingPath = null;
     let pendingRecallTerminalMeetingPath = null;
+    // True while a Terminal session still owes its first real question the
+    // context it is allowed to see (the selected meeting, or the general
+    // meeting directory when none was selected). Cleared once materialized.
+    let recallTerminalContextPending = false;
     let recallTerminalInputDraft = '';
     let recallTerminalInputReliable = true;
     let recallTerminalInputQueue = Promise.resolve();
@@ -14438,6 +14442,7 @@
       recallModePreferenceExplicit = true;
       localStorage.setItem('minutes.recallModePreferenceExplicit', 'true');
       pendingRecallTerminalMeetingPath = recallDevMode ? recallSelectedMeetingPath : null;
+      recallTerminalContextPending = recallDevMode;
       recallTerminalInputDraft = '';
       recallTerminalInputReliable = true;
       syncRecallModeControls();
@@ -14479,6 +14484,7 @@
           'error'
         );
         pendingRecallTerminalMeetingPath = mode === 'meeting' ? meetingPath : null;
+        recallTerminalContextPending = true;
         recallTerminalInputDraft = '';
         recallTerminalInputReliable = true;
         return { mode: 'deferred', meetingPath: null };
@@ -14496,6 +14502,7 @@
 
       if (recallDevMode) {
         pendingRecallTerminalMeetingPath = mode === 'meeting' ? meetingPath : null;
+        recallTerminalContextPending = true;
         recallTerminalInputDraft = '';
         recallTerminalInputReliable = true;
         setRecallProviderNotice(
@@ -14506,6 +14513,7 @@
       }
 
       pendingRecallTerminalMeetingPath = null;
+      recallTerminalContextPending = false;
       setRecallProviderNotice(readiness.message);
       return { mode, meetingPath };
     }
@@ -14942,7 +14950,7 @@
         }
 
         const question = recallTerminalInputDraft.trim();
-        if (pendingRecallTerminalMeetingPath && (!question || !recallTerminalInputReliable)) {
+        if (recallTerminalContextPending && (!question || !recallTerminalInputReliable)) {
           setRecallProviderNotice(
             'For privacy, Minutes could not verify a complete question or command. Press Ctrl-U, retype it without cursor editing, and submit again. No meeting context was read.',
             'error'
@@ -14950,14 +14958,18 @@
           return;
         }
         const isAccountCommand = question.startsWith('/');
-        if (pendingRecallTerminalMeetingPath && question && !isAccountCommand) {
+        if (recallTerminalContextPending && question && !isAccountCommand) {
+          // null means "no meeting selected": the backend writes the general
+          // meeting-directory context instead, under the same auth gate.
+          const meetingPath = pendingRecallTerminalMeetingPath;
           try {
-            await invoke('cmd_prepare_recall_terminal_meeting', {
-              meetingPath: pendingRecallTerminalMeetingPath,
-            });
+            await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath });
             pendingRecallTerminalMeetingPath = null;
+            recallTerminalContextPending = false;
             setRecallProviderNotice(
-              'The selected meeting is ready for this question. Terminal chat remains under your agent subscription.'
+              meetingPath
+                ? 'The selected meeting is ready for this question. Terminal chat remains under your agent subscription.'
+                : 'Your meeting directory is ready for this question. Terminal chat remains under your agent subscription.'
             );
           } catch (error) {
             // Do not forward Enter: the question remains in the terminal input,
@@ -15079,6 +15091,7 @@
           // clears any stale CURRENT_MEETING.md before a new question while
           // the backend keeps the already-running terminal session intact.
           await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme() });
+          recallTerminalContextPending = true;
           recallPtyAlive = true;
           recallEndBtn.classList.add('active');
         } catch (e) {

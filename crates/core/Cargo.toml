@@ -116,6 +116,7 @@ windows-sys = { version = "0.59", features = ["Wdk_Foundation", "Wdk_Storage_Fil
 # sherpa-rs moved to crates/sherpa-plugin (#685).
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
 insta = { version = "1", features = ["json"] }

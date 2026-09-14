@@ -10557,6 +10557,10 @@
 
     function openAbout() {
       aboutOverlay.classList.add('active');
+      // Native menu events call this function directly. Keep the CLI refresh
+      // on the shared entry point so every About opener observes current PATH
+      // state instead of depending on a later function reassignment.
+      void refreshCliStatus(false);
     }
 
     function closeInputModal(result = null) {
@@ -16660,13 +16664,6 @@
       });
       setBody(cliSetupFooter, close);
     }
-
-    // Refresh CLI status when the About modal opens.
-    const _origOpenAbout = openAbout;
-    openAbout = function () {
-      _origOpenAbout();
-      refreshCliStatus(false);
-    };
 
     // Refresh the What's New CLI section each time the modal renders.
     const _origShowWhatsNew = showWhatsNewModal;

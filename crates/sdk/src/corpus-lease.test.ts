@@ -923,6 +923,45 @@ describe("stable corpus lease", () => {
     });
   });
 
+  it.each([0, 17])("reports worker exit %i without exposing private stderr", async (exitCode) => {
+    await withCorpus(async (root) => {
+      const privateCanary = "PRIVATE_WORKER_STDERR_CANARY";
+      writeFileSync(join(root, "meeting.md"), privateCanary);
+      const fixture = join(root, "exiting-worker.mjs");
+      writeFileSync(
+        fixture,
+        `process.stdin.once("data", () => {\n` +
+          `  process.stderr.write(${JSON.stringify(privateCanary + "\n")}, () => process.exit(${exitCode}));\n` +
+          `});\n`
+      );
+      const original = process.stderr.write;
+      let diagnostics = "";
+      (process.stderr as unknown as { write: unknown }).write = (chunk: unknown) => {
+        diagnostics += String(chunk);
+        return true;
+      };
+      try {
+        let operationRan = false;
+        await expect(
+          withStableCorpusLease(root, () => { operationRan = true; }, {
+            timeoutMs: 10_000,
+            workerScriptForTest: fixture,
+          })
+        ).rejects.toThrow(/^Access denied: stable meeting corpus authorization failed$/);
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(operationRan).toBe(false);
+        expect(diagnostics).toContain(
+          `worker exited before authorization (exit code ${exitCode}; signal none)`
+        );
+        expect(diagnostics).not.toContain(privateCanary);
+        expect(diagnostics).not.toContain(root);
+        await expect(withStableCorpusLease(root, () => "recovered")).resolves.toBe("recovered");
+      } finally {
+        (process.stderr as unknown as { write: unknown }).write = original;
+      }
+    });
+  });
+
   it("rejects an out-of-order worker protocol and remains reusable", async () => {
     await withCorpus(async (root) => {
       writeFileSync(join(root, "meeting.md"), "protocol canary");

@@ -19,7 +19,7 @@
     "ci": "npm run build && npm run test && npm run check && npm run golden && npm run compile:dry"
   },
   "devDependencies": {
-    "@types/node": "22.19.11",
+    "@types/node": "26.5.1",
     "typescript": "6.0.3"
   }
 }

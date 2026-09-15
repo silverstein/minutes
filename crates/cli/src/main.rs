@@ -437,7 +437,7 @@ enum Commands {
         #[arg(long)]
         mute: bool,
 
-        /// Print every session event as one JSON object per line.
+        /// Print every session event except audio levels as one JSON object per line.
         #[arg(long)]
         json: bool,
     },
@@ -2636,6 +2636,10 @@ fn cmd_talk(
             mute_playback: mute,
         },
         move |event| {
+            // Level events arrive many times a second and only matter to a HUD.
+            if matches!(event, VoiceLiveEvent::Level { .. }) {
+                return;
+            }
             if json {
                 if let Ok(line) = serde_json::to_string(&event) {
                     println!("{line}");

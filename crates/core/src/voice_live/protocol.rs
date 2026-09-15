@@ -377,15 +377,37 @@ pub fn decode_events(text: &str) -> Vec<ServerEvent> {
     if let Some(err) = v.get("error") {
         events.push(ServerEvent::Error(err.to_string()));
     }
+    // Only genuinely new top-level keys are worth surfacing. Known envelopes that
+    // carried nothing actionable this time (a `serverContent` with only
+    // `generationComplete`, a bare `usageMetadata`, a keepalive `{}`) stay quiet.
     if events.is_empty() {
-        let keys = v
+        let unknown: Vec<String> = v
             .as_object()
-            .map(|o| o.keys().cloned().collect())
+            .map(|o| {
+                o.keys()
+                    .filter(|k| !KNOWN_TOP_LEVEL_KEYS.contains(&k.as_str()))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
-        events.push(ServerEvent::Other(keys));
+        if !unknown.is_empty() {
+            events.push(ServerEvent::Other(unknown));
+        }
     }
     events
 }
+
+/// Top-level keys the decoder understands, including ones it deliberately ignores.
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "setupComplete",
+    "serverContent",
+    "toolCall",
+    "toolCallCancellation",
+    "goAway",
+    "sessionResumptionUpdate",
+    "usageMetadata",
+    "error",
+];
 
 fn redact_key(message: &str, key: &str) -> String {
     if key.is_empty() {
@@ -478,6 +500,21 @@ mod tests {
         }
         let events = decode_events(&json!({"serverContent": {"interrupted": true}}).to_string());
         assert!(matches!(events[0], ServerEvent::Interrupted));
+    }
+
+    #[test]
+    fn known_envelopes_with_nothing_actionable_stay_quiet() {
+        for msg in [
+            json!({"serverContent": {"generationComplete": true}}),
+            json!({"serverContent": {"modelTurn": {"parts": [{"thought": true}]}}}),
+            json!({"usageMetadata": {"totalTokenCount": 12}}),
+            json!({}),
+        ] {
+            assert!(
+                decode_events(&msg.to_string()).is_empty(),
+                "expected no events for {msg}"
+            );
+        }
     }
 
     #[test]

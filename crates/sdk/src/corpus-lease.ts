@@ -30,6 +30,10 @@ import { nodeChildEnvironment } from "./node-child.js";
 const MAX_AUTHORIZATION_ATTEMPTS = 2;
 const DEFAULT_FENCE_TIMEOUT_MS = 5_000;
 const MAX_TEST_HARNESS_AUTHORIZATION_TIMEOUT_MS = 120_000;
+// Opt-in bound for seek-heavy storage. The HDD measurements in #933 required
+// more than 120 seconds cold, despite fitting the byte and file ceilings.
+// This is an operator-selected allowance, not a universal disk-speed promise.
+const SLOW_STORAGE_AUTHORIZATION_TIMEOUT_MS = 240_000;
 const MAX_ACTIVE_WATCHERS = 64;
 // Snapshot content is retained as JavaScript strings, whose backing storage
 // may require two bytes per source byte. Reserve that worst case for the full
@@ -97,18 +101,14 @@ export const DEFAULT_CORPUS_READ_BUDGETS: Readonly<CorpusReadBudgets> =
 const CORPUS_MANIFESTS_PER_AUTHORIZATION_ATTEMPT = 3;
 const CORPUS_PHYSICAL_READS_PER_MANIFEST = 2;
 
-// Match the native corpus reader's documented storage floor. Meeting libraries
-// may live on synced folders, external disks, and ordinary spinning disks; a
-// corpus inside every published resource ceiling must not require fast local
-// SSD throughput merely to pass authorization.
+// The standard profile matches the native reader's throughput assumption.
+// This byte-based estimate does not model per-file seeks or reader round trips;
+// small-file HDD corpora can exceed it even inside every resource ceiling.
 const MIN_ASSUMED_CORPUS_READ_BYTES_PER_SECOND = 16 * 1024 * 1024;
 
-// This deadline is a backstop, not the primary safety control. File, byte,
-// directory, watcher, reader, retained-memory, and worker-process ceilings
-// still bound what one request may consume. Deriving the wall-clock ceiling
-// from that work envelope keeps those promises consistent when a pass count or
-// byte ceiling changes. At today's limits this is 60 seconds, rather than the
-// old hardcoded 15 seconds that denied valid large or slow corpora (#933).
+// The standard profile remains 60 seconds. The explicit slow profile allows
+// more wall time without changing passes, watcher fences, cancellation, or any
+// file, byte, directory, reader, watcher, retained-memory or process ceiling.
 const DEFAULT_AUTHORIZATION_TIMEOUT_MS = Math.ceil(
   (DEFAULT_CORPUS_READ_BUDGETS.maxCorpusBytes *
     CORPUS_MANIFESTS_PER_AUTHORIZATION_ATTEMPT *
@@ -444,13 +444,17 @@ function resolveAuthorizationTimeoutMs(
   timeoutMs: number | undefined,
   environment: Readonly<NodeJS.ProcessEnv> = process.env
 ): number {
+  const storageProfile = environment.MINUTES_CORPUS_STORAGE_PROFILE ?? "standard";
+  if (storageProfile !== "standard" && storageProfile !== "slow") {
+    throw new Error("Access denied: invalid meeting corpus storage profile");
+  }
+  const productionCap = storageProfile === "slow"
+    ? SLOW_STORAGE_AUTHORIZATION_TIMEOUT_MS
+    : DEFAULT_AUTHORIZATION_TIMEOUT_MS;
   const configuredOverride = environment.MINUTES_CORPUS_AUTH_TIMEOUT_MS;
-  // A deadline beyond the derived production envelope is test infrastructure,
-  // not application configuration. Requiring both markers keeps an ambient
-  // production environment variable from relaxing the fail-closed cap. Only
-  // the repository's test harness sets this pair; the spawned lease worker
-  // inherits it from the parent. Invalid gated values fail closed instead of
-  // silently relaxing or changing the requested budget.
+  // The numeric override remains test-only. Both markers are required, and
+  // its independent cap still applies even with the production slow profile.
+  // Invalid gated values fail closed rather than silently changing policy.
   const testHarnessOverride =
     environment.NODE_ENV === "test" &&
     environment.MINUTES_TEST_HARNESS === "1" &&
@@ -465,7 +469,7 @@ function resolveAuthorizationTimeoutMs(
   }
   const cap =
     testHarnessOverride === undefined
-      ? DEFAULT_AUTHORIZATION_TIMEOUT_MS
+      ? productionCap
       : Math.min(
           Number(testHarnessOverride),
           MAX_TEST_HARNESS_AUTHORIZATION_TIMEOUT_MS

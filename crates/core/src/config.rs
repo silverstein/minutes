@@ -36,6 +36,8 @@ pub struct Config {
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
     pub voice: VoiceConfig,
+    /// Voice Live spoken assistant (RFC 0007). Distinct from `[voice]`, which is speaker identification.
+    pub voice_live: VoiceLiveConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
     pub retention: RetentionConfig,
@@ -1106,6 +1108,59 @@ impl Default for RecordingConfig {
 /// Knowledge base integration — Karpathy-style LLM wiki maintained from meeting data.
 /// After each meeting, extract facts about people and decisions, update person profiles,
 /// append to a chronological log, and maintain an index. Opt-in (disabled by default).
+/// Voice Live: a push-to-talk spoken assistant over Minutes' memory (RFC 0007).
+///
+/// This is a cloud provider behind an explicit opt-in. The API key is never stored
+/// in config; `api_key_env` names the environment variable that holds it. The
+/// desktop app hydrates that variable from the Keychain at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceLiveConfig {
+    /// Master switch for the feature surfaces (CLI command, shortcut slot).
+    pub enabled: bool,
+    /// Realtime provider. Phase 1 supports only "gemini".
+    pub provider: String,
+    /// Model id, e.g. "gemini-3.8-live".
+    pub model: String,
+    /// Name of the environment variable holding the provider API key.
+    pub api_key_env: String,
+    /// BCP-47 language code pinned for transcription and speech ("en-US").
+    pub language: String,
+    /// Explicit acknowledgement that microphone audio and tool results leave the device.
+    pub allow_cloud: bool,
+    /// How async tool results are delivered: "when_idle" (after the model finishes speaking) or "interrupt".
+    pub tool_scheduling: String,
+    /// Per-tool-result character budget so one transcript cannot fill the voice context.
+    pub max_tool_chars: usize,
+    /// How many known people to inject as spelling bias.
+    pub known_people: usize,
+    /// Expose knowledge-base search/read when `[knowledge].path` is set.
+    pub brain_search: bool,
+    /// Expose a single on-request screen frame (phase 3).
+    pub screen_on_request: bool,
+    /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
+    pub log_sessions: bool,
+}
+
+impl Default for VoiceLiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "gemini".into(),
+            model: "gemini-3.8-live".into(),
+            api_key_env: "GEMINI_API_KEY".into(),
+            language: "en-US".into(),
+            allow_cloud: false,
+            tool_scheduling: "when_idle".into(),
+            max_tool_chars: 12_000,
+            known_people: 200,
+            brain_search: true,
+            screen_on_request: false,
+            log_sessions: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
@@ -1359,6 +1414,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
             voice: VoiceConfig::default(),
+            voice_live: VoiceLiveConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
             retention: RetentionConfig::default(),

@@ -46,6 +46,10 @@ vad-ort = ["streaming", "dep:ort", "dep:ndarray"]
 # answers. Without it that fallback returns a diagnostic placeholder as if it
 # were a transcript, which is worse than either engine failing honestly.
 engine-sherpa = ["dep:libloading", "whisper"]
+# Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
+# Implies `streaming` for the 16 kHz mic stream. Blocking WebSocket (tungstenite +
+# rustls) so core stays tokio-free. Off by default: it is a cloud provider.
+voice-live = ["streaming", "dep:tungstenite"]
 
 [dependencies]
 serde = { workspace = true }
@@ -79,6 +83,7 @@ ndarray = { workspace = true, optional = true }
 whisper-guard = { path = "../whisper-guard", version = "0.3.1" }
 nnnoiseless = { workspace = true, optional = true }
 base64 = "0.23"
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 rusqlite = { workspace = true }
 sys-locale = { workspace = true }
 tempfile = "3"

@@ -57,6 +57,18 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # match_threshold = 0.65  # Cosine similarity threshold for voice matching (higher = stricter).
                           # If using embedding_model = "cam++-lm", lower this to ~0.1–0.2.
 
+[voice_live]
+# Spoken assistant over your meeting memory, run with `minutes talk` (RFC 0007).
+# Off by default: it sends microphone audio and tool results to a cloud realtime model.
+# enabled = true
+# allow_cloud = true              # Required acknowledgement of that egress
+# provider = "gemini"             # Only provider today
+# model = "gemini-3.8-live"
+# api_key_env = "GEMINI_API_KEY"  # Name of the env var holding the key. The key itself never goes in this file.
+# language = "en-US"
+# brain_search = true             # Expose knowledge base search/read when [knowledge].path is set
+# log_sessions = true             # Write each session transcript to ~/.minutes/voice-sessions/
+
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)
 

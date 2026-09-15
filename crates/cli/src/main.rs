@@ -422,7 +422,7 @@ enum Commands {
     /// Requires `[voice_live] enabled = true`, `allow_cloud = true`, and the provider API key
     /// in the environment variable named by `api_key_env` (default GEMINI_API_KEY).
     #[cfg(feature = "voice-live")]
-    Voice {
+    Talk {
         /// Push-to-talk: press Enter to start talking and Enter again to stop.
         /// Default is open mic with the provider's voice activity detection.
         #[arg(long)]
@@ -2057,12 +2057,12 @@ fn main() -> Result<()> {
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         #[cfg(feature = "voice-live")]
-        Commands::Voice {
+        Commands::Talk {
             ptt,
             device,
             mute,
             json,
-        } => cmd_voice(&config, ptt, device, mute, json),
+        } => cmd_talk(&config, ptt, device, mute, json),
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2598,13 +2598,14 @@ fn main() -> Result<()> {
     result
 }
 
-/// `minutes voice`: run one Voice Live session in the terminal.
+/// `minutes talk`: run one Voice Live session in the terminal.
+/// (`minutes voice` is speaker enrollment, so the assistant uses a different verb.)
 ///
 /// Stdin drives the session: an empty line toggles push-to-talk (in `--ptt` mode),
 /// any other line is sent to the model as typed text, and `q` ends the session.
 /// Ctrl-C ends it too. Events print to stdout; instructions print to stderr.
 #[cfg(feature = "voice-live")]
-fn cmd_voice(
+fn cmd_talk(
     config: &Config,
     ptt: bool,
     device: Option<String>,
@@ -2734,7 +2735,7 @@ fn cmd_voice(
     Ok(())
 }
 
-/// Human-readable rendering of one Voice Live event for `minutes voice`.
+/// Human-readable rendering of one Voice Live event for `minutes talk`.
 #[cfg(feature = "voice-live")]
 fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
     use minutes_core::voice_live::VoiceLiveEvent;

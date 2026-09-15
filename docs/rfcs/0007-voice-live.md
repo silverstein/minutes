@@ -37,7 +37,7 @@ Module: `crates/core/src/voice_live/` behind Cargo feature `voice-live` (optiona
 
 Hosts:
 
-- CLI: `minutes voice` (phase 1). Open-mic with server VAD by default, `--ptt` for Enter-to-talk. Prints both transcripts and tool calls. This is the test harness that needs no app rebuild.
+- CLI: `minutes talk` (phase 1; `minutes voice` is already speaker enrollment). Open-mic with server VAD by default, `--ptt` for Enter-to-talk. Prints both transcripts and tool calls. This is the test harness that needs no app rebuild.
 - Tauri (phase 2): a third `ShortcutSlot::Voice` in the shortcut manager reusing the hold/lock state machine, `cmd_start_voice`, `cmd_stop_voice`, `cmd_voice_status`, and a voice state in the dictation overlay (listening, thinking, speaking) using the `--capture` blue for active capture per DESIGN.md. API key stored through the existing Keychain secret store and hydrated into the process at startup, mirroring the OpenAI-compatible key.
 
 ## Configuration
@@ -84,7 +84,7 @@ The system instruction states: spoken register, one to three sentences; facts on
 
 ## Phases
 
-1. Core module, config, tests, `minutes voice` CLI. Dogfood on macOS.
+1. Core module, config, tests, `minutes talk` CLI. Dogfood on macOS.
 2. Tauri shortcut slot, commands, overlay states, Keychain-backed key, settings UI. Tested in `Minutes Dev.app`.
 3. `look_at_screen` (one frame via the app's screen module), `ask_codebase` (delegates to a coding agent), session resumption past the fifteen-minute cap.
 4. Alternate providers, including a fully local pipeline.

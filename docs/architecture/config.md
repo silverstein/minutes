@@ -372,6 +372,25 @@ hotkey_keycode = 57   # Caps Lock (macOS) — requires Input Monitoring
 | `enabled` | `true` | Learn voices across recordings |
 | `match_threshold` | `0.65` | Cosine similarity cutoff for voice enrollment matching |
 
+### `[voice_live]` spoken assistant (RFC 0007)
+
+Push-to-talk conversation with a realtime speech model over your meeting memory, run with `minutes talk` (built with the `voice-live` Cargo feature). Every fact it speaks comes from a tool call into minutes-core. It is a cloud provider: microphone audio and tool results leave the device, so it stays off until both `enabled` and `allow_cloud` are set. It never touches recording state and refuses to start while a recording is active. The existing `[voice]` section is speaker identification and is unrelated.
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch for the CLI command and, later, the desktop shortcut |
+| `allow_cloud` | `false` | Explicit acknowledgement that microphone audio and tool results go to the provider |
+| `provider` | `"gemini"` | Realtime provider. Only `"gemini"` today |
+| `model` | `"gemini-3.8-live"` | Model id |
+| `api_key_env` | `"GEMINI_API_KEY"` | Name of the environment variable holding the API key. The key itself is never stored in config |
+| `language` | `"en-US"` | BCP-47 language for transcription and speech |
+| `tool_scheduling` | `"when_idle"` | Deliver async tool results after the model finishes speaking (`"when_idle"`) or immediately (`"interrupt"`) |
+| `max_tool_chars` | `12000` | Per-tool-result character budget so one transcript cannot fill the voice context |
+| `known_people` | `200` | How many known names to inject as spelling bias |
+| `brain_search` | `true` | Expose knowledge base search and read when `[knowledge].path` is set |
+| `screen_on_request` | `false` | Expose a single on-request screen frame (reserved, not yet implemented) |
+| `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
+
 ### `[screen_context]` — recording-time screenshots
 
 | key | default | meaning |

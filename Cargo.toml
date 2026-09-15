@@ -118,7 +118,7 @@ libloading = "0.9"
 ndarray = "0.16"
 
 # SQLite (relationship graph index)
-rusqlite = { version = "0.33", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "limits"] }
 
 # System locale detection (UI language "auto" resolution — see crate::i18n)
 sys-locale = "0.3"

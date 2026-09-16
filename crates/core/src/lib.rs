@@ -52,6 +52,7 @@ pub mod graph;
 pub mod graph_worker;
 pub mod health;
 pub mod i18n;
+pub mod interaction;
 pub mod jobs;
 pub mod knowledge;
 pub mod knowledge_extract;
@@ -205,7 +206,7 @@ pub fn install_whisper_logging_hooks() {
 /// WHAT THIS ACTUALLY SAVES, measured rather than assumed, because the first
 /// version of this comment cited a 26% suite regression that does not reproduce:
 /// about 0.4 s across the three call sites, two avoided binds at roughly 0.2 s
-/// each. Run-to-run noise on the same machine is larger than that. It is kept
+/// each. Run-to-run noise is larger than that. It is kept
 /// because it is free and directionally right, not because it rescued anything.
 ///
 /// "The answer cannot change during a run" would be too strong: `bind` can fail

@@ -196,6 +196,40 @@ impl AudioIo {
     }
 }
 
+/// How long to wait for the echo canceller before giving up on it.
+///
+/// Opening the platform voice-processing unit can block indefinitely inside
+/// CoreAudio, which was observed in practice: a session printed its tool count
+/// and then hung forever, before the microphone line, with nothing on screen to
+/// say why. A session that starts without cancellation is far better than one
+/// that never starts.
+#[cfg(target_os = "macos")]
+const ECHO_CANCELLER_DEADLINE: Duration = Duration::from_secs(6);
+
+/// Open the cancelled audio path, giving up if it does not come back in time.
+///
+/// The work happens on its own thread because the blocking call is inside the
+/// platform framework and cannot be interrupted. If it is still blocked when
+/// the deadline passes, the thread is abandoned; whatever it eventually
+/// produces is dropped, which releases the unit it was opening.
+#[cfg(target_os = "macos")]
+fn start_cancelled_audio(deadline: Duration) -> Result<VoiceIo, VoiceLiveError> {
+    let (tx, rx) = bounded::<Result<VoiceIo, VoiceLiveError>>(1);
+    std::thread::Builder::new()
+        .name("voice-live-canceller".into())
+        .spawn(move || {
+            let _ = tx.send(VoiceIo::start());
+        })
+        .map_err(|e| VoiceLiveError::Audio(format!("could not start the canceller: {e}")))?;
+    match rx.recv_timeout(deadline) {
+        Ok(result) => result,
+        Err(_) => Err(VoiceLiveError::Audio(format!(
+            "the system voice-processing unit did not open within {}s",
+            deadline.as_secs()
+        ))),
+    }
+}
+
 /// Open audio for a session. Prefers the echo-cancelled unit when playback is
 /// on and the platform has one; otherwise separate streams, with a status line
 /// saying why so a self-interrupting session is explainable from the log.
@@ -208,7 +242,7 @@ fn open_audio(
     let want_cancellation = !options.mute_playback && config.voice_live.echo_cancellation;
     #[cfg(target_os = "macos")]
     if want_cancellation {
-        match VoiceIo::start() {
+        match start_cancelled_audio(ECHO_CANCELLER_DEADLINE) {
             Ok(io) => {
                 if let Some(d) = device {
                     emit(VoiceLiveEvent::Status {
@@ -1111,6 +1145,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["type"], "tool_result");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_canceller_that_will_not_open_gives_up_instead_of_hanging() {
+        // The platform call can block inside CoreAudio with no way to interrupt
+        // it, which stalled a whole session before it printed anything. With an
+        // impossible deadline this must still return, and say why.
+        let started = std::time::Instant::now();
+        let outcome = super::start_cancelled_audio(Duration::from_millis(1));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "giving up took {:?}",
+            started.elapsed()
+        );
+        if let Err(e) = outcome {
+            let said = e.to_string();
+            // Either it opened faster than the deadline, or it explains itself.
+            assert!(
+                said.contains("did not open") || said.contains("voice processing"),
+                "{said}"
+            );
+        }
     }
 
     #[test]

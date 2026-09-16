@@ -29,9 +29,13 @@ jobs:
           git checkout 7df6a4006dfb03afe688fe9dc5abf998c0477db0 -- crates/core/src/interaction tooling/interaction-contracts docs/architecture/interaction-continuity.md
           python - <<'PY'
           import base64, gzip, hashlib, os, pathlib, subprocess
-          packed = pathlib.Path('.github/continuity-patch.b64').read_bytes()
-          assert len(packed) < 100000
-          patch = gzip.decompress(base64.b64decode(packed, validate=False))
+          parts = sorted(pathlib.Path('.github').glob('continuity-patch.part*'))
+          assert len(parts) == 6
+          packed = b''.join(path.read_bytes().strip() for path in parts)
+          assert len(packed) == 31024
+          compressed = base64.b64decode(packed, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == '84ee1da3876c4d82f951258e31d9c272f98e3f9376e4ec5cb1abf67cbb84cb21'
+          patch = gzip.decompress(compressed)
           assert len(patch) < 1000000
           assert hashlib.sha256(patch).hexdigest() == os.environ['EXPECTED_PATCH']
           pathlib.Path('/tmp/continuity.patch').write_bytes(patch)
@@ -45,7 +49,7 @@ jobs:
               subprocess.run(['git', 'add', '--', path], check=True)
           PY
           cargo test --manifest-path tooling/interaction-contracts/Cargo.toml
-          git rm -- .github/continuity-patch.b64
+          git rm -- .github/continuity-patch.b64 .github/continuity-patch.part*
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'

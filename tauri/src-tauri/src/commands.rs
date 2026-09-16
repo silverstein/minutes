@@ -66,14 +66,14 @@ pub struct AppState {
     pub live_transcript_stop_flag: Arc<AtomicBool>,
     pub live_shortcut_enabled: Arc<AtomicBool>,
     pub live_shortcut: Arc<Mutex<String>>,
-    /// Desktop-owned lifecycle for the optional Coach HUD consumer. This is
-    /// independent of recording/live capture: the copilot only reads the
-    /// Agent Event Bus and must never own or stop capture.
     /// A voice session is open. Read lock-free from the shortcut event tap.
     pub voice_active: Arc<AtomicBool>,
     /// The running session, so a stop can end it. `None` when idle.
     #[cfg(feature = "voice-live")]
     pub voice_session: Arc<Mutex<Option<minutes_core::voice_live::VoiceLiveSession>>>,
+    /// Desktop-owned lifecycle for the optional Coach HUD consumer. This is
+    /// independent of recording/live capture: the copilot only reads the
+    /// Agent Event Bus and must never own or stop capture.
     pub copilot_active: Arc<AtomicBool>,
     pub copilot_stop_flag: Arc<AtomicBool>,
     pub copilot_paused: Arc<AtomicBool>,
@@ -4552,6 +4552,9 @@ fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
     }
     if state.live_transcript_active.load(Ordering::Relaxed) {
         return Err("Live transcript in progress — stop it first".into());
+    }
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it first".into());
     }
     // Check both the in-process atomic and the cross-process PID file,
     // mirroring the live transcript path. `cmd_install_update` and the
@@ -13016,6 +13019,49 @@ pub fn cmd_get_settings() -> serde_json::Value {
     })
 }
 
+/// Status of the voice key, hydrating the environment as a side effect so a
+/// key saved in a previous launch is usable in this one.
+#[tauri::command]
+pub fn cmd_voice_secret_status() -> serde_json::Value {
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
+    serde_json::to_value(crate::secret_store::hydrate_voice_api_key_env(&env_var))
+        .unwrap_or_else(|_| serde_json::json!({ "keySet": false }))
+}
+
+/// Store the voice key in the Keychain and make it usable immediately, so the
+/// user does not have to restart the app after pasting it.
+#[tauri::command]
+pub fn cmd_set_voice_api_key(api_key: String) -> Result<serde_json::Value, String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("Paste an API key first.".into());
+    }
+
+    crate::secret_store::save_voice_api_key(&api_key)?;
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
+    std::env::set_var(&env_var, &api_key);
+
+    Ok(
+        serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
+            .unwrap_or_else(|_| serde_json::json!({ "keySet": true })),
+    )
+}
+
+/// Forget the voice key. Clearing the variable as well as the Keychain item
+/// means the running app stops being able to open a session, rather than
+/// carrying the revoked key until the next launch.
+#[tauri::command]
+pub fn cmd_clear_voice_api_key() -> Result<serde_json::Value, String> {
+    crate::secret_store::clear_voice_api_key()?;
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
+    std::env::remove_var(&env_var);
+
+    Ok(
+        serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
+            .unwrap_or_else(|_| serde_json::json!({ "keySet": false })),
+    )
+}
+
 #[tauri::command]
 pub fn cmd_openai_compatible_secret_status() -> serde_json::Value {
     serde_json::to_value(crate::secret_store::hydrate_openai_compatible_api_key_env())
@@ -19847,6 +19893,12 @@ pub fn cmd_start_voice(
     use minutes_core::voice_live;
 
     let config = Config::load();
+    // Before preflight, not after: preflight is what checks for the key, and
+    // an app launched from Finder has no shell environment to have inherited
+    // it from.
+    let _ = crate::secret_store::hydrate_voice_api_key_env(
+        &crate::secret_store::voice_api_key_env(&config),
+    );
     voice_live::preflight(&config).map_err(|e| e.to_string())?;
     try_acquire_voice(&state)?;
 
@@ -21317,11 +21369,6 @@ impl Drop for DictationActiveGuard {
     }
 }
 
-/// Try to acquire the dictation state. Mirrors `try_acquire_live`: gates
-/// against recording / live / dictation, uses `compare_exchange` to close
-/// the load→store TOCTOU window in the old code (`load` at the top of
-/// `start_dictation_session`, `store` after overlay setup), and rolls back
-/// the flag on subsequent failure cases.
 /// Claim the voice slot, refusing if anything else owns the microphone.
 ///
 /// Voice is a fourth participant in a lattice the other three enumerate by
@@ -21347,6 +21394,11 @@ fn try_acquire_voice(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Try to acquire the dictation state. Mirrors `try_acquire_live`: gates
+/// against recording / live / dictation / voice, uses `compare_exchange` to
+/// close the load→store TOCTOU window in the old code (`load` at the top of
+/// `start_dictation_session`, `store` after overlay setup), and rolls back
+/// the flag on subsequent failure cases.
 fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
     if recording_active(&state.recording) {
         return Err("Recording in progress — stop recording before dictating".into());

@@ -599,6 +599,10 @@ pub struct TrayMenuHandles {
     pub quick_thought: tauri::menu::MenuItem<tauri::Wry>,
     pub stop: tauri::menu::MenuItem<tauri::Wry>,
     pub coach: tauri::menu::MenuItem<tauri::Wry>,
+    /// Only exists in voice-live builds. A build that cannot open a session
+    /// shows no Voice entry at all, rather than one that always errors.
+    #[cfg(feature = "voice-live")]
+    pub voice: tauri::menu::MenuItem<tauri::Wry>,
     // Remaining static-label items, held so a UI language switch can relabel
     // them in place via `tr()` without an app restart (see
     // `rebuild_localized_shell`). The dynamic Stop label + tooltip are handled
@@ -750,7 +754,7 @@ impl TrayActivity {
             Self::Live => "Minutes — Live Transcribing...",
             Self::Dictation => "Minutes — Dictating...",
             Self::Copilot => "Minutes — Coach Listening...",
-            Self::Voice => "Minutes — Voice...",
+            Self::Voice => "Minutes — Voice Session...",
         }
     }
 
@@ -901,6 +905,15 @@ fn apply_tray_activity(
                     "Coach"
                 }))
                 .ok();
+            #[cfg(feature = "voice-live")]
+            handles
+                .voice
+                .set_text(minutes_core::i18n::tr(if snapshot.voice {
+                    "Voice ✓"
+                } else {
+                    "Voice"
+                }))
+                .ok();
         }
         None => {
             tracing::warn!(
@@ -952,6 +965,10 @@ pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
             } else {
                 "Coach"
             }))
+            .ok();
+        #[cfg(feature = "voice-live")]
+        h.voice
+            .set_text(tr(if snapshot.voice { "Voice ✓" } else { "Voice" }))
             .ok();
         h.mic_mute
             .set_text(tr(if minutes_core::streaming::is_mic_muted() {
@@ -1771,6 +1788,9 @@ fn main() {
         }
     }
     let _ = secret_store::hydrate_openai_compatible_api_key_env();
+    let _ = secret_store::hydrate_voice_api_key_env(&secret_store::voice_api_key_env(
+        &startup_config_snapshot,
+    ));
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -2360,6 +2380,9 @@ fn main() {
             )?;
             let stop_item_ref = stop_item.clone();
             let coach_item = MenuItem::with_id(app, "coach-toggle", "Coach", true, None::<&str>)?;
+            #[cfg(feature = "voice-live")]
+            let voice_item =
+                MenuItem::with_id(app, "voice-toggle", tr("Voice"), true, None::<&str>)?;
             // Enabled regardless of recording state: toggling when no recording
             // is active primes the sentinel so the NEXT dual-source recording
             // starts muted. During a recording, the toggle takes effect on the
@@ -2449,6 +2472,10 @@ fn main() {
                 &sensitive_item,
                 &stop_item,
                 &coach_item,
+            ])?;
+            #[cfg(feature = "voice-live")]
+            menu.append_items(&[&voice_item])?;
+            menu.append_items(&[
                 &mic_mute_item,
                 &sep,
                 &note_item,
@@ -2541,17 +2568,23 @@ fn main() {
                             //   - recording → `commands::request_stop`
                             //   - live      → `commands::cmd_stop_live_transcript`
                             //   - dictation → `commands::cmd_stop_dictation`
+                            //   - voice     → `commands::cmd_stop_voice`
                             //   - copilot   → `commands::cmd_stop_copilot_surface`
                             // Priority order matches `derive_tray_activity`
-                            // (Recording > Live > Dictation > Copilot) so behavior is
-                            // deterministic if two flags are somehow both
-                            // true.
+                            // (Recording > Live > Dictation > Voice > Copilot)
+                            // so behavior is deterministic if two flags are
+                            // somehow both true.
+                            //
+                            // Every activity that `is_active()` must appear
+                            // here. One that does not leaves Stop enabled and
+                            // labelled for it while doing nothing at all.
                             let state = app.state::<commands::AppState>();
                             let recording_was_active = commands::recording_active(&recording);
                             let live_active = state.live_transcript_active.load(Ordering::Relaxed);
                             let dictation_was_active =
                                 state.dictation_active.load(Ordering::Relaxed);
                             let copilot_was_active = state.copilot_active.load(Ordering::Relaxed);
+                            let voice_was_active = state.voice_active.load(Ordering::Relaxed);
 
                             let stop_ok = if recording_was_active {
                                 commands::request_stop(&recording, &stop).is_ok()
@@ -2559,6 +2592,15 @@ fn main() {
                                 commands::cmd_stop_live_transcript(state).is_ok()
                             } else if dictation_was_active {
                                 commands::cmd_stop_dictation(state).is_ok()
+                            } else if voice_was_active {
+                                #[cfg(feature = "voice-live")]
+                                {
+                                    commands::cmd_stop_voice(app.clone(), state).is_ok()
+                                }
+                                #[cfg(not(feature = "voice-live"))]
+                                {
+                                    false
+                                }
                             } else if copilot_was_active {
                                 commands::cmd_stop_copilot_surface(state).is_ok()
                             } else {
@@ -2608,6 +2650,18 @@ fn main() {
                                     qi.set_text("Quick Thought").ok();
                                 }
                             });
+                        }
+                        #[cfg(feature = "voice-live")]
+                        "voice-toggle" => {
+                            let state = app.state::<commands::AppState>();
+                            let result = if state.voice_active.load(Ordering::Relaxed) {
+                                commands::cmd_stop_voice(app.clone(), state).map(|_| ())
+                            } else {
+                                commands::cmd_start_voice(app.clone(), state).map(|_| ())
+                            };
+                            if let Err(error) = result {
+                                commands::show_user_notification(app, "Voice", &error);
+                            }
                         }
                         "coach-toggle" => {
                             let state = app.state::<commands::AppState>();
@@ -2838,6 +2892,8 @@ fn main() {
                 quick_thought: quick_thought_item.clone(),
                 stop: stop_item.clone(),
                 coach: coach_item.clone(),
+                #[cfg(feature = "voice-live")]
+                voice: voice_item.clone(),
                 open: open_item.clone(),
                 sensitive: sensitive_item.clone(),
                 mic_mute: mic_mute_item.clone(),
@@ -3112,6 +3168,9 @@ fn main() {
             commands::cmd_start_voice,
             commands::cmd_stop_voice,
             commands::cmd_voice_status,
+            commands::cmd_voice_secret_status,
+            commands::cmd_set_voice_api_key,
+            commands::cmd_clear_voice_api_key,
             commands::cmd_start_dictation,
             commands::cmd_show_dictation_permission_help,
             commands::cmd_stop_dictation,
@@ -3935,6 +3994,61 @@ mod tray_activity_tests {
         // And it never claims the capture pipeline it does not own.
         assert!(!TrayActivity::Voice.blocks_capture_controls());
         assert!(TrayActivity::Voice.is_active());
+    }
+
+    #[test]
+    fn every_active_tray_activity_has_a_tray_stop_path() {
+        // An activity that `is_active()` enables the tray Stop item and gives
+        // it that activity's label. If the "stop" arm does not also route it,
+        // Stop reads "Close Voice" and does nothing at all when clicked, which
+        // is exactly what shipped in the first draft of this change.
+        //
+        // The match below is exhaustive on purpose: a new TrayActivity variant
+        // will not compile until someone answers "how does Stop stop it?".
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let main_rs = std::fs::read_to_string(format!("{}/src/main.rs", manifest))
+            .expect("failed to read main.rs");
+        let start = main_rs
+            .find("\"stop\" => {")
+            .expect("tray stop handler not found");
+        let end = main_rs[start..]
+            .find("\"mic-mute-toggle\" => {")
+            .expect("tray handler arms not found in the expected order")
+            + start;
+        let stop_arm = &main_rs[start..end];
+
+        for activity in [
+            TrayActivity::Idle,
+            TrayActivity::Recording,
+            TrayActivity::Live,
+            TrayActivity::Dictation,
+            TrayActivity::Copilot,
+            TrayActivity::Voice,
+        ] {
+            let routed_by = match activity {
+                TrayActivity::Idle => None,
+                TrayActivity::Recording => Some("recording_was_active"),
+                TrayActivity::Live => Some("live_active"),
+                TrayActivity::Dictation => Some("dictation_was_active"),
+                TrayActivity::Copilot => Some("copilot_was_active"),
+                TrayActivity::Voice => Some("voice_was_active"),
+            };
+            assert_eq!(
+                routed_by.is_some(),
+                activity.is_active(),
+                "{:?} claims to be active but names no stop route (or vice versa)",
+                activity
+            );
+            if let Some(flag) = routed_by {
+                assert!(
+                    stop_arm.contains(flag),
+                    "the tray Stop handler never checks {}, so {:?} would leave Stop \
+                     enabled and labelled while doing nothing",
+                    flag,
+                    activity
+                );
+            }
+        }
     }
 
     #[test]

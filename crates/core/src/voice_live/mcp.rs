@@ -50,6 +50,7 @@ pub struct McpServer {
     /// Kept outside the lock so a wedged connection can still be killed. A
     /// server that stops reading its stdin blocks the writer while it holds the
     /// lock, and shutdown that also wanted the lock would wait forever.
+    #[cfg(unix)]
     pid: u32,
     /// Set once the child has been waited on. After that the pid may belong to
     /// an unrelated process, so it must never be signalled again.
@@ -217,9 +218,11 @@ impl McpServer {
             })
             .map_err(|e| format!("could not read from the server: {e}"))?;
 
+        #[cfg(unix)]
         let pid = child.id();
         let server = Self {
             name: spec.name.clone(),
+            #[cfg(unix)]
             pid,
             reaped: AtomicBool::new(false),
             conn: Mutex::new(Conn {
@@ -627,6 +630,7 @@ impl McpServer {
         let (_tx, rx) = bounded::<Value>(1);
         Self {
             name: name.to_string(),
+            #[cfg(unix)]
             pid: 0,
             reaped: AtomicBool::new(true),
             conn: Mutex::new(Conn {
@@ -640,7 +644,9 @@ impl McpServer {
                         .stdin(Stdio::piped())
                         .spawn()
                         .expect("true should spawn");
-                    helper.stdin.take().expect("piped stdin")
+                    let pipe = helper.stdin.take().expect("piped stdin");
+                    let _ = helper.wait();
+                    pipe
                 },
                 broken: false,
                 rx,

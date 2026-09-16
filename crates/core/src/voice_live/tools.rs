@@ -2,18 +2,17 @@
 //!
 //! The model sees only what these return. Results are JSON text, truncated to a
 //! per-call budget so one transcript cannot consume the voice context. Reads use
-//! `include_restricted: true` because voice runs on the operator's own surface,
-//! matching the desktop app. Phase 1 writes exactly one thing: `add_note`.
+//! normal-sensitivity records only. Local readability is not cloud permission.
+//! Mutations, delegation, connected services and screen access require host review.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{Duration as ChronoDuration, Local};
+use chrono::Local;
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::events::{InsightFilter, MeetingInsight};
 use crate::graph::{PolicyProjectionRequest, PolicyProjectionResponse};
 use crate::search::{self, SearchFilters};
 
@@ -33,6 +32,7 @@ pub struct ToolContext {
     pub mcp_problems: Vec<String>,
     /// Desktop verbs, and anything awaiting spoken confirmation.
     pub desktop: DesktopControl,
+    pub(crate) continuity: Mutex<super::continuity::Continuity>,
 }
 
 /// Result of one tool call.
@@ -70,6 +70,9 @@ impl ToolContext {
             mcp,
             mcp_problems,
             desktop: DesktopControl::default(),
+            continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
+                Config::minutes_dir().join("work-capsules"),
+            )),
         }
     }
 
@@ -185,9 +188,9 @@ impl ToolContext {
                     &format!(
                         "Relay one question to Mat's local {agent_label} agent, which can read his code, files and connected services. Use it for anything outside meeting memory: his codebase, a repository, a document, or a system like a CRM or issue tracker. Ask one self-contained question, including any context from this conversation the agent would need, because it cannot hear you. It takes several seconds, so say you are checking before you call it.{}",
                         if self.config.voice_live.delegate_writes {
-                            " It can also change things, so confirm with Mat out loud before asking it to."
+                            " Its configured executor may change things. A local host review is mandatory before dispatch."
                         } else {
-                            " It only reads. If Mat wants something created, edited or sent, tell him writing through the agent is turned off rather than trying."
+                            " Request read-only work, but the executor's launch permissions—not this prompt—enforce access. A local host review is mandatory before dispatch."
                         }
                     ),
                     json!({"question": {"type": "string", "description": "A single self-contained question"}}),
@@ -232,11 +235,107 @@ impl ToolContext {
                 json!({"path": {"type": "string", "description": "Relative path inside the knowledge base"}}),
             ));
         }
+        // Historical insights currently lack a final-egress live-source gate.
+        // Do not expose a derived-cache bypass around restricted meeting reads.
+        d.retain(|v| v["name"] != "get_meeting_insights");
+        for declaration in &mut d {
+            if let Some(properties) = declaration
+                .pointer_mut("/parameters/properties")
+                .and_then(Value::as_object_mut)
+            {
+                properties.remove("confirm");
+            }
+        }
+        d.push(decl("propose_checkpoint",
+            "Propose a working checkpoint with goal, uncertain interpretation and next step. Does not save or authorize actions. The user must review and approve it locally.",
+            json!({"goal":{"type":"string"},"summary":{"type":"string"},"next_step":{"type":"string"}})));
         d
     }
 
     /// Execute one tool. Never panics; errors come back as text the model can speak.
     pub fn execute(&self, name: &str, args: &Value) -> ToolOutcome {
+        // Disabled capabilities fail before staging a review as well as at execution.
+        if (name == "make_music" && !self.config.voice_live.music)
+            || (name == "look_at_screen" && !self.config.voice_live.screen_on_request)
+            || (name == "ask_agent" && !self.config.voice_live.ask_agent)
+            || desktop::find(name).is_some_and(|v| {
+                !self.config.voice_live.desktop_control
+                    || (v.risk == desktop::Risk::Outward && !self.config.voice_live.desktop_outward)
+            })
+        {
+            return self.execute_raw(name, args);
+        }
+        let connected = self.mcp.declarations().iter().any(|v| v["name"] == name);
+        let outward = desktop::find(name).is_some_and(|v| v.risk != desktop::Risk::Read);
+        if connected
+            || outward
+            || matches!(
+                name,
+                "propose_checkpoint" | "add_note" | "ask_agent" | "look_at_screen" | "make_music"
+            )
+        {
+            let started = Instant::now();
+            let result = self
+                .continuity
+                .lock()
+                .map_err(|_| "host state unavailable".to_string())
+                .and_then(|mut host| host.propose(name, args));
+            return host_outcome(result, started);
+        }
+        self.execute_raw(name, args)
+    }
+
+    /// Trusted host worker only. The model cannot call this method by name.
+    pub(crate) fn execute_approved(&self, id: u64) -> ToolOutcome {
+        let started = Instant::now();
+        let result = (|| {
+            let action = self
+                .continuity
+                .lock()
+                .map_err(|_| "host state unavailable".to_string())?
+                .take(id)?;
+            let args: Value = serde_json::from_str(&action.payload).map_err(|e| e.to_string())?;
+            if action.operation == "propose_checkpoint" {
+                return self
+                    .continuity
+                    .lock()
+                    .map_err(|_| "host state unavailable".to_string())?
+                    .save_proposal(&args);
+            }
+            if let Some(verb) = desktop::find(&action.operation) {
+                if verb.risk != desktop::Risk::Read {
+                    if !self.config.voice_live.desktop_control
+                        || (verb.risk == desktop::Risk::Outward
+                            && !self.config.voice_live.desktop_outward)
+                    {
+                        return Err("outward desktop actions disabled".into());
+                    }
+                    return desktop::execute_from_host(verb, &args);
+                }
+            }
+            // Re-check all configuration gates in the original dispatch path.
+            Ok(json!({"internal_dispatch": action.operation, "args": args}))
+        })();
+        match result {
+            Ok(v) if v.get("internal_dispatch").is_some() => self.execute_raw(
+                v["internal_dispatch"].as_str().unwrap_or_default(),
+                &v["args"],
+            ),
+            other => host_outcome(other, started),
+        }
+    }
+
+    pub(crate) fn capture_selection_from_host(&self, bundle: Option<&str>) -> ToolOutcome {
+        let started = Instant::now();
+        let result = if self.config.voice_live.screen_on_request {
+            super::selection::capture(bundle)
+        } else {
+            Err("Selection sharing requires screen_on_request=true; nothing captured.".into())
+        };
+        host_outcome(result, started)
+    }
+
+    fn execute_raw(&self, name: &str, args: &Value) -> ToolOutcome {
         let started = Instant::now();
         if name == "look_at_screen" {
             return self.look_at_screen(started);
@@ -411,7 +510,7 @@ impl ToolContext {
                 let limit = int_arg(args, "limit", 10).clamp(1, 50);
                 let filters = SearchFilters {
                     content_type: str_arg(args, "type"),
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let results = search::search("", cfg, &filters).map_err(|e| e.to_string())?;
@@ -428,7 +527,7 @@ impl ToolContext {
                     content_type: str_arg(args, "type"),
                     since: str_arg(args, "since"),
                     attendee: str_arg(args, "attendee"),
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let results = search::search(&query, cfg, &filters).map_err(|e| e.to_string())?;
@@ -439,7 +538,7 @@ impl ToolContext {
             }
             "get_meeting" => {
                 let path = str_arg(args, "path").ok_or("path is required")?;
-                let snap = search::read_authorized_meeting(Path::new(&path), cfg, true)
+                let snap = search::read_authorized_meeting(Path::new(&path), cfg, false)
                     .map_err(|e| e.to_string())?;
                 let fm = &snap.frontmatter;
                 Ok(json!({
@@ -454,25 +553,11 @@ impl ToolContext {
                     "content": body_of(&snap.content),
                 }))
             }
-            "get_meeting_insights" => {
-                let since_days = int_arg(args, "since_days", 30).clamp(1, 3650) as i64;
-                let filter = InsightFilter {
-                    kind: str_arg(args, "kind").and_then(|k| serde_json::from_value(json!(k)).ok()),
-                    min_confidence: None,
-                    participant: str_arg(args, "participant"),
-                    since: Some(Local::now() - ChronoDuration::days(since_days)),
-                    limit: Some(int_arg(args, "limit", 25).clamp(1, 100)),
-                };
-                let rows = crate::events::read_insights(&filter);
-                Ok(json!(rows
-                    .iter()
-                    .map(|(at, insight, _)| insight_row(at, insight))
-                    .collect::<Vec<_>>()))
-            }
+            "get_meeting_insights" => Err("derived insights are unavailable to cloud voice until live-source policy validation is implemented; use authorized meeting reads".into()),
             "research_topic" => {
                 let query = str_arg(args, "query").ok_or("query is required")?;
                 let filters = SearchFilters {
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let r = search::cross_meeting_research(&query, cfg, &filters)
@@ -693,20 +778,6 @@ fn int_arg(args: &Value, key: &str, default: usize) -> usize {
 
 fn meeting_row(r: &search::SearchResult) -> Value {
     json!({"path": r.path, "title": r.title, "date": r.date, "type": r.content_type, "snippet": r.snippet})
-}
-
-fn insight_row(at: &chrono::DateTime<Local>, i: &MeetingInsight) -> Value {
-    json!({
-        "at": at.to_rfc3339(),
-        "kind": serde_json::to_value(i.kind).unwrap_or(Value::Null),
-        "content": i.content,
-        "confidence": serde_json::to_value(i.confidence).unwrap_or(Value::Null),
-        "participants": i.participants,
-        "owner": i.owner,
-        "deadline": i.deadline,
-        "topic": i.topic,
-        "source_meeting": i.source_meeting,
-    })
 }
 
 /// Strip YAML frontmatter so the model reads the transcript, not the metadata twice.
@@ -950,7 +1021,7 @@ fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
         .into_iter()
         .take(limit)
         .map(|(f, modified, snippet)| {
-            let rel = f.strip_prefix(root).unwrap_or(&f).to_string_lossy().to_string();
+            let rel = f.strip_prefix(root).unwrap_or(&f).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
             let modified: chrono::DateTime<Local> = modified.into();
             json!({"path": rel, "modified": modified.format("%Y-%m-%d").to_string(), "snippet": snippet})
         })
@@ -1036,6 +1107,20 @@ fn brain_read(root: &Path, rel: &str, max_chars: usize) -> Result<Value, String>
     }))
 }
 
+fn host_outcome(result: Result<Value, String>, started: Instant) -> ToolOutcome {
+    let (text, is_error) = match result {
+        Ok(v) => (v.to_string(), false),
+        Err(e) => (json!({"error":e}).to_string(), true),
+    };
+    ToolOutcome {
+        text,
+        is_error,
+        elapsed: started.elapsed(),
+        image: None,
+        audio: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1060,6 +1145,9 @@ mod tests {
             mcp: McpPool::default(),
             mcp_problems: Vec::new(),
             desktop: DesktopControl::default(),
+            continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
+                Config::minutes_dir().join("work-capsules"),
+            )),
         }
     }
 
@@ -1257,10 +1345,10 @@ mod tests {
                 .map(|d| d["description"].as_str().unwrap_or_default().to_string())
         };
         if let Some(text) = describe(false) {
-            assert!(text.contains("only reads"), "{text}");
+            assert!(text.contains("executor's launch permissions"), "{text}");
         }
         if let Some(text) = describe(true) {
-            assert!(text.contains("confirm with Mat out loud"), "{text}");
+            assert!(text.contains("local host review"), "{text}");
         }
     }
 
@@ -1321,6 +1409,91 @@ mod tests {
         assert!(out.is_error);
         assert!(out.image.is_none());
         assert!(out.text.contains("screen_on_request"));
+    }
+
+    #[test]
+    fn model_cannot_approve_or_redeem_host_actions_or_write_notes() {
+        let ctx = ctx_with(None);
+        let out = ctx.execute("add_note", &json!({"text":"fixture: never written"}));
+        assert!(!out.is_error);
+        assert!(out.text.contains("needs_host_approval"));
+        let id = serde_json::from_str::<Value>(&out.text).unwrap()["proposal_id"]
+            .as_u64()
+            .unwrap();
+        assert!(ctx.execute_approved(id).is_error);
+        for name in [
+            "/approve",
+            "approve_from_host",
+            "execute_approved",
+            "host:approval:1",
+        ] {
+            assert!(ctx.execute(name, &json!({"id":id})).is_error);
+        }
+        assert!(
+            ctx.execute("add_note", &json!({"text":"fixture", "confirm":"yes"}))
+                .is_error
+        );
+    }
+
+    #[test]
+    fn checkpoint_pipeline_saves_only_exact_host_reviewed_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with(None);
+        ctx.continuity = Mutex::new(crate::voice_live::continuity::Continuity::new(
+            temp.path().join("capsules"),
+        ));
+        let args = json!({"goal":"Simplify","summary":"Still a suggestion","next_step":"Compare"});
+        let proposed = ctx.execute("propose_checkpoint", &args);
+        assert!(!proposed.is_error, "{}", proposed.text);
+        let id = serde_json::from_str::<Value>(&proposed.text).unwrap()["proposal_id"]
+            .as_u64()
+            .unwrap();
+        ctx.continuity
+            .lock()
+            .unwrap()
+            .host_command(&format!("/approve {id}"))
+            .unwrap()
+            .unwrap();
+        let done = ctx.execute_approved(id);
+        assert!(!done.is_error, "{}", done.text);
+        assert!(done.text.contains("\"saved\":true"));
+        assert!(!done.text.contains("Still a suggestion"));
+        assert!(ctx.execute_approved(id).is_error);
+    }
+
+    #[test]
+    fn restricted_exact_path_and_unattested_insights_never_reach_voice() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private.md");
+        std::fs::write(&path, "---\ntitle: Private\ntype: meeting\ndate: 2026-09-15T11:00:00Z\nsensitivity: restricted\n---\n\nSECRET_CANARY").unwrap();
+        let mut ctx = ctx_with(None);
+        ctx.config.output_dir = temp.path().to_path_buf();
+        let read = ctx.execute("get_meeting", &json!({"path":path}));
+        assert!(read.is_error);
+        assert!(!read.text.contains("SECRET_CANARY"));
+        assert!(ctx.execute("get_meeting_insights", &json!({})).is_error);
+        assert!(!ctx
+            .declarations()
+            .iter()
+            .any(|d| d["name"] == "get_meeting_insights"));
+    }
+
+    #[test]
+    fn outbound_model_calls_only_stage_and_disabled_features_do_not_stage() {
+        let mut ctx = ctx_with(None);
+        let args = json!({"to":"fixture@example.invalid", "subject":"Test", "body":"Never sent"});
+        assert!(ctx.execute("send_email", &args).is_error);
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        ctx.config.voice_live.desktop_control = true;
+        ctx.config.voice_live.desktop_outward = true;
+        let result = ctx.execute("send_email", &args);
+        assert!(!result.is_error);
+        assert!(result.text.contains("needs_host_approval"));
+        assert!(!ctx
+            .declarations()
+            .iter()
+            .any(|d| d["parameters"]["properties"].get("confirm").is_some()));
+        // No approval or native execution in this test.
     }
 
     #[test]

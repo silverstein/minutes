@@ -689,16 +689,36 @@ impl ToolContext {
                 }
                 // An empty list and an unreadable calendar look identical from
                 // here, and reporting the second as the first tells Mat his day
-                // is clear when it is not. Probe first; the probe never prompts.
+                // is clear when it is not. Prefer the EventKit probe, but allow
+                // the AppleScript read path that `minutes health` already uses
+                // so Terminal-launched dogfood builds work when the helper is
+                // missing or only has add-only Calendar access.
                 let access = crate::calendar::calendar_access_status();
-                if !access.can_read() {
-                    return Err(format!(
-                        "cannot read the calendar ({}). Tell Mat his calendar is unreachable and never that it is empty.",
-                        calendar_access_label(access)
-                    ));
-                }
+                let calendar_reader = if access.can_read() {
+                    "eventkit"
+                } else {
+                    let health = crate::health::calendar_status(cfg);
+                    if health.state == "ready" {
+                        "applescript"
+                    } else {
+                        return Err(format!(
+                            "cannot read the calendar ({}). Tell Mat Minutes needs Full Calendar Access, not Add Events Only, and never that his calendar is empty.",
+                            calendar_access_label(access)
+                        ));
+                    }
+                };
                 let minutes = int_arg(args, "within_minutes", 720).clamp(5, 10_080) as u32;
-                let events: Vec<Value> = crate::calendar::upcoming_events(minutes)
+                let raw_events = crate::calendar::upcoming_events(minutes);
+                if raw_events.is_empty() && calendar_reader == "applescript" {
+                    let health = crate::health::calendar_status(cfg);
+                    if health.state != "ready" {
+                        return Err(format!(
+                            "cannot read the calendar ({}). Tell Mat Minutes needs Full Calendar Access, not Add Events Only, and never that his calendar is empty.",
+                            calendar_access_label(access)
+                        ));
+                    }
+                }
+                let events: Vec<Value> = raw_events
                     .into_iter()
                     .map(|e| {
                         json!({
@@ -709,9 +729,13 @@ impl ToolContext {
                         })
                     })
                     .collect();
-                Ok(
-                    json!({ "within_minutes": minutes, "calendar_readable": true, "events": events }),
-                )
+                Ok(json!({
+                    "within_minutes": minutes,
+                    "calendar_readable": true,
+                    "calendar_reader": calendar_reader,
+                    "calendar_access": calendar_access_label(access),
+                    "events": events
+                }))
             }
             other => {
                 if self.config.voice_live.desktop_control {
@@ -1247,7 +1271,7 @@ mod tests {
         // On a machine with no calendar access this must fail loudly. Where it
         // does succeed the result says so explicitly instead of being a bare list.
         if out.is_error {
-            assert!(out.text.contains("never that it is empty"));
+            assert!(out.text.contains("never that"));
         } else {
             assert!(out.text.contains("calendar_readable"));
         }

@@ -961,13 +961,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires GEMINI_API_KEY and requests a short Charon voice response"]
+    #[ignore = "requires GEMINI_API_KEY; MINUTES_VOICE_SMOKE_VOICE selects the voice"]
     fn live_morris_voice_smoke() {
         let mut config = crate::config::Config::default();
         config.voice_live.enabled = true;
         config.voice_live.allow_cloud = true;
         config.voice_live.persona = "morris".into();
-        config.voice_live.voice_name = "Charon".into();
+        config.voice_live.voice_name =
+            std::env::var("MINUTES_VOICE_SMOKE_VOICE").unwrap_or_else(|_| "Charon".into());
         let names = crate::voice_live::NameIndex::default();
         let setup = SessionSetup {
             model: config.voice_live.model.clone(),
@@ -1152,6 +1153,78 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY; synthetic text routing only, no clipboard or app access"]
+    fn live_text_transfer_routing_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.clipboard = true;
+        config.voice_live.text_input = true;
+        config.voice_live.desktop_control = true;
+        config.voice_live.voice_name = "Orus".into();
+        config.voice_live.persona = "morris".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        for (request, expected) in [
+            ("Summarize the text I just copied. Please read my clipboard for this.", "read_clipboard_text"),
+            ("Notes is frontmost and my caret is in the draft. Put exactly 'A better way to work.' there. Do not send it or replace any selection.", "paste_text"),
+            ("Read the paragraph I selected in Notes, make it shorter, and replace only that selection.", "paste_text"),
+        ] {
+            let setup = SessionSetup {
+                model: config.voice_live.model.clone(), thinking_level: config.voice_live.thinking_level.clone(),
+                api_key: crate::voice_live::api_key(&config).unwrap(),
+                system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+                function_declarations: tools.declarations(), language: "en-US".into(),
+                voice_name: config.voice_live.voice_name.clone(),
+                manual_activity: true, proactive_audio: false, start_sensitivity: String::new(),
+                end_sensitivity: String::new(), resume_handle: None,
+            };
+            let client = LiveClient::connect(&setup).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(45);
+            let mut matched = false;
+            let mut read_selection = false;
+            let mut speech = String::new();
+            while std::time::Instant::now() < deadline {
+                match client.inbox.recv_timeout(Duration::from_millis(250)) {
+                    Ok(ServerEvent::SetupComplete) => client.send_text_turn(request).unwrap(),
+                    Ok(ServerEvent::OutputTranscript(text)) => speech.push_str(&text),
+                    Ok(ServerEvent::ToolCall(calls)) => {
+                        for call in calls {
+                            if call.name == "read_selected_text" {
+                                read_selection = true;
+                                client.send_tool_response(&call, r#"{"source":"host_selected_text","bundle_id":"com.apple.Notes","selected_text":"We should schedule fewer meetings to leave more time for focused work."}"#, "INTERRUPT").unwrap();
+                                continue;
+                            }
+                            if call.name == "open_app" {
+                                client.send_tool_response(&call, r#"{"opened":true,"app":"Notes"}"#, "INTERRUPT").unwrap();
+                                continue;
+                            }
+                            assert_eq!(call.name, expected, "unexpected text routing");
+                            if expected == "paste_text" {
+                                assert!(matches!(call.args["target_app"].as_str(), Some("Notes" | "com.apple.Notes")));
+                                if request.contains("selected") {
+                                    assert!(read_selection);
+                                    assert_eq!(call.args["mode"], "replace_selection");
+                                    assert_eq!(call.args["expected_selection"], "We should schedule fewer meetings to leave more time for focused work.");
+                                } else {
+                                    assert_eq!(call.args["text"], "A better way to work.");
+                                }
+                            }
+                            matched = true;
+                        }
+                        if matched { break; }
+                    }
+                    Ok(ServerEvent::Error(e) | ServerEvent::Closed(e)) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            client.close();
+            assert!(matched, "missing {expected}; speech={speech}");
+            assert!(!speech.to_lowercase().contains("/approve"), "{speech}");
+            println!("text routing passed: {expected}; selection={read_selection}");
+        }
+    }
     #[test]
     fn compound_status_is_decoded_after_utterance_completion() {
         let events = decode_events(

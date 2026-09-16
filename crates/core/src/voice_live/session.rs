@@ -271,8 +271,7 @@ const TOOL_PROGRESS_EVERY: Duration = Duration::from_secs(8);
 const SCREEN_CAPTION: &str = "This is my screen at this exact moment, captured for the look_at_screen you just ran. Answer my question from this image and nothing else. If I dispute what you report, look at the image again and tell me what is actually there, even if that means disagreeing with me.";
 
 enum Control {
-    PttStart,
-    PttEnd,
+    PttChanged,
     Text(String),
     Approve(Review),
     Reject(u64),
@@ -283,6 +282,7 @@ enum Control {
 /// Handle to a running session. Dropping it stops the session.
 pub struct VoiceLiveSession {
     control: Sender<Control>,
+    ptt_gate: Arc<super::ptt::PttGate>,
     stop_flag: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     pub log_path: Option<PathBuf>,
@@ -304,12 +304,14 @@ impl VoiceLiveSession {
 
     /// Start talking (push-to-talk mode).
     pub fn ptt_start(&self) {
-        let _ = self.control.try_send(Control::PttStart);
+        self.ptt_gate.set(true);
+        let _ = self.control.try_send(Control::PttChanged);
     }
 
     /// Stop talking (push-to-talk mode).
     pub fn ptt_end(&self) {
-        let _ = self.control.try_send(Control::PttEnd);
+        self.ptt_gate.set(false);
+        let _ = self.control.try_send(Control::PttChanged);
     }
 
     /// Send a typed turn.
@@ -496,7 +498,9 @@ where
     }
     .to_string();
 
+    let ptt_gate = Arc::new(super::ptt::PttGate::default());
     let runner = Runner {
+        ptt_gate: Arc::clone(&ptt_gate),
         client,
         inbox,
         setup,
@@ -516,6 +520,7 @@ where
 
     Ok(VoiceLiveSession {
         control: control_tx,
+        ptt_gate,
         stop_flag,
         thread: Some(thread),
         log_path,
@@ -539,6 +544,7 @@ struct Runner {
     audio: AudioIo,
     tools: Arc<ToolContext>,
     control_rx: Receiver<Control>,
+    ptt_gate: Arc<super::ptt::PttGate>,
     on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync>,
     log: Option<SessionLog>,
     mode: TalkMode,
@@ -770,6 +776,7 @@ impl Runner {
             }
         };
 
+        let mut ptt_generation = 0;
         loop {
             if self.stop_flag.load(Ordering::SeqCst) {
                 break;
@@ -806,6 +813,43 @@ impl Runner {
             }
             if state == VoiceLiveState::Thinking && activity.ready() {
                 set_state(&self, &mut state, VoiceLiveState::Ready);
+            }
+            if self.mode == TalkMode::PushToTalk {
+                let observed = self.ptt_gate.snapshot();
+                if observed != ptt_generation {
+                    if ptt.started {
+                        let _ = self.client().activity_end();
+                        set_state(&self, &mut state, VoiceLiveState::Thinking);
+                    }
+                    ptt_generation = observed;
+                    let down = observed & 1 != 0;
+                    ptt = PttState {
+                        held: down,
+                        started: false,
+                        chunks: 0,
+                        held_back: Vec::new(),
+                    };
+                    if !down && state == VoiceLiveState::Listening {
+                        self.emit(VoiceLiveEvent::Status {
+                            text: "Press was too short; no microphone audio sent".into(),
+                        });
+                        set_state(
+                            &self,
+                            &mut state,
+                            if activity.ready() {
+                                VoiceLiveState::Ready
+                            } else {
+                                VoiceLiveState::Thinking
+                            },
+                        );
+                    }
+                    if down {
+                        // Do not send chunks buffered before this press.
+                        for _ in self.audio.receiver().try_iter().take(128) {}
+                        self.audio.flush();
+                        set_state(&self, &mut state, VoiceLiveState::Listening);
+                    }
+                }
             }
             select! {
                 recv(inbox) -> msg => {
@@ -919,7 +963,7 @@ impl Runner {
                     let send = match self.mode {
                         TalkMode::OpenMic => true,
                         TalkMode::PushToTalk => {
-                            if !ptt.held {
+                            if !ptt.held || !self.ptt_gate.permits_audio(ptt_generation) {
                                 false
                             } else {
                                 ptt.chunks += 1;
@@ -932,9 +976,11 @@ impl Runner {
                                 } else {
                                     if !ptt.started {
                                         ptt.started = true;
+                                        activity.user_turn_started();
                                         let _ = self.client().activity_start();
                                         let mut failed = false;
                                         for earlier in ptt.held_back.drain(..) {
+                                            if !self.ptt_gate.permits_audio(ptt_generation) || self.stop_flag.load(Ordering::SeqCst) { break; }
                                             if self.client().send_audio(&earlier).is_err() {
                                                 failed = true;
                                                 break;
@@ -949,7 +995,8 @@ impl Runner {
                             }
                         }
                     };
-                    if send {
+                    if send && !self.stop_flag.load(Ordering::SeqCst)
+                        && (self.mode == TalkMode::OpenMic || self.ptt_gate.permits_audio(ptt_generation)) {
                         if self.client().send_audio(&pcm).is_err() { break; }
                         if self.mode == TalkMode::OpenMic && chunk.rms > 0.02 && state == VoiceLiveState::Ready {
                             set_state(&self, &mut state, VoiceLiveState::Listening);
@@ -975,29 +1022,7 @@ impl Runner {
                 }
                 recv(self.control_rx) -> ctl => {
                     match ctl {
-                        Ok(Control::PttStart) if self.mode == TalkMode::PushToTalk => {
-                            activity.user_turn_started();
-                            ptt = PttState { held: true, started: false, chunks: 0, held_back: Vec::new() };
-                            self.audio.flush();
-                            set_state(&self, &mut state, VoiceLiveState::Listening);
-                        }
-                        Ok(Control::PttEnd) if self.mode == TalkMode::PushToTalk => {
-                            let PttState { started, chunks, .. } = ptt;
-                            ptt = PttState { held: false, started: false, chunks: 0, held_back: Vec::new() };
-                            // Chunks are 100 ms; require 300 ms of audio or the transcriber invents a word.
-                            if started && chunks >= PTT_MIN_CHUNKS {
-                                let _ = self.client().activity_end();
-                                set_state(&self, &mut state, VoiceLiveState::Thinking);
-                            } else {
-                                // The audio only leaves once the press is long
-                                // enough, so there is nothing to retract here.
-                                // Closing the turn anyway would hand the model
-                                // exactly the fragment this guard exists to
-                                // withhold, while the host said nothing was sent.
-                                self.emit(VoiceLiveEvent::Status { text: "press was too short, nothing sent".into() });
-                                set_state(&self, &mut state, VoiceLiveState::Ready);
-                            }
-                        }
+                        Ok(Control::PttChanged) => {}
                         Ok(Control::Approve(review)) => {
                             match self.tools.work.approve_from_host(&review) {
                                 Ok((call, authority)) => {
@@ -1032,7 +1057,6 @@ impl Runner {
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         Ok(Control::Stop) | Err(_) => break,
-                        Ok(_) => {}
                     }
                 }
                 default(Duration::from_millis(50)) => {}

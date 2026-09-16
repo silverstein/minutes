@@ -269,7 +269,9 @@ const MAX_SCREENSHOTS: u32 = 60;
 
 /// Target resolution for screenshots (width in pixels).
 /// Full Retina screenshots are 3-8 MB; resizing to 1280px wide reduces to ~200KB.
-#[cfg(target_os = "macos")]
+///
+/// Only the macOS path resizes, but the width is part of the public capture
+/// signature on every platform, so the constant cannot be gated to one.
 const TARGET_WIDTH: u32 = 1280;
 
 /// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.

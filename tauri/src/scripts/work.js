@@ -3,7 +3,7 @@
   'use strict';
   const $ = id => document.getElementById(id);
   let current = null, updating = false, held = false, latestSpoken = '', artifact = null, lastId = '';
-  let lastReviews = '', lastMemory = '', lastTasks = '';
+  let lastReviews = '', lastMemory = '', lastTasks = '', pttSequence = 0;
   const call = async request => {
     if (!window.__TAURI__?.core?.invoke) throw new Error('Open this page in Minutes Dev; no desktop connection is available.');
     return window.__TAURI__.core.invoke('cmd_workbench', { request });
@@ -107,12 +107,12 @@
     if (held || $('talk').disabled) return;
     if (event?.pointerId !== undefined) $('talk').setPointerCapture(event.pointerId);
     held=true; $('talk').classList.add('held'); $('talk').textContent='Listening — release to send';
-    try { await call({action:'ptt',down:true}); } catch (error) { held=false; notice(error,true); }
+    try { await call({action:'ptt',down:true,sequence:++pttSequence,generation:current.generation}); } catch (error) { held=false; notice(error,true); }
   }
   function releaseTalk() {
     if (!held) return;
     held=false; $('talk').classList.remove('held'); $('talk').textContent='Hold to talk';
-    call({action:'ptt',down:false}).catch(error => notice(error,true));
+    call({action:'ptt',down:false,sequence:++pttSequence,generation:current.generation}).catch(error => notice(error,true));
   }
   $('talk').addEventListener('pointerdown', pressTalk);
   for (const event of ['pointerup','pointercancel','lostpointercapture']) $('talk').addEventListener(event,releaseTalk);

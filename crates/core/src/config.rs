@@ -58,6 +58,7 @@ pub struct Config {
 ///   back to English when the OS locale isn't a supported language.
 /// - `"en"`: force English (the untranslated source strings).
 /// - `"zh-CN"`: Simplified Chinese.
+/// - `"pt-BR"`: Brazilian Portuguese.
 ///
 /// The `MINUTES_LANG` environment variable overrides this field at runtime,
 /// which is handy for one-off CLI invocations. `#[serde(default)]` keeps old
@@ -68,7 +69,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    /// Display language: `"auto"`, `"en"`, or `"zh-CN"`.
+    /// Display language: `"auto"`, `"en"`, `"zh-CN"`, or `"pt-BR"`.
     pub language: String,
     /// Remembered edge anchor for the movable dictation HUD.
     pub dictation_hud_anchor: String,

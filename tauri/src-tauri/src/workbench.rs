@@ -91,6 +91,7 @@ mod enabled {
         starting: bool,
         generation: u64,
         shortcut: bool,
+        last_ptt_sequence: u64,
         startup_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     }
 
@@ -128,6 +129,8 @@ mod enabled {
         },
         Ptt {
             down: bool,
+            sequence: u64,
+            generation: u64,
         },
         Approve {
             review: Review,
@@ -201,7 +204,7 @@ mod enabled {
         Ok(
             json!({"available":true,"checkpoint":work.snapshot()?,"reviews":work.reviews()?,
             "voice_active":slot.voice.as_ref().is_some_and(VoiceLiveSession::is_running),
-            "starting":slot.starting,"shortcut_enabled":slot.shortcut,
+            "starting":slot.starting,"shortcut_enabled":slot.shortcut,"generation":slot.generation,
             "native_selection":cfg!(target_os="macos"),"shortcut":SHORTCUT}),
         )
     }
@@ -355,6 +358,7 @@ mod enabled {
                         .checked_add(1)
                         .ok_or("Work generation exhausted")?;
                     slot.starting = true;
+                    slot.last_ptt_sequence = 0;
                     slot.startup_cancel = Some(Arc::clone(&cancelled));
                     slot.generation
                 };
@@ -405,14 +409,27 @@ mod enabled {
                     Ok(())
                 })?;
             }
-            Request::Ptt { down } => with_voice(&state, |voice| {
+            Request::Ptt {
+                down,
+                sequence,
+                generation,
+            } => {
+                let mut slot = lock(&state)?;
+                if generation != slot.generation || sequence <= slot.last_ptt_sequence {
+                    return Err("Stale push-to-talk gesture ignored".into());
+                }
+                slot.last_ptt_sequence = sequence;
+                let voice = slot
+                    .voice
+                    .as_ref()
+                    .filter(|v| v.is_running())
+                    .ok_or("Voice is not running")?;
                 if down {
                     voice.ptt_start();
                 } else {
                     voice.ptt_end();
                 }
-                Ok(())
-            })?,
+            }
             Request::Approve { review } => with_voice(&state, |voice| {
                 voice.approve_local(review);
                 Ok(())

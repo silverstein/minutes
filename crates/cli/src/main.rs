@@ -3364,7 +3364,8 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Preserve main's interrupt-safe C++ teardown fix (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -7552,7 +7553,7 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        std::process::exit(0);
+        minutes_core::exit_without_cxx_teardown(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -17484,7 +17485,8 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Preserve main's interrupt-safe C++ teardown fix (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -17997,7 +17999,8 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Preserve main's interrupt-safe C++ teardown fix (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })
     .ok();

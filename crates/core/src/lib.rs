@@ -20,6 +20,102 @@ pub(crate) mod macos_graph_xpc;
 pub fn install_validated_outer_process_group(process_group: i32) -> std::io::Result<()> {
     bounded_child::install_validated_outer_process_group(process_group)
 }
+
+/// Exit the process, skipping C++ static destructors on macOS.
+///
+/// whisper.cpp registers process-global Metal state whose teardown runs from
+/// `__cxa_finalize_ranges` on a normal `exit()`. A `WhisperContext` that is
+/// still alive at that moment still has its buffers registered in ggml's
+/// residency-set collection, so `ggml_metal_rsets_free` aborts on
+/// `GGML_ASSERT([rsets->data count] == 0)` (issue #998). The same teardown
+/// aborted a worker subprocess over a partially initialized context in #229.
+///
+/// An interrupt path cannot fix that by dropping the context, because the
+/// decode that owns it is running on another thread. It terminates without the
+/// teardown instead and leaves the rest for the kernel to reclaim.
+///
+/// On every other target this is an ordinary [`std::process::exit`], teardown
+/// included: the aborting destructor is Metal's, and an equivalent exit-time
+/// assertion has not been shown for the CUDA, HIP or Vulkan backends.
+///
+/// This deliberately does not flush `stdout` first. `Stdout::flush` takes the
+/// process-wide stdout lock, so a thread already blocked writing into a stalled
+/// pipe would hold that lock and the interrupt would hang forever instead of
+/// exiting. Rust's own exit cleanup avoids the same trap by using `try_lock`.
+/// A force-quit that cannot quit is worse than the buffered bytes it saves, and
+/// the interrupt handlers report through `stderr`, which is unbuffered.
+pub fn exit_without_cxx_teardown(code: i32) -> ! {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::_exit(code)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    std::process::exit(code)
+}
+
+#[cfg(test)]
+mod exit_teardown_tests {
+    /// Marks the re-executed child role; see the test below.
+    const CHILD_MARKER: &str = "MINUTES_INTERNAL_TEST_EXIT_HELD_STDOUT_CHILD";
+    const CHILD_EXIT_CODE: i32 = 23;
+
+    /// A force-quit must terminate while another thread holds the stdout lock.
+    ///
+    /// This guards the shape of the bug, not its implementation: it asserts the
+    /// process actually dies, so re-adding any blocking flush to
+    /// [`super::exit_without_cxx_teardown`] fails here rather than in a user's
+    /// terminal. Unlike the Metal abort this cannot be reproduced without a GPU
+    /// backend, so it runs on every platform CI builds.
+    #[test]
+    fn exit_without_cxx_teardown_does_not_block_on_a_held_stdout_lock() {
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            std::thread::spawn(|| {
+                let _held = std::io::stdout().lock();
+                std::thread::sleep(std::time::Duration::from_secs(120));
+            });
+            // Let the other thread take the lock before we try to exit under it.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            super::exit_without_cxx_teardown(CHILD_EXIT_CODE);
+        }
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let mut child = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "exit_teardown_tests::exit_without_cxx_teardown_does_not_block_on_a_held_stdout_lock",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("re-exec the test binary in its child role");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait().expect("poll the child") {
+                Some(status) => {
+                    assert_eq!(
+                        status.code(),
+                        Some(CHILD_EXIT_CODE),
+                        "the child should exit cleanly under a held stdout lock"
+                    );
+                    return;
+                }
+                None if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!(
+                        "exit_without_cxx_teardown blocked while another thread held the \
+                         stdout lock; an emergency exit path must not wait on that lock"
+                    );
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+}
 #[cfg(any(test, all(feature = "streaming", feature = "whisper")))]
 pub(crate) mod bounded_inference;
 pub mod calendar;

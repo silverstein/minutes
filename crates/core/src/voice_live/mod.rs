@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod music;
 pub mod names;
 pub mod protocol;
+mod ptt;
 pub mod selection;
 pub mod session;
 pub mod tools;

@@ -83,7 +83,7 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # delegate_cwd = "~/Sites"        # Where the relayed agent starts looking
 # music = true                    # Labs toy: generate and play short instrumental music
 #                                 # steered by a meeting or a prep. Refuses while recording.
-# music_max_secs = 45
+# music_max_secs = 0             # 0 plays the whole piece; set a number to cap it
 # delegate_writes = false         # Let the relayed agent change things. Off by default:
 #                                 # a misheard sentence should not open an issue or edit a file.
 

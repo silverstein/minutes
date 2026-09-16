@@ -1178,7 +1178,12 @@ pub struct VoiceLiveConfig {
     pub music: bool,
     /// Music model id.
     pub music_model: String,
-    /// Longest piece to play, in seconds.
+    /// Longest stretch to play, in seconds. 0 plays the whole piece.
+    ///
+    /// Music and speech share one output queue, which is what lets the echo
+    /// canceller treat the music as reference audio so the microphone never
+    /// hears it. The cost is that unprompted speech waits behind queued music.
+    /// Talking flushes the queue, so anything the user starts is unaffected.
     pub music_max_secs: u64,
     /// Let the relayed agent change things: write files, open issues, call a
     /// service that writes. Off by default.
@@ -1227,7 +1232,7 @@ impl Default for VoiceLiveConfig {
             delegate_writes: false,
             music: false,
             music_model: "lyria-3.5".into(),
-            music_max_secs: 45,
+            music_max_secs: 0,
             mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }

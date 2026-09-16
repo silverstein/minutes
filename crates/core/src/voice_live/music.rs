@@ -122,7 +122,11 @@ pub fn compose(config: &Config, description: &str) -> Result<Music, String> {
         .map_err(|e| format!("the music was not valid base64: {e}"))?;
 
     let path = write_source(&bytes, mime)?;
-    let max_secs = config.voice_live.music_max_secs.clamp(5, 600);
+    // 0 plays the whole piece; anything else is a ceiling.
+    let max_secs = match config.voice_live.music_max_secs {
+        0 => None,
+        other => Some(other.clamp(5, 3_600)),
+    };
     let pcm16 = decode_for_playback(&path, max_secs)?;
     let seconds = pcm16.len() as f32 / 2.0 / OUTPUT_SAMPLE_RATE as f32;
     if seconds < 0.5 {
@@ -178,16 +182,19 @@ fn write_source(bytes: &[u8], mime: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Decode to the sample format the playback queue takes, bounded by `max_secs`.
-fn decode_for_playback(path: &std::path::Path, max_secs: u64) -> Result<Vec<u8>, String> {
+/// Decode to the sample format the playback queue takes.
+///
+/// `max_secs` of `None` decodes the whole piece.
+fn decode_for_playback(path: &std::path::Path, max_secs: Option<u64>) -> Result<Vec<u8>, String> {
     let ffmpeg = crate::ffmpeg::resolve_launchable_ffmpeg()
         .map_err(|e| format!("music needs ffmpeg to decode, and it is unavailable: {e}"))?;
-    let output = crate::engine_process::command(&ffmpeg)
-        .args(["-v", "error", "-nostdin", "-i"])
-        .arg(path)
+    let mut command = crate::engine_process::command(&ffmpeg);
+    command.args(["-v", "error", "-nostdin", "-i"]).arg(path);
+    if let Some(secs) = max_secs {
+        command.args(["-t", &secs.to_string()]);
+    }
+    let output = command
         .args([
-            "-t",
-            &max_secs.to_string(),
             "-f",
             "s16le",
             "-acodec",

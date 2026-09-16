@@ -2633,17 +2633,21 @@ fn main() -> Result<()> {
 #[cfg(feature = "voice-live")]
 fn local_work_fast_path() -> Option<Result<()>> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let is_local_work = args.iter().any(|arg| arg == "talk")
-        && args.iter().any(|arg| arg == "--local-work");
+    let is_local_work = args.iter().any(|arg| arg.to_str() == Some("talk"))
+        && args
+            .iter()
+            .any(|arg| arg.to_str() == Some("--local-work"));
     if !is_local_work {
         return None;
     }
     if std::env::var_os("MINUTES_MCP_OUTER_PROCESS_GROUP").is_some() {
-        return Some(anyhow::bail!(
+        return Some(Err(anyhow::anyhow!(
             "local work mode cannot run inside authorized process containment"
-        ));
+        )));
     }
-    Some(cmd_local_work(args.iter().any(|arg| arg == "--json")))
+    Some(cmd_local_work(
+        args.iter().any(|arg| arg.to_str() == Some("--json")),
+    ))
 }
 
 /// Offline counterpart using the exact same checkpoint store as Voice Live.

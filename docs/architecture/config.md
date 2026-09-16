@@ -396,6 +396,9 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `delegate_timeout_secs` | `120` | How long to wait for that agent |
 | `delegate_agent_args` | `[]` | Launch flags for the relayed agent. Empty follows `[assistant] agent_args`. A relayed agent has no terminal, so it must not stop to ask for tool-use permission: nothing can answer the prompt and the call burns its whole timeout looking like a hang |
 | `delegate_cwd` | `""` | Directory the relayed agent starts in. Empty uses the Minutes process directory, which for a desktop launch is not where any code lives |
+| `music` | `false` | Labs toy. Generate and play a short instrumental piece steered by what the assistant knows about a conversation. Deliberately separate from the memory features and off by default. Refuses while a recording is running, because music through the speakers reaches the microphone and then the transcript |
+| `music_model` | `"lyria-3.5"` | Music model id |
+| `music_max_secs` | `45` | Longest stretch to play. The whole piece is still kept under `~/.minutes/music` |
 | `delegate_writes` | `false` | Let the relayed agent change things. Off by default: the caller is a cloud speech model deciding on its own when to relay, from audio it may have misheard, with nobody reviewing the request. RFC 0007 holds phase 1 to a single write, `add_note`, for that reason. Note this instructs the agent; narrowing its own tool access through `delegate_agent_args` is the enforcing control |
 | `screen_settle_ms` | `150` | Spacing between closing the screen tool call and sending the frame that answers it |
 | `mcp_servers` | `[]` | MCP servers to launch for a session, as `[[voice_live.mcp_servers]]` tables |

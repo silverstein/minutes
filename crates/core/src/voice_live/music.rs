@@ -157,6 +157,12 @@ fn write_source(bytes: &[u8], mime: &str) -> Result<PathBuf, String> {
     let dir = music_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    // Owner-only, like every other directory Minutes writes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     let path = dir.join(format!(
         "{}.{}",
         chrono::Local::now().format("%Y-%m-%d-%H-%M-%S"),

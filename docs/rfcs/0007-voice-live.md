@@ -95,6 +95,10 @@ The system instruction states: spoken register, one to three sentences; facts on
 3. `look_at_screen` (one frame via the app's screen module), `ask_codebase` (delegates to a coding agent), session resumption past the fifteen-minute cap.
 4. Alternate providers, including a fully local pipeline.
 
+## Outside the phases
+
+`music.rs` is a labs toy behind `[voice_live] music`, off by default and not part of any phase above. The assistant reads a meeting, a prep or the calendar, writes a music brief itself, and the module renders it through the provider's music model and hands back samples. It exists because Minutes is the only thing that knows both what your next conversation is and what you wrote about it beforehand. It refuses while a recording is running: music through the speakers reaches the microphone and then the transcript, and RFC 0004's rule that an optional consumer never degrades capture applies to it exactly as it does to everything else.
+
 ## Open questions
 
 - Whether a single on-demand image frame moves a Live session into the shorter audio-plus-video session cap. Measure in phase 3.

@@ -827,6 +827,11 @@ impl Runner {
                             }
                         }
                         Ok(Control::Text(text)) => {
+                            // A typed line is the user as surely as a spoken
+                            // one, and rather less ambiguously: nothing the
+                            // assistant does can produce a keystroke. The
+                            // confirmation gate counts it.
+                            self.tools.desktop.heard_user();
                             self.log_line(format!("**You (typed):** {text}"));
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
                             if self.client().send_text_turn(&text).is_err() { break; }

@@ -36,9 +36,10 @@ const DEFAULT_MAX_TOOLS: usize = 8;
 /// never writes a newline makes the reader allocate forever, which no channel
 /// bound or stash limit can stop.
 const MAX_LINE_BYTES: usize = 1 << 20;
-/// Longest request we will write. Kept well under a pipe buffer so a server
-/// that has stopped reading cannot block the write and strand the connection.
+/// Longest request we will write.
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
+/// How long to keep trying to hand a server a request before giving up on it.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Separator between the server name and the tool name.
 pub const SEP: &str = "__";
 
@@ -158,6 +159,21 @@ impl McpServer {
             .spawn()
             .map_err(|e| format!("could not start {}: {e}", spec.command))?;
         let stdin = child.stdin.take().ok_or("no stdin on the server")?;
+        // Non-blocking, so a server that stops reading cannot pin the writer,
+        // and with it the connection lock, for the life of the process. A size
+        // cap alone was not enough: successive requests fill the pipe and the
+        // next write blocks before any timeout of ours can start.
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                let fd = stdin.as_raw_fd();
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags >= 0 {
+                    libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                }
+            }
+        }
         let stdout = child.stdout.take().ok_or("no stdout on the server")?;
 
         let (tx, rx) = bounded::<Value>(256);
@@ -260,9 +276,8 @@ impl McpServer {
 
     fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|_| "server lock poisoned")?;
-        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        writeln!(conn.stdin, "{msg}").map_err(|e| e.to_string())?;
-        conn.stdin.flush().map_err(|e| e.to_string())
+        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
+        write_line(&mut conn.stdin, &msg)
     }
 
     fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
@@ -276,10 +291,7 @@ impl McpServer {
                 "that request is too large to send to {method} safely"
             ));
         }
-        writeln!(conn.stdin, "{msg}").map_err(|e| format!("writing to the server: {e}"))?;
-        conn.stdin
-            .flush()
-            .map_err(|e| format!("writing to the server: {e}"))?;
+        write_line(&mut conn.stdin, &msg)?;
 
         // A response that arrived while an earlier call was waiting.
         if let Some(pos) = conn.stash.iter().position(|v| response_id(v) == Some(id)) {
@@ -349,6 +361,48 @@ impl Drop for McpPool {
 /// A server may send its own requests, and those carry ids from its own
 /// numbering. Matching on the id alone let a server-initiated `ping` with the
 /// id we happened to be waiting on satisfy our call with an empty result.
+/// Write one line, giving up rather than blocking forever.
+///
+/// The pipe is non-blocking, so a server that has stopped reading returns
+/// `WouldBlock` instead of parking the caller. Without this a wedged server
+/// holds the connection lock for the life of the process, which also stops
+/// shutdown from taking the lock to kill it.
+fn write_line(stdin: &mut ChildStdin, line: &str) -> Result<(), String> {
+    let bytes = line.as_bytes();
+    let deadline = Instant::now() + WRITE_TIMEOUT;
+    let mut sent = 0;
+    while sent < bytes.len() {
+        if Instant::now() > deadline {
+            return Err("the server stopped reading its input".into());
+        }
+        match stdin.write(&bytes[sent..]) {
+            Ok(0) => return Err("the server closed its input".into()),
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("writing to the server: {e}")),
+        }
+    }
+    loop {
+        if Instant::now() > deadline {
+            return Err("the server stopped reading its input".into());
+        }
+        match stdin.write(b"\n") {
+            Ok(0) => return Err("the server closed its input".into()),
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("writing to the server: {e}")),
+        }
+    }
+    // Flushing a pipe is a no-op, and a non-blocking one must not be waited on.
+    Ok(())
+}
+
 fn response_id(value: &Value) -> Option<u64> {
     if value.get("method").is_some() {
         return None;

@@ -616,7 +616,13 @@ impl Runner {
                                 .send_image(image, "image/png", SCREEN_CAPTION)
                                 .is_err()
                             {
-                                break;
+                                // Same reasoning as the tool response above:
+                                // losing one frame is bad, losing every later
+                                // tool call for the session is worse.
+                                on_event(VoiceLiveEvent::Status {
+                                    text: "the screen frame arrived after the socket closed".into(),
+                                });
+                                continue;
                             }
                         }
                     }
@@ -676,7 +682,7 @@ impl Runner {
                             // is most likely the echo of the very sentence that
                             // asked for confirmation.
                             if self.audio.cancels_echo() || self.audio.is_idle() {
-                                self.tools.desktop.heard_user();
+                                self.tools.desktop.heard_user(&t);
                             }
                             you.push_str(&t);
                             self.emit(VoiceLiveEvent::UserTranscript { text: t, partial: true });
@@ -831,7 +837,7 @@ impl Runner {
                             // one, and rather less ambiguously: nothing the
                             // assistant does can produce a keystroke. The
                             // confirmation gate counts it.
-                            self.tools.desktop.heard_user();
+                            self.tools.desktop.heard_user(&text);
                             self.log_line(format!("**You (typed):** {text}"));
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
                             if self.client().send_text_turn(&text).is_err() { break; }

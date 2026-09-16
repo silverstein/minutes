@@ -70,6 +70,10 @@ pub struct McpTool {
 struct Conn {
     child: Child,
     stdin: ChildStdin,
+    /// Set when a write gave up part way. Whatever reached the server is an
+    /// unterminated fragment, and appending the next request to it produces one
+    /// malformed frame rather than two good ones, so the connection is done.
+    broken: bool,
     rx: Receiver<Value>,
     /// Responses that arrived out of order, kept rather than dropped.
     stash: VecDeque<Value>,
@@ -221,6 +225,7 @@ impl McpServer {
             conn: Mutex::new(Conn {
                 child,
                 stdin,
+                broken: false,
                 rx,
                 stash: VecDeque::new(),
                 next_id: 1,
@@ -276,12 +281,22 @@ impl McpServer {
 
     fn notify(&self, method: &str, params: Value) -> Result<(), String> {
         let mut conn = self.conn.lock().map_err(|_| "server lock poisoned")?;
+        if conn.broken {
+            return Err("that server is no longer usable".into());
+        }
         let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params }).to_string();
-        write_line(&mut conn.stdin, &msg)
+        let sent = write_line(&mut conn.stdin, &msg);
+        if sent.is_err() {
+            conn.broken = true;
+        }
+        sent
     }
 
     fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let mut conn = self.conn.lock().map_err(|_| "server lock poisoned")?;
+        if conn.broken {
+            return Err("that server is no longer usable".into());
+        }
         let id = conn.next_id;
         conn.next_id += 1;
         let msg =
@@ -291,7 +306,11 @@ impl McpServer {
                 "that request is too large to send to {method} safely"
             ));
         }
-        write_line(&mut conn.stdin, &msg)?;
+        if let Err(e) = write_line(&mut conn.stdin, &msg) {
+            // A partial line is on the wire and cannot be taken back.
+            conn.broken = true;
+            return Err(e);
+        }
 
         // A response that arrived while an earlier call was waiting.
         if let Some(pos) = conn.stash.iter().position(|v| response_id(v) == Some(id)) {
@@ -623,6 +642,7 @@ impl McpServer {
                         .expect("true should spawn");
                     helper.stdin.take().expect("piped stdin")
                 },
+                broken: false,
                 rx,
                 stash: VecDeque::new(),
                 next_id: 1,

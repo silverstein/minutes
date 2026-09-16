@@ -141,8 +141,13 @@ end run"#,
     },
     Verb {
         name: "open_url",
-        description: "Open a web page in the default browser. Only http and https.",
-        risk: Risk::Local,
+        // Outward, despite looking harmless. A URL carries a query string, and
+        // the model can put anything it has read into one: a meeting, a prep,
+        // a person's profile. Opening it transmits that to whoever owns the
+        // domain. This is the only verb whose danger is in its argument rather
+        // than its effect.
+        description: "Open a web page in the default browser. Only http and https. Confirmed out loud first, because a web address can carry private text out with it.",
+        risk: Risk::Outward,
         params: &[p("url", "An http or https address", true)],
         script: r#"on run argv
     open location (item 1 of argv)
@@ -264,6 +269,9 @@ pub struct DesktopControl {
     heard_user_at: Arc<AtomicU64>,
     /// Nanoseconds at the last moment the assistant finished a turn.
     finished_speaking_at: Arc<AtomicU64>,
+    /// What the user last said. Read only to refuse an obvious "no", never to
+    /// decide that something was a "yes".
+    last_words: Mutex<String>,
     /// The instant those nanoseconds are measured from.
     epoch: Mutex<Option<Instant>>,
 }
@@ -275,8 +283,12 @@ impl DesktopControl {
     const VOID: &'static str = "Mat has not answered that yet, so the confirmation is void. \
          Read him the sentence again and wait for him to reply.";
 
-    /// Record that the user's voice was just heard.
-    pub fn heard_user(&self) {
+    /// Record what the user just said, spoken or typed.
+    pub fn heard_user(&self, text: &str) {
+        {
+            let mut last = self.last_words.lock().unwrap_or_else(|p| p.into_inner());
+            *last = text.trim().to_string();
+        }
         self.stamp(&self.heard_user_at);
     }
 
@@ -451,6 +463,23 @@ impl DesktopControl {
         {
             return Err(Self::VOID.into());
         }
+        // Hearing a person is not the same as being agreed with. Catching a
+        // plain refusal is the part code can do; the rest rests on the model
+        // having read the question out, which is why the question is read out.
+        let words = {
+            let words = self.last_words.lock().unwrap_or_else(|p| p.into_inner());
+            words.clone()
+        };
+        if sounds_like_refusal(&words) {
+            return Err(format!(
+                "Mat said \"{}\", which is not agreement. Do not send it, and do not ask again \
+                 unless he brings it up.",
+                words.trim()
+            ));
+        }
+        // Spend the utterance too, so one reply cannot release a second pending
+        // action the user was never asked about.
+        self.heard_user_at.store(0, Ordering::SeqCst);
         Ok(())
     }
 
@@ -463,6 +492,51 @@ impl DesktopControl {
             .unwrap_or_default();
         format!("ok-{}-{}", *counter, nanos)
     }
+}
+
+/// Whether an answer is plainly a refusal.
+///
+/// Deliberately one-sided. A false positive refuses to send something the user
+/// wanted, which costs them a sentence; a false negative sends something they
+/// declined, which cannot be taken back.
+fn sounds_like_refusal(words: &str) -> bool {
+    // Punctuation and spacing vary with the transcriber, so compare on words.
+    let flattened: String = words
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '\'' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let normalized = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return true;
+    }
+    const REFUSALS: &[&str] = &[
+        "no",
+        "nope",
+        "nah",
+        "don't",
+        "do not",
+        "stop",
+        "cancel",
+        "wait",
+        "hold on",
+        "hold up",
+        "never mind",
+        "nevermind",
+        "forget it",
+        "scratch that",
+        "not yet",
+    ];
+    let padded = format!(" {normalized} ");
+    REFUSALS
+        .iter()
+        .any(|needle| padded.contains(&format!(" {needle} ")))
 }
 
 /// The arguments that identify an action, with the confirmation token removed.
@@ -525,6 +599,10 @@ fn describe(verb: &'static Verb, args: &Value) -> String {
             get("to"),
             get("subject"),
             get("body")
+        ),
+        "open_url" => format!(
+            "I'm about to open {} in your browser. Is that right?",
+            get("url")
         ),
         other => format!("I'm about to run {other}. Is that right?"),
     }
@@ -673,7 +751,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(2));
         control.finished_speaking();
         std::thread::sleep(Duration::from_millis(2));
-        control.heard_user();
+        control.heard_user("yes, go ahead");
     }
 
     /// Ask the gate, expecting it to want confirmation, and return the payload.
@@ -836,9 +914,71 @@ mod tests {
         // was minted, but before the assistant has read anything out. It is not
         // an answer to a question nobody has asked yet.
         std::thread::sleep(Duration::from_millis(2));
-        control.heard_user();
+        control.heard_user("and send it to Kim as well");
         let err = control.gate(outward(), &confirmed).unwrap_err();
         assert!(err.contains("has not answered"), "{err}");
+    }
+
+    #[test]
+    fn a_refusal_does_not_authorise_the_send() {
+        let control = DesktopControl::default();
+        let args = json!({"to": NOBODY, "text": "hello"});
+        let token = ask_for(&control, &args)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut confirmed = args.clone();
+        confirmed["confirm"] = json!(token);
+        std::thread::sleep(Duration::from_millis(2));
+        control.finished_speaking();
+        std::thread::sleep(Duration::from_millis(2));
+        control.heard_user("No, don't send that");
+        let err = control.gate(outward(), &confirmed).unwrap_err();
+        assert!(err.contains("not agreement"), "{err}");
+    }
+
+    #[test]
+    fn one_answer_cannot_release_two_pending_actions() {
+        let control = DesktopControl::default();
+        let first = json!({"to": NOBODY, "text": "one"});
+        let second = json!({"to": NOBODY, "text": "two"});
+        let token_one = ask_for(&control, &first)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let token_two = ask_for(&control, &second)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        user_answers(&control);
+        let mut confirmed_one = first.clone();
+        confirmed_one["confirm"] = json!(token_one);
+        assert!(matches!(
+            control.gate(outward(), &confirmed_one),
+            Ok(Gate::Cleared(_))
+        ));
+        // The user answered one question, not two.
+        let mut confirmed_two = second.clone();
+        confirmed_two["confirm"] = json!(token_two);
+        assert!(control.gate(outward(), &confirmed_two).is_err());
+    }
+
+    #[test]
+    fn plain_refusals_are_recognised() {
+        for words in [
+            "no",
+            "No.",
+            "nope",
+            "don't send that",
+            "wait, hold on",
+            "never mind",
+            "",
+        ] {
+            assert!(sounds_like_refusal(words), "{words:?} should be a refusal");
+        }
+        for words in ["yes", "yes go ahead", "sure, send it", "that's right"] {
+            assert!(!sounds_like_refusal(words), "{words:?} should not be");
+        }
     }
 
     #[test]

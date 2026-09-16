@@ -884,7 +884,10 @@ fn read_prep_artifact(name: &str, max_chars: usize) -> Result<Value, String> {
         let Ok(root) = root.canonicalize() else {
             continue;
         };
-        if !resolved.starts_with(&root) || !resolved.is_file() {
+        let Ok(meta) = resolved.metadata() else {
+            continue;
+        };
+        if !resolved.starts_with(&root) || !is_readable_file(&meta) {
             continue;
         }
         let body = std::fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
@@ -971,6 +974,26 @@ fn snippet_around(text: &str, byte_pos: usize, needle_len: usize) -> String {
     text[start..end].replace('\n', " ").trim().to_string()
 }
 
+/// True for something that can actually be read to the end.
+///
+/// A named pipe passes every ordinary metadata check and then blocks forever
+/// waiting for a writer, which takes the tool worker and the session's shutdown
+/// with it.
+fn is_readable_file(meta: &std::fs::Metadata) -> bool {
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let kind = meta.file_type();
+        if kind.is_fifo() || kind.is_socket() || kind.is_char_device() || kind.is_block_device() {
+            return false;
+        }
+    }
+    true
+}
+
 fn brain_read(root: &Path, rel: &str, max_chars: usize) -> Result<Value, String> {
     let candidate = root.join(rel.trim_start_matches('/'));
     let resolved = candidate
@@ -980,6 +1003,9 @@ fn brain_read(root: &Path, rel: &str, max_chars: usize) -> Result<Value, String>
         return Err("path is outside the knowledge root".into());
     }
     let meta = resolved.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_dir() && !is_readable_file(&meta) {
+        return Err(format!("{rel} is not a file that can be read"));
+    }
     if meta.is_dir() {
         let mut entries: Vec<String> = std::fs::read_dir(&resolved)
             .map_err(|e| e.to_string())?

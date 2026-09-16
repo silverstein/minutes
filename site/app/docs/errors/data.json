@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-09-15",
-  "visibleCount": 68,
+  "generatedAt": "2026-09-16",
+  "visibleCount": 70,
   "hiddenCount": 17,
   "groups": [
     {
@@ -598,7 +598,7 @@
     },
     {
       "enumName": "DictationError",
-      "count": 7,
+      "count": 8,
       "entries": [
         {
           "id": "dictationerror-recordingactive",
@@ -621,6 +621,17 @@
           "hidden": false,
           "anchorId": "error-dictationerror-livetranscriptactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-livetranscriptactive"
+        },
+        {
+          "id": "dictationerror-voiceactive",
+          "enumName": "DictationError",
+          "variant": "VoiceActive",
+          "cfg": null,
+          "message": "a voice session is open — close it before dictating",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-voiceactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-voiceactive"
         },
         {
           "id": "dictationerror-alreadyactive",
@@ -681,7 +692,7 @@
     },
     {
       "enumName": "LiveTranscriptError",
-      "count": 5,
+      "count": 6,
       "entries": [
         {
           "id": "livetranscripterror-recordingactive",
@@ -704,6 +715,17 @@
           "hidden": false,
           "anchorId": "error-livetranscripterror-dictationactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-dictationactive"
+        },
+        {
+          "id": "livetranscripterror-voiceactive",
+          "enumName": "LiveTranscriptError",
+          "variant": "VoiceActive",
+          "cfg": null,
+          "message": "a voice session is open — close it before starting live transcript",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-voiceactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-voiceactive"
         },
         {
           "id": "livetranscripterror-alreadyactive",

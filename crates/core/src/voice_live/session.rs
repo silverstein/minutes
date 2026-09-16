@@ -103,6 +103,13 @@ pub struct SessionOptions {
     pub device: Option<String>,
     /// Skip speaker playback (headless tests).
     pub mute_playback: bool,
+    /// The host has no way to push to talk, so an open mic is the only usable
+    /// mode. Set by the desktop tray, which has no key to hold. When echo
+    /// cancellation turns out to be unavailable, the session refuses to start
+    /// rather than degrade: a plain-capture open mic on speakers hears the
+    /// assistant and interrupts itself forever, and this host cannot fall back
+    /// to push-to-talk.
+    pub require_open_mic: bool,
 }
 
 impl Default for SessionOptions {
@@ -111,6 +118,7 @@ impl Default for SessionOptions {
             mode: TalkMode::PushToTalk,
             device: None,
             mute_playback: false,
+            require_open_mic: false,
         }
     }
 }
@@ -128,6 +136,20 @@ enum AudioIo {
     /// out of the microphone.
     #[cfg(target_os = "macos")]
     Processed(VoiceIo),
+}
+
+impl AudioIo {
+    /// Whether the speaker signal is actually being cancelled out of the
+    /// microphone, as opposed to merely having been asked for. `open_audio`
+    /// falls back to plain capture when the voice-processing unit will not
+    /// open, so config intent and reality can differ.
+    fn cancels_echo(&self) -> bool {
+        match self {
+            Self::Split { .. } => false,
+            #[cfg(target_os = "macos")]
+            Self::Processed(_) => true,
+        }
+    }
 }
 
 impl AudioIo {
@@ -378,6 +400,26 @@ where
     super::preflight(config)?;
     let api_key = super::api_key(config)?;
     super::refuse_if_microphone_busy()?;
+
+    // Claim the cross-process marker here, before connecting or opening the
+    // microphone, so the window between "nobody else is capturing" and "this
+    // session is visible to everyone" is a few instructions rather than a whole
+    // socket handshake and audio startup. The flock is the authoritative gate;
+    // the check above only gets a friendlier message out earlier.
+    //
+    // It moves into the session thread below, so the file goes away exactly
+    // when the session ends, whatever ended it. Held by the returned handle
+    // instead, a session that dropped its socket would leave a live-looking PID
+    // behind, and since that PID is this same still-running process, nothing
+    // would ever see it as stale. Every early return between here and the spawn
+    // drops the guard, which removes the file.
+    let pid_guard =
+        crate::pid::create_pid_guard(&crate::pid::voice_pid_path()).map_err(|e| match e {
+            crate::error::PidError::AlreadyRecording(_) => {
+                VoiceLiveError::MicrophoneBusy("another voice session")
+            }
+            other => VoiceLiveError::Audio(format!("voice session lock: {other}")),
+        })?;
     let on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync> = Arc::new(on_event);
     let emit = |e: VoiceLiveEvent| on_event(e);
     emit(VoiceLiveEvent::State {
@@ -432,6 +474,19 @@ where
         return Err(VoiceLiveError::Audio(reason));
     }
     let audio = open_audio(config, &options, device.as_deref(), &emit)?;
+    // Asking for echo cancellation is not the same as getting it: the
+    // voice-processing unit can fail to open and `open_audio` falls back to
+    // plain capture. A host that can push to talk rides that out; one that
+    // cannot would run the exact self-interrupting configuration the mode
+    // check was supposed to prevent.
+    if options.require_open_mic && !options.mute_playback && !audio.cancels_echo() {
+        return Err(VoiceLiveError::Audio(
+            "echo cancellation could not be started, and this surface has no \
+             push-to-talk to fall back to. Use `minutes talk` in a terminal, or \
+             check that another app is not holding the microphone."
+                .into(),
+        ));
+    }
 
     let log = if config.voice_live.log_sessions {
         SessionLog::open(&config.voice_live.model, options.mode).ok()
@@ -472,23 +527,6 @@ where
         scheduling,
         stop_flag: Arc::clone(&stop_flag),
     };
-    // The cross-process marker, so `minutes record` in a terminal and a session
-    // in the menu-bar app can see each other. The flock is the authoritative
-    // gate; the friendlier check in `refuse_if_microphone_busy` only gets the
-    // message out earlier.
-    //
-    // It is owned by the session thread rather than by the returned handle, so
-    // the file goes away exactly when the session ends, whatever ended it. Held
-    // by the handle instead, a session that dropped its socket would leave a
-    // live-looking PID behind, and since the PID is this same still-running
-    // process, nothing would ever see it as stale.
-    let pid_guard =
-        crate::pid::create_pid_guard(&crate::pid::voice_pid_path()).map_err(|e| match e {
-            crate::error::PidError::AlreadyRecording(_) => {
-                VoiceLiveError::MicrophoneBusy("another voice session")
-            }
-            other => VoiceLiveError::Audio(format!("voice session lock: {other}")),
-        })?;
     let thread = std::thread::Builder::new()
         .name("voice-live-session".into())
         .spawn(move || {

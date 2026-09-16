@@ -121,11 +121,17 @@ pub fn voice_api_key_env(config: &minutes_core::config::Config) -> Result<String
     if configured.is_empty() {
         return Ok(VOICE_API_KEY_ENV_DEFAULT.to_string());
     }
-    if configured == OPENAI_COMPATIBLE_API_KEY_ENV {
+    // Both the desktop's own variable and whatever the summarization config
+    // names, because that one is user-configurable too. Two Keychain items do
+    // not help if both secrets land in one environment variable: saving the
+    // voice key would hand a Gemini credential to whatever endpoint
+    // summarization is pointed at, and clearing either would break the other.
+    let summarization = config.summarization.openai_compatible_api_key_env.trim();
+    if configured == OPENAI_COMPATIBLE_API_KEY_ENV || configured == summarization {
         return Err(format!(
             "[voice_live] api_key_env must not be {}, which holds the summarization key. \
              Use a different variable name, or leave it blank for {}.",
-            OPENAI_COMPATIBLE_API_KEY_ENV, VOICE_API_KEY_ENV_DEFAULT
+            configured, VOICE_API_KEY_ENV_DEFAULT
         ));
     }
     if !is_usable_env_name(configured) {
@@ -227,9 +233,11 @@ pub fn save_voice_api_key(env_var: &str, api_key: &str) -> Result<(), String> {
 }
 
 pub fn clear_voice_api_key(env_var: &str) -> Result<(), String> {
-    clear_secret(VOICE_SLOT)?;
+    // Environment first. Revoking is the point, and a Keychain error must not
+    // leave the running process still holding a usable key: this order fails
+    // toward less access rather than more.
     forget_hydrated(env_var);
-    Ok(())
+    clear_secret(VOICE_SLOT)
 }
 
 pub fn load_voice_api_key() -> Result<Option<String>, String> {
@@ -371,6 +379,24 @@ mod tests {
         config.voice_live.api_key_env = OPENAI_COMPATIBLE_API_KEY_ENV.into();
         let error = voice_api_key_env(&config).unwrap_err();
         assert!(error.contains(OPENAI_COMPATIBLE_API_KEY_ENV), "{}", error);
+    }
+
+    /// The summarization variable is configurable too, so checking only the
+    /// desktop's own name leaves the collision wide open. Both secrets in one
+    /// variable means saving the voice key hands a Gemini credential to
+    /// whatever endpoint summarization points at.
+    #[test]
+    fn voice_may_not_borrow_a_configured_summarization_variable() {
+        let mut config = minutes_core::config::Config::default();
+        config.summarization.openai_compatible_api_key_env = "SHARED_KEY".into();
+        config.voice_live.api_key_env = "SHARED_KEY".into();
+        let error = voice_api_key_env(&config).unwrap_err();
+        assert!(error.contains("SHARED_KEY"), "{}", error);
+
+        // A blank summarization variable must not make every voice name
+        // collide with the empty string.
+        config.summarization.openai_compatible_api_key_env = String::new();
+        assert_eq!(voice_api_key_env(&config).unwrap(), "SHARED_KEY");
     }
 
     /// `std::env::set_var` panics on these, and the name comes from a file the

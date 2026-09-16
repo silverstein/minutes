@@ -19913,6 +19913,20 @@ pub fn cmd_start_voice(
     let _ = crate::secret_store::hydrate_voice_api_key_env(
         &crate::secret_store::voice_api_key_env(&config)?,
     );
+
+    // Retire a previous session before preflight, not after. A session that
+    // ended by itself clears `voice_active` the moment it emits Closed, but
+    // holds `voice.pid` until teardown finishes, and preflight checks that
+    // file. Retiring afterwards means the retirement can never run in the one
+    // case it exists for: preflight would reject the start first, and the tray
+    // would be stuck offering a Voice toggle that always fails.
+    if !retire_stale_voice_session(&state) {
+        // Do not queue or block: the old session still owns the microphone and
+        // `voice.pid`, and how long it needs depends on a tool call nobody here
+        // can bound. Say so and let the user press it again.
+        return Err("The previous voice session is still closing. Try again in a moment.".into());
+    }
+
     voice_live::preflight(&config).map_err(|e| e.to_string())?;
 
     // The tray has no talk control. In push-to-talk the session discards every
@@ -19934,20 +19948,6 @@ pub fn cmd_start_voice(
 
     try_acquire_voice(&state)?;
 
-    // A previous session that ended by itself may still be tearing down: Closed
-    // is emitted before audio stops and the tool worker is joined. Retire it
-    // before opening a new microphone, or the two sessions overlap on the
-    // device. `voice_active` is already false here, so nothing else can be
-    // holding this.
-    let stale = state
-        .voice_session
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take();
-    if let Some(stale) = stale {
-        stale.stop();
-    }
-
     let started = (|| -> Result<(), String> {
         let emitter = app.clone();
         // The session can end without anyone asking it to: the socket drops,
@@ -19961,14 +19961,24 @@ pub fn cmd_start_voice(
             &config,
             voice_live::SessionOptions {
                 mode,
+                // The tray has no key to hold, so a silent fall back to plain
+                // capture is not something this surface can ride out.
+                require_open_mic: true,
                 ..voice_live::SessionOptions::default()
             },
             move |event| {
-                // `Closed` is terminal: every site that emits it breaks out of
-                // the session loop.
+                // Two terminal signals, because the Closed *event* does not
+                // cover every way a session ends: several provider failures
+                // just break out of the loop without emitting it. Teardown
+                // always sets the Closed *state*, so that is the reliable one;
+                // the event is kept because it carries the reason and arrives
+                // first.
                 let ending = matches!(
                     event,
                     minutes_core::voice_live::VoiceLiveEvent::Closed { .. }
+                        | minutes_core::voice_live::VoiceLiveEvent::State {
+                            state: minutes_core::voice_live::VoiceLiveState::Closed
+                        }
                 );
                 // Emit first, so a HUD sees why it closed before it sees the
                 // tray go idle.
@@ -19993,10 +20003,23 @@ pub fn cmd_start_voice(
             },
         )
         .map_err(|e| e.to_string())?;
-        *state
+
+        // Connecting and opening audio takes long enough for the user to hit
+        // Close in the meantime. A stop during that window finds no handle to
+        // take, clears the flag and returns, and without this check the start
+        // would then store a live session while the tray said idle and
+        // recording was allowed over the top of it. The flag is the record of
+        // who won: if it went false, the stop did, so honor it.
+        let mut slot = state
             .voice_session
             .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(session);
+            .unwrap_or_else(|p| p.into_inner());
+        if !state.voice_active.load(Ordering::SeqCst) {
+            drop(slot);
+            end_voice_session_off_thread(session);
+            return Err("Voice was closed while it was starting.".into());
+        }
+        *slot = Some(session);
         Ok(())
     })();
 
@@ -20014,6 +20037,38 @@ pub fn cmd_start_voice(
     }
 }
 
+/// Retire a session that ended by itself but has not been cleaned up.
+///
+/// Closed is emitted before audio stops, MCP shuts down and the tool worker is
+/// joined, so `voice_active` can already be false while the old session still
+/// holds `voice.pid` and the microphone. Anything that wants to start a new
+/// session has to get the old one out of the way first.
+/// Returns whether the old session is fully gone. A caller that needs the
+/// microphone and `voice.pid` must not proceed on `false`.
+#[cfg(feature = "voice-live")]
+#[must_use]
+fn retire_stale_voice_session(state: &AppState) -> bool {
+    let stale = state
+        .voice_session
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    let Some(stale) = stale else {
+        return true;
+    };
+
+    // Joining a thread that has already exited is instant; joining one that is
+    // still inside a tool call is not bounded by anything. Only the first is
+    // safe to do on the thread the menu bar runs on, so ask first.
+    if !stale.is_running() {
+        stale.stop();
+        return true;
+    }
+
+    end_voice_session_off_thread(stale);
+    false
+}
+
 /// Close the voice session. Safe to call when nothing is running.
 #[cfg(feature = "voice-live")]
 #[tauri::command]
@@ -20026,12 +20081,36 @@ pub fn cmd_stop_voice(
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .take();
-    if let Some(session) = session {
-        session.stop();
-    }
+    // Flag first, so the tray is honest immediately and a concurrent start
+    // knows it lost, then hand the join to a background thread.
     state.voice_active.store(false, Ordering::SeqCst);
+    if let Some(session) = session {
+        end_voice_session_off_thread(session);
+    }
     crate::sync_tray_state(&app);
     Ok("Voice session ended".into())
+}
+
+/// Stop a session without blocking the caller on its join.
+///
+/// `VoiceLiveSession::stop` joins the session thread, which in turn joins the
+/// tool worker, which may be inside a tool call that takes as long as it takes.
+/// Called from a Tauri command or a tray handler, that is the menu bar frozen
+/// for the duration. The user cannot tell a frozen menu bar from a crashed app.
+///
+/// The session still shuts down in order and still releases `voice.pid` when it
+/// finishes; only the waiting moves off the main thread.
+#[cfg(feature = "voice-live")]
+fn end_voice_session_off_thread(session: minutes_core::voice_live::VoiceLiveSession) {
+    if std::thread::Builder::new()
+        .name("voice-session-teardown".into())
+        .spawn(move || session.stop())
+        .is_err()
+    {
+        // Out of threads. Dropping still stops and joins, on this thread, which
+        // is worse than a background join and better than leaking the session.
+        tracing::warn!("could not spawn voice teardown thread; stopping inline");
+    }
 }
 
 /// Whether a voice session is open, and whether this build can open one.

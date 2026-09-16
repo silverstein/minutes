@@ -67,6 +67,8 @@ pub struct SessionSetup {
     pub language: String,
     /// `true` for push-to-talk: we send activityStart/activityEnd ourselves.
     pub manual_activity: bool,
+    /// Let the model stay silent when speech was not addressed to it.
+    pub proactive_audio: bool,
     /// Open-mic speech-start sensitivity: "low", "high", or empty for the provider default.
     pub start_sensitivity: String,
     /// Open-mic speech-end sensitivity: "low", "high", or empty for the provider default.
@@ -105,6 +107,11 @@ impl SessionSetup {
                 setup["realtimeInputConfig"] =
                     json!({ "automaticActivityDetection": Value::Object(detection) });
             }
+        }
+        // Only meaningful with the provider's own detection running: in
+        // push-to-talk the user has already said every turn is for it.
+        if self.proactive_audio && !self.manual_activity {
+            setup["proactivity"] = json!({ "proactiveAudio": true });
         }
         setup["sessionResumption"] = match &self.resume_handle {
             Some(h) => json!({ "handle": h }),
@@ -503,6 +510,7 @@ mod tests {
             ],
             language: "en-US".into(),
             manual_activity: true,
+            proactive_audio: false,
             start_sensitivity: "low".into(),
             end_sensitivity: "low".into(),
             resume_handle: None,
@@ -530,6 +538,38 @@ mod tests {
     }
 
     #[test]
+    fn proactivity_is_asked_for_only_with_provider_detection() {
+        let base = SessionSetup {
+            model: "m".into(),
+            api_key: "k".into(),
+            system_instruction: String::new(),
+            function_declarations: vec![],
+            language: "en-US".into(),
+            manual_activity: false,
+            proactive_audio: true,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        assert_eq!(
+            base.to_json()["setup"]["proactivity"]["proactiveAudio"],
+            true
+        );
+        // Push-to-talk already says every turn is meant for it.
+        let manual = SessionSetup {
+            manual_activity: true,
+            ..base.clone()
+        };
+        assert!(manual.to_json()["setup"].get("proactivity").is_none());
+        // Off unless asked for, because an unsupported field fails the setup.
+        let off = SessionSetup {
+            proactive_audio: false,
+            ..base
+        };
+        assert!(off.to_json()["setup"].get("proactivity").is_none());
+    }
+
+    #[test]
     fn open_mic_setup_passes_speech_sensitivity() {
         let setup = SessionSetup {
             model: "m".into(),
@@ -538,6 +578,7 @@ mod tests {
             function_declarations: vec![],
             language: "en-US".into(),
             manual_activity: false,
+            proactive_audio: false,
             start_sensitivity: "low".into(),
             end_sensitivity: "HIGH".into(),
             resume_handle: None,
@@ -561,6 +602,7 @@ mod tests {
             function_declarations: vec![],
             language: "en-US".into(),
             manual_activity: false,
+            proactive_audio: false,
             start_sensitivity: String::new(),
             end_sensitivity: String::new(),
             resume_handle: Some("h".into()),

@@ -12,6 +12,7 @@
 
 pub mod audio_out;
 pub mod decimate;
+pub mod desktop;
 pub mod mcp;
 pub mod music;
 pub mod names;
@@ -154,6 +155,12 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if config.voice_live.calendar && config.calendar.enabled {
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
+    if config.voice_live.desktop_control {
+        p.push_str("Doing things on the Mac. You can open an application, open a web page, show a file in the Finder, control playback, and add a reminder. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
+        if config.voice_live.desktop_outward {
+            p.push_str("Sending things. Sending a message or an email leaves the machine and cannot be taken back, so those take two calls. Call once without a confirm token, read back the exact sentence you are handed, word for word, and wait. Only when Mat clearly agrees do you call again with that token and the identical arguments. If he changes a word, start over and read the new sentence. Never tell him something was sent before the second call has returned, and never guess at a recipient: if you are not certain who he means, ask.\n\n");
+        }
+    }
     if config.voice_live.music {
         p.push_str("Music. You can make and play music with make_music. When Mat asks for music for a meeting, a call or a moment, first read what you actually know about it, from upcoming_meetings, a prep, or the meeting itself, then write the brief yourself and say in a sentence what you drew on. Describe instruments, tempo and mood. It can sing: ask for vocals and say what they should be about when he wants words, and ask for instrumental when he wants background. It writes the words itself and hands them back, so quote a line if it sang. It takes most of a minute, so say you are writing something first. Never while a recording is running, and do not offer it in the middle of real work.\n\n");
     }
@@ -161,6 +168,9 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
         p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. After you call look_at_screen the frame arrives as the very next thing you receive, so wait for it and say nothing in between. If it truly does not arrive, say plainly that it did not and take another rather than hedging about not making out details. When Mat says you got something on screen wrong, look at the frame again and tell him what is actually there. If you still see the same thing, say so and say where you are looking. Agreeing with his correction without checking is worse than being wrong once, because then neither of you knows what is on the screen. Fine detail like a pointer position is genuinely hard to read, so say when you are unsure rather than asserting. Never describe a screen you have not actually looked at. Naming a plausible application, a document or a cursor you did not see is a serious error and worse than saying you cannot see anything yet, because Mat cannot tell the difference from a real answer. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
     }
     p.push_str("When Mat asks why you did something, or why you got something wrong, tell him what you actually observed: which tool you called and what it returned. You do not know how Minutes is implemented, so never explain your own behaviour by inventing a mechanism inside it. Saying you do not know why is a real answer and he is usually debugging when he asks.\n\n");
+    if config.voice_live.proactive_audio {
+        p.push_str("Not everything you hear is for you. Mat leaves this running while he works and talks to other people, so answer when he is speaking to you and stay silent otherwise. A fragment, a stray phrase, or something that sounds like nonsense is almost never a question. Silence is a valid response and the right one more often than you expect.\n\n");
+    }
     p.push_str("If Mat asks you to remember or note something, call add_note with his words. Ask before calling any tool that writes or changes something, and never rename a speaker unless Mat explicitly states the name.");
     p
 }

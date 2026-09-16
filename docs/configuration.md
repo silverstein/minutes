@@ -69,6 +69,9 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # brain_search = true             # Expose knowledge base search/read when [knowledge].path is set
 # log_sessions = true             # Write each session transcript to ~/.minutes/voice-sessions/
 # echo_cancellation = true        # macOS: cancel the speaker signal out of the mic so open mic does not hear itself
+# proactive_audio = true          # Let it stay silent when speech was not meant for it.
+#                                 # Turns open mic from something you talk to into something
+#                                 # you can leave running. Ignored in push-to-talk.
 # speech_start_sensitivity = "low"  # Provider speech detection on open mic: "low" or "high"
 # speech_end_sensitivity = "low"
 # prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
@@ -81,6 +84,9 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 #                                 # has no terminal, so it needs flags that let it run without
 #                                 # stopping to ask permission, or the call just times out.
 # delegate_cwd = "~/Sites"        # Where the relayed agent starts looking
+# desktop_control = true          # Let it open apps and files, control playback, add reminders
+# desktop_outward = true          # Also let it send an iMessage or email. Every send is read
+#                                 # back to you and waits for you to agree out loud first.
 # music = true                    # Labs toy: generate and play music, sung or instrumental,
 #                                 # steered by a meeting or a prep. Refuses while recording.
 # music_max_secs = 0             # 0 plays the whole piece; set a number to cap it

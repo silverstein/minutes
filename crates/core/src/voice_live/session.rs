@@ -351,6 +351,7 @@ where
         function_declarations: declarations,
         language: config.voice_live.language.clone(),
         manual_activity: options.mode == TalkMode::PushToTalk,
+        proactive_audio: config.voice_live.proactive_audio,
         start_sensitivity: config.voice_live.speech_start_sensitivity.clone(),
         end_sensitivity: config.voice_live.speech_end_sensitivity.clone(),
         resume_handle: None,

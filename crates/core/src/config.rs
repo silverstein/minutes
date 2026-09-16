@@ -1144,6 +1144,14 @@ pub struct VoiceLiveConfig {
     /// and interrupt the assistant. Uses the platform voice-processing unit on
     /// macOS; other platforms fall back to plain capture.
     pub echo_cancellation: bool,
+    /// Let the model decide not to answer at all.
+    ///
+    /// Open mic otherwise treats everything it hears as addressed to it, so a
+    /// half sentence to someone else, or noise a transcriber turns into words,
+    /// becomes a prompt. With this on the provider stays quiet unless the
+    /// speech was meant for it, which is the difference between something you
+    /// talk to deliberately and something you can leave running.
+    pub proactive_audio: bool,
     /// Provider speech-start sensitivity on open mic: "low" (default), "high", or "" for the provider default.
     pub speech_start_sensitivity: String,
     /// Provider speech-end sensitivity on open mic: "low" (default), "high", or "" for the provider default.
@@ -1172,6 +1180,13 @@ pub struct VoiceLiveConfig {
     /// Directory the relayed agent starts in. Empty uses the Minutes process
     /// directory, which for a desktop launch is not where any code lives.
     pub delegate_cwd: String,
+    /// Let the assistant act on the desktop: open things, control playback,
+    /// add a reminder. A fixed catalogue of verbs, never arbitrary script.
+    pub desktop_control: bool,
+    /// Also allow the verbs that leave the machine, such as sending a message
+    /// or an email. Each one is confirmed out loud before it happens, and that
+    /// gate is enforced in code rather than asked for in the prompt.
+    pub desktop_outward: bool,
     /// Labs toy: let the assistant generate and play music steered by what it
     /// knows about a conversation. Off by default and deliberately separate
     /// from the memory features.
@@ -1220,6 +1235,7 @@ impl Default for VoiceLiveConfig {
             screen_on_request: false,
             log_sessions: true,
             echo_cancellation: true,
+            proactive_audio: false,
             speech_start_sensitivity: "low".into(),
             speech_end_sensitivity: "low".into(),
             prep_artifacts: true,
@@ -1230,6 +1246,8 @@ impl Default for VoiceLiveConfig {
             delegate_agent_args: Vec::new(),
             delegate_cwd: String::new(),
             delegate_writes: false,
+            desktop_control: false,
+            desktop_outward: false,
             music: false,
             music_model: "lyria-3.5".into(),
             music_max_secs: 0,

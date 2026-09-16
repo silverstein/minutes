@@ -17,6 +17,7 @@ use crate::events::{InsightFilter, MeetingInsight};
 use crate::graph::{PolicyProjectionRequest, PolicyProjectionResponse};
 use crate::search::{self, SearchFilters};
 
+use super::desktop::{self, DesktopControl};
 use super::mcp::McpPool;
 use super::names::NameIndex;
 
@@ -30,6 +31,8 @@ pub struct ToolContext {
     pub mcp: McpPool,
     /// Servers that would not start, reported to the host once.
     pub mcp_problems: Vec<String>,
+    /// Desktop verbs, and anything awaiting spoken confirmation.
+    pub desktop: DesktopControl,
 }
 
 /// Result of one tool call.
@@ -66,6 +69,7 @@ impl ToolContext {
             max_chars,
             mcp,
             mcp_problems,
+            desktop: DesktopControl::default(),
         }
     }
 
@@ -205,6 +209,12 @@ impl ToolContext {
                 "Take one frame of whatever is on Mat's screen right now and look at it. Use it only when he asks about his screen, what he is looking at, or something visible in front of him. The frame is delivered as an image; describe what you actually see.",
                 json!({}),
             ));
+        }
+        if self.config.voice_live.desktop_control {
+            d.extend(
+                self.desktop
+                    .declarations(self.config.voice_live.desktop_outward),
+            );
         }
         d.extend(self.mcp.declarations());
         if let Some(root) = &self.brain_root {
@@ -594,7 +604,18 @@ impl ToolContext {
                     json!({ "within_minutes": minutes, "calendar_readable": true, "events": events }),
                 )
             }
-            other => Err(format!("unknown tool {other}")),
+            other => {
+                if self.config.voice_live.desktop_control {
+                    if let Some(verb) = desktop::find(other) {
+                        if verb.risk != desktop::Risk::Outward
+                            || self.config.voice_live.desktop_outward
+                        {
+                            return self.desktop.execute(verb, args);
+                        }
+                    }
+                }
+                Err(format!("unknown tool {other}"))
+            }
         }
     }
 }
@@ -974,6 +995,7 @@ mod tests {
             max_chars: 2_000,
             mcp: McpPool::default(),
             mcp_problems: Vec::new(),
+            desktop: DesktopControl::default(),
         }
     }
 
@@ -1100,6 +1122,38 @@ mod tests {
         // Whether or not capture works here, the result never names an app: the
         // model reported that name instead of reading the image.
         assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn desktop_verbs_are_absent_until_turned_on() {
+        let names = |config: Config| -> Vec<String> {
+            ToolContext::new(config, Arc::new(NameIndex::default()))
+                .declarations()
+                .into_iter()
+                .map(|d| d["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert!(!names(Config::default()).contains(&"open_app".to_string()));
+        let mut on = Config::default();
+        on.voice_live.desktop_control = true;
+        let with_desktop = names(on.clone());
+        assert!(with_desktop.contains(&"open_app".to_string()));
+        // Outward verbs need their own switch, not just the feature.
+        assert!(!with_desktop.contains(&"send_message".to_string()));
+        on.voice_live.desktop_outward = true;
+        assert!(names(on).contains(&"send_message".to_string()));
+    }
+
+    #[test]
+    fn an_outward_verb_stays_unreachable_through_dispatch() {
+        let mut config = Config::default();
+        config.voice_live.desktop_control = true;
+        config.voice_live.desktop_outward = false;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        // Declared or not, the dispatch path must refuse it too.
+        let out = ctx.execute("send_message", &json!({"to": "Kim", "text": "hi"}));
+        assert!(out.is_error);
+        assert!(out.text.contains("unknown tool"), "{}", out.text);
     }
 
     #[test]

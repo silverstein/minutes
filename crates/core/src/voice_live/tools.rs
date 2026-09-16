@@ -193,7 +193,7 @@ impl ToolContext {
         if self.config.voice_live.music {
             d.push(decl(
                 "make_music",
-                "Generate and play a short instrumental piece. Write the brief yourself from what you know about the conversation in question: instruments, tempo, mood, and what it is for. Instrumental only, so never ask for lyrics or singing. Takes most of a minute, and will refuse while a recording is running.",
+                "Generate and play a piece of music. Write the brief yourself from what you know about the conversation in question: instruments, tempo, mood, and what it is for. It can sing, so ask for vocals and say what they should be about when that is what Mat wants, or ask for instrumental when it is background. It writes the words itself and returns them. Takes most of a minute, and will refuse while a recording is running.",
                 json!({"description": {"type": "string", "description": "What the music should sound like, in a sentence or two"}}),
             ));
         }
@@ -294,8 +294,8 @@ impl ToolContext {
                     "playing": true,
                     "seconds": piece.seconds.round() as i64,
                     "saved_to": piece.path.display().to_string(),
-                    "structure": piece.structure,
-                    "note": "The piece is playing now. Say one short sentence about what you made and what you based it on, then stop talking and let it play.",
+                    "lyrics": piece.lyrics,
+                    "note": "The piece is playing now. Say one short sentence about what you made and what you based it on, and quote a line if it has words, then stop talking and let it play.",
                 })
                 .to_string(),
                 is_error: false,

@@ -26,6 +26,9 @@ use crate::config::Config;
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+/// Enough lyrics for the assistant to quote a line without eating the budget.
+const MAX_LYRIC_CHARS: usize = 1_200;
+
 /// Generation is slow; this is well above what it has taken in practice.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -36,8 +39,9 @@ pub struct Music {
     pub seconds: f32,
     /// Where the original was kept, so it can be played again.
     pub path: PathBuf,
-    /// The section sketch the model returns alongside the audio.
-    pub structure: Option<String>,
+    /// What the model wrote alongside the audio: the lyrics when it sang, a
+    /// bare section sketch when it did not.
+    pub lyrics: Option<String>,
 }
 
 // Hand written so a failure never prints a megabyte of samples.
@@ -47,7 +51,7 @@ impl std::fmt::Debug for Music {
             .field("seconds", &self.seconds)
             .field("bytes", &self.pcm16.len())
             .field("path", &self.path)
-            .field("structure", &self.structure)
+            .field("lyrics", &self.lyrics)
             .finish()
     }
 }
@@ -108,10 +112,21 @@ pub fn compose(config: &Config, description: &str) -> Result<Music, String> {
         .iter()
         .find_map(|p| p.pointer("/inlineData/data").and_then(Value::as_str))
         .ok_or("the music model returned no audio")?;
-    let structure = parts
+    // The model writes words for a sung piece and a section sketch otherwise.
+    // Capped so a long set of lyrics cannot crowd out the rest of the result.
+    let lyrics = parts
         .iter()
         .find_map(|p| p.get("text").and_then(Value::as_str))
-        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|t| {
+            let cleaned = t.replace("[:]", " ").replace('\n', " ");
+            let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+            if cleaned.chars().count() > MAX_LYRIC_CHARS {
+                let kept: String = cleaned.chars().take(MAX_LYRIC_CHARS).collect();
+                format!("{kept}…")
+            } else {
+                cleaned
+            }
+        })
         .filter(|t| !t.is_empty());
     let mime = parts
         .iter()
@@ -136,7 +151,7 @@ pub fn compose(config: &Config, description: &str) -> Result<Music, String> {
         pcm16,
         seconds,
         path,
-        structure,
+        lyrics,
     })
 }
 
@@ -224,6 +239,12 @@ mod tests {
     fn an_empty_brief_is_refused_before_any_request() {
         let err = compose(&Config::default(), "   ").unwrap_err();
         assert!(err.contains("description"), "{err}");
+    }
+
+    #[test]
+    fn lyrics_are_flattened_and_capped() {
+        // Sanity on the cap itself; composing needs the network.
+        assert!(MAX_LYRIC_CHARS > 200 && MAX_LYRIC_CHARS < 5_000);
     }
 
     #[test]

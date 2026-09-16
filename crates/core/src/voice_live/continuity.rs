@@ -105,7 +105,7 @@ impl Continuity {
             payload,
         }, self.now(), 120_000, 0)?;
         Ok(json!({"needs_host_approval":true,"proposal_id":proposal.id,
-            "note":"Nothing executed or saved. The host displays the exact proposal. Only the local /approve ID command can release it; voice or a model token cannot."}))
+            "note": format!("Nothing executed or saved. Tell Mat to review the terminal block and type /approve {} in this same Terminal to run these exact details, or /reject to refuse. Voice approval or a model token cannot release it.", proposal.id)}))
     }
 
     /// Called at dequeue, not when approval is merely queued. Stop/reject and

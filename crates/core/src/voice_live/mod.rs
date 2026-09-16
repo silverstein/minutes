@@ -161,7 +161,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
     if config.voice_live.desktop_control {
-        p.push_str("Doing things on the Mac. You can open an application, open a web page, show a file in the Finder, control playback, and add a reminder. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
+        p.push_str("Doing things on the Mac. You can use a fixed AppleScript/OSA-backed catalogue of desktop verbs: open an application, open a web page, show a file in the Finder, control playback, and add a reminder. This is not arbitrary AppleScript execution: never write or run a script Mat dictates, and when he asks about OSA scriptability explain that you can use the approved desktop verbs rather than raw scripts. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
         if config.voice_live.desktop_outward {
             p.push_str("Sending things. Sending a message or email requires local host review of the exact account, recipient and contents. Call the tool once to propose, then wait for a host receipt. Never send a confirmation token or mistake speech for local approval.\n\n");
         }
@@ -244,6 +244,8 @@ mod tests {
         // rule was dropped, not to check what is on by default.
         let mut config = cfg();
         config.voice_live.ask_agent = true;
+        config.voice_live.desktop_control = true;
+        config.voice_live.desktop_outward = true;
         let p = system_prompt(&config, &names, true);
         for needle in [
             "spelled with one t",
@@ -263,6 +265,9 @@ mod tests {
             "call ask_agent with one self-contained question",
             "never explain your own behaviour by inventing a mechanism",
             "read the current time from get_status",
+            "AppleScript/OSA-backed catalogue",
+            "not arbitrary AppleScript execution",
+            "Sending a message or email requires local host review",
         ] {
             assert!(p.contains(needle), "prompt lost rule: {needle}");
         }

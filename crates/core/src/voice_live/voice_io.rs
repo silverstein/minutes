@@ -14,8 +14,8 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use coreaudio::audio_unit::audio_format::LinearPcmFlags;
 use coreaudio::audio_unit::macos_helpers::{get_default_device_id, get_device_name};
@@ -33,6 +33,9 @@ use crate::streaming::{AudioChunk, SourceRole};
 const MIC_RATE: u32 = 16_000;
 /// 100 ms at 16 kHz, matching `AudioStream`.
 const CHUNK_SAMPLES: usize = 1_600;
+/// CoreAudio can occasionally block creating the VoiceProcessingIO unit. Keep
+/// startup bounded so callers can fall back to split mic/speaker streams.
+const START_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// One voice-processing unit: echo-cancelled mic chunks out, speaker samples in.
 pub struct VoiceIo {
@@ -70,6 +73,14 @@ fn device_label(input: bool) -> String {
 impl VoiceIo {
     /// Open the unit on the default devices and start both directions.
     pub fn start() -> Result<Self, VoiceLiveError> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::start_inner());
+        });
+        recv_start_result(rx, START_TIMEOUT)
+    }
+
+    fn start_inner() -> Result<Self, VoiceLiveError> {
         let mut unit =
             AudioUnit::new_uninitialized(IOType::VoiceProcessingIO).map_err(audio_err("create"))?;
         let enable = 1u32;
@@ -201,5 +212,48 @@ impl VoiceIo {
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.unit.stop();
+    }
+}
+
+fn recv_start_result<T>(
+    rx: mpsc::Receiver<Result<T, VoiceLiveError>>,
+    timeout: Duration,
+) -> Result<T, VoiceLiveError> {
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(VoiceLiveError::Audio(format!(
+            "voice processing create timed out after {} ms",
+            timeout.as_millis()
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(VoiceLiveError::Audio(
+            "voice processing create ended before returning".into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_processing_startup_timeout_is_reported() {
+        let (_tx, rx) = mpsc::channel::<Result<(), VoiceLiveError>>();
+        let error = recv_start_result(rx, Duration::from_millis(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("voice processing create timed out"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn voice_processing_startup_returns_ready_result() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok("ready")).unwrap();
+        assert_eq!(
+            recv_start_result(rx, Duration::from_secs(1)).unwrap(),
+            "ready"
+        );
     }
 }

@@ -71,6 +71,9 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # echo_cancellation = true        # macOS: cancel the speaker signal out of the mic so open mic does not hear itself
 # speech_start_sensitivity = "low"  # Provider speech detection on open mic: "low" or "high"
 # speech_end_sensitivity = "low"
+# prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
+# calendar = true                 # Let voice read upcoming calendar events
+# screen_on_request = true        # Let voice take ONE frame of your screen when you ask. Sends that image to the provider.
 
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)

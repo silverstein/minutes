@@ -33,6 +33,10 @@ pub struct ToolOutcome {
     pub text: String,
     pub is_error: bool,
     pub elapsed: Duration,
+    /// An image the host must push into the session before delivering `text`.
+    /// Tool results are text, so a frame reaches the model as session media and
+    /// the text only tells it the frame is there.
+    pub image: Option<Vec<u8>>,
 }
 
 impl ToolContext {
@@ -136,6 +140,32 @@ impl ToolContext {
                 json!({"name": {"type": "string", "description": "The name as heard"}}),
             ));
         }
+        if self.config.voice_live.prep_artifacts {
+            d.push(decl(
+                "list_preps",
+                "List the prep and debrief briefs Mat generated with the /minutes-prep and /minutes-brief skills, newest first. These are his own notes about an upcoming or past conversation, separate from the meeting transcripts. Follow up with get_prep.",
+                json!({}),
+            ));
+            d.push(decl(
+                "get_prep",
+                "Read one prep or brief by the exact name returned from list_preps.",
+                json!({"name": {"type": "string", "description": "File name from list_preps"}}),
+            ));
+        }
+        if self.config.voice_live.calendar && self.config.calendar.enabled {
+            d.push(decl(
+                "upcoming_meetings",
+                "Mat's upcoming calendar events, soonest first, with how many minutes until each one. Use it for what is next, when something starts, or who is attending.",
+                json!({"within_minutes": {"type": "integer", "description": "Look-ahead window in minutes (default 720)"}}),
+            ));
+        }
+        if self.config.voice_live.screen_on_request {
+            d.push(decl(
+                "look_at_screen",
+                "Take one frame of whatever is on Mat's screen right now and look at it. Use it only when he asks about his screen, what he is looking at, or something visible in front of him. The frame is delivered as an image; describe what you actually see.",
+                json!({}),
+            ));
+        }
         if let Some(root) = &self.brain_root {
             d.push(decl(
                 "search_brain",
@@ -157,6 +187,9 @@ impl ToolContext {
     /// Execute one tool. Never panics; errors come back as text the model can speak.
     pub fn execute(&self, name: &str, args: &Value) -> ToolOutcome {
         let started = Instant::now();
+        if name == "look_at_screen" {
+            return self.look_at_screen(started);
+        }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(name, args)));
         let (text, is_error) = match result {
@@ -172,6 +205,61 @@ impl ToolContext {
             text,
             is_error,
             elapsed: started.elapsed(),
+            image: None,
+        }
+    }
+
+    /// Capture one frame of the screen. Handled outside `dispatch` because it
+    /// is the only tool that answers with media rather than text.
+    fn look_at_screen(&self, started: Instant) -> ToolOutcome {
+        let fail = |msg: String| ToolOutcome {
+            text: json!({ "error": msg }).to_string(),
+            is_error: true,
+            elapsed: started.elapsed(),
+            image: None,
+        };
+        if !self.config.voice_live.screen_on_request {
+            return fail(
+                "screen access is off; set [voice_live] screen_on_request = true in config.toml"
+                    .into(),
+            );
+        }
+        if !crate::screen::check_screen_permission() {
+            return fail("no Screen Recording permission for this process".into());
+        }
+        let path = std::env::temp_dir().join(format!(
+            "minutes-voice-screen-{}-{}.png",
+            std::process::id(),
+            started.elapsed().as_nanos()
+        ));
+        if let Err(e) = crate::screen::capture_screenshot(&path) {
+            let _ = std::fs::remove_file(&path);
+            return fail(format!("screenshot failed: {e}"));
+        }
+        let bytes = std::fs::read(&path);
+        // The frame is sensitive and already in memory; never leave it on disk.
+        let _ = std::fs::remove_file(&path);
+        match bytes {
+            Ok(bytes) => {
+                let app = crate::desktop_context::frontmost_app_identity()
+                    .ok()
+                    .flatten()
+                    .and_then(|f| f.app_name)
+                    .unwrap_or_else(|| "unknown".to_string());
+                ToolOutcome {
+                    text: json!({
+                        "delivered": true,
+                        "frontmost_app": app,
+                        "captured_at": Local::now().to_rfc3339(),
+                        "note": "One frame of Mat's screen was just added to this conversation. Describe what you can actually see in it, and say so plainly if it is unreadable.",
+                    })
+                    .to_string(),
+                    is_error: false,
+                    elapsed: started.elapsed(),
+                    image: Some(bytes),
+                }
+            }
+            Err(e) => fail(format!("could not read the captured frame: {e}")),
         }
     }
 
@@ -186,6 +274,9 @@ impl ToolContext {
                     "processing_stage": s.processing_stage,
                     "processing_title": s.processing_title,
                     "duration_secs": s.duration_secs,
+                    // The prompt carries the date from session start; a long
+                    // session needs the clock read fresh.
+                    "now": Local::now().format("%A %Y-%m-%d %H:%M %Z").to_string(),
                 }))
             }
             "list_meetings" => {
@@ -339,6 +430,26 @@ impl ToolContext {
                 let rel = str_arg(args, "path").ok_or("path is required")?;
                 brain_read(root, &rel, self.max_chars.saturating_sub(500))
             }
+            "list_preps" => Ok(list_prep_artifacts()),
+            "get_prep" => {
+                let name = str_arg(args, "name").ok_or("name is required")?;
+                read_prep_artifact(&name, self.max_chars.saturating_sub(500))
+            }
+            "upcoming_meetings" => {
+                let minutes = int_arg(args, "within_minutes", 720).clamp(5, 10_080) as u32;
+                let events: Vec<Value> = crate::calendar::upcoming_events(minutes)
+                    .into_iter()
+                    .map(|e| {
+                        json!({
+                            "title": e.title,
+                            "start": e.start,
+                            "minutes_until": e.minutes_until,
+                            "attendees": e.attendees,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "within_minutes": minutes, "events": events }))
+            }
             other => Err(format!("unknown tool {other}")),
         }
     }
@@ -469,6 +580,71 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
             }
         }
     }
+}
+
+/// The two directories the prep and brief skills write to.
+fn prep_roots() -> Vec<(&'static str, PathBuf)> {
+    let base = Config::minutes_dir();
+    vec![("prep", base.join("preps")), ("brief", base.join("briefs"))]
+}
+
+fn list_prep_artifacts() -> Value {
+    let mut items: Vec<(std::time::SystemTime, Value)> = Vec::new();
+    for (kind, root) in prep_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || !name.ends_with(".md") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            items.push((
+                modified,
+                json!({
+                    "name": name,
+                    "kind": kind,
+                    "modified": chrono::DateTime::<Local>::from(modified)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                }),
+            ));
+        }
+    }
+    items.sort_by_key(|i| std::cmp::Reverse(i.0));
+    let files: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
+    json!({ "count": files.len(), "files": files })
+}
+
+fn read_prep_artifact(name: &str, max_chars: usize) -> Result<Value, String> {
+    // A bare file name only. Anything with a separator is a traversal attempt.
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("name must be a plain file name from list_preps".into());
+    }
+    for (kind, root) in prep_roots() {
+        let candidate = root.join(name);
+        let Ok(resolved) = candidate.canonicalize() else {
+            continue;
+        };
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
+        if !resolved.starts_with(&root) || !resolved.is_file() {
+            continue;
+        }
+        let body = std::fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
+        return Ok(json!({
+            "name": name,
+            "kind": kind,
+            "content": truncate(body_of(&body), max_chars),
+        }));
+    }
+    Err(format!("no prep or brief named {name}"))
 }
 
 fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
@@ -671,6 +847,38 @@ mod tests {
     fn truncation_marks_dropped_chars() {
         let t = truncate("x".repeat(50), 10);
         assert!(t.starts_with("xxxxxxxxxx\n...[truncated 40 chars]"));
+    }
+
+    #[test]
+    fn prep_names_cannot_escape_their_directory() {
+        for bad in ["../config.toml", "../../.ssh/id_rsa", "sub/dir.md", ".."] {
+            let err = read_prep_artifact(bad, 500).unwrap_err();
+            assert!(
+                err.contains("plain file name") || err.contains("no prep or brief"),
+                "{bad} gave {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn listing_preps_without_the_directories_is_empty_not_an_error() {
+        let v = list_prep_artifacts();
+        assert!(v["files"].is_array());
+        assert_eq!(
+            v["count"].as_u64().unwrap(),
+            v["files"].as_array().unwrap().len() as u64
+        );
+    }
+
+    #[test]
+    fn look_at_screen_is_refused_while_the_switch_is_off() {
+        let mut config = Config::default();
+        config.voice_live.screen_on_request = false;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("look_at_screen", &json!({}));
+        assert!(out.is_error);
+        assert!(out.image.is_none());
+        assert!(out.text.contains("screen_on_request"));
     }
 
     #[test]

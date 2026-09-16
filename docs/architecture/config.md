@@ -388,7 +388,9 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `max_tool_chars` | `12000` | Per-tool-result character budget so one transcript cannot fill the voice context |
 | `known_people` | `200` | How many known names to inject as spelling bias |
 | `brain_search` | `true` | Expose knowledge base search and read when `[knowledge].path` is set |
-| `screen_on_request` | `false` | Expose a single on-request screen frame (reserved, not yet implemented) |
+| `screen_on_request` | `false` | Expose `look_at_screen`, which captures one frame and sends it to the provider. Off by default because a screen frame is the most sensitive thing this feature can transmit. Pull-only: the model cannot take a frame Mat did not ask for |
+| `prep_artifacts` | `true` | Expose the prep and brief files written by the `/minutes-prep` and `/minutes-brief` skills under `~/.minutes` |
+| `calendar` | `true` | Expose upcoming calendar events. Also requires `[calendar] enabled` |
 | `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
 | `echo_cancellation` | `true` | Also decides the default talk mode: open mic where cancellation exists, push-to-talk everywhere else, so no platform self-interrupts by default. |
 | | | Run mic and speaker through one voice-processing unit so the speaker signal is cancelled out of the mic. macOS only today; elsewhere plain capture, so `minutes talk` defaults to push-to-talk and `--open-mic` warns |

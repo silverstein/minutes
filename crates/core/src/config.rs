@@ -1148,6 +1148,11 @@ pub struct VoiceLiveConfig {
     pub speech_start_sensitivity: String,
     /// Provider speech-end sensitivity on open mic: "low" (default), "high", or "" for the provider default.
     pub speech_end_sensitivity: String,
+    /// Expose the prep and brief artifacts written by the `/minutes-prep` and
+    /// `/minutes-brief` skills under `~/.minutes/preps` and `~/.minutes/briefs`.
+    pub prep_artifacts: bool,
+    /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
+    pub calendar: bool,
 }
 
 impl Default for VoiceLiveConfig {
@@ -1168,6 +1173,8 @@ impl Default for VoiceLiveConfig {
             echo_cancellation: true,
             speech_start_sensitivity: "low".into(),
             speech_end_sensitivity: "low".into(),
+            prep_artifacts: true,
+            calendar: true,
         }
     }
 }

@@ -273,7 +273,10 @@ const MAX_SCREENSHOTS: u32 = 60;
 const TARGET_WIDTH: u32 = 1280;
 
 /// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.
-fn capture_screenshot(path: &Path) -> std::io::Result<()> {
+///
+/// Public so on-request surfaces (Voice Live's `look_at_screen`) can take one
+/// frame without starting an interval capture session.
+pub fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // macOS: screencapture to temp file, then resize with sips
     #[cfg(target_os = "macos")]
     {

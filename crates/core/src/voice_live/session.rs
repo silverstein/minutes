@@ -460,6 +460,13 @@ impl Runner {
                                 outcome.elapsed.as_millis()
                             ));
                         }
+                        // Media first: the frame must be in context before the
+                        // text that tells the model to describe it.
+                        if let Some(image) = &outcome.image {
+                            if client.send_image(image, "image/png").is_err() {
+                                break;
+                            }
+                        }
                         if client
                             .send_tool_response(&call, &outcome.text, &scheduling)
                             .is_err()

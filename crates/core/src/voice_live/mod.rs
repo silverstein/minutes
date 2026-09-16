@@ -140,6 +140,15 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if brain {
         p.push_str("Brain. Mat keeps a personal knowledge base of markdown notes (people, companies, projects, daily notes). For questions about a person or company beyond meetings, background on a project, or anything that sounds like a note rather than a transcript, use search_brain then read_brain. Combine it with the meeting tools when both apply, and say which source a fact came from if it matters.\n\n");
     }
+    if config.voice_live.prep_artifacts {
+        p.push_str("Preps and briefs. Before a conversation Mat sometimes writes himself a prep or a brief with the /minutes-prep and /minutes-brief skills. Those are his own intentions, goals and talking points, not a transcript, so they answer what he wanted out of a meeting rather than what was said. When he mentions prepping for something, or asks what he meant to cover, call list_preps and then get_prep. Use them alongside the meeting tools when both apply.\n\n");
+    }
+    if config.voice_live.calendar && config.calendar.enabled {
+        p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
+    }
+    if config.voice_live.screen_on_request {
+        p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
+    }
     p.push_str("If Mat asks you to remember or note something, call add_note with his words. Ask before calling any tool that writes or changes something, and never rename a speaker unless Mat explicitly states the name.");
     p
 }
@@ -218,6 +227,8 @@ mod tests {
             "search_brain then read_brain",
             "Ask before calling any tool that writes",
             "never rename a speaker",
+            "list_preps and then get_prep",
+            "read the current time from get_status",
         ] {
             assert!(p.contains(needle), "prompt lost rule: {needle}");
         }
@@ -228,6 +239,24 @@ mod tests {
         let p = system_prompt(&cfg(), &NameIndex::default(), false);
         assert!(!p.contains("search_brain"));
         assert!(p.contains("(unavailable)"));
+    }
+
+    #[test]
+    fn screen_rules_appear_only_when_screen_access_is_on() {
+        let mut config = cfg();
+        config.voice_live.screen_on_request = false;
+        assert!(!system_prompt(&config, &NameIndex::default(), false).contains("look_at_screen"));
+        config.voice_live.screen_on_request = true;
+        let p = system_prompt(&config, &NameIndex::default(), false);
+        assert!(p.contains("look_at_screen"));
+        assert!(p.contains("Never take a frame he did not ask for"));
+    }
+
+    #[test]
+    fn prep_rules_track_their_switch() {
+        let mut config = cfg();
+        config.voice_live.prep_artifacts = false;
+        assert!(!system_prompt(&config, &NameIndex::default(), false).contains("list_preps"));
     }
 
     #[test]

@@ -862,6 +862,7 @@ mod tests {
         for (request, expected) in [
             ("Ask Kodak CLI whether PR 2058 in x1wealth/x1wealth should be landed. I want an assessment only, do not merge it.", "review_pull_request"),
             ("Use extended thinking to analyze this tradeoff: our team can ship now with one known intermittent crash, or delay two days to fix it. We have no hard deadline. Think it through.", "think_deeply"),
+            ("I'm a startup founder. You just told me my next meeting is a fireside chat with Alex Komoroske. What does he do that would apply to my job?", "research_public"),
         ] {
             let setup = SessionSetup {
                 model: config.voice_live.model.clone(),
@@ -877,13 +878,17 @@ mod tests {
                 resume_handle: None,
             };
             let client = LiveClient::connect(&setup).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(40);
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
             let mut matched = false;
+            let mut spoken_answer = String::new();
             while std::time::Instant::now() < deadline {
                 match client.inbox.recv_timeout(Duration::from_millis(250)) {
                     Ok(ServerEvent::SetupComplete) => client.send_text_turn(request).unwrap(),
                     Ok(ServerEvent::ToolCall(calls)) => {
                         for call in calls {
+                            if expected == "research_public" {
+                                assert_ne!(call.name, "ask_agent", "public research must not launch a broad agent");
+                            }
                             if call.name == expected {
                                 if expected == "review_pull_request" {
                                     assert_eq!(call.args["agent"], "codex");
@@ -892,16 +897,32 @@ mod tests {
                                 }
                                 matched = true;
                             }
+                            if call.name == "research_public" {
+                                let result = tools.execute(&call.name, &call.args);
+                                assert!(!result.is_error, "{}", result.text);
+                                assert!(!result.text.contains("requires_local_approval"));
+                                println!("public research completed: {} chars", result.text.len());
+                                client.send_tool_response(&call, &result.text, "INTERRUPT").unwrap();
+                                continue;
+                            }
                             client.send_tool_response(&call, "Routing test only. No action or review was executed.", "WHEN_IDLE").unwrap();
                         }
-                        if matched { break; }
+                        if matched && expected != "research_public" { break; }
                     }
+                    Ok(ServerEvent::OutputTranscript(text)) if matched => spoken_answer.push_str(&text),
+                    Ok(ServerEvent::TurnComplete) if matched && !spoken_answer.is_empty() => break,
                     Ok(ServerEvent::Error(error) | ServerEvent::Closed(error)) => panic!("{error}"),
                     _ => {}
                 }
             }
             client.close();
             assert!(matched, "did not route to {expected}");
+            if expected == "research_public" {
+                assert!(!spoken_answer.is_empty(), "research never produced a spoken answer");
+                let lower = spoken_answer.to_lowercase();
+                assert!(!lower.contains("approv") && !lower.contains("terminal"), "unexpected approval prompt: {spoken_answer}");
+                println!("public research spoken answer: {spoken_answer}");
+            }
             println!("routing passed: {expected}");
         }
     }

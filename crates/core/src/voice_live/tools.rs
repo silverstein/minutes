@@ -80,6 +80,7 @@ impl ToolContext {
     pub fn declarations(&self) -> Vec<Value> {
         let mut d = vec![
             decl("get_status", "Current time, recording state, active voice model and available reasoning modes.", json!({})),
+            decl("research_public", "Research public facts about a speaker, person, company or current topic using Google Search. Runs directly without approval, using Gemini and no local agent or action tools. Send only the public question, not private notes or calendar details. For 'what does this speaker do that applies to my job?', research the speaker by the name already returned by the calendar, then relate the sourced answer to the user's context yourself. Returns an answer and sources; never claim success if it errors.", json!({"question":{"type":"string","description":"A concise public-web question; exclude private context"}})),
             decl("think_deeply", "Use Gemini Extended Thinking for a difficult question or when Mat asks you to think harder. This runs a separate reasoning request while the normal conversation stays on its current voice model. First gather evidence with your other tools, then include the question and relevant evidence in context. Cannot fetch new facts, run actions, or change the ongoing session model. Do not call it for routine commands or simple factual lookups.", json!({"question":{"type":"string"},"context":{"type":"string"},"level":{"type":"string","enum":["low","medium","high"]}})),
             decl(
                 "list_meetings",
@@ -518,6 +519,7 @@ impl ToolContext {
                 }))
             }
             "think_deeply" => super::reasoning::think(cfg, args),
+            "research_public" => super::research::research(cfg, args),
             "list_meetings" => {
                 let limit = int_arg(args, "limit", 10).clamp(1, 50);
                 let filters = SearchFilters {
@@ -802,7 +804,7 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
         "get_person_profile" | "resolve_person" => vec!["name"],
         "add_note" => vec!["text"],
         "ask_agent" => vec!["question"],
-        "think_deeply" => vec!["question"],
+        "think_deeply" | "research_public" => vec!["question"],
         "review_pull_request" => vec!["repository", "number"],
         _ => vec![],
     };
@@ -1363,6 +1365,7 @@ mod tests {
             "now_playing",
             "read_pull_requests",
             "review_pull_request",
+            "research_public",
         ] {
             assert!(
                 !requires_host_review(name, false),
@@ -1394,6 +1397,40 @@ mod tests {
             assert!(result.text.contains("turned off"));
             assert!(ctx.continuity.lock().unwrap().review().is_none());
         }
+    }
+
+    #[test]
+    fn public_research_never_stages_a_broad_agent_approval() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        let result = ctx.execute(
+            "research_public",
+            &json!({"question":"Who is Alex Komoroske?"}),
+        );
+        assert!(result.is_error);
+        assert!(result.text.contains("disabled"));
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        let declaration = ctx
+            .declarations()
+            .into_iter()
+            .find(|d| d["name"] == "research_public")
+            .unwrap();
+        assert_eq!(declaration["parameters"]["required"], json!(["question"]));
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY and makes a public web research request"]
+    fn live_public_research_smoke() {
+        let mut config = Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let result = ctx.execute("research_public", &json!({"question":"What is Alex Komoroske's public work, and why might his ideas be relevant to startup founders? Use primary public sources."}));
+        assert!(!result.is_error, "{}", result.text);
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        let value: Value = serde_json::from_str(&result.text).unwrap();
+        assert!(!value["sources"].as_array().unwrap().is_empty());
+        assert_eq!(value["local_agent_launched"], false);
+        println!("public research receipt: {}", result.text);
     }
 
     #[test]

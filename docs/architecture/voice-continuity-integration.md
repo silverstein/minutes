@@ -154,6 +154,17 @@ grants authority to act.
 
 ### Spoken reads and reasoning
 
+`research_public` answers public background and current-topic questions through
+Gemini 3.8 Flash with Google Search grounding, using the existing cloud consent
+and API key. It never launches a local agent or exposes filesystem, shell or
+action tools. It runs without host approval, caps the question and response,
+times out after 45 seconds, and requires a completed answer with web sources.
+The voice assistant sends only the public lookup, then combines returned facts
+with private conversational context in the ongoing voice session. It
+must not send private transcripts or calendar contents as search context.
+Returned source links preserve attribution; failure does not
+fall back to broad delegation. General explanations need no delegation at all.
+
 With `[voice_live] ask_agent = true`, `read_pull_requests` exposes fixed GitHub
 repository search, PR list and PR detail reads without terminal approval.
 `review_pull_request` fetches current PR metadata and a bounded diff, checks that
@@ -195,6 +206,7 @@ surface must preserve these host boundaries rather than recreate them in prompts
 Google contract references verified September 16, 2026:
 - https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking
 - https://ai.google.dev/gemini-api/docs/live-api/tools
+- https://ai.google.dev/gemini-api/docs/generate-content/google-search
 
 ## Lint scope
 

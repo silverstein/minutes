@@ -53,6 +53,50 @@ impl Drop for HomeOverride {
     }
 }
 
+/// A temporary `HOME`, isolated for as long as this value is held.
+///
+/// [`with_temp_home`] covers the common case and should be preferred. Use this
+/// when the isolation has to outlive a closure, such as a fixture that builds a
+/// [`crate::config::Config`] which the test body then uses across many
+/// statements.
+///
+/// Holding this serializes against every other `HOME` mutator, which is the
+/// price of `HOME` being process-global. Dropping it restores the previous
+/// `HOME` before releasing the lock, so the next waiter never observes this
+/// test's home.
+pub struct TempHome {
+    // Field order is drop order: restore HOME, then release the lock, then
+    // remove the directory.
+    _home: HomeOverride,
+    _lock: MutexGuard<'static, ()>,
+    temp: tempfile::TempDir,
+}
+
+impl TempHome {
+    /// Points `HOME` at a fresh temporary directory until the value is dropped.
+    pub fn new() -> Self {
+        let lock = home_env_lock();
+        let temp = tempfile::tempdir().expect("temp home");
+        let home = HomeOverride::set(temp.path());
+        Self {
+            _home: home,
+            _lock: lock,
+            temp,
+        }
+    }
+
+    /// The temporary home directory.
+    pub fn path(&self) -> &Path {
+        self.temp.path()
+    }
+}
+
+impl Default for TempHome {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Run `f` with `HOME` pointed at a fresh temporary directory.
 ///
 /// Anything the body resolves from the home directory (`search.db`, `graph.db`,

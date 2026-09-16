@@ -11911,6 +11911,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::test_support::TempHome;
     use std::sync::{Arc, Condvar, Mutex};
     use tempfile::TempDir;
 
@@ -11933,6 +11934,8 @@ mod tests {
 
     #[test]
     fn update_from_meeting_skips_restricted_meetings() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let knowledge = TempDir::new().unwrap();
         let meetings = TempDir::new().unwrap();
         let path = meetings.path().join("2026-06-10-board.md");
@@ -11972,6 +11975,8 @@ mod tests {
 
     #[test]
     fn ingest_file_refuses_restricted_meetings() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let kb = TempDir::new().unwrap();
         let meetings = TempDir::new().unwrap();
         let meeting_path = meetings.path().join("2026-06-10-board.md");
@@ -12008,6 +12013,8 @@ mod tests {
 
     #[test]
     fn authorized_meeting_rejects_in_place_mutation_between_descriptor_reads() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let path = meetings.path().join("mutable.md");
         fs::write(&path, meeting_markdown("Mutable", None, "NORMAL-CANARY")).unwrap();
@@ -12028,6 +12035,8 @@ mod tests {
 
     #[test]
     fn qmd_policy_mirror_retracts_restricted_malformed_and_linked_sources() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let mirror_parent = TempDir::new().unwrap();
         let mirror = mirror_parent.path().canonicalize().unwrap().join("mirror");
@@ -13698,6 +13707,8 @@ mod tests {
 
     #[test]
     fn live_corpus_policy_excludes_every_inactive_directory_for_direct_and_mirror_reads() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let mirror_parent = TempDir::new().unwrap();
         let live = meetings.path().join("teams/live.md");
@@ -13770,10 +13781,23 @@ mod tests {
             .collect()
     }
 
-    fn knowledge_config(meetings: &TempDir, knowledge: &TempDir, adapter: &str) -> Config {
+    /// Builds a knowledge `Config` and isolates `HOME` for the caller.
+    ///
+    /// Isolating `output_dir` and `knowledge.path` is not enough. Ingest
+    /// resolves policy locks and the QMD mirror from `Config::minutes_dir()`,
+    /// which is `$HOME/.minutes`, so without this these tests read and write
+    /// the developer's real home and race every other test that repoints
+    /// `HOME` (#1003). The returned [`TempHome`] must be held for the body of
+    /// the test; dropping it early puts `HOME` back.
+    fn knowledge_config(
+        meetings: &TempDir,
+        knowledge: &TempDir,
+        adapter: &str,
+    ) -> (Config, TempHome) {
+        let home = TempHome::new();
         let knowledge_path = knowledge.path().join("visible-kb");
         fs::create_dir_all(&knowledge_path).unwrap();
-        Config {
+        let config = Config {
             output_dir: meetings.path().to_path_buf(),
             knowledge: KnowledgeConfig {
                 enabled: true,
@@ -13782,7 +13806,8 @@ mod tests {
                 ..Default::default()
             },
             ..Config::default()
-        }
+        };
+        (config, home)
     }
 
     fn all_preserved_text(config: &Config) -> String {
@@ -13793,6 +13818,8 @@ mod tests {
 
     #[test]
     fn preservation_root_stays_outside_nested_knowledge_and_source_corpus() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let workspace = TempDir::new().unwrap();
         let output = workspace.path().join("meetings");
         let knowledge = output.join("wiki");
@@ -13814,6 +13841,8 @@ mod tests {
 
     #[test]
     fn para_private_root_does_not_fall_back_when_knowledge_parent_is_public() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let workspace = TempDir::new().unwrap();
         let output = workspace.path().join("meetings");
         let knowledge = output.join("wiki");
@@ -13837,6 +13866,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn para_private_root_rejects_symlink_alias_containment_without_fallback() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         use std::os::unix::fs::symlink;
 
         let workspace = TempDir::new().unwrap();
@@ -13863,6 +13894,8 @@ mod tests {
 
     #[test]
     fn para_private_root_is_the_deterministic_knowledge_parent_sibling() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let workspace = TempDir::new().unwrap();
         let output = workspace.path().join("meetings");
         let knowledge_parent = workspace.path().join("knowledge-parent");
@@ -13906,6 +13939,8 @@ mod tests {
 
     #[test]
     fn para_private_root_rejects_existing_wrong_shape_people_path() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let workspace = TempDir::new().unwrap();
         let output = workspace.path().join("meetings");
         let knowledge = workspace.path().join("knowledge/wiki");
@@ -13930,6 +13965,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn para_private_root_rejects_symlink_people_path() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         use std::os::unix::fs::symlink;
 
         let workspace = TempDir::new().unwrap();
@@ -14506,7 +14543,7 @@ mod tests {
     fn windows_retained_root_and_namespace_block_redirect_before_private_write() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let source = config.knowledge.path.join("manual.md");
         fs::write(&source, b"WINDOWS-PRIVATE-PRESERVATION-CANARY").unwrap();
         let redirected_root = meetings.path().join("agent-visible-root-redirect");
@@ -14558,7 +14595,7 @@ mod tests {
     fn source_swap_after_backup_is_not_overwritten_or_unlinked() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("manual.md");
         fs::write(&path, b"ORIGINAL-USER-BYTES").unwrap();
         let identity = preserve_file_before_retraction(&config, &path).unwrap();
@@ -14576,7 +14613,7 @@ mod tests {
     fn oversized_knowledge_source_fails_before_preservation_or_mutation() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("oversized.md");
         let file = OpenOptions::new()
             .create_new(true)
@@ -14604,7 +14641,7 @@ mod tests {
     fn replacement_rewrite_after_publication_retains_exact_old_capture() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("rewrite-boundary.md");
         let original = b"EXACT-OLD-CAPTURE";
         let intended = b"INTENDED-REWRITE";
@@ -14635,7 +14672,7 @@ mod tests {
     fn replacement_late_rewrite_after_initial_successor_proof_preserves_exact_old() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("late-successor.md");
         fs::write(&path, b"EXACT-OLD").unwrap();
         let identity = preserved_source_identity(&path).unwrap();
@@ -14662,7 +14699,7 @@ mod tests {
     fn deletion_late_winner_after_initial_absence_proof_preserves_exact_old() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("late-delete.md");
         fs::write(&path, b"EXACT-OLD").unwrap();
         let identity = preserved_source_identity(&path).unwrap();
@@ -14689,7 +14726,7 @@ mod tests {
     fn replacement_hardlink_after_publication_retains_exact_old_capture() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("hardlink-boundary.md");
         let alias = config.knowledge.path.join("hardlink-boundary-alias.md");
         let original = b"EXACT-OLD-CAPTURE";
@@ -14720,7 +14757,7 @@ mod tests {
     fn replacement_name_winner_after_publication_retains_exact_old_capture() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("winner-boundary.md");
         let displaced = config.knowledge.path.join("winner-boundary-displaced.md");
         let original = b"EXACT-OLD-CAPTURE";
@@ -14753,7 +14790,7 @@ mod tests {
     fn deletion_name_winner_retains_exact_old_capture() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("delete-winner.md");
         let original = b"EXACT-OLD-CAPTURE";
         let winner = b"DELETE-NAME-WINNER";
@@ -14777,7 +14814,7 @@ mod tests {
     fn final_capture_slot_replacement_is_retained_not_unlinked() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("manual.md");
         fs::write(&path, b"BOUND-ORIGINAL").unwrap();
         let identity = preserved_source_identity(&path).unwrap();
@@ -15054,7 +15091,7 @@ mod tests {
     fn reconciliation_rewrite_preserves_late_hardlink_alias_bytes() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("rewrite-hardlink.md");
         let alias = config.knowledge.path.join("rewrite-hardlink-alias.md");
         let original = b"REWRITE-LATE-HARDLINK-ORIGINAL";
@@ -15086,7 +15123,7 @@ mod tests {
     fn reconciliation_delete_preserves_late_hardlink_alias_bytes() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let path = config.knowledge.path.join("delete-hardlink.md");
         let alias = config.knowledge.path.join("delete-hardlink-alias.md");
         let original = b"DELETE-LATE-HARDLINK-ORIGINAL";
@@ -15165,7 +15202,7 @@ mod tests {
     fn byte_bearing_captures_fail_closed_at_the_sequential_rewrite_bound() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let people = config.knowledge.path.join("people");
         fs::create_dir_all(&people).unwrap();
         let profile = people.join("repeated.md");
@@ -15200,7 +15237,7 @@ mod tests {
     fn byte_bearing_captures_bound_large_profile_retraction_and_followup() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let people = config.knowledge.path.join("people");
         fs::create_dir_all(&people).unwrap();
         let profile_count = MAX_RETAINED_RECONCILIATION_CAPTURES + 8;
@@ -15239,7 +15276,7 @@ mod tests {
         for adapter in ["wiki", "obsidian", "para"] {
             let meetings = TempDir::new().unwrap();
             let knowledge = TempDir::new().unwrap();
-            let mut config = knowledge_config(&meetings, &knowledge, adapter);
+            let (mut config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             if adapter == "para" {
                 let directory = config.knowledge.path.join("areas/people/retired");
                 fs::create_dir_all(&directory).unwrap();
@@ -15285,7 +15322,7 @@ mod tests {
     fn byte_bearing_capture_winners_still_exhaust_the_fail_closed_budget() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let people = config.knowledge.path.join("people");
         fs::create_dir_all(&people).unwrap();
 
@@ -15534,7 +15571,7 @@ mod tests {
         for adapter in ["wiki", "para"] {
             let meetings = TempDir::new().unwrap();
             let knowledge = TempDir::new().unwrap();
-            let config = knowledge_config(&meetings, &knowledge, adapter);
+            let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             let (target, original) = if adapter == "para" {
                 let directory = config.knowledge.path.join("areas/people/alex-kim");
                 fs::create_dir_all(&directory).unwrap();
@@ -15617,7 +15654,7 @@ mod tests {
         for adapter in ["wiki", "para"] {
             let meetings = TempDir::new().unwrap();
             let knowledge = TempDir::new().unwrap();
-            let config = knowledge_config(&meetings, &knowledge, adapter);
+            let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             let (target, original) = if adapter == "para" {
                 let directory = config.knowledge.path.join("areas/people/alex-kim");
                 fs::create_dir_all(&directory).unwrap();
@@ -15678,7 +15715,7 @@ mod tests {
     fn para_summary_publication_never_replaces_a_final_boundary_winner() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         let directory = config.knowledge.path.join("areas/people/alex-kim");
         fs::create_dir_all(&directory).unwrap();
         let items = directory.join("items.json");
@@ -15733,7 +15770,7 @@ mod tests {
     fn para_revocation_failed_summary_proof_never_exposes_a_mixed_generation() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         let people = config.knowledge.path.join("areas/people");
         let private_root = para_private_root(&config).unwrap();
         assert!(!private_root.starts_with(&config.knowledge.path));
@@ -15802,7 +15839,7 @@ mod tests {
     fn reconciliation_semantic_caps_fail_before_any_mutation() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         let people = config.knowledge.path.join("areas/people");
         let directory = people.join("bounded-person");
         fs::create_dir_all(&directory).unwrap();
@@ -15869,7 +15906,7 @@ mod tests {
         for mode in ["depth", "output"] {
             let meetings = TempDir::new().unwrap();
             let knowledge = TempDir::new().unwrap();
-            let config = knowledge_config(&meetings, &knowledge, "para");
+            let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
             let people = config.knowledge.path.join("areas/people");
             let directory = people.join("bounded-person");
             fs::create_dir_all(&directory).unwrap();
@@ -15926,7 +15963,7 @@ mod tests {
     fn preservation_root_real_directory_replacement_is_detected_between_operations() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let mut replacement = None;
         let result = open_preservation_namespace_with(&config, |root| {
             let moved = root.with_extension("original-root");
@@ -15951,7 +15988,7 @@ mod tests {
                 meeting_markdown("Normal", None, "AUTHORIZED-FACT"),
             )
             .unwrap();
-            let config = knowledge_config(&meetings, &knowledge, adapter);
+            let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             ingest_file(&meeting, &config).unwrap();
 
             let people = config.knowledge.path.join("people");
@@ -15995,7 +16032,7 @@ mod tests {
             let knowledge = TempDir::new().unwrap();
             let meeting = meetings.path().join("normal.md");
             fs::write(&meeting, meeting_markdown("Normal", None, "GENERATED-FACT")).unwrap();
-            let config = knowledge_config(&meetings, &knowledge, adapter);
+            let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             ingest_file(&meeting, &config).unwrap();
             let profile = config.knowledge.path.join("people/alex-kim.md");
             let log = config.knowledge.path.join("log.md");
@@ -16026,7 +16063,7 @@ mod tests {
             meeting_markdown("Normal", None, "AUTHORIZED-FACT"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&meeting, &config).unwrap();
         let source = exact_source_key(&meeting, &config).unwrap();
         let profile = config.knowledge.path.join("people/alex-kim.md");
@@ -16052,7 +16089,7 @@ mod tests {
                 meeting_markdown("Normal", None, "OLD-LAYOUT-GENERATED-CANARY"),
             )
             .unwrap();
-            let mut config = knowledge_config(&meetings, &knowledge, from);
+            let (mut config, _home) = knowledge_config(&meetings, &knowledge, from);
             config.knowledge.log_file = "old-layout-log.md".into();
             ingest_file(&meeting, &config).unwrap();
 
@@ -16099,7 +16136,7 @@ mod tests {
     fn provenance_temp_is_fixed_bounded_and_reusable_after_post_sync_failures() {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let manifest = KnowledgeProvenanceManifest {
             schema: 4,
             sources: BTreeMap::from([("source".into(), "revision".into())]),
@@ -16156,7 +16193,7 @@ mod tests {
             meeting_markdown("Normal", None, "V3-GENERATED-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&meeting, &config).unwrap();
         let manifest_path = provenance_manifest_path(&config).unwrap();
         let current: serde_json::Value =
@@ -16210,7 +16247,7 @@ mod tests {
             meeting_markdown("Normal", None, "LEGITIMATE-PROVENANCE-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&meeting, &config).unwrap();
 
         let source = exact_source_key(&meeting, &config).unwrap();
@@ -16264,7 +16301,7 @@ mod tests {
             let knowledge = TempDir::new().unwrap();
             let meeting = meetings.path().join("normal.md");
             fs::write(&meeting, meeting_markdown("Normal", None, "GENERATED-FACT")).unwrap();
-            let config = knowledge_config(&meetings, &knowledge, adapter);
+            let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
             let source = exact_source_key(&meeting, &config).unwrap();
             let _lock = acquire_policy_lock(KNOWLEDGE_POLICY_LOCK).unwrap();
             let mut injected = false;
@@ -16333,7 +16370,7 @@ mod tests {
             meeting_markdown("Normal", None, "LEGITIMATE-GENERATED-FACT"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         let source = exact_source_key(&meeting, &config).unwrap();
         let forged = serde_json::json!({
             "id": "forged-after-retraction",
@@ -16384,7 +16421,7 @@ mod tests {
         let knowledge = TempDir::new().unwrap();
         let path = meetings.path().join("mutable.md");
         fs::write(&path, meeting_markdown("Mutable", None, "OLD-CANARY")).unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&path, &config).unwrap();
         assert!(all_knowledge_text(knowledge.path()).contains("OLD-CANARY"));
 
@@ -16403,6 +16440,8 @@ mod tests {
 
     #[test]
     fn source_change_hook_runs_qmd_fail_closed_path_even_when_knowledge_refresh_fails() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let state = TempDir::new().unwrap();
         let knowledge_file = state.path().join("knowledge-is-a-file");
@@ -16440,7 +16479,7 @@ mod tests {
             meeting_markdown("External", None, "EXTERNAL-CHANGE-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&path, &config).unwrap();
         fs::write(
             &path,
@@ -16474,7 +16513,7 @@ mod tests {
         fs::create_dir_all(second.parent().unwrap()).unwrap();
         fs::write(&first, meeting_markdown("First", None, "FIRST-CANARY")).unwrap();
         fs::write(&second, meeting_markdown("Second", None, "SECOND-CANARY")).unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&first, &config).unwrap();
         ingest_file(&second, &config).unwrap();
 
@@ -16494,6 +16533,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn deleted_macos_var_private_var_alias_retracts_all_adapters_and_manifest() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let workspace = TempDir::new().unwrap();
         let canonical_workspace = workspace.path().canonicalize().unwrap();
         let relative = canonical_workspace
@@ -16561,7 +16602,7 @@ mod tests {
         fs::create_dir_all(second.parent().unwrap()).unwrap();
         fs::write(&first, meeting_markdown("First", None, "unused")).unwrap();
         fs::write(&second, meeting_markdown("Second", None, "unused")).unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         let first_v2 = preferred_source_key(&first, &config).unwrap();
         let second_v2 = preferred_source_key(&second, &config).unwrap();
         let knowledge_config = &config.knowledge;
@@ -16606,6 +16647,8 @@ mod tests {
 
     #[test]
     fn knowledge_reclassification_retracts_fact_title_path_and_log() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
         let path = meetings.path().join("board-secret-name.md");
@@ -16651,6 +16694,8 @@ mod tests {
 
     #[test]
     fn knowledge_reconcile_retracts_normal_to_malformed_without_logging_filename() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
         let path = meetings.path().join("private-codename.md");
@@ -16684,6 +16729,8 @@ mod tests {
 
     #[test]
     fn knowledge_retraction_preserves_same_fact_from_another_normal_source() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
         let first = meetings.path().join("first.md");
@@ -16739,7 +16786,7 @@ mod tests {
                 let knowledge = TempDir::new().unwrap();
                 let path = meetings.path().join("flip.md");
                 fs::write(&path, meeting_markdown("Flip", None, "FLIP-SECRET-CANARY")).unwrap();
-                let config = knowledge_config(&meetings, &knowledge, adapter);
+                let (config, _home) = knowledge_config(&meetings, &knowledge, adapter);
                 let _lock = acquire_policy_lock(KNOWLEDGE_POLICY_LOCK).unwrap();
                 let mut flipped = false;
                 let update = update_path_transaction_locked(&path, &config, false, &mut |phase| {
@@ -16790,7 +16837,7 @@ mod tests {
             meeting_markdown("Normal", None, "AUTHORIZED-PARA-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&path, &config).unwrap();
         let people = config.knowledge.path.join("areas/people");
         let valid_summary = people.join("alex-kim/summary.md");
@@ -16855,7 +16902,7 @@ mod tests {
         let second = meetings.path().join("second.md");
         fs::write(&first, meeting_markdown("First", None, "FIRST-FACT")).unwrap();
         fs::write(&second, meeting_markdown("Second", None, "SECOND-FACT")).unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&first, &config).unwrap();
         ingest_file(&second, &config).unwrap();
         let summary = config
@@ -16890,7 +16937,7 @@ mod tests {
             meeting_markdown("Normal", None, "AUTHORIZED-WIKI-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "wiki");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "wiki");
         ingest_file(&path, &config).unwrap();
         let profile = config.knowledge.path.join("people/alex-kim.md");
         let mut profile_content = fs::read_to_string(&profile).unwrap();
@@ -16924,7 +16971,7 @@ mod tests {
         let mirror_parent = TempDir::new().unwrap();
         let path = meetings.path().join("normal.md");
         fs::write(&path, meeting_markdown("Normal", None, "PRIVATE-MODE")).unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&path, &config).unwrap();
         let mirror = mirror_parent.path().join("mirror");
         rebuild_qmd_policy_mirror_at(&config, &mirror).unwrap();
@@ -16965,6 +17012,8 @@ mod tests {
 
     #[test]
     fn wiki_adapter_creates_person_file() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let dir = TempDir::new().unwrap();
         let config = KnowledgeConfig {
             enabled: true,
@@ -17004,6 +17053,8 @@ mod tests {
 
     #[test]
     fn wiki_adapter_deduplicates_facts() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let dir = TempDir::new().unwrap();
         let config = KnowledgeConfig {
             enabled: true,
@@ -17033,6 +17084,8 @@ mod tests {
 
     #[test]
     fn wiki_retraction_removes_legacy_multiline_fact_as_one_provenance_block() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
         let meeting_path = meetings.path().join("legacy-source.md");
@@ -17077,6 +17130,8 @@ mod tests {
 
     #[test]
     fn wiki_adapter_skips_low_confidence() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let dir = TempDir::new().unwrap();
         let config = KnowledgeConfig {
             enabled: true,
@@ -17117,6 +17172,8 @@ mod tests {
 
     #[test]
     fn para_adapter_writes_items_json() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let dir = TempDir::new().unwrap();
         let config = KnowledgeConfig {
             enabled: true,
@@ -17252,7 +17309,7 @@ mod tests {
         let meetings = TempDir::new().unwrap();
         let knowledge = TempDir::new().unwrap();
         let source = meetings.path().join("normal.md");
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         fs::write(
             &source,
             meeting_markdown("Normal", None, "LAUNDER-REVOKE-CANARY"),
@@ -17367,7 +17424,7 @@ mod tests {
             meeting_markdown("Normal", None, "CRASH-REVOCATION-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
 
         let people = config.knowledge.path.join("areas/people");
@@ -17417,7 +17474,7 @@ mod tests {
             meeting_markdown("Normal", None, "FULL-SCRUB-REVOCATION-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
 
         let people = config.knowledge.path.join("areas/people");
@@ -17475,7 +17532,7 @@ mod tests {
             meeting_markdown("Normal", None, "BASELINE-DELETED-REVOCATION-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
         let people = config.knowledge.path.join("areas/people");
         let existing = inspect_para_person(&people.join("alex-kim")).unwrap();
@@ -17577,7 +17634,7 @@ mod tests {
             meeting_markdown("Normal", None, "REVOCATION-STATE-TABLE-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
         let people = config.knowledge.path.join("areas/people");
         let original = people.join("alex-kim");
@@ -17748,7 +17805,7 @@ mod tests {
             meeting_markdown("Normal", None, "PARTIAL-CREATION-REVOCATION-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
         let people = config.knowledge.path.join("areas/people");
         let original = people.join("alex-kim");
@@ -17808,7 +17865,7 @@ mod tests {
             meeting_markdown("Normal", None, "PARTIAL-SLOT-REVOCATION-CANARY"),
         )
         .unwrap();
-        let config = knowledge_config(&meetings, &knowledge, "para");
+        let (config, _home) = knowledge_config(&meetings, &knowledge, "para");
         ingest_file(&source, &config).unwrap();
 
         let people = config.knowledge.path.join("areas/people");
@@ -18565,6 +18622,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn torn_recyclable_journal_is_exactly_reset_before_any_generation_mutation() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let root = TempDir::new().unwrap();
         let people = root.path().join("areas/people");
         let private_root = root.path().join(PARA_PRIVATE_ROOT);
@@ -18634,6 +18693,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn corrupted_active_recyclable_journal_after_exchange_is_never_reset_as_pre_mutation() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let root = TempDir::new().unwrap();
         let people = root.path().join("areas/people");
         let private_root = root.path().join(PARA_PRIVATE_ROOT);
@@ -18773,6 +18834,8 @@ mod tests {
 
     #[test]
     fn log_append_creates_and_appends() {
+        // Isolates $HOME; see knowledge_config (#1003).
+        let _home = TempHome::new();
         let dir = TempDir::new().unwrap();
         let config = KnowledgeConfig {
             enabled: true,

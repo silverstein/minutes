@@ -1008,6 +1008,93 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires GEMINI_API_KEY; checks spoken acknowledgment with tool results withheld"]
+    fn live_pending_generation_acknowledgment_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.html_prototypes = true;
+        config.voice_live.music = true;
+        config.voice_live.persona = "morris".into();
+        config.voice_live.voice_name =
+            std::env::var("MINUTES_TEST_VOICE").unwrap_or_else(|_| "Puck".into());
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let setup = SessionSetup {
+            model: config.voice_live.model.clone(),
+            thinking_level: config.voice_live.thinking_level.clone(),
+            api_key: crate::voice_live::api_key(&config).unwrap(),
+            system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+            function_declarations: tools.declarations(),
+            language: config.voice_live.language.clone(),
+            voice_name: config.voice_live.voice_name.clone(),
+            manual_activity: true,
+            proactive_audio: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        let client = LiveClient::connect(&setup).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let mut turn = 0;
+        let mut called = [false; 2];
+        let mut audio = [0usize; 2];
+        let mut transcript = [String::new(), String::new()];
+        let mut music_description = String::new();
+        let mut finished = false;
+        // Neither tool is executed or answered: the board stays pending while
+        // the second request must get its own audible acknowledgment.
+        while std::time::Instant::now() < deadline {
+            match client.inbox.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerEvent::SetupComplete) => client.send_text_turn(
+                    "Build a small interactive board with Now, Next and Later columns. Use these three cards: Fewer meetings, Smaller teams, Shorter workdays. Let me move the cards between columns. This is the complete brief; build it now."
+                ).unwrap(),
+                Ok(ServerEvent::Audio(bytes)) => audio[turn] += bytes.len(),
+                Ok(ServerEvent::OutputTranscript(text)) => transcript[turn].push_str(&text),
+                Ok(ServerEvent::ToolCall(calls)) => {
+                    for call in calls {
+                        assert_eq!(call.name, ["build_prototype", "make_music"][turn]);
+                        if call.name == "make_music" {
+                            music_description = call.args["description"].as_str().unwrap_or("").to_owned();
+                        }
+                        called[turn] = true;
+                    }
+                }
+                Ok(ServerEvent::TurnComplete) if called[turn] => {
+                    if turn == 0 {
+                        turn = 1;
+                        client.send_text_turn("While I'm waiting for that, can you create hold music for me?").unwrap();
+                    } else {
+                        finished = true;
+                        break;
+                    }
+                }
+                Ok(ServerEvent::Error(error)) => panic!("acknowledgment smoke: {error}"),
+                Ok(ServerEvent::Closed(reason)) => panic!("acknowledgment smoke closed: {reason}"),
+                _ => {}
+            }
+        }
+        client.close();
+        println!(
+            "GENERATION_ACK voice={} called={called:?} audio={audio:?} transcripts={transcript:?} music_description={music_description}",
+            config.voice_live.voice_name
+        );
+        assert!(finished && called.iter().all(|called| *called));
+        assert!(
+            audio.iter().all(|bytes| *bytes > 6_400),
+            "missing spoken acknowledgment"
+        );
+        assert!(transcript.iter().all(|text| !text.trim().is_empty()));
+        let description = music_description.to_ascii_lowercase();
+        assert!(
+            ["snark", "sarcas", "witt", "dry", "deadpan"]
+                .iter()
+                .any(|word| description.contains(word)),
+            "hold-music default missing: {music_description}"
+        );
+    }
+
+    #[test]
     #[ignore = "requires GEMINI_API_KEY; synthetic routing only, no prototypes generated"]
     fn live_prototype_routing_smoke() {
         let mut config = crate::config::Config::default();

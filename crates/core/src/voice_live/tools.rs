@@ -266,14 +266,7 @@ impl ToolContext {
             return self.execute_raw(name, args);
         }
         let connected = self.mcp.declarations().iter().any(|v| v["name"] == name);
-        let outward = desktop::find(name).is_some_and(|v| v.risk != desktop::Risk::Read);
-        if connected
-            || outward
-            || matches!(
-                name,
-                "propose_checkpoint" | "add_note" | "ask_agent" | "make_music"
-            )
-        {
+        if requires_host_review(name, connected) {
             let started = Instant::now();
             let result = self
                 .continuity
@@ -734,6 +727,15 @@ impl ToolContext {
             }
         }
     }
+}
+
+fn requires_host_review(name: &str, connected: bool) -> bool {
+    connected
+        || desktop::find(name).is_some_and(|v| v.risk == desktop::Risk::Outward)
+        || matches!(
+            name,
+            "propose_checkpoint" | "add_note" | "ask_agent" | "make_music"
+        )
 }
 
 fn decl(name: &str, description: &str, properties: Value) -> Value {
@@ -1288,6 +1290,37 @@ mod tests {
             out.text
         );
         assert!(ctx.continuity.lock().unwrap().review().is_none());
+    }
+
+    #[test]
+    fn local_desktop_actions_run_without_host_review() {
+        for name in [
+            "open_app",
+            "control_music",
+            "reveal_path",
+            "add_reminder",
+            "now_playing",
+        ] {
+            assert!(
+                !requires_host_review(name, false),
+                "{name} should not ask Mat to type /approve"
+            );
+        }
+        for name in [
+            "open_url",
+            "send_message",
+            "send_email",
+            "propose_checkpoint",
+            "add_note",
+            "ask_agent",
+            "make_music",
+        ] {
+            assert!(
+                requires_host_review(name, false),
+                "{name} should still require host review"
+            );
+        }
+        assert!(requires_host_review("hubspot__search", true));
     }
 
     #[test]

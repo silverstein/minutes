@@ -36,6 +36,8 @@ pub struct Config {
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
     pub voice: VoiceConfig,
+    /// Voice Live spoken assistant (RFC 0007). Distinct from `[voice]`, which is speaker identification.
+    pub voice_live: VoiceLiveConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
     pub retention: RetentionConfig,
@@ -56,7 +58,6 @@ pub struct Config {
 ///   back to English when the OS locale isn't a supported language.
 /// - `"en"`: force English (the untranslated source strings).
 /// - `"zh-CN"`: Simplified Chinese.
-/// - `"pt-BR"`: Brazilian Portuguese.
 ///
 /// The `MINUTES_LANG` environment variable overrides this field at runtime,
 /// which is handy for one-off CLI invocations. `#[serde(default)]` keeps old
@@ -67,7 +68,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    /// Display language: `"auto"`, `"en"`, `"zh-CN"`, or `"pt-BR"`.
+    /// Display language: `"auto"`, `"en"`, or `"zh-CN"`.
     pub language: String,
     /// Remembered edge anchor for the movable dictation HUD.
     pub dictation_hud_anchor: String,
@@ -1107,6 +1108,182 @@ impl Default for RecordingConfig {
 /// Knowledge base integration — Karpathy-style LLM wiki maintained from meeting data.
 /// After each meeting, extract facts about people and decisions, update person profiles,
 /// append to a chronological log, and maintain an index. Opt-in (disabled by default).
+/// Voice Live: a push-to-talk spoken assistant over Minutes' memory (RFC 0007).
+///
+/// This is a cloud provider behind an explicit opt-in. The API key is never stored
+/// in config; `api_key_env` names the environment variable that holds it. The
+/// desktop app hydrates that variable from the Keychain at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceLiveConfig {
+    /// Master switch for the feature surfaces (CLI command, shortcut slot).
+    pub enabled: bool,
+    /// Realtime provider. Phase 1 supports only "gemini".
+    pub provider: String,
+    /// Model id, e.g. "gemini-3.8-live".
+    pub model: String,
+    /// Name of the environment variable holding the provider API key.
+    pub api_key_env: String,
+    /// BCP-47 language code pinned for transcription and speech ("en-US").
+    pub language: String,
+    /// Explicit acknowledgement that microphone audio and tool results leave the device.
+    pub allow_cloud: bool,
+    /// How async tool results are delivered: "when_idle" (after the model finishes speaking) or "interrupt".
+    pub tool_scheduling: String,
+    /// Per-tool-result character budget so one transcript cannot fill the voice context.
+    pub max_tool_chars: usize,
+    /// How many known people to inject as spelling bias.
+    pub known_people: usize,
+    /// Expose knowledge-base search/read when `[knowledge].path` is set.
+    pub brain_search: bool,
+    /// Expose a single on-request screen frame (phase 3).
+    pub screen_on_request: bool,
+    /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
+    pub log_sessions: bool,
+    /// Cancel the speaker signal out of the microphone so open mic does not hear
+    /// and interrupt the assistant. Uses the platform voice-processing unit on
+    /// macOS; other platforms fall back to plain capture.
+    pub echo_cancellation: bool,
+    /// Reopen a session the provider ended, carrying its context forward.
+    ///
+    /// A Live session has a cap of roughly fifteen minutes. The provider offers
+    /// a resumption handle before it closes, so a new socket can continue the
+    /// same conversation instead of starting over with no memory of it.
+    pub resume_sessions: bool,
+    /// Let the model decide not to answer at all.
+    ///
+    /// Open mic otherwise treats everything it hears as addressed to it, so a
+    /// half sentence to someone else, or noise a transcriber turns into words,
+    /// becomes a prompt. With this on the provider stays quiet unless the
+    /// speech was meant for it, which is the difference between something you
+    /// talk to deliberately and something you can leave running.
+    pub proactive_audio: bool,
+    /// Provider speech-start sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_start_sensitivity: String,
+    /// Provider speech-end sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_end_sensitivity: String,
+    /// Expose the prep and brief artifacts written by the `/minutes-prep` and
+    /// `/minutes-brief` skills under `~/.minutes/preps` and `~/.minutes/briefs`.
+    pub prep_artifacts: bool,
+    /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
+    pub calendar: bool,
+    /// Expose `ask_agent`, which relays a question to a local coding agent.
+    ///
+    /// Off by default. Only its answer travels onward, but the agent itself
+    /// runs with whatever permissions it was configured with, and Minutes
+    /// cannot constrain what it does once asked. `delegate_agent_args` is the
+    /// control that matters; the flag here only decides whether to offer it.
+    pub ask_agent: bool,
+    /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
+    /// first agent CLI found on the machine.
+    pub delegate_agent: String,
+    /// How long to wait for that agent before giving up.
+    pub delegate_timeout_secs: u64,
+    /// Launch flags for the relayed agent. Empty follows `[assistant] agent_args`.
+    ///
+    /// A relayed agent runs with no terminal, so it must not stop to ask for
+    /// tool-use permission: nothing can answer, and the call burns its whole
+    /// timeout looking like a hang. Give it whatever flags your agent needs to
+    /// run non-interactively.
+    pub delegate_agent_args: Vec<String>,
+    /// Directory the relayed agent starts in. Empty uses the Minutes process
+    /// directory, which for a desktop launch is not where any code lives.
+    pub delegate_cwd: String,
+    /// Let the assistant act on the desktop: open things, control playback,
+    /// add a reminder. A fixed catalogue of verbs, never arbitrary script.
+    pub desktop_control: bool,
+    /// Also allow the verbs that leave the machine, such as sending a message
+    /// or an email. Each one is confirmed out loud before it happens, and that
+    /// gate is enforced in code rather than asked for in the prompt.
+    pub desktop_outward: bool,
+    /// Labs toy: let the assistant generate and play music steered by what it
+    /// knows about a conversation. Off by default and deliberately separate
+    /// from the memory features.
+    pub music: bool,
+    /// Music model id.
+    pub music_model: String,
+    /// Longest stretch to play, in seconds. 0 plays the whole piece.
+    ///
+    /// Music and speech share one output queue, which is what lets the echo
+    /// canceller treat the music as reference audio so the microphone never
+    /// hears it. The cost is that unprompted speech waits behind queued music.
+    /// Talking flushes the queue, so anything the user starts is unaffected.
+    pub music_max_secs: u64,
+    /// Let the relayed agent change things: write files, open issues, call a
+    /// service that writes. Off by default.
+    ///
+    /// The caller here is a cloud speech model deciding on its own when to
+    /// relay, from audio it may have misheard, with nobody reviewing the
+    /// request. RFC 0007 keeps phase 1 to a single write, `add_note`, for that
+    /// reason. Turning this on is a deliberate widening of that boundary.
+    pub delegate_writes: bool,
+    /// MCP servers to launch for a voice session, so the assistant can reach
+    /// tools Minutes does not implement. Secrets are never named here: a server
+    /// inherits this process's environment and reads whatever variable it
+    /// already expects.
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// Pause between closing the screen tool call and sending the frame that
+    /// answers it. Only spacing between two ordered messages; the frame is the
+    /// turn the model answers, so this does not need to be long.
+    pub screen_settle_ms: u64,
+}
+
+impl Default for VoiceLiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "gemini".into(),
+            model: "gemini-3.8-live".into(),
+            api_key_env: "GEMINI_API_KEY".into(),
+            language: "en-US".into(),
+            allow_cloud: false,
+            tool_scheduling: "when_idle".into(),
+            max_tool_chars: 12_000,
+            known_people: 200,
+            brain_search: true,
+            screen_on_request: false,
+            log_sessions: true,
+            echo_cancellation: true,
+            resume_sessions: true,
+            proactive_audio: false,
+            speech_start_sensitivity: "low".into(),
+            speech_end_sensitivity: "low".into(),
+            prep_artifacts: true,
+            calendar: true,
+            ask_agent: false,
+            delegate_agent: String::new(),
+            delegate_timeout_secs: 120,
+            delegate_agent_args: Vec::new(),
+            delegate_cwd: String::new(),
+            delegate_writes: false,
+            desktop_control: false,
+            desktop_outward: false,
+            music: false,
+            music_model: "lyria-3.5".into(),
+            music_max_secs: 0,
+            mcp_servers: Vec::new(),
+            screen_settle_ms: 150,
+        }
+    }
+}
+
+/// One MCP server launched for a voice session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Short name. It prefixes every tool this server offers, so keep it to
+    /// letters, digits and underscores.
+    pub name: String,
+    /// Executable to launch, e.g. "npx".
+    pub command: String,
+    /// Arguments for it.
+    pub args: Vec<String>,
+    /// Only expose these tools. Empty means take what fits under `max_tools`.
+    pub tools: Vec<String>,
+    /// Cap on tools taken from this server. 0 uses the built-in default.
+    pub max_tools: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
@@ -1360,6 +1537,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
             voice: VoiceConfig::default(),
+            voice_live: VoiceLiveConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
             retention: RetentionConfig::default(),

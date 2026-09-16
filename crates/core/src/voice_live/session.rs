@@ -770,9 +770,9 @@ impl Runner {
                             self.flush_transcripts(&mut you, &mut me);
                             activity.turn_complete();
                         }
-                        ServerEvent::ToolCall(calls) => {
+                        ServerEvent::ToolCall(incoming_calls) => {
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
-                            for call in calls {
+                            for call in incoming_calls {
                                 self.emit(VoiceLiveEvent::ToolCall { name: call.name.clone(), args: call.args.clone() });
                                 self.log_line(format!("`{}({})`", call.name, call.args));
                                 let id = call.id.clone();

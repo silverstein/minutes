@@ -116,9 +116,13 @@ mod native {
                 if bundle.is_empty() || bundle.len() > 255 {
                     return Err("Invalid application identifier".into());
                 }
-                let mut matches = workspace
-                    .runningApplications()
-                    .iter()
+                let applications = workspace.runningApplications();
+                if applications.len() > 4096 {
+                    return Err("Running application budget exceeded".into());
+                }
+                let mut matches = applications
+                    .to_vec()
+                    .into_iter()
                     .filter(|app| {
                         app.bundleIdentifier()
                             .is_some_and(|b| b.to_string() == bundle)

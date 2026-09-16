@@ -11275,8 +11275,14 @@ life (qmd://life/)
         let source = std::fs::read_to_string(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
             .expect("failed to read main.rs");
 
-        let force_quit = "InterruptAction::ForceExit(code) = handle_graceful_interrupt(";
-        let sites: Vec<_> = source.match_indices(force_quit).collect();
+        // Built from halves so the needle never appears whole in this file.
+        // Spelled literally, the guard matches its own source and then fails
+        // on itself, which is how the first draft of this test behaved.
+        let force_quit = format!(
+            "{}{}",
+            "InterruptAction::ForceExit(code) = ", "handle_graceful_interrupt("
+        );
+        let sites: Vec<_> = source.match_indices(force_quit.as_str()).collect();
         assert!(
             !sites.is_empty(),
             "the force-quit interrupt shape moved; this guard needs updating rather than deleting"
@@ -11292,8 +11298,9 @@ life (qmd://life/)
             );
         }
 
+        let watch_banner = format!("{}{}", "Stopping ", "watcher...");
         let watch = source
-            .find("Stopping watcher...")
+            .find(watch_banner.as_str())
             .expect("the watch interrupt handler moved; update this guard");
         let window = &source[watch..source.len().min(watch + 500)];
         assert!(

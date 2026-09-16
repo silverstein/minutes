@@ -271,7 +271,7 @@ impl ToolContext {
             || outward
             || matches!(
                 name,
-                "propose_checkpoint" | "add_note" | "ask_agent" | "look_at_screen" | "make_music"
+                "propose_checkpoint" | "add_note" | "ask_agent" | "make_music"
             )
         {
             let started = Instant::now();
@@ -1274,6 +1274,20 @@ mod tests {
         // Whether or not capture works here, the result never names an app: the
         // model reported that name instead of reading the image.
         assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn explicit_screen_request_runs_without_host_review() {
+        let mut config = Config::default();
+        config.voice_live.screen_on_request = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("look_at_screen", &json!({}));
+        assert!(
+            !out.text.contains("local host review"),
+            "explicit screen requests should not ask Mat to type /approve: {}",
+            out.text
+        );
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
     }
 
     #[test]

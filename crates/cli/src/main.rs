@@ -2634,9 +2634,7 @@ fn main() -> Result<()> {
 fn local_work_fast_path() -> Option<Result<()>> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let is_local_work = args.iter().any(|arg| arg.to_str() == Some("talk"))
-        && args
-            .iter()
-            .any(|arg| arg.to_str() == Some("--local-work"));
+        && args.iter().any(|arg| arg.to_str() == Some("--local-work"));
     if !is_local_work {
         return None;
     }

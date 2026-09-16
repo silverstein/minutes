@@ -21,10 +21,15 @@ impl LiveModel {
     }
 
     pub fn tool_response(self, id: &str, name: &str, result: Value, delivery: Delivery) -> Value {
-        let mut response = json!({"id": id, "name": name, "response": result});
+        let body = if result.is_object() {
+            result
+        } else {
+            json!({"result":result})
+        };
+        let mut response = json!({"id": id, "name": name, "response": body});
         // Extended Thinking explicitly disallows scheduling configuration.
         if self == Self::Standard {
-            response["scheduling"] = json!(delivery.scheduling());
+            response["response"]["scheduling"] = json!(delivery.scheduling());
         }
         json!({"toolResponse": {"functionResponses": [response]}})
     }
@@ -221,7 +226,7 @@ mod tests {
         ] {
             let response = LiveModel::Standard.tool_response("id", "tool", json!({}), delivery);
             assert_eq!(
-                response["toolResponse"]["functionResponses"][0]["scheduling"],
+                response["toolResponse"]["functionResponses"][0]["response"]["scheduling"],
                 expected
             );
         }

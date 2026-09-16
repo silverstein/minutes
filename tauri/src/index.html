@@ -5912,6 +5912,7 @@
         <!-- Recall opens a panel; it is navigation, not capture, so it lives
              with the other pane controls rather than beside Start Recording.
              Same id and nudge element: every existing handler keeps working. -->
+        <button class="list-toggle-btn" id="btn-work-preview" type="button" hidden title="Selected context, voice, and park/resume">Work preview</button>
         <button class="list-toggle-btn recall-toggle-btn" id="btn-assistant" type="button" aria-expanded="false" title="Open Recall">Recall <span class="recall-nudge"
             id="recall-nudge" aria-label="Recall has new content"></span></button>
         <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
@@ -18273,6 +18274,19 @@
           });
         }, 650);
       }
+    })();
+  </script>
+  <script>
+    (() => {
+      const workButton = document.getElementById('btn-work-preview');
+      const call = window.__TAURI__?.core?.invoke;
+      if (!call || !workButton) return;
+      call('cmd_workbench', { request: { action: 'capabilities' } })
+        .then(status => { workButton.hidden = !status.available; }).catch(() => {});
+      workButton.addEventListener('click', async () => {
+        try { await call('cmd_workbench', { request: { action: 'open' } }); }
+        catch (error) { workButton.title = String(error); }
+      });
     })();
   </script>
 </body>

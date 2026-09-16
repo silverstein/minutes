@@ -364,6 +364,9 @@ impl DesktopControl {
 
     /// Run a verb, or ask for confirmation first when it needs one.
     pub fn execute(&self, verb: &'static Verb, args: &Value) -> Result<Value, String> {
+        if verb.risk != Risk::Read {
+            return Err("This desktop action requires exact local host approval".into());
+        }
         match self.gate(verb, args)? {
             Gate::Ask(payload) => Ok(payload),
             Gate::Cleared(values) => {
@@ -371,6 +374,23 @@ impl DesktopControl {
                 Ok(json!({ "ok": true, "result": output }))
             }
         }
+    }
+
+    /// Called only with a consumed in-process host capability, never with an
+    /// ASR transcript or a model confirmation string. All tests use gates only.
+    pub fn execute_authorized(
+        &self,
+        authorized: crate::live_sidekick::work::AuthorizedAction,
+    ) -> Result<Value, String> {
+        let action = authorized.action();
+        let verb = find(&action.verb).ok_or("Unknown desktop operation")?;
+        if action.payload.get("confirm").is_some() {
+            return Err("Model confirmation tokens are not accepted".into());
+        }
+        reject_unknown_args(verb, &action.payload)?;
+        let values = collect_params(verb, &action.payload)?;
+        let output = run_script(verb.script, &values)?;
+        Ok(json!({"ok":true,"result":output}))
     }
 
     /// Everything that decides whether an action may happen, and nothing that

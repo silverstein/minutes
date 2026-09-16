@@ -1955,7 +1955,28 @@ pub fn run_agent_prompt(
     cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
+    run_agent_prompt_cancellable(
+        agent_cmd,
+        prompt,
+        extra_args,
+        cwd,
+        timeout,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+pub fn run_agent_prompt_cancellable(
+    agent_cmd: &str,
+    prompt: &str,
+    extra_args: &[String],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
     use std::io::Write;
+    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Agent task cancelled before launch".into());
+    }
 
     let mut invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)
         .map_err(|e| format!("could not build the agent invocation: {e}"))?;
@@ -2003,7 +2024,9 @@ pub fn run_agent_prompt(
     let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
         (Some(o), Some(e)) => (o, e),
         _ => {
+            kill_process_group(child.id());
             let _ = child.kill();
+            let _ = child.wait();
             cleanup(&cleanup_path);
             return Err(format!("agent '{agent_cmd}' gave no output pipes"));
         }
@@ -2039,7 +2062,8 @@ pub fn run_agent_prompt(
                 return Ok(text);
             }
             Ok(None) => {
-                if start.elapsed() > timeout {
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) || start.elapsed() > timeout
+                {
                     // Kill the group first: descendants hold the pipes open.
                     kill_process_group(child.id());
                     child.kill().ok();
@@ -2047,6 +2071,9 @@ pub fn run_agent_prompt(
                     let _ = take_agent_output(&stdout_buf, stdout_handle, "stdout");
                     let _ = take_agent_output(&stderr_buf, stderr_handle, "stderr");
                     cleanup(&cleanup_path);
+                    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err("Agent process group was terminated after cancellation; any already-completed external effects require reconciliation".into());
+                    }
                     return Err(format!(
                         "agent '{agent_cmd}' did not answer within {}s. The usual cause \
                          is the agent waiting on a tool-use permission prompt that nothing \
@@ -2057,6 +2084,9 @@ pub fn run_agent_prompt(
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             Err(e) => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
                 cleanup(&cleanup_path);
                 return Err(format!("could not check on the agent: {e}"));
             }

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 mod dashboard;
 mod demo_data;
 mod voice;
+mod work;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -446,6 +447,19 @@ enum Commands {
         /// Print every session event except audio levels as one JSON object per line.
         #[arg(long)]
         json: bool,
+        /// Goal for a new work session.
+        #[arg(long, default_value = "Conversation with Minutes")]
+        goal: String,
+
+        /// Exact checkpoint name from `minutes work list`; restores context, not authority.
+        #[arg(long)]
+        resume: Option<String>,
+    },
+
+    /// List or inspect private work checkpoints. Reading never resumes workers or approvals.
+    Work {
+        #[command(subcommand)]
+        action: work::Action,
     },
 
     /// Stop recording and process the audio
@@ -2069,7 +2083,19 @@ fn main() -> Result<()> {
             device,
             mute,
             json,
-        } => cmd_talk(&config, ptt, open_mic, device, mute, json),
+            goal,
+            resume,
+        } => cmd_talk(
+            &config,
+            ptt,
+            open_mic,
+            device,
+            mute,
+            json,
+            &goal,
+            resume.as_deref(),
+        ),
+        Commands::Work { action } => work::run(action),
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2612,6 +2638,7 @@ fn main() -> Result<()> {
 /// any other line is sent to the model as typed text, and `q` ends the session.
 /// Ctrl-C ends it too. Events print to stdout; instructions print to stderr.
 #[cfg(feature = "voice-live")]
+#[allow(clippy::too_many_arguments)] // CLI flag bridge; all state stays in the session host.
 fn cmd_talk(
     config: &Config,
     ptt: bool,
@@ -2619,6 +2646,8 @@ fn cmd_talk(
     device: Option<String>,
     mute: bool,
     json: bool,
+    goal: &str,
+    resume: Option<&str>,
 ) -> Result<()> {
     use minutes_core::voice_live::{
         self, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveState,
@@ -2643,13 +2672,26 @@ fn cmd_talk(
     }
     let closed = Arc::new(AtomicBool::new(false));
     let closed_in_events = Arc::clone(&closed);
-    let session = voice_live::start(
+    let work = match resume {
+        Some(name) => voice_live::work_runtime::WorkRuntime::resume(
+            minutes_core::live_sidekick::work_store::WorkStore::open(
+                &minutes_core::live_sidekick::work_store::WorkStore::default_path(),
+            )
+            .map_err(anyhow::Error::msg)?
+            .load(name)
+            .map_err(anyhow::Error::msg)?,
+        ),
+        None => voice_live::work_runtime::WorkRuntime::new(goal),
+    }
+    .map_err(anyhow::Error::msg)?;
+    let session = voice_live::start_with_work(
         config,
         SessionOptions {
             mode,
             device,
             mute_playback: mute,
         },
+        Arc::clone(&work),
         move |event| {
             // Level events arrive many times a second and only matter to a HUD.
             if matches!(event, VoiceLiveEvent::Level { .. }) {
@@ -2705,6 +2747,9 @@ fn cmd_talk(
         }
     });
 
+    eprintln!("Local controls: /approve ID, /reject ID, /cancel, /note TEXT, /decision TEXT, /park NEXT STEP. Approvals require an interactive terminal.");
+    let human_terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let mut park_next: Option<Option<String>> = None;
     let mut talking = false;
     loop {
         if interrupted.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) {
@@ -2740,7 +2785,59 @@ fn cmd_talk(
                     }
                     continue;
                 }
-                session.send_text(text);
+                if let Some(id) = text.strip_prefix("/approve ") {
+                    if !human_terminal {
+                        eprintln!(
+                            "Local approval requires an interactive terminal, not piped input."
+                        );
+                        continue;
+                    }
+                    let reviewed = id
+                        .parse::<u64>()
+                        .ok()
+                        .and_then(|id| work.reviews().ok()?.into_iter().find(|r| r.id == id));
+                    if let Some(review) = reviewed {
+                        session.approve_local(review);
+                    } else {
+                        eprintln!("No current review has that ID.");
+                    }
+                } else if let Some(id) = text.strip_prefix("/reject ") {
+                    if let Ok(id) = id.parse::<u64>() {
+                        session.reject_local(id);
+                    }
+                } else if text == "/cancel" {
+                    session.cancel_tools();
+                } else if let Some(note) = text.strip_prefix("/note ") {
+                    if !human_terminal {
+                        eprintln!("User-attributed notes require an interactive terminal.");
+                        continue;
+                    }
+                    if let Err(error) = work.note_from_host(note, false) {
+                        eprintln!("{error}");
+                    } else {
+                        session
+                            .send_text(&format!("I saved this interpretation/correction: {note}"));
+                    }
+                } else if let Some(note) = text.strip_prefix("/decision ") {
+                    if !human_terminal {
+                        eprintln!("Human decisions require an interactive terminal.");
+                        continue;
+                    }
+                    if let Err(error) = work.note_from_host(note, true) {
+                        eprintln!("{error}");
+                    } else {
+                        session.send_text(&format!("I explicitly confirmed this decision: {note}"));
+                    }
+                } else if text == "/park" || text.starts_with("/park ") {
+                    park_next = Some(
+                        text.strip_prefix("/park ")
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                    );
+                    break;
+                } else {
+                    session.send_text(text);
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -2748,6 +2845,10 @@ fn cmd_talk(
     }
     let _ = VoiceLiveState::Closed;
     session.stop();
+    if let Some(next) = park_next {
+        let saved = work.park(next).map_err(anyhow::Error::msg)?;
+        println!("{}", serde_json::to_string(&saved)?);
+    }
     if !json {
         eprintln!("Voice session ended.");
     }
@@ -2789,6 +2890,9 @@ fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
         } => {
             let flag = if *error { " (error)" } else { "" };
             println!("  <- {name} {ms} ms, {chars} chars{flag}");
+        }
+        VoiceLiveEvent::ApprovalRequired { review } => {
+            println!("Local review #{}: {}\n{}\n{}\nType /approve {} or /reject {}. A spoken yes does not approve.", review.id, review.verb, review.target, serde_json::to_string_pretty(&review.payload).unwrap_or_default(), review.id, review.id);
         }
         VoiceLiveEvent::Level { .. } => {}
         VoiceLiveEvent::Closed { reason } => println!("[closed] {reason}"),

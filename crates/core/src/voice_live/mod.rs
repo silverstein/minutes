@@ -17,10 +17,12 @@ pub mod mcp;
 pub mod music;
 pub mod names;
 pub mod protocol;
+pub mod selection;
 pub mod session;
 pub mod tools;
 #[cfg(target_os = "macos")]
 pub mod voice_io;
+pub mod work_runtime;
 
 use std::path::PathBuf;
 
@@ -31,7 +33,8 @@ use crate::config::Config;
 
 pub use names::NameIndex;
 pub use session::{
-    start, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveSession, VoiceLiveState,
+    start, start_with_work, start_with_work_cancellable, SessionOptions, TalkMode, VoiceLiveEvent,
+    VoiceLiveSession, VoiceLiveState,
 };
 pub use tools::ToolContext;
 
@@ -86,7 +89,10 @@ pub fn preflight(config: &Config) -> Result<(), VoiceLiveError> {
 
 /// Voice never shares or steals the capture device.
 pub fn refuse_if_recording() -> Result<(), VoiceLiveError> {
-    if crate::pid::status().recording {
+    if crate::pid::status().recording
+        || crate::pid::inspect_pid_file(&crate::pid::dictation_pid_path()).is_active()
+        || crate::pid::inspect_pid_file(&crate::pid::live_transcript_pid_path()).is_active()
+    {
         return Err(VoiceLiveError::RecordingActive);
     }
     Ok(())
@@ -130,6 +136,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     let people = names.prompt_names(config.voice_live.known_people);
     let terms = names.prompt_terms();
     let mut p = String::with_capacity(6_000);
+    p.push_str("Work continuity. Use work_status to inspect the current goal, selected context and saved interpretations. Use work_propose_note to propose a correction or next step as MODEL INFERENCE, never as a human-confirmed decision. External actions require LOCAL UI/CLI approval; hearing yes is not authorization. When a tool awaits local approval, wait for its result and do not resubmit it.\n\n");
     p.push_str(&format!("You are Minutes, a spoken assistant for Mat's private meeting memory. His name is Mat, spelled with one t. Today is {today} ({tz}).\n\n"));
     p.push_str("You are talking, not writing. Answer in one to three short sentences, then stop and let Mat respond. No lists, no markdown, no headers, no URLs or file paths read aloud. Say dates and numbers the way a person would.\n\n");
     p.push_str("Facts about meetings, people, decisions, commitments, action items, or notes must come from tool results in this conversation. Never invent history. If a tool returns nothing or errors, say so plainly and ask how to proceed.\n\n");
@@ -158,7 +165,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if config.voice_live.desktop_control {
         p.push_str("Doing things on the Mac. You can open an application, open a web page, show a file in the Finder, control playback, and add a reminder. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
         if config.voice_live.desktop_outward {
-            p.push_str("Sending things. Sending a message or an email leaves the machine and cannot be taken back, so those take two calls. Call once without a confirm token, read back the exact sentence you are handed, word for word, and wait. Only when Mat clearly agrees do you call again with that token and the identical arguments. If he changes a word, start over and read the new sentence. Never tell him something was sent before the second call has returned, and never guess at a recipient: if you are not certain who he means, ask.\n\n");
+            p.push_str("Sending things requires an exact local review. The user approves or rejects in the work panel or terminal, not by a model-readable token. Never claim something was sent before its execution receipt arrives.\n\n");
         }
     }
     if config.voice_live.music {

@@ -5,7 +5,6 @@
 //! Tool calls run on a single worker thread so corpus reads never overlap (the
 //! active-corpus budget guard rejects concurrent readers) and never block audio.
 
-use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
-use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, Receiver, Sender};
 use serde::Serialize;
 
 use crate::config::Config;
@@ -26,7 +25,10 @@ use super::protocol::{FunctionCall, LiveClient, ServerEvent, SessionSetup};
 use super::tools::ToolContext;
 #[cfg(target_os = "macos")]
 use super::voice_io::VoiceIo;
+use super::work_runtime::{Review, WorkRuntime};
 use super::{system_prompt, VoiceLiveError};
+use crate::live_sidekick::live_model::{LiveActivity, LiveModel, ModelActivity};
+use crate::live_sidekick::work::AuthorizedAction;
 
 /// How the user talks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +78,9 @@ pub enum VoiceLiveEvent {
         ms: u128,
         chars: usize,
         error: bool,
+    },
+    ApprovalRequired {
+        review: Review,
     },
     Level {
         rms: f32,
@@ -269,6 +274,9 @@ enum Control {
     PttStart,
     PttEnd,
     Text(String),
+    Approve(Review),
+    Reject(u64),
+    CancelTools,
     Stop,
 }
 
@@ -278,28 +286,52 @@ pub struct VoiceLiveSession {
     stop_flag: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     pub log_path: Option<PathBuf>,
+    pub work: Arc<WorkRuntime>,
 }
 
 impl VoiceLiveSession {
+    /// Host-only gestures; never model tools.
+    pub fn approve_local(&self, review: Review) {
+        let _ = self.control.try_send(Control::Approve(review));
+    }
+    pub fn reject_local(&self, id: u64) {
+        let _ = self.control.try_send(Control::Reject(id));
+    }
+    pub fn cancel_tools(&self) {
+        self.work.cancel_all();
+        let _ = self.control.try_send(Control::CancelTools);
+    }
+
     /// Start talking (push-to-talk mode).
     pub fn ptt_start(&self) {
-        let _ = self.control.send(Control::PttStart);
+        let _ = self.control.try_send(Control::PttStart);
     }
 
     /// Stop talking (push-to-talk mode).
     pub fn ptt_end(&self) {
-        let _ = self.control.send(Control::PttEnd);
+        let _ = self.control.try_send(Control::PttEnd);
     }
 
     /// Send a typed turn.
     pub fn send_text(&self, text: &str) {
-        let _ = self.control.send(Control::Text(text.to_string()));
+        if text.is_empty() || text.len() > 40_000 {
+            return;
+        }
+        let _ = self.control.try_send(Control::Text(text.to_string()));
+    }
+
+    /// Signal shutdown without waiting; safe for the app's capture-critical exit path.
+    pub fn request_stop(&self) {
+        self.work.cancel_all();
+        self.stop_flag.store(true, Ordering::SeqCst);
+        let _ = self.control.try_send(Control::Stop);
     }
 
     /// Stop and wait for the session thread.
     pub fn stop(mut self) {
+        self.work.cancel_all();
         self.stop_flag.store(true, Ordering::SeqCst);
-        let _ = self.control.send(Control::Stop);
+        let _ = self.control.try_send(Control::Stop);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -313,8 +345,9 @@ impl VoiceLiveSession {
 
 impl Drop for VoiceLiveSession {
     fn drop(&mut self) {
+        self.work.cancel_all();
         self.stop_flag.store(true, Ordering::SeqCst);
-        let _ = self.control.send(Control::Stop);
+        let _ = self.control.try_send(Control::Stop);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -331,6 +364,42 @@ pub fn start<F>(
 where
     F: Fn(VoiceLiveEvent) + Send + Sync + 'static,
 {
+    let work = WorkRuntime::new("Conversation with Minutes").map_err(VoiceLiveError::Connect)?;
+    start_with_work(config, options, work, on_event)
+}
+
+pub fn start_with_work<F>(
+    config: &Config,
+    options: SessionOptions,
+    work: Arc<WorkRuntime>,
+    on_event: F,
+) -> Result<VoiceLiveSession, VoiceLiveError>
+where
+    F: Fn(VoiceLiveEvent) + Send + Sync + 'static,
+{
+    start_with_work_cancellable(
+        config,
+        options,
+        work,
+        Arc::new(AtomicBool::new(false)),
+        on_event,
+    )
+}
+
+pub fn start_with_work_cancellable<F>(
+    config: &Config,
+    options: SessionOptions,
+    work: Arc<WorkRuntime>,
+    stop_flag: Arc<AtomicBool>,
+    on_event: F,
+) -> Result<VoiceLiveSession, VoiceLiveError>
+where
+    F: Fn(VoiceLiveEvent) + Send + Sync + 'static,
+{
+    if stop_flag.load(Ordering::SeqCst) {
+        return Err(VoiceLiveError::Closed);
+    }
+    super::preflight(config)?;
     let api_key = super::api_key(config)?;
     super::refuse_if_recording()?;
     let on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync> = Arc::new(on_event);
@@ -340,14 +409,22 @@ where
     });
 
     let names = Arc::new(NameIndex::load(config, config.voice_live.known_people));
-    let tools = Arc::new(ToolContext::new(config.clone(), Arc::clone(&names)));
+    let tools = Arc::new(ToolContext::new_with_work(
+        config.clone(),
+        Arc::clone(&names),
+        Arc::clone(&work),
+    ));
     for problem in &tools.mcp_problems {
         emit(VoiceLiveEvent::Status {
             text: format!("mcp server unavailable, {problem}"),
         });
     }
     let declarations = tools.declarations();
-    let prompt = system_prompt(config, &names, tools.brain_root.is_some());
+    let prompt = format!(
+        "{}\n{}",
+        system_prompt(config, &names, tools.brain_root.is_some()),
+        work.context().map_err(VoiceLiveError::Connect)?
+    );
     emit(VoiceLiveEvent::Status {
         text: format!(
             "{} known people, {} tools{}",
@@ -373,6 +450,9 @@ where
         end_sensitivity: config.voice_live.speech_end_sensitivity.clone(),
         resume_handle: None,
     };
+    if stop_flag.load(Ordering::SeqCst) {
+        return Err(VoiceLiveError::Closed);
+    }
     let connected = LiveClient::connect(&setup)?;
     let inbox = connected.inbox.clone();
     let client = Arc::new(Mutex::new(Arc::new(connected)));
@@ -385,6 +465,10 @@ where
     if let Some(reason) = preflight.blocking_reason {
         return Err(VoiceLiveError::Audio(reason));
     }
+    if stop_flag.load(Ordering::SeqCst) {
+        return Err(VoiceLiveError::Closed);
+    }
+    super::refuse_if_recording()?;
     let audio = open_audio(config, &options, device.as_deref(), &emit)?;
 
     let log = if config.voice_live.log_sessions {
@@ -399,8 +483,7 @@ where
         });
     }
 
-    let (control_tx, control_rx) = unbounded::<Control>();
-    let stop_flag = Arc::new(AtomicBool::new(false));
+    let (control_tx, control_rx) = bounded::<Control>(128);
     let scheduling = match config
         .voice_live
         .tool_scheduling
@@ -436,7 +519,14 @@ where
         stop_flag,
         thread: Some(thread),
         log_path,
+        work,
     })
+}
+
+struct QueuedCall {
+    call: FunctionCall,
+    cancel: Arc<AtomicBool>,
+    authority: Option<AuthorizedAction>,
 }
 
 struct Runner {
@@ -513,9 +603,10 @@ impl Runner {
         let mut resume_handle: Option<String> = None;
         let mut resumes = 0u32;
         // Tool worker: one at a time, results go straight back to the socket.
-        let (tool_tx, tool_rx) = bounded::<FunctionCall>(64);
-        let (audio_out, audio_in) = unbounded::<Vec<u8>>();
-        let worker = {
+        let (tool_tx, tool_rx) = bounded::<QueuedCall>(64);
+        let (agent_tx, agent_rx) = bounded::<QueuedCall>(2);
+        let (audio_out, audio_in) = bounded::<Vec<u8>>(2);
+        let make_worker = |tool_rx: Receiver<QueuedCall>| {
             let tools = Arc::clone(&self.tools);
             let client_cell = Arc::clone(&self.client);
             let on_event = Arc::clone(&self.on_event);
@@ -528,11 +619,24 @@ impl Runner {
             std::thread::Builder::new()
                 .name("voice-live-tools".into())
                 .spawn(move || {
-                    for call in tool_rx.iter() {
+                    for queued in tool_rx.iter() {
+                        let call = queued.call;
                         // Shutdown drops the sender, but whatever was already
                         // queued still arrives here. A send waiting behind a
                         // slow tool must not fire after the session is over.
-                        if stop_flag.load(Ordering::SeqCst) {
+                        if stop_flag.load(Ordering::SeqCst) || queued.cancel.load(Ordering::SeqCst)
+                        {
+                            tools.work.finish(&call.id);
+                            if !stop_flag.load(Ordering::SeqCst) {
+                                let client = Arc::clone(
+                                    &client_cell.lock().unwrap_or_else(|p| p.into_inner()),
+                                );
+                                let _ = client.send_tool_response(
+                                    &call,
+                                    "Cancelled before execution; nothing dispatched",
+                                    "WHEN_IDLE",
+                                );
+                            }
                             continue;
                         }
                         // A relayed agent can take half a minute. Without this
@@ -563,7 +667,13 @@ impl Runner {
                                 }
                             });
                         }
-                        let outcome = tools.execute(&call.name, &call.args);
+                        let outcome = tools.execute_call(&call, &queued.cancel, queued.authority);
+                        if let Some(review) = outcome.review.clone() {
+                            running.store(false, Ordering::Relaxed);
+                            on_event(VoiceLiveEvent::ApprovalRequired { review });
+                            continue;
+                        }
+                        tools.work.finish(&call.id);
                         running.store(false, Ordering::Relaxed);
                         on_event(VoiceLiveEvent::ToolResult {
                             name: call.name.clone(),
@@ -572,7 +682,7 @@ impl Runner {
                             error: outcome.is_error,
                         });
                         if let Some(tx) = &log_tx {
-                            let _ = tx.send(format!(
+                            let _ = tx.try_send(format!(
                                 "  -> {} {} chars in {} ms",
                                 if outcome.is_error { "error" } else { "ok" },
                                 outcome.text.chars().count(),
@@ -584,6 +694,9 @@ impl Runner {
                         // resumed onto a new socket while it did. Answering the
                         // old one loses the result and breaks this loop, which
                         // silently kills every later tool call in the session.
+                        if stop_flag.load(Ordering::SeqCst) {
+                            continue;
+                        }
                         let client =
                             Arc::clone(&client_cell.lock().unwrap_or_else(|p| p.into_inner()));
                         // A frame answers as a turn, not as a tool result.
@@ -591,7 +704,7 @@ impl Runner {
                         // its own, then send the frame as the turn the model
                         // actually answers.
                         if let Some(pcm) = &outcome.audio {
-                            audio_out.send(pcm.clone()).ok();
+                            audio_out.try_send(pcm.clone()).ok();
                         }
                         let media = outcome.image.is_some();
                         let this_scheduling = if media { "SILENT" } else { &scheduling };
@@ -630,6 +743,16 @@ impl Runner {
                 .ok()
         };
 
+        let worker = make_worker(tool_rx);
+        let agent_worker = make_worker(agent_rx);
+        if worker.is_none() || agent_worker.is_none() {
+            self.emit(VoiceLiveEvent::Closed {
+                reason: "Unable to start tool supervisors".into(),
+            });
+            self.stop_flag.store(true, Ordering::SeqCst);
+        }
+        let mut activity =
+            LiveActivity::new(LiveModel::from_id(&self.setup.model).unwrap_or(LiveModel::Standard));
         let mut state = VoiceLiveState::Connecting;
         let mut ptt = PttState {
             held: false,
@@ -651,19 +774,47 @@ impl Runner {
             if self.stop_flag.load(Ordering::SeqCst) {
                 break;
             }
-            // Speaking -> Ready once playback drains.
+            if super::refuse_if_recording().is_err() {
+                self.emit(VoiceLiveEvent::Closed {
+                    reason: "Another capture started; voice stopped without changing it".into(),
+                });
+                break;
+            }
+            activity.audio_playing = !self.audio.is_idle();
+            activity.outstanding_tasks = self.tools.work.pending_count();
+            for call in self.tools.work.expire_reviews() {
+                let _ = self.client().send_tool_response(
+                    &call,
+                    "Local approval expired; nothing executed.",
+                    "WHEN_IDLE",
+                );
+            }
+            // Playback draining is not proof that asynchronous reasoning ended.
             if state == VoiceLiveState::Speaking {
                 let idle = self.audio.is_idle();
                 if idle && last_audio.elapsed() > Duration::from_millis(300) {
-                    set_state(&self, &mut state, VoiceLiveState::Ready);
+                    set_state(
+                        &self,
+                        &mut state,
+                        if activity.ready() {
+                            VoiceLiveState::Ready
+                        } else {
+                            VoiceLiveState::Thinking
+                        },
+                    );
                 }
+            }
+            if state == VoiceLiveState::Thinking && activity.ready() {
+                set_state(&self, &mut state, VoiceLiveState::Ready);
             }
             select! {
                 recv(inbox) -> msg => {
                     let Ok(ev) = msg else { self.emit(VoiceLiveEvent::Closed { reason: "io thread ended".into() }); break; };
                     match ev {
-                        ServerEvent::SetupComplete => set_state(&self, &mut state, VoiceLiveState::Ready),
+                        ServerEvent::SetupComplete => { activity.model_activity = ModelActivity::Idle; set_state(&self, &mut state, VoiceLiveState::Ready); },
+                        ServerEvent::InteractionStatus(value) => activity.observe(&value),
                         ServerEvent::Audio(bytes) => {
+                            activity.model_activity = ModelActivity::InProgress;
                             self.audio.push_pcm16(&bytes);
                             last_audio = Instant::now();
                             set_state(&self, &mut state, VoiceLiveState::Speaking);
@@ -684,45 +835,59 @@ impl Runner {
                             if self.audio.cancels_echo() || self.audio.is_idle() {
                                 self.tools.desktop.heard_user(&t);
                             }
+                            if you.len().saturating_add(t.len()) > 64 * 1024 { self.emit(VoiceLiveEvent::Closed { reason: "Transcript turn exceeded budget".into() }); break; }
                             you.push_str(&t);
                             self.emit(VoiceLiveEvent::UserTranscript { text: t, partial: true });
                         }
                         ServerEvent::OutputTranscript(t) | ServerEvent::Text(t) => {
+                            if me.len().saturating_add(t.len()) > 64 * 1024 { self.emit(VoiceLiveEvent::Closed { reason: "Transcript turn exceeded budget".into() }); break; }
                             me.push_str(&t);
                             self.emit(VoiceLiveEvent::AssistantTranscript { text: t, partial: true });
                         }
                         ServerEvent::Interrupted => {
+                            activity.user_turn_started();
                             self.audio.flush();
                             self.flush_transcripts(&mut you, &mut me);
-                            set_state(&self, &mut state, VoiceLiveState::Ready);
+                            set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         ServerEvent::TurnComplete => {
                             // The end of the assistant's turn is the earliest
                             // point an answer to its question can exist.
                             self.tools.desktop.finished_speaking();
                             self.flush_transcripts(&mut you, &mut me);
-                            if self.audio.is_idle() {
-                                set_state(&self, &mut state, VoiceLiveState::Ready);
-                            }
+                            activity.observe(&serde_json::json!({"serverContent":{"turnComplete":true}}));
+                            activity.audio_playing = !self.audio.is_idle();
+                            activity.outstanding_tasks = self.tools.work.pending_count();
+                            if activity.ready() { set_state(&self, &mut state, VoiceLiveState::Ready); }
                         }
                         ServerEvent::ToolCall(calls) => {
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                             for call in calls {
                                 self.emit(VoiceLiveEvent::ToolCall { name: call.name.clone(), args: call.args.clone() });
                                 self.log_line(format!("`{}({})`", call.name, call.args));
-                                if tool_tx.try_send(call).is_err() {
-                                    self.emit(VoiceLiveEvent::Status { text: "tool queue full; call dropped".into() });
+                                activity.user_turn_started();
+                                match self.tools.work.register(&call.id) {
+                                    Ok(cancel) => {
+                                        let queued = QueuedCall { call: call.clone(), cancel, authority: None };
+                                        if tool_tx.try_send(queued).is_err() {
+                                            self.tools.work.finish(&call.id);
+                                            let _ = self.client().send_tool_response(&call, "Tool queue full; nothing executed", "WHEN_IDLE");
+                                        }
+                                    }
+                                    Err(error) => { let _ = self.client().send_tool_response(&call, &error, "WHEN_IDLE"); }
                                 }
                             }
                         }
                         ServerEvent::ToolCallCancellation(ids) => {
-                            self.emit(VoiceLiveEvent::Status { text: format!("tool calls cancelled: {}", ids.join(",")) });
+                            self.tools.work.cancel(&ids);
+                            self.emit(VoiceLiveEvent::Status { text: format!("cancellation requested: {}. An action already in progress may still complete.", ids.join(",")) });
                         }
                         ServerEvent::GoAway(t) => self.emit(VoiceLiveEvent::Status { text: format!("server ending session in {t}") }),
                         ServerEvent::ResumptionHandle(h) => resume_handle = Some(h),
                         ServerEvent::Error(e) => self.emit(VoiceLiveEvent::Status { text: format!("provider: {e}") }),
                         ServerEvent::Other(keys) => self.emit(VoiceLiveEvent::Status { text: format!("unhandled server message: {}", keys.join(",")) }),
                         ServerEvent::Closed(reason) => {
+                            activity.disconnected();
                             self.flush_transcripts(&mut you, &mut me);
                             // A Live session is capped at around fifteen
                             // minutes. The provider hands out a handle before
@@ -811,6 +976,7 @@ impl Runner {
                 recv(self.control_rx) -> ctl => {
                     match ctl {
                         Ok(Control::PttStart) if self.mode == TalkMode::PushToTalk => {
+                            activity.user_turn_started();
                             ptt = PttState { held: true, started: false, chunks: 0, held_back: Vec::new() };
                             self.audio.flush();
                             set_state(&self, &mut state, VoiceLiveState::Listening);
@@ -832,13 +998,35 @@ impl Runner {
                                 set_state(&self, &mut state, VoiceLiveState::Ready);
                             }
                         }
+                        Ok(Control::Approve(review)) => {
+                            match self.tools.work.approve_from_host(&review) {
+                                Ok((call, authority)) => {
+                                    if let Some(cancel) = self.tools.work.cancel_flag(&call.id) {
+                                        if (if call.name == "ask_agent" { &agent_tx } else { &tool_tx }).try_send(QueuedCall { call: call.clone(), cancel, authority: Some(authority) }).is_err() {
+                                            self.tools.work.finish(&call.id);
+                                            let _ = self.client().send_tool_response(&call, "Queue full; approved action not executed", "WHEN_IDLE");
+                                        }
+                                    }
+                                }
+                                Err(error) => self.emit(VoiceLiveEvent::Status { text: error }),
+                            }
+                        }
+                        Ok(Control::Reject(id)) => {
+                            if let Ok(call) = self.tools.work.reject_from_host(id) {
+                                self.tools.work.finish(&call.id);
+                                let _ = self.client().send_tool_response(&call, "User rejected this action. Nothing executed. Do not ask again unless requested.", "WHEN_IDLE");
+                            }
+                        }
+                        Ok(Control::CancelTools) => { self.tools.work.cancel_all(); self.audio.flush(); }
                         Ok(Control::Text(text)) => {
+                            activity.user_turn_started();
                             // A typed line is the user as surely as a spoken
                             // one, and rather less ambiguously: nothing the
                             // assistant does can produce a keystroke. The
                             // confirmation gate counts it.
                             self.tools.desktop.heard_user(&text);
                             self.log_line(format!("**You (typed):** {text}"));
+                            self.tools.work.observe_transcript("User (typed)", &text);
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
                             if self.client().send_text_turn(&text).is_err() { break; }
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
@@ -854,11 +1042,16 @@ impl Runner {
         // However the loop ended, the session is over. Anything still queued
         // must not act afterwards, and only this flag tells the worker.
         self.stop_flag.store(true, Ordering::SeqCst);
+        self.tools.work.cancel_all();
         self.flush_transcripts(&mut you, &mut me);
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
         self.tools.mcp.shutdown();
         drop(tool_tx);
+        drop(agent_tx);
+        if let Some(w) = agent_worker {
+            let _ = w.join();
+        }
         if let Some(w) = worker {
             let _ = w.join();
         }
@@ -873,6 +1066,9 @@ impl Runner {
 
     fn flush_transcripts(&self, you: &mut String, me: &mut String) {
         if !you.trim().is_empty() {
+            self.tools
+                .work
+                .observe_transcript("User (speech recognition, unverified)", you.trim());
             self.emit(VoiceLiveEvent::UserTranscript {
                 text: you.trim().to_string(),
                 partial: false,
@@ -880,6 +1076,7 @@ impl Runner {
             self.log_line(format!("**You:** {}", you.trim()));
         }
         if !me.trim().is_empty() {
+            self.tools.work.observe_transcript("Assistant", me.trim());
             self.emit(VoiceLiveEvent::AssistantTranscript {
                 text: me.trim().to_string(),
                 partial: false,
@@ -907,27 +1104,19 @@ struct SessionLog {
 impl SessionLog {
     fn open(model: &str, mode: TalkMode) -> std::io::Result<Self> {
         let dir = super::sessions_dir();
-        std::fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-        }
-        let path = dir.join(format!("{}.md", Local::now().format("%Y-%m-%d-%H-%M-%S")));
-        let mut opts = OpenOptions::new();
-        opts.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let mut file = opts.open(&path)?;
+        let root = crate::policy_fs::BoundRecoveryDirectory::prepare_owner_private(&dir)?;
+        let mut token = [0u8; 16];
+        getrandom::fill(&mut token).map_err(std::io::Error::other)?;
+        let suffix: String = token.iter().map(|b| format!("{b:02x}")).collect();
+        let name = format!("{}-{suffix}.md", Local::now().format("%Y-%m-%d-%H-%M-%S"));
+        let path = dir.join(&name);
+        let mut file = root.create_new_exact_file(std::ffi::OsStr::new(&name))?;
         writeln!(
             file,
             "# Voice session {} ({model}, {mode:?})\n",
             Local::now().to_rfc3339()
         )?;
-        let (tx, rx) = unbounded::<String>();
+        let (tx, rx) = bounded::<String>(256);
         let writer = std::thread::Builder::new()
             .name("voice-live-log".into())
             .spawn(move || {
@@ -947,7 +1136,7 @@ impl SessionLog {
     }
 
     fn write(&self, line: &str) {
-        let _ = self.tx.send(line.to_string());
+        let _ = self.tx.try_send(line.to_string());
     }
 }
 

@@ -12,12 +12,17 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use crossbeam_channel::{unbounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
 use super::VoiceLiveError;
+use crate::live_sidekick::live_model::{Delivery, LiveModel};
 
 /// Base endpoint for the bidirectional Live API.
 pub const LIVE_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -40,6 +45,7 @@ pub struct FunctionCall {
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
     SetupComplete,
+    InteractionStatus(Value),
     /// Raw little-endian PCM16 at [`OUTPUT_SAMPLE_RATE`].
     Audio(Vec<u8>),
     InputTranscript(String),
@@ -79,7 +85,7 @@ pub struct SessionSetup {
 impl SessionSetup {
     fn to_json(&self) -> Value {
         let mut setup = json!({
-            "model": format!("models/{}", self.model),
+            "model": format!("models/{}", self.model.strip_prefix("models/").unwrap_or(&self.model)),
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": { "languageCode": self.language },
@@ -90,7 +96,16 @@ impl SessionSetup {
             "contextWindowCompression": { "slidingWindow": {} },
         });
         if !self.function_declarations.is_empty() {
-            setup["tools"] = json!([{ "functionDeclarations": self.function_declarations }]);
+            let declarations: Vec<Value> = self
+                .function_declarations
+                .iter()
+                .cloned()
+                .map(|mut d| {
+                    d["behavior"] = json!("NON_BLOCKING");
+                    d
+                })
+                .collect();
+            setup["tools"] = json!([{ "functionDeclarations": declarations }]);
         }
         if self.manual_activity {
             setup["realtimeInputConfig"] =
@@ -110,7 +125,9 @@ impl SessionSetup {
         }
         // Only meaningful with the provider's own detection running: in
         // push-to-talk the user has already said every turn is for it.
-        if self.proactive_audio && !self.manual_activity {
+        if (self.proactive_audio && !self.manual_activity)
+            || LiveModel::from_id(&self.model) == Some(LiveModel::ExtendedThinking)
+        {
             setup["proactivity"] = json!({ "proactiveAudio": true });
         }
         setup["sessionResumption"] = match &self.resume_handle {
@@ -125,13 +142,20 @@ impl SessionSetup {
 /// exits when the socket closes or [`LiveClient::close`] is called.
 pub struct LiveClient {
     outbox: Sender<Message>,
+    model: LiveModel,
     pub inbox: Receiver<ServerEvent>,
     io_thread: Option<JoinHandle<()>>,
+    closing: Arc<AtomicBool>,
 }
 
 impl LiveClient {
     /// Open the socket, send the setup message, and start the IO thread.
     pub fn connect(setup: &SessionSetup) -> Result<Self, VoiceLiveError> {
+        let model = LiveModel::from_id(&setup.model).ok_or_else(|| {
+            VoiceLiveError::Connect(
+                "Unsupported Live model; choose an explicit supported profile".into(),
+            )
+        })?;
         let url = format!("{LIVE_WS_BASE}?key={}", setup.api_key);
         let (mut socket, _response) = tungstenite::connect(url.as_str())
             .map_err(|e| VoiceLiveError::Connect(redact_key(&e.to_string(), &setup.api_key)))?;
@@ -140,16 +164,20 @@ impl LiveClient {
             .send(Message::Text(setup.to_json().to_string().into()))
             .map_err(|e| VoiceLiveError::Connect(format!("setup send failed: {e}")))?;
 
-        let (outbox, out_rx) = unbounded::<Message>();
-        let (in_tx, inbox) = unbounded::<ServerEvent>();
+        let (outbox, out_rx) = bounded::<Message>(256);
+        let (in_tx, inbox) = bounded::<ServerEvent>(256);
+        let closing = Arc::new(AtomicBool::new(false));
+        let io_closing = Arc::clone(&closing);
         let io_thread = std::thread::Builder::new()
             .name("voice-live-io".into())
-            .spawn(move || io_loop(socket, out_rx, in_tx))
+            .spawn(move || io_loop(socket, out_rx, in_tx, io_closing))
             .map_err(|e| VoiceLiveError::Connect(format!("io thread: {e}")))?;
         Ok(Self {
             outbox,
+            model,
             inbox,
             io_thread: Some(io_thread),
+            closing,
         })
     }
 
@@ -214,16 +242,23 @@ impl LiveClient {
         result: &str,
         scheduling: &str,
     ) -> Result<(), VoiceLiveError> {
-        self.send_json(json!({ "toolResponse": { "functionResponses": [{
-            "id": call.id,
-            "name": call.name,
-            "response": { "result": result, "scheduling": scheduling },
-        }]}}))
+        let delivery = match scheduling {
+            "INTERRUPT" => Delivery::NeedsAttention,
+            "SILENT" => Delivery::Silent,
+            _ => Delivery::Routine,
+        };
+        self.send_json(self.model.tool_response(
+            &call.id,
+            &call.name,
+            json!({"result": result}),
+            delivery,
+        ))
     }
 
     /// Ask the IO thread to close the socket and wait for it.
     pub fn close(mut self) {
-        let _ = self.outbox.send(Message::Close(None));
+        self.closing.store(true, Ordering::SeqCst);
+        let _ = self.outbox.try_send(Message::Close(None));
         if let Some(t) = self.io_thread.take() {
             let _ = t.join();
         }
@@ -232,7 +267,8 @@ impl LiveClient {
 
 impl Drop for LiveClient {
     fn drop(&mut self) {
-        let _ = self.outbox.send(Message::Close(None));
+        self.closing.store(true, Ordering::SeqCst);
+        let _ = self.outbox.try_send(Message::Close(None));
         if let Some(t) = self.io_thread.take() {
             let _ = t.join();
         }
@@ -271,9 +307,18 @@ fn set_read_timeout(socket: &mut Socket, timeout: Duration) {
     }
 }
 
-fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEvent>) {
+fn io_loop(
+    mut socket: Socket,
+    out_rx: Receiver<Message>,
+    in_tx: Sender<ServerEvent>,
+    stop: Arc<AtomicBool>,
+) {
     let mut closing = false;
     loop {
+        if stop.load(Ordering::SeqCst) {
+            let _ = socket.close(None);
+            return;
+        }
         // Drain outbound first so a tool response or audio chunk never waits on a read timeout.
         loop {
             match out_rx.try_recv() {
@@ -284,8 +329,8 @@ fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEv
                 }
                 Ok(msg) => {
                     if let Err(e) = socket.send(msg) {
-                        let _ = in_tx.send(ServerEvent::Error(format!("send failed: {e}")));
-                        let _ = in_tx.send(ServerEvent::Closed("send failure".into()));
+                        let _ = in_tx.try_send(ServerEvent::Error(format!("send failed: {e}")));
+                        let _ = in_tx.try_send(ServerEvent::Closed("send failure".into()));
                         return;
                     }
                 }
@@ -293,18 +338,27 @@ fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEv
             }
         }
         match socket.read() {
-            Ok(Message::Text(text)) => decode(&text, &in_tx),
+            Ok(Message::Text(text)) => {
+                if !forward(&text, &in_tx) {
+                    return;
+                }
+            }
             Ok(Message::Binary(bytes)) => match std::str::from_utf8(&bytes) {
-                Ok(text) => decode(text, &in_tx),
+                Ok(text) => {
+                    if !forward(text, &in_tx) {
+                        return;
+                    }
+                }
                 Err(_) => {
-                    let _ = in_tx.send(ServerEvent::Other(vec!["<non-utf8 binary frame>".into()]));
+                    let _ =
+                        in_tx.try_send(ServerEvent::Other(vec!["<non-utf8 binary frame>".into()]));
                 }
             },
             Ok(Message::Close(frame)) => {
                 let reason = frame
                     .map(|f| format!("{} {}", f.code, f.reason))
                     .unwrap_or_default();
-                let _ = in_tx.send(ServerEvent::Closed(reason));
+                let _ = in_tx.try_send(ServerEvent::Closed(reason));
                 return;
             }
             Ok(_) => {}
@@ -312,17 +366,17 @@ fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEv
                 if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
             {
                 if closing {
-                    let _ = in_tx.send(ServerEvent::Closed("closed by client".into()));
+                    let _ = in_tx.try_send(ServerEvent::Closed("closed by client".into()));
                     return;
                 }
             }
             Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => {
-                let _ = in_tx.send(ServerEvent::Closed("connection closed".into()));
+                let _ = in_tx.try_send(ServerEvent::Closed("connection closed".into()));
                 return;
             }
             Err(e) => {
-                let _ = in_tx.send(ServerEvent::Error(e.to_string()));
-                let _ = in_tx.send(ServerEvent::Closed("read failure".into()));
+                let _ = in_tx.try_send(ServerEvent::Error(e.to_string()));
+                let _ = in_tx.try_send(ServerEvent::Closed("read failure".into()));
                 return;
             }
         }
@@ -331,13 +385,22 @@ fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEv
 
 /// Decode one server JSON message into zero or more events.
 pub fn decode(text: &str, out: &Sender<ServerEvent>) {
+    let _ = forward(text, out);
+}
+fn forward(text: &str, out: &Sender<ServerEvent>) -> bool {
     for ev in decode_events(text) {
-        let _ = out.send(ev);
+        if out.try_send(ev).is_err() {
+            return false;
+        }
     }
+    true
 }
 
 /// Pure decoder, separated so it can be unit-tested without a socket.
 pub fn decode_events(text: &str) -> Vec<ServerEvent> {
+    if text.len() > 4 * 1024 * 1024 {
+        return vec![ServerEvent::Closed("Provider frame exceeded budget".into())];
+    }
     let mut events = Vec::new();
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -429,6 +492,13 @@ pub fn decode_events(text: &str) -> Vec<ServerEvent> {
     }
     if let Some(err) = v.get("error") {
         events.push(ServerEvent::Error(err.to_string()));
+    }
+    if v.get("interactionStatus").is_some()
+        || v.get("interaction_status").is_some()
+        || v.pointer("/serverContent/interactionStatus").is_some()
+        || v.pointer("/serverContent/interaction_status").is_some()
+    {
+        events.push(ServerEvent::InteractionStatus(v.clone()));
     }
     // Only genuinely new top-level keys are worth surfacing. Known envelopes that
     // carried nothing actionable this time (a `serverContent` with only

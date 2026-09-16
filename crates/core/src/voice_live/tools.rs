@@ -922,13 +922,12 @@ fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
             .unwrap_or(false);
         if let Some(pos) = lower.find(&needle) {
             // The offset came from the lowercased text, and lowercasing can
-            // change byte lengths, so it may land inside a character of the
-            // original. Snippet from whichever string the offset is valid in.
-            let source = if text.is_char_boundary(pos) {
-                &text
-            } else {
-                &lower
-            };
+            // change byte lengths, so neither end is guaranteed to sit on a
+            // character boundary in the original. A valid start is not enough:
+            // the end can still land inside a character and panic.
+            let fits = text.is_char_boundary(pos)
+                && text.is_char_boundary((pos + needle.len()).min(text.len()));
+            let source = if fits { &text } else { &lower };
             hits.push((
                 f,
                 meta.modified().unwrap_or(std::time::UNIX_EPOCH),

@@ -101,11 +101,23 @@ impl McpPool {
     }
 
     /// Declarations for every tool across every server.
+    ///
+    /// Names are deduplicated across servers as well as within one: a server
+    /// called `a` with a tool `b__c` and a server called `a__b` with a tool `c`
+    /// both reduce to `a__b__c`, and dispatch takes the first.
     pub fn declarations(&self) -> Vec<Value> {
-        self.servers
-            .iter()
-            .flat_map(|s| s.tools.iter().map(|t| t.declaration.clone()))
-            .collect()
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for server in &self.servers {
+            for tool in &server.tools {
+                if seen.iter().any(|n| n == &tool.qualified) {
+                    continue;
+                }
+                seen.push(tool.qualified.clone());
+                out.push(tool.declaration.clone());
+            }
+        }
+        out
     }
 
     /// Route a `server__tool` call. `None` when no server owns that name.
@@ -517,7 +529,10 @@ fn sanitize_inner(schema: &Value, keys_are_names: bool) -> Value {
                 let child_keys_are_names = !keys_are_names && key == "properties";
                 clean.insert(key.clone(), sanitize_inner(value, child_keys_are_names));
             }
-            if !clean.contains_key("type") && clean.contains_key("properties") {
+            // Only in keyword position. An argument that happens to be called
+            // "properties" is a name, and giving it a type here produces a
+            // declaration that can fail the whole session setup.
+            if !keys_are_names && !clean.contains_key("type") && clean.contains_key("properties") {
                 clean.insert("type".into(), json!("object"));
             }
             Value::Object(clean)
@@ -529,6 +544,37 @@ fn sanitize_inner(schema: &Value, keys_are_names: bool) -> Value {
                 .collect(),
         ),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+impl McpServer {
+    /// A server with no child behind it, for testing name handling only.
+    fn for_test(name: &str, tools: Vec<McpTool>) -> Self {
+        let (_tx, rx) = bounded::<Value>(1);
+        Self {
+            name: name.to_string(),
+            pid: 0,
+            reaped: AtomicBool::new(true),
+            conn: Mutex::new(Conn {
+                child: crate::engine_process::command("true")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .expect("true should spawn"),
+                stdin: {
+                    let mut helper = crate::engine_process::command("true")
+                        .stdin(Stdio::piped())
+                        .spawn()
+                        .expect("true should spawn");
+                    helper.stdin.take().expect("piped stdin")
+                },
+                rx,
+                stash: VecDeque::new(),
+                next_id: 1,
+            }),
+            tools,
+        }
     }
 }
 
@@ -598,6 +644,22 @@ mod tests {
             "properties": {"q": {"type": "string", "minLength": 2}}
         }));
         assert!(nested["properties"]["q"].get("minLength").is_none());
+    }
+
+    #[test]
+    fn a_name_cannot_be_claimed_by_two_servers() {
+        let raw = vec![json!({"name": "c", "inputSchema": {"type": "object", "properties": {}}})];
+        // Server "a" with tool "b__c" and server "a__b" with tool "c" collide.
+        let first = select_tools("a", &[json!({"name": "b__c", "inputSchema": {}})], &[], 0);
+        let second = select_tools("a__b", &raw, &[], 0);
+        assert_eq!(first[0].qualified, second[0].qualified);
+        let pool = McpPool {
+            servers: vec![
+                McpServer::for_test("a", first),
+                McpServer::for_test("a__b", second),
+            ],
+        };
+        assert_eq!(pool.declarations().len(), 1);
     }
 
     #[test]

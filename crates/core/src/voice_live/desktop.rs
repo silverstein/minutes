@@ -234,11 +234,15 @@ struct Pending {
     /// token that was read out loud.
     canonical: String,
     created: Instant,
-    /// How many times the user had finished speaking when this was minted.
-    /// Redeeming requires that number to have moved, which is what makes a
-    /// confirmation evidence of a person rather than of the model's own
-    /// enthusiasm.
-    turns_at_mint: u64,
+    /// When this was asked for. Redeeming requires the user's voice to have
+    /// been heard after this instant, which is what makes a confirmation
+    /// evidence of a person rather than of the model's own enthusiasm.
+    ///
+    /// Deliberately the arrival of transcribed microphone audio rather than a
+    /// count of finished turns. The user's own original request is still being
+    /// flushed around the time the token is minted, and counting flushes let
+    /// that same request satisfy the confirmation it had just triggered.
+    asked_at: Instant,
 }
 
 /// The outcome of the confirmation gate.
@@ -255,14 +259,35 @@ pub(crate) enum Gate {
 pub struct DesktopControl {
     pending: Mutex<Vec<Pending>>,
     counter: Mutex<u64>,
-    /// Bumped by the host every time the user finishes saying something.
-    user_turns: Arc<AtomicU64>,
+    /// Nanoseconds since this process started, at the last moment the user's
+    /// transcribed voice arrived. Written by the host.
+    heard_user_at: Arc<AtomicU64>,
+    /// The instant those nanoseconds are measured from.
+    epoch: Mutex<Option<Instant>>,
 }
 
 impl DesktopControl {
-    /// The counter the host increments when the user finishes speaking.
-    pub fn user_turns(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.user_turns)
+    /// Record that the user's voice was just heard.
+    pub fn heard_user(&self) {
+        let elapsed = {
+            let mut epoch = self.epoch.lock().unwrap_or_else(|p| p.into_inner());
+            epoch.get_or_insert_with(Instant::now).elapsed()
+        };
+        self.heard_user_at
+            .store(elapsed.as_nanos() as u64, Ordering::SeqCst);
+    }
+
+    /// How long ago, in this control's own clock, the user was last heard.
+    fn last_heard(&self) -> Option<Instant> {
+        let epoch = {
+            let epoch = self.epoch.lock().unwrap_or_else(|p| p.into_inner());
+            (*epoch)?
+        };
+        let nanos = self.heard_user_at.load(Ordering::SeqCst);
+        if nanos == 0 {
+            return None;
+        }
+        Some(epoch + Duration::from_nanos(nanos))
     }
 }
 
@@ -358,7 +383,7 @@ impl DesktopControl {
                 verb: verb.name,
                 canonical: canonical.to_string(),
                 created: now,
-                turns_at_mint: self.user_turns.load(Ordering::SeqCst),
+                asked_at: now,
             });
         }
         json!({
@@ -391,11 +416,14 @@ impl DesktopControl {
                     .into(),
             );
         }
-        // The user must have spoken since this was asked for. Without this the
-        // model can call twice in a row and authorise itself, which is not a
-        // confirmation at all, only a second call. This proves a person spoke;
-        // whether they agreed is what the sentence was read out for.
-        if self.user_turns.load(Ordering::SeqCst) <= found.turns_at_mint {
+        // The user must have been heard since this was asked for. Without it
+        // the model can call twice in a row and authorise itself, which is not
+        // a confirmation at all, only a second call. This proves a person
+        // spoke; whether they agreed is what reading the sentence out is for.
+        if self
+            .last_heard()
+            .is_none_or(|heard| heard <= found.asked_at)
+        {
             return Err(
                 "Mat has not said anything since you asked, so that confirmation is void. \
                  Read him the sentence again and wait for his answer."
@@ -620,7 +648,9 @@ mod tests {
 
     /// Stand in for the user answering out loud.
     fn user_speaks(control: &DesktopControl) {
-        control.user_turns.fetch_add(1, Ordering::SeqCst);
+        // The gate compares instants, so the answer has to land after the ask.
+        std::thread::sleep(Duration::from_millis(2));
+        control.heard_user();
     }
 
     /// Ask the gate, expecting it to want confirmation, and return the payload.

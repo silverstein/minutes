@@ -586,7 +586,14 @@ impl Runner {
                             .send_tool_response(&call, &outcome.text, this_scheduling)
                             .is_err()
                         {
-                            break;
+                            // The socket went while this ran. Losing one result
+                            // is bad; ending the worker loses every tool call
+                            // for the rest of the session, including after a
+                            // successful resume.
+                            on_event(VoiceLiveEvent::Status {
+                                text: format!("{} finished after the socket closed", call.name),
+                            });
+                            continue;
                         }
                         if let Some(image) = &outcome.image {
                             if settle > Duration::ZERO {
@@ -643,6 +650,11 @@ impl Runner {
                             set_state(&self, &mut state, VoiceLiveState::Speaking);
                         }
                         ServerEvent::InputTranscript(t) => {
+                            // The user's voice, as it arrives. The confirmation
+                            // gate needs to know a person spoke and when, and a
+                            // flush at a turn boundary is too late and can
+                            // replay the very request that asked the question.
+                            self.tools.desktop.heard_user();
                             you.push_str(&t);
                             self.emit(VoiceLiveEvent::UserTranscript { text: t, partial: true });
                         }
@@ -751,7 +763,17 @@ impl Runner {
                 // because the playback handle lives here.
                 recv(audio_in) -> pcm => {
                     if let Ok(pcm) = pcm {
-                        self.audio.push_pcm16(&pcm);
+                        // Checked again here, not only where it was generated:
+                        // a piece can wait in this queue while a recording
+                        // starts, and music in the transcript is the one thing
+                        // this must never do.
+                        if crate::pid::status().recording {
+                            self.emit(VoiceLiveEvent::Status {
+                                text: "a recording started, so the music is saved but not played".into(),
+                            });
+                        } else {
+                            self.audio.push_pcm16(&pcm);
+                        }
                     }
                 }
                 recv(self.control_rx) -> ctl => {
@@ -792,6 +814,9 @@ impl Runner {
             }
         }
 
+        // However the loop ended, the session is over. Anything still queued
+        // must not act afterwards, and only this flag tells the worker.
+        self.stop_flag.store(true, Ordering::SeqCst);
         self.flush_transcripts(&mut you, &mut me);
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
@@ -811,12 +836,6 @@ impl Runner {
 
     fn flush_transcripts(&self, you: &mut String, me: &mut String) {
         if !you.trim().is_empty() {
-            // A finished utterance is the evidence the confirmation gate needs
-            // that a person, and not the model, is agreeing to something.
-            self.tools
-                .desktop
-                .user_turns()
-                .fetch_add(1, Ordering::SeqCst);
             self.emit(VoiceLiveEvent::UserTranscript {
                 text: you.trim().to_string(),
                 partial: false,

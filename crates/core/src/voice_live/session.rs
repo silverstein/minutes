@@ -139,20 +139,6 @@ enum AudioIo {
 }
 
 impl AudioIo {
-    /// Whether the speaker signal is actually being cancelled out of the
-    /// microphone, as opposed to merely having been asked for. `open_audio`
-    /// falls back to plain capture when the voice-processing unit will not
-    /// open, so config intent and reality can differ.
-    fn cancels_echo(&self) -> bool {
-        match self {
-            Self::Split { .. } => false,
-            #[cfg(target_os = "macos")]
-            Self::Processed(_) => true,
-        }
-    }
-}
-
-impl AudioIo {
     fn receiver(&self) -> &Receiver<AudioChunk> {
         match self {
             AudioIo::Split { mic, .. } => &mic.receiver,

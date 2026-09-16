@@ -1929,6 +1929,10 @@ fn main() -> Result<()> {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    #[cfg(feature = "voice-live")]
+    if let Some(result) = local_work_fast_path() {
+        return result;
+    }
     let mut cli = Cli::parse();
     let verbose = cli.verbose;
     // This must remain the first action after parsing. In particular, do not
@@ -2624,6 +2628,22 @@ fn main() -> Result<()> {
 
     minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
     result
+}
+
+#[cfg(feature = "voice-live")]
+fn local_work_fast_path() -> Option<Result<()>> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let is_local_work = args.iter().any(|arg| arg == "talk")
+        && args.iter().any(|arg| arg == "--local-work");
+    if !is_local_work {
+        return None;
+    }
+    if std::env::var_os("MINUTES_MCP_OUTER_PROCESS_GROUP").is_some() {
+        return Some(anyhow::bail!(
+            "local work mode cannot run inside authorized process containment"
+        ));
+    }
+    Some(cmd_local_work(args.iter().any(|arg| arg == "--json")))
 }
 
 /// Offline counterpart using the exact same checkpoint store as Voice Live.

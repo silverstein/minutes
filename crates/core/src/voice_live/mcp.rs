@@ -16,6 +16,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,9 @@ pub struct McpServer {
     /// server that stops reading its stdin blocks the writer while it holds the
     /// lock, and shutdown that also wanted the lock would wait forever.
     pid: u32,
+    /// Set once the child has been waited on. After that the pid may belong to
+    /// an unrelated process, so it must never be signalled again.
+    reaped: AtomicBool,
     pub tools: Vec<McpTool>,
 }
 
@@ -185,6 +189,7 @@ impl McpServer {
         let server = Self {
             name: spec.name.clone(),
             pid,
+            reaped: AtomicBool::new(false),
             conn: Mutex::new(Conn {
                 child,
                 stdin,
@@ -297,17 +302,26 @@ impl McpServer {
     }
 
     fn shutdown(&self) {
-        // Kill by pid first, without the lock. A server blocking our writer is
-        // exactly the case where the lock is unavailable and shutdown matters.
+        if self.reaped.load(Ordering::SeqCst) {
+            return;
+        }
+        // Prefer the clean path. `Child` owns the handle, so this cannot signal
+        // a pid that has since been reused.
+        if let Ok(mut conn) = self.conn.try_lock() {
+            let _ = conn.child.kill();
+            let _ = conn.child.wait();
+            self.reaped.store(true, Ordering::SeqCst);
+            return;
+        }
+        // The lock is held, which means a write is blocked on a server that
+        // stopped reading, which in turn means nothing has waited on the child.
+        // So the pid is still this child's and signalling it is safe. Exactly
+        // the case the clean path cannot reach.
         #[cfg(unix)]
         if self.pid > 0 {
             unsafe {
                 libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
             }
-        }
-        if let Ok(mut conn) = self.conn.try_lock() {
-            let _ = conn.child.kill();
-            let _ = conn.child.wait();
         }
     }
 }

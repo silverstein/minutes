@@ -242,6 +242,9 @@ fn open_audio(
     Ok(AudioIo::Split { mic, playback })
 }
 
+/// Sent with a screen frame, as the user turn the model answers.
+const SCREEN_CAPTION: &str = "This is my screen at this exact moment, captured for the look_at_screen you just ran. Answer my question from this image and nothing else. If I dispute what you report, look at the image again and tell me what is actually there, even if that means disagreeing with me.";
+
 enum Control {
     PttStart,
     PttEnd,
@@ -462,22 +465,28 @@ impl Runner {
                                 outcome.elapsed.as_millis()
                             ));
                         }
-                        // Media first: the frame must be in context before the
-                        // text that tells the model to describe it, and the
-                        // model unblocks on that text rather than on the frame.
-                        if let Some(image) = &outcome.image {
-                            if client.send_image(image, "image/png").is_err() {
-                                break;
-                            }
-                            if settle > Duration::ZERO {
-                                std::thread::sleep(settle);
-                            }
-                        }
+                        // A frame answers as a turn, not as a tool result.
+                        // Close the call silently so it produces no speech of
+                        // its own, then send the frame as the turn the model
+                        // actually answers.
+                        let media = outcome.image.is_some();
+                        let this_scheduling = if media { "SILENT" } else { &scheduling };
                         if client
-                            .send_tool_response(&call, &outcome.text, &scheduling)
+                            .send_tool_response(&call, &outcome.text, this_scheduling)
                             .is_err()
                         {
                             break;
+                        }
+                        if let Some(image) = &outcome.image {
+                            if settle > Duration::ZERO {
+                                std::thread::sleep(settle);
+                            }
+                            if client
+                                .send_image(image, "image/png", SCREEN_CAPTION)
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                 })

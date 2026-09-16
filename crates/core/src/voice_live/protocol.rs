@@ -173,8 +173,13 @@ impl LiveClient {
     /// previous frame and appears to be one turn behind. `clientContent` lands
     /// in send order, and `turnComplete: false` leaves the turn open for the
     /// tool response that explains the frame.
-    pub fn send_image(&self, bytes: &[u8], mime: &str) -> Result<(), VoiceLiveError> {
-        self.send_json(client_image_json(bytes, mime))
+    pub fn send_image(
+        &self,
+        bytes: &[u8],
+        mime: &str,
+        caption: &str,
+    ) -> Result<(), VoiceLiveError> {
+        self.send_json(client_image_json(bytes, mime, caption))
     }
 
     /// Manual voice activity markers (push-to-talk mode only).
@@ -434,13 +439,20 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
 
 /// The wire message for one image frame. Split out so the shape is testable
 /// without a socket.
-fn client_image_json(bytes: &[u8], mime: &str) -> Value {
+///
+/// `turnComplete` is true and the frame carries a caption, so this is the turn
+/// the model answers. An earlier version sent the frame as an open-ended
+/// message just before the tool response, and the model reliably answered the
+/// tool call without it and only saw the frame on the following turn. Waiting
+/// longer did not help, because the frame was not part of the turn being
+/// generated at all.
+fn client_image_json(bytes: &[u8], mime: &str, caption: &str) -> Value {
     json!({ "clientContent": {
-        "turns": [{ "role": "user", "parts": [{ "inlineData": {
-            "mimeType": mime,
-            "data": B64.encode(bytes),
-        }}]}],
-        "turnComplete": false,
+        "turns": [{ "role": "user", "parts": [
+            { "inlineData": { "mimeType": mime, "data": B64.encode(bytes) } },
+            { "text": caption },
+        ]}],
+        "turnComplete": true,
     }})
 }
 
@@ -467,14 +479,17 @@ mod tests {
 
     #[test]
     fn an_image_frame_is_an_ordered_turn_not_realtime_media() {
-        let msg = client_image_json(&[1u8, 2, 3], "image/png");
-        // Ordered channel, so the frame is in context before the tool response.
+        let msg = client_image_json(&[1u8, 2, 3], "image/png", "look at this");
+        // Not the media side channel: that arrived a turn late every time.
         assert!(msg.get("realtimeInput").is_none());
-        let part = &msg["clientContent"]["turns"][0]["parts"][0]["inlineData"];
-        assert_eq!(part["mimeType"], "image/png");
-        assert!(part["data"].as_str().is_some_and(|d| !d.is_empty()));
-        // The tool response completes the turn, not the frame.
-        assert_eq!(msg["clientContent"]["turnComplete"], false);
+        let parts = &msg["clientContent"]["turns"][0]["parts"];
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+        assert!(parts[0]["inlineData"]["data"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()));
+        assert_eq!(parts[1]["text"], "look at this");
+        // The frame completes the turn, so it is what the model answers.
+        assert_eq!(msg["clientContent"]["turnComplete"], true);
     }
 
     #[test]

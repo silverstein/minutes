@@ -173,7 +173,9 @@ impl ToolContext {
             }
         }
         if self.config.voice_live.screen_on_request {
-            d.push(decl_blocking(
+            // Non-blocking on purpose: the frame is delivered as its own turn
+            // and answered there, so the tool result itself is closed silently.
+            d.push(decl(
                 "look_at_screen",
                 "Take one frame of whatever is on Mat's screen right now and look at it. Use it only when he asks about his screen, what he is looking at, or something visible in front of him. The frame is delivered as an image; describe what you actually see.",
                 json!({}),
@@ -245,7 +247,9 @@ impl ToolContext {
             std::process::id(),
             started.elapsed().as_nanos()
         ));
-        if let Err(e) = crate::screen::capture_screenshot(&path) {
+        // Wider than the recording pipeline's frames: at that size a pointer is
+        // a few pixels and cannot be located.
+        if let Err(e) = crate::screen::capture_screenshot_at_width(&path, SCREEN_FRAME_WIDTH) {
             let _ = std::fs::remove_file(&path);
             return fail(format!("screenshot failed: {e}"));
         }
@@ -511,21 +515,6 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
     decl_json(name, description, params, "NON_BLOCKING")
 }
 
-/// A tool the model must wait for before it answers.
-///
-/// Non-blocking is right for reads whose answer is still true a second later.
-/// It is wrong for anything about this instant: the model issues the call and
-/// answers immediately from what it already had, so a question about the screen
-/// gets described from the previous frame and the assistant runs a turn behind.
-fn decl_blocking(name: &str, description: &str, properties: Value) -> Value {
-    decl_json(
-        name,
-        description,
-        json!({"type": "object", "properties": properties}),
-        "BLOCKING",
-    )
-}
-
 fn decl_json(name: &str, description: &str, params: Value, behavior: &str) -> Value {
     json!({"name": name, "description": description, "parameters": params, "behavior": behavior})
 }
@@ -641,6 +630,9 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
         }
     }
 }
+
+/// Width of an on-request screen frame, in pixels.
+const SCREEN_FRAME_WIDTH: u32 = 1920;
 
 /// A spoken reason a calendar read failed.
 fn calendar_access_label(access: crate::calendar::CalendarAccess) -> &'static str {
@@ -955,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_tool_blocks_so_the_answer_is_not_a_frame_behind() {
+    fn the_screen_tool_is_answered_as_its_own_turn() {
         let mut config = Config::default();
         config.voice_live.screen_on_request = true;
         let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
@@ -964,7 +956,8 @@ mod tests {
             .into_iter()
             .find(|d| d["name"] == "look_at_screen")
             .expect("look_at_screen should be declared");
-        assert_eq!(screen["behavior"], "BLOCKING");
+        // The frame answers as a turn, so the call itself is closed silently.
+        assert_eq!(screen["behavior"], "NON_BLOCKING");
     }
 
     #[test]

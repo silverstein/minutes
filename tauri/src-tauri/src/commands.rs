@@ -5801,7 +5801,7 @@ pub fn cmd_vault_unlink() -> Result<String, String> {
     Ok(format!("Vault unlinked (was: {})", old))
 }
 
-/// Returns the resolved UI language (`"en"` or `"zh-CN"`) for the frontend.
+/// Returns the resolved UI language (`"en"`, `"zh-CN"` or `"pt-BR"`) for the frontend.
 ///
 /// Reads the persisted `[ui] language` preference and resolves `"auto"` plus
 /// the `MINUTES_LANG` env override through [`minutes_core::i18n`]. The frontend
@@ -5815,15 +5815,15 @@ pub fn cmd_get_ui_language() -> String {
 
 /// Persists the UI language preference and applies it to the running process.
 ///
-/// `language` is `"auto"`, `"en"`, or `"zh-CN"`. After saving, the active
+/// `language` is `"auto"`, `"en"`, `"zh-CN"`, or `"pt-BR"`. After saving, the active
 /// locale is updated so any native shell strings (tray / menus / notifications)
 /// built afterward render in the new language, and the tray + native menu are
-/// rebuilt in place. Returns the resolved locale (`"en"` / `"zh-CN"`) so the
+/// rebuilt in place. Returns the resolved locale (`"en"` / `"zh-CN"` / `"pt-BR"`) so the
 /// caller can drive `MinutesI18n.setLocale` for the frontend.
 #[tauri::command]
 pub fn cmd_set_ui_language(app: tauri::AppHandle, language: String) -> Result<String, String> {
     let normalized = match language.as_str() {
-        "auto" | "en" | "zh-CN" => language,
+        "auto" | "en" | "zh-CN" | "pt-BR" => language,
         other => return Err(format!("Unsupported language: {}", other)),
     };
 
@@ -5845,6 +5845,7 @@ pub fn cmd_set_ui_language(app: tauri::AppHandle, language: String) -> Result<St
 fn locale_tag(locale: minutes_core::i18n::Locale) -> String {
     match locale {
         minutes_core::i18n::Locale::ZhCn => "zh-CN".to_string(),
+        minutes_core::i18n::Locale::PtBr => "pt-BR".to_string(),
         minutes_core::i18n::Locale::En => "en".to_string(),
     }
 }

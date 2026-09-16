@@ -1937,6 +1937,16 @@ fn main() -> Result<()> {
     let mut claimed_authorized_process_input = claim_authorized_process_input(&mut cli.command)?;
     install_authorized_process_containment(claimed_authorized_process_input.is_some())?;
 
+    #[cfg(feature = "voice-live")]
+    if let Commands::Talk {
+        local_work: true,
+        json,
+        ..
+    } = &cli.command
+    {
+        return cmd_local_work(*json);
+    }
+
     // Initialize logging.
     //
     // Default filter: app code at INFO (or DEBUG with --verbose), but the

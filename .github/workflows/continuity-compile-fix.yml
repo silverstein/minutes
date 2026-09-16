@@ -1,0 +1,45 @@
+name: Apply continuity compilation corrections
+
+on:
+  push:
+    branches: ['feat/voice-continuity-integration-20260916']
+    paths: ['.github/workflows/continuity-compile-fix.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  correct:
+    if: github.repository == 'silverstein/minutes' && github.ref == 'refs/heads/feat/voice-continuity-integration-20260916'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Correct exact compiler-reported sites
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              file = Path(path)
+              text = file.read_text()
+              assert text.count(old) == 1, (path, old)
+              file.write_text(text.replace(old, new))
+          replace('crates/core/src/voice_live/session.rs', 'ServerEvent::ToolCall(calls) => {\n                            set_state(&self, &mut state, VoiceLiveState::Thinking);\n                            for call in calls {', 'ServerEvent::ToolCall(incoming_calls) => {\n                            set_state(&self, &mut state, VoiceLiveState::Thinking);\n                            for call in incoming_calls {')
+          replace('crates/core/src/screen.rs', '#[cfg(target_os = "macos")]\nconst TARGET_WIDTH: u32 = 1280;', 'const TARGET_WIDTH: u32 = 1280;')
+          replace('crates/core/src/screen.rs', '        let _ = width;\n        return Err(std::io::Error::other(\n            "screen capture not supported on this platform",\n        ));\n    }\n\n    Ok(())', '        let _ = (path, width);\n        Err(std::io::Error::other(\n            "screen capture not supported on this platform",\n        ))\n    }\n\n    #[cfg(any(target_os = "macos", target_os = "linux"))]\n    Ok(())')
+          replace('crates/core/src/voice_live/selection.rs', '                let mut matches = workspace\n                    .runningApplications()\n                    .iter()', '                let applications = workspace.runningApplications();\n                if applications.len() > 4096 {\n                    return Err("Running application budget exceeded".into());\n                }\n                let mut matches = applications\n                    .to_vec()\n                    .into_iter()')
+          PY
+          rustfmt --edition 2021 --config skip_children=true crates/core/src/voice_live/session.rs crates/core/src/voice_live/selection.rs crates/core/src/screen.rs
+          git diff --check
+          git add -- crates/core/src/voice_live/session.rs crates/core/src/voice_live/selection.rs crates/core/src/screen.rs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(voice): compile queue registry and native selection on all platforms'
+          git fetch origin feat/voice-continuity-integration-20260916
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git push origin HEAD:refs/heads/feat/voice-continuity-integration-20260916

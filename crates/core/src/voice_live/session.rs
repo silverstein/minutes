@@ -440,6 +440,8 @@ impl Runner {
             let client = Arc::clone(&self.client);
             let on_event = Arc::clone(&self.on_event);
             let scheduling = self.scheduling.clone();
+            let settle =
+                Duration::from_millis(self.tools.config.voice_live.screen_settle_ms.min(3_000));
             let log_tx = self.log.as_ref().map(|l| l.sender());
             std::thread::Builder::new()
                 .name("voice-live-tools".into())
@@ -461,10 +463,14 @@ impl Runner {
                             ));
                         }
                         // Media first: the frame must be in context before the
-                        // text that tells the model to describe it.
+                        // text that tells the model to describe it, and the
+                        // model unblocks on that text rather than on the frame.
                         if let Some(image) = &outcome.image {
                             if client.send_image(image, "image/png").is_err() {
                                 break;
+                            }
+                            if settle > Duration::ZERO {
+                                std::thread::sleep(settle);
                             }
                         }
                         if client

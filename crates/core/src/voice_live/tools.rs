@@ -263,7 +263,7 @@ impl ToolContext {
                     text: json!({
                         "delivered": true,
                         "captured_at": Local::now().to_rfc3339(),
-                        "note": "A frame of Mat's screen taken just now was added to this conversation. It replaces any earlier frame: his screen has probably changed since, so describe only this newest one and never answer from a previous one. Say so plainly if it is unreadable.",
+                        "note": "A frame of Mat's screen taken just now was added to this conversation immediately before this result. It replaces any earlier frame: his screen has probably changed since, so describe only this newest one and never answer from a previous one. If you cannot actually see a new image, do not hedge or guess at what might be there. Say plainly that the frame did not arrive and call look_at_screen once more.",
                     })
                     .to_string(),
                     is_error: false,
@@ -465,6 +465,16 @@ impl ToolContext {
                 read_prep_artifact(&name, self.max_chars.saturating_sub(500))
             }
             "upcoming_meetings" => {
+                // An empty list and an unreadable calendar look identical from
+                // here, and reporting the second as the first tells Mat his day
+                // is clear when it is not. Probe first; the probe never prompts.
+                let access = crate::calendar::calendar_access_status();
+                if !access.can_read() {
+                    return Err(format!(
+                        "cannot read the calendar ({}). Tell Mat his calendar is unreachable and never that it is empty.",
+                        calendar_access_label(access)
+                    ));
+                }
                 let minutes = int_arg(args, "within_minutes", 720).clamp(5, 10_080) as u32;
                 let events: Vec<Value> = crate::calendar::upcoming_events(minutes)
                     .into_iter()
@@ -477,7 +487,9 @@ impl ToolContext {
                         })
                     })
                     .collect();
-                Ok(json!({ "within_minutes": minutes, "events": events }))
+                Ok(
+                    json!({ "within_minutes": minutes, "calendar_readable": true, "events": events }),
+                )
             }
             other => Err(format!("unknown tool {other}")),
         }
@@ -627,6 +639,19 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
                 out.push(path);
             }
         }
+    }
+}
+
+/// A spoken reason a calendar read failed.
+fn calendar_access_label(access: crate::calendar::CalendarAccess) -> &'static str {
+    use crate::calendar::CalendarAccess;
+    match access {
+        CalendarAccess::FullAccess => "readable",
+        CalendarAccess::WriteOnly => "Minutes has add-only access, not read access",
+        CalendarAccess::Denied => "calendar access is denied in System Settings",
+        CalendarAccess::Restricted => "calendar access is restricted by policy",
+        CalendarAccess::NotDetermined => "calendar access has not been granted yet",
+        CalendarAccess::Unknown => "the calendar helper did not answer",
     }
 }
 
@@ -911,6 +936,22 @@ mod tests {
     fn truncation_marks_dropped_chars() {
         let t = truncate("x".repeat(50), 10);
         assert!(t.starts_with("xxxxxxxxxx\n...[truncated 40 chars]"));
+    }
+
+    #[test]
+    fn an_unreadable_calendar_is_an_error_not_an_empty_day() {
+        let mut config = Config::default();
+        config.voice_live.calendar = true;
+        config.calendar.enabled = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("upcoming_meetings", &json!({}));
+        // On a machine with no calendar access this must fail loudly. Where it
+        // does succeed the result says so explicitly instead of being a bare list.
+        if out.is_error {
+            assert!(out.text.contains("never that it is empty"));
+        } else {
+            assert!(out.text.contains("calendar_readable"));
+        }
     }
 
     #[test]

@@ -1162,6 +1162,11 @@ pub struct VoiceLiveConfig {
     pub delegate_agent: String,
     /// How long to wait for that agent before giving up.
     pub delegate_timeout_secs: u64,
+    /// Pause between delivering a screen frame and releasing the tool result
+    /// that describes it. `BLOCKING` makes the model wait for the result, not
+    /// for the frame, so without a beat here it can unblock and answer before
+    /// the image is in context and then hedge about not seeing anything.
+    pub screen_settle_ms: u64,
 }
 
 impl Default for VoiceLiveConfig {
@@ -1187,6 +1192,7 @@ impl Default for VoiceLiveConfig {
             ask_agent: true,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
+            screen_settle_ms: 400,
         }
     }
 }

@@ -11,7 +11,11 @@ if os.name == "nt":
     binary = binary.with_suffix(".exe")
 with tempfile.TemporaryDirectory() as directory:
     env = dict(os.environ)
-    env["MINUTES_HOME"] = str(Path(directory) / "minutes")
+    # Config::minutes_dir resolves HOME/.minutes, not MINUTES_HOME.
+    # Give only the child process an isolated home on every supported platform.
+    env["HOME"] = directory
+    env["USERPROFILE"] = directory
+    env["XDG_CONFIG_HOME"] = str(Path(directory) / ".config")
     env.pop("GEMINI_API_KEY", None)
 
     def run(commands):
@@ -25,6 +29,9 @@ with tempfile.TemporaryDirectory() as directory:
     events = run(["/work new Resume the proposal", "/work debrief I did not approve scope", "/work park", "/work list", "/work share", "/approve 1"])
     assert [event["type"] for event in events] == ["local"] * 4 + ["local_error"] * 2, events
     identifiers = json.loads(events[3]["text"])
+    snapshots = Path(directory) / ".minutes" / "work-capsules"
+    assert snapshots.is_dir(), "CLI did not use the isolated test home"
+    assert sorted(p.stem for p in snapshots.glob("*.json")) == sorted(identifiers)
     assert len(identifiers) == 1, identifiers  # debrief and park have identical contents
     events = run([f"/work resume {identifiers[0]}", "/work show"])
     assert all(event["type"] == "local" for event in events), events

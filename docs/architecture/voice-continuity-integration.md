@@ -140,8 +140,8 @@ existing brain, prep, calendar or already-delivered provider-context path.
 
 ## Persistence and recovery
 
-Checkpoints are bounded, versioned JSON under `$MINUTES_HOME/work-capsules`
-(default `~/.minutes/work-capsules`). The content digest is the identifier.
+Checkpoints are bounded, versioned JSON under `~/.minutes/work-capsules`.
+The content digest is the identifier.
 The existing policy filesystem capabilities create private staging files and
 atomically publish without replacing a saved checkpoint. Reads reject path
 traversal, symlinks, changed content and oversized input, and verify the exact

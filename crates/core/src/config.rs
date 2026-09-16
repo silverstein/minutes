@@ -1145,6 +1145,12 @@ pub struct VoiceLiveConfig {
     pub brain_search: bool,
     /// Expose a single on-request screen frame (phase 3).
     pub screen_on_request: bool,
+    /// Explicit clipboard reads and copies, not continuous monitoring.
+    pub clipboard: bool,
+    /// Named-app selected-text reads and guarded text insertion.
+    pub text_input: bool,
+    /// Exact bundle identifiers allowed to receive text. Never shell/agent consoles.
+    pub text_input_apps: Vec<String>,
     /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
     pub log_sessions: bool,
     /// Cancel the speaker signal out of the microphone so open mic does not hear
@@ -1255,6 +1261,25 @@ impl Default for VoiceLiveConfig {
             known_people: 200,
             brain_search: true,
             screen_on_request: false,
+            clipboard: false,
+            text_input: false,
+            text_input_apps: [
+                "com.apple.TextEdit",
+                "com.apple.Notes",
+                "com.apple.mail",
+                "com.apple.iWork.Pages",
+                "com.apple.Safari",
+                "com.google.Chrome",
+                "org.mozilla.firefox",
+                "com.microsoft.edgemac",
+                "com.brave.Browser",
+                "company.thebrowser.Browser",
+                "md.obsidian",
+                "notion.id",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             log_sessions: true,
             echo_cancellation: true,
             resume_sessions: true,

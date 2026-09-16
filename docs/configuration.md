@@ -66,6 +66,8 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # model = "gemini-3.8-live"
 # api_key_env = "GEMINI_API_KEY"  # Name of the env var holding the key. The key itself never goes in this file.
 # language = "en-US"
+# voice_name = "Sulafat"          # Optional warmer voice; voice selection is separate from persona
+# persona = "morris"              # Optional concise, dry chief-of-staff personality
 # brain_search = true             # Expose knowledge base search/read when [knowledge].path is set
 # log_sessions = true             # Write each session transcript to ~/.minutes/voice-sessions/
 # echo_cancellation = true        # macOS: cancel the speaker signal out of the mic so open mic does not hear itself
@@ -77,6 +79,10 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
 # calendar = true                 # Let voice read upcoming calendar events
 # screen_on_request = true        # Let voice take ONE frame of your screen when you ask. Sends that image to the provider.
+# clipboard = true                # Explicit plain-text read/copy requests only; no monitoring
+# text_input = true               # Named-app selection reads and verified text insertion; never Send/Submit
+#                                 # Optional text_input_apps overrides the exact bundle-ID allowlist.
+#                                 # See docs/voice-text-transfer.md for safeguards and supported-editor limits.
 # ask_agent = true                # Let voice relay a question to your local coding agent (see [assistant] agent).
 #                                 # Off by default. Pair it with delegate_agent_args to bound what it can do.
 # delegate_agent = ""             # Override which agent. Empty follows [assistant] agent.
@@ -87,7 +93,7 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # delegate_cwd = "~/Sites"        # Where the relayed agent starts looking
 # desktop_control = true          # Let it open apps and files, control playback, add reminders
 # desktop_outward = true          # Also let it send an iMessage or email. Every send is read
-#                                 # back to you and waits for you to agree out loud first.
+#                                 # back to you and requires the displayed local host review.
 # music = true                    # Labs toy: generate and play music, sung or instrumental,
 #                                 # steered by a meeting or a prep. Refuses while recording.
 # music_max_secs = 0             # 0 plays the whole piece; set a number to cap it

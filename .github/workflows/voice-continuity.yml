@@ -1,0 +1,29 @@
+name: Voice continuity integration
+
+on:
+  push:
+    branches: ['feat/voice-continuity-integration-20260916']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export pinned public source for isolated implementation
+        run: |
+          mkdir -p /tmp/continuity-source
+          git archive HEAD > /tmp/continuity-source/voice.tar
+          git fetch --depth=1 origin 7df6a4006dfb03afe688fe9dc5abf998c0477db0
+          git archive 7df6a4006dfb03afe688fe9dc5abf998c0477db0 > /tmp/continuity-source/foundation.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: continuity-source
+          path: /tmp/continuity-source/*.tar
+          retention-days: 1

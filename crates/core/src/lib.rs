@@ -80,7 +80,7 @@ mod exit_teardown_tests {
         }
 
         let exe = std::env::current_exe().expect("test binary path");
-        let mut child = std::process::Command::new(exe)
+        let mut child = crate::engine_process::command(exe)
             .args([
                 "--exact",
                 "exit_teardown_tests::exit_without_cxx_teardown_does_not_block_on_a_held_stdout_lock",

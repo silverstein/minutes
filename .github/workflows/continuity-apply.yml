@@ -1,0 +1,64 @@
+name: Apply isolated continuity integration
+
+on:
+  push:
+    branches: ['feat/voice-continuity-integration-20260916']
+    paths: ['.github/continuity-patch.b64']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'silverstein/minutes' && github.ref == 'refs/heads/feat/voice-continuity-integration-20260916'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Apply exact reviewed patch on isolated branch only
+        env:
+          EXPECTED_PATCH: d0db502ef3b014704407eb219d8939239b721462550a5b0321c10c9f01caacf1
+        run: |
+          test "$GITHUB_REF" = refs/heads/feat/voice-continuity-integration-20260916
+          git fetch --depth=1 origin 7df6a4006dfb03afe688fe9dc5abf998c0477db0
+          git checkout 7df6a4006dfb03afe688fe9dc5abf998c0477db0 -- crates/core/src/interaction tooling/interaction-contracts docs/architecture/interaction-continuity.md
+          python - <<'PY'
+          import base64, gzip, hashlib, os, pathlib, subprocess
+          packed = pathlib.Path('.github/continuity-patch.b64').read_bytes()
+          assert len(packed) < 100000
+          patch = gzip.decompress(base64.b64decode(packed, validate=False))
+          assert len(patch) < 1000000
+          assert hashlib.sha256(patch).hexdigest() == os.environ['EXPECTED_PATCH']
+          pathlib.Path('/tmp/continuity.patch').write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', '--unidiff-zero', '/tmp/continuity.patch'], check=True)
+          subprocess.run(['git', 'apply', '--index', '--unidiff-zero', '/tmp/continuity.patch'], check=True)
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z']).decode().split('\0')
+          for path in filter(None, paths):
+              assert path.startswith(('crates/core/src/', 'crates/cli/src/', 'docs/architecture/', 'tooling/interaction-contracts/', 'scripts/smoke_voice_continuity.py'))
+              if path.endswith('.rs'):
+                  subprocess.run(['rustfmt', '--edition', '2021', '--config', 'skip_children=true', path], check=True)
+              subprocess.run(['git', 'add', '--', path], check=True)
+          PY
+          cargo test --manifest-path tooling/interaction-contracts/Cargo.toml
+          git rm -- .github/continuity-patch.b64
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(voice): integrate reviewed checkpoints, local work, host approval and cancellation'
+          git fetch origin feat/voice-continuity-integration-20260916
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git push origin HEAD:refs/heads/feat/voice-continuity-integration-20260916
+          git rev-parse HEAD
+          git archive HEAD > /tmp/continuity-implemented.tar
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: continuity-implemented
+          path: /tmp/continuity-implemented.tar
+          if-no-files-found: ignore
+          retention-days: 1

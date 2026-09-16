@@ -691,6 +691,9 @@ impl Runner {
                             set_state(&self, &mut state, VoiceLiveState::Ready);
                         }
                         ServerEvent::TurnComplete => {
+                            // The end of the assistant's turn is the earliest
+                            // point an answer to its question can exist.
+                            self.tools.desktop.finished_speaking();
                             self.flush_transcripts(&mut you, &mut me);
                             if self.audio.is_idle() {
                                 set_state(&self, &mut state, VoiceLiveState::Ready);

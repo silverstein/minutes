@@ -194,7 +194,28 @@ fn write_source(bytes: &[u8], mime: &str) -> Result<PathBuf, String> {
         chrono::Local::now().format("%Y-%m-%d-%H-%M-%S"),
         extension_for(mime)
     ));
-    let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    // Create exclusively. Two sessions finishing in the same instant can still
+    // produce the same name, and a truncating create would let one silently
+    // overwrite the other's music, possibly while it was being decoded.
+    let mut attempt = path;
+    let mut file = loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&attempt)
+        {
+            Ok(file) => break file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stem = attempt
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                attempt = dir.join(format!("{stem}-again.{}", extension_for(mime)));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let path = attempt;
     file.write_all(bytes).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {

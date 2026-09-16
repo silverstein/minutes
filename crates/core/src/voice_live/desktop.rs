@@ -259,31 +259,47 @@ pub(crate) enum Gate {
 pub struct DesktopControl {
     pending: Mutex<Vec<Pending>>,
     counter: Mutex<u64>,
-    /// Nanoseconds since this process started, at the last moment the user's
+    /// Nanoseconds since this control's epoch, at the last moment the user's
     /// transcribed voice arrived. Written by the host.
     heard_user_at: Arc<AtomicU64>,
+    /// Nanoseconds at the last moment the assistant finished a turn.
+    finished_speaking_at: Arc<AtomicU64>,
     /// The instant those nanoseconds are measured from.
     epoch: Mutex<Option<Instant>>,
 }
 
 impl DesktopControl {
+    /// Said whenever a confirmation cannot be honoured. Deliberately one
+    /// message: the model does not need to know which ordering rule it missed,
+    /// and every case has the same remedy.
+    const VOID: &'static str = "Mat has not answered that yet, so the confirmation is void. \
+         Read him the sentence again and wait for him to reply.";
+
     /// Record that the user's voice was just heard.
     pub fn heard_user(&self) {
+        self.stamp(&self.heard_user_at);
+    }
+
+    /// Record that the assistant just finished a turn.
+    pub fn finished_speaking(&self) {
+        self.stamp(&self.finished_speaking_at);
+    }
+
+    fn stamp(&self, slot: &AtomicU64) {
         let elapsed = {
             let mut epoch = self.epoch.lock().unwrap_or_else(|p| p.into_inner());
             epoch.get_or_insert_with(Instant::now).elapsed()
         };
-        self.heard_user_at
-            .store(elapsed.as_nanos() as u64, Ordering::SeqCst);
+        // Never zero, because zero means "never happened".
+        slot.store((elapsed.as_nanos() as u64).max(1), Ordering::SeqCst);
     }
 
-    /// How long ago, in this control's own clock, the user was last heard.
-    fn last_heard(&self) -> Option<Instant> {
+    fn read(&self, slot: &AtomicU64) -> Option<Instant> {
         let epoch = {
             let epoch = self.epoch.lock().unwrap_or_else(|p| p.into_inner());
             (*epoch)?
         };
-        let nanos = self.heard_user_at.load(Ordering::SeqCst);
+        let nanos = slot.load(Ordering::SeqCst);
         if nanos == 0 {
             return None;
         }
@@ -416,19 +432,24 @@ impl DesktopControl {
                     .into(),
             );
         }
-        // The user must have been heard since this was asked for. Without it
-        // the model can call twice in a row and authorise itself, which is not
-        // a confirmation at all, only a second call. This proves a person
-        // spoke; whether they agreed is what reading the sentence out is for.
+        // The order has to be: asked, then the assistant finished reading the
+        // question out, then the user said something. Requiring only that the
+        // user was heard after the ask is not enough, because the tail of the
+        // request that triggered all this is still being transcribed, and its
+        // late fragments land after the token was minted. Anchoring to the end
+        // of the assistant's own turn rules those out: they belong to the turn
+        // before the question existed.
+        let Some(spoke) = self.read(&self.finished_speaking_at) else {
+            return Err(Self::VOID.into());
+        };
+        if spoke <= found.asked_at {
+            return Err(Self::VOID.into());
+        }
         if self
-            .last_heard()
-            .is_none_or(|heard| heard <= found.asked_at)
+            .read(&self.heard_user_at)
+            .is_none_or(|heard| heard <= spoke)
         {
-            return Err(
-                "Mat has not said anything since you asked, so that confirmation is void. \
-                 Read him the sentence again and wait for his answer."
-                    .into(),
-            );
+            return Err(Self::VOID.into());
         }
         Ok(())
     }
@@ -646,9 +667,11 @@ mod tests {
     /// A number reserved for fiction, so no test names anyone real.
     const NOBODY: &str = "555-0100";
 
-    /// Stand in for the user answering out loud.
-    fn user_speaks(control: &DesktopControl) {
-        // The gate compares instants, so the answer has to land after the ask.
+    /// Stand in for the assistant reading the question out and the user
+    /// answering it, which is the only order the gate accepts.
+    fn user_answers(control: &DesktopControl) {
+        std::thread::sleep(Duration::from_millis(2));
+        control.finished_speaking();
         std::thread::sleep(Duration::from_millis(2));
         control.heard_user();
     }
@@ -696,7 +719,7 @@ mod tests {
         confirmed["confirm"] = json!(token);
         // Spending it clears the gate exactly once. Nothing is performed: the
         // gate stops at the decision.
-        user_speaks(&control);
+        user_answers(&control);
         assert!(matches!(
             control.gate(outward(), &confirmed),
             Ok(Gate::Cleared(_))
@@ -717,7 +740,7 @@ mod tests {
         let token = asked["confirm"].as_str().unwrap().to_string();
         // Confirmed one thing, attempted another.
         let swapped = json!({"to": NOBODY, "text": "you are fired", "confirm": token});
-        user_speaks(&control);
+        user_answers(&control);
         let err = control.gate(outward(), &swapped).unwrap_err();
         assert!(err.contains("details changed"), "{err}");
     }
@@ -747,7 +770,7 @@ mod tests {
             "text": "Hello\u{1f}textx=I quit",
             "confirm": token,
         });
-        user_speaks(&control);
+        user_answers(&control);
         let err = control.gate(outward(), &smuggled).unwrap_err();
         assert!(err.contains("details changed"), "{err}");
     }
@@ -777,11 +800,11 @@ mod tests {
         // Calling straight back with its own token, having heard nothing, is
         // the model agreeing with itself. That is not a confirmation.
         let err = control.gate(outward(), &confirmed).unwrap_err();
-        assert!(err.contains("has not said anything"), "{err}");
+        assert!(err.contains("has not answered"), "{err}");
 
         // Jumping the gun spends the token, so the user cannot be talked into
         // it afterwards by saying anything at all. It has to be asked again.
-        user_speaks(&control);
+        user_answers(&control);
         let spent = control.gate(outward(), &confirmed).unwrap_err();
         assert!(spent.contains("not valid any more"), "{spent}");
 
@@ -792,11 +815,30 @@ mod tests {
             .to_string();
         let mut answered = args.clone();
         answered["confirm"] = json!(fresh);
-        user_speaks(&control);
+        user_answers(&control);
         assert!(matches!(
             control.gate(outward(), &answered),
             Ok(Gate::Cleared(_))
         ));
+    }
+
+    #[test]
+    fn a_late_fragment_of_the_original_request_cannot_answer_it() {
+        let control = DesktopControl::default();
+        let args = json!({"to": NOBODY, "text": "hello"});
+        let token = ask_for(&control, &args)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut confirmed = args.clone();
+        confirmed["confirm"] = json!(token);
+        // The tail of the request that triggered this arrives after the token
+        // was minted, but before the assistant has read anything out. It is not
+        // an answer to a question nobody has asked yet.
+        std::thread::sleep(Duration::from_millis(2));
+        control.heard_user();
+        let err = control.gate(outward(), &confirmed).unwrap_err();
+        assert!(err.contains("has not answered"), "{err}");
     }
 
     #[test]

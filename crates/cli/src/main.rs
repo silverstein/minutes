@@ -2643,6 +2643,12 @@ fn cmd_talk(
     }
     let closed = Arc::new(AtomicBool::new(false));
     let closed_in_events = Arc::clone(&closed);
+    // Shared with the event callback so the meter only draws while a press is
+    // in progress. Without any visible sign of input, a session waiting for the
+    // user is indistinguishable from a microphone that is not working, which
+    // has already cost one debugging session.
+    let holding = Arc::new(AtomicBool::new(false));
+    let holding_in_events = Arc::clone(&holding);
     let session = voice_live::start(
         config,
         SessionOptions {
@@ -2651,8 +2657,14 @@ fn cmd_talk(
             mute_playback: mute,
         },
         move |event| {
-            // Level events arrive many times a second and only matter to a HUD.
-            if matches!(event, VoiceLiveEvent::Level { .. }) {
+            // Level arrives many times a second. It is the only evidence the
+            // microphone is live, so draw it while the user is holding the key
+            // and stay silent otherwise.
+            if let VoiceLiveEvent::Level { rms } = event {
+                if !json && holding_in_events.load(Ordering::SeqCst) {
+                    eprint!("\r  {}", input_meter(rms));
+                    let _ = std::io::stderr().flush();
+                }
                 return;
             }
             if json {
@@ -2727,12 +2739,15 @@ fn cmd_talk(
                         if talking {
                             session.ptt_end();
                             talking = false;
+                            holding.store(false, Ordering::SeqCst);
                             if !json {
-                                eprintln!("(sent)");
+                                // Wipe the meter before writing under it.
+                                eprintln!("\r{:width$}\r(sent)", "", width = METER_LINE_WIDTH);
                             }
                         } else {
                             session.ptt_start();
                             talking = true;
+                            holding.store(true, Ordering::SeqCst);
                             if !json {
                                 eprintln!("(listening, Enter to send)");
                             }
@@ -2752,6 +2767,32 @@ fn cmd_talk(
         eprintln!("Voice session ended.");
     }
     Ok(())
+}
+
+/// Width to clear when wiping the meter line.
+#[cfg(feature = "voice-live")]
+const METER_LINE_WIDTH: usize = 32;
+
+/// A small live input meter, so a held key visibly differs from a dead mic.
+///
+/// Speech sits far below full scale, so the bar is scaled for the quiet end
+/// rather than linearly: at a linear scale ordinary talking barely moves it and
+/// the meter answers the wrong question.
+#[cfg(feature = "voice-live")]
+fn input_meter(rms: f32) -> String {
+    const BARS: usize = 20;
+    let level = (rms.max(0.0).sqrt() * 2.2).min(1.0);
+    let filled = ((level * BARS as f32).round() as usize).min(BARS);
+    let mut out = String::with_capacity(BARS + 12);
+    out.push('[');
+    for i in 0..BARS {
+        out.push(if i < filled { '=' } else { ' ' });
+    }
+    out.push(']');
+    if filled == 0 {
+        out.push_str(" quiet");
+    }
+    out
 }
 
 /// Human-readable rendering of one Voice Live event for `minutes talk`.
@@ -9127,6 +9168,61 @@ fn cmd_logs(errors: bool, lines: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "voice-live"))]
+mod input_meter_tests {
+    use super::input_meter;
+
+    fn bars(rms: f32) -> usize {
+        input_meter(rms).chars().filter(|c| *c == '=').count()
+    }
+
+    #[test]
+    fn silence_reads_as_quiet_and_shows_nothing() {
+        let quiet = input_meter(0.0);
+        assert_eq!(bars(0.0), 0);
+        assert!(quiet.contains("quiet"), "{quiet}");
+    }
+
+    #[test]
+    fn ordinary_speech_moves_the_meter_well_off_the_floor() {
+        // Conversational speech sits far below full scale. A meter that barely
+        // twitches at these levels answers the wrong question, since the point
+        // is telling a live microphone from a dead one.
+        assert!(bars(0.02) >= 4, "quiet speech showed {} bars", bars(0.02));
+        assert!(bars(0.05) >= 8, "normal speech showed {} bars", bars(0.05));
+        assert!(bars(0.2) >= 15, "loud speech showed {} bars", bars(0.2));
+    }
+
+    #[test]
+    fn it_never_overflows_or_goes_backwards() {
+        assert_eq!(bars(1.0), 20);
+        assert_eq!(bars(5.0), 20, "clamped above full scale");
+        assert_eq!(bars(-1.0), 0, "clamped below zero");
+        let mut last = 0;
+        for step in 0..=40 {
+            let now = bars(step as f32 / 40.0);
+            assert!(now >= last, "meter went backwards at {step}");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn the_bar_is_a_fixed_width_so_redrawing_leaves_no_debris() {
+        for rms in [0.0f32, 0.01, 0.3, 1.0] {
+            let drawn = input_meter(rms);
+            let inside = drawn.chars().filter(|c| *c == '=' || *c == ' ').count();
+            // The trailing word only appears at silence, so measure the bracket.
+            let bracketed = drawn.split(']').next().unwrap_or_default().len() - 1;
+            assert_eq!(bracketed, 20, "{drawn}");
+            assert!(inside >= 20);
+            assert!(
+                drawn.len() <= super::METER_LINE_WIDTH,
+                "{drawn} exceeds the wipe width"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

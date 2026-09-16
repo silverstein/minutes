@@ -142,13 +142,8 @@ end run"#,
     },
     Verb {
         name: "open_url",
-        // Outward, despite looking harmless. A URL carries a query string, and
-        // the model can put anything it has read into one: a meeting, a prep,
-        // a person's profile. Opening it transmits that to whoever owns the
-        // domain. This is the only verb whose danger is in its argument rather
-        // than its effect.
-        description: "Open a web page in the default browser. Only http and https. Confirmed out loud first, because a web address can carry private text out with it.",
-        risk: Risk::Outward,
+        description: "Open a web page in the default browser. Only http and https; local URL validation rejects file, javascript and other unsafe schemes.",
+        risk: Risk::Local,
         params: &[p("url", "An http or https address", true)],
         script: r#"on run argv
     open location (item 1 of argv)

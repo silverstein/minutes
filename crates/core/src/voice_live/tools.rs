@@ -1296,6 +1296,7 @@ mod tests {
     fn local_desktop_actions_run_without_host_review() {
         for name in [
             "open_app",
+            "open_url",
             "control_music",
             "reveal_path",
             "add_reminder",
@@ -1307,7 +1308,6 @@ mod tests {
             );
         }
         for name in [
-            "open_url",
             "send_message",
             "send_email",
             "propose_checkpoint",

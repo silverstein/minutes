@@ -1,0 +1,31 @@
+name: Work integration source snapshot
+
+on:
+  push:
+    branches: ['codex/work-continuity-20260916']
+    paths: ['.github/workflows/work-integration-snapshot.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only for isolated integration review
+        shell: bash
+        run: |
+          mkdir -p /tmp/minutes-integration
+          git archive --format=zip --output=/tmp/minutes-integration/work-source.zip HEAD
+          git fetch --no-tags origin refs/heads/feat/voice-live
+          git rev-parse FETCH_HEAD > /tmp/minutes-integration/voice-sha.txt
+          git archive --format=zip --output=/tmp/minutes-integration/voice-source.zip FETCH_HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minutes-integration-source
+          path: /tmp/minutes-integration/
+          retention-days: 1

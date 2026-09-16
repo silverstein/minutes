@@ -299,6 +299,23 @@ impl ToolContext {
             return fail("description is required".into());
         };
         match super::music::compose(&self.config, &description) {
+            Ok(piece) if crate::pid::status().recording => {
+                // A recording began while this was generating. The piece is on
+                // disk, but it must not reach the speakers and then the
+                // microphone and then the transcript.
+                ToolOutcome {
+                    text: json!({
+                        "playing": false,
+                        "saved_to": piece.path.display().to_string(),
+                        "note": "A recording started while this was being written, so it is saved but not played. Tell Mat it is waiting for him.",
+                    })
+                    .to_string(),
+                    is_error: false,
+                    elapsed: started.elapsed(),
+                    image: None,
+                    audio: None,
+                }
+            }
             Ok(piece) => ToolOutcome {
                 text: json!({
                     "playing": true,
@@ -542,6 +559,9 @@ impl ToolContext {
                 brain_read(root, &rel, self.max_chars.saturating_sub(500))
             }
             "ask_agent" => {
+                if !cfg.voice_live.ask_agent {
+                    return Err("relaying to the local agent is turned off".into());
+                }
                 let question = str_arg(args, "question").ok_or("question is required")?;
                 let agent =
                     delegate_agent(cfg).ok_or("no coding agent is configured or installed")?;
@@ -572,12 +592,23 @@ impl ToolContext {
                 crate::summarize::run_agent_prompt(&agent, &prompt, &args, cwd.as_deref(), timeout)
                     .map(|answer| json!({ "agent": agent, "answer": answer }))
             }
-            "list_preps" => Ok(list_prep_artifacts()),
+            "list_preps" => {
+                if !cfg.voice_live.prep_artifacts {
+                    return Err("prep and brief files are turned off".into());
+                }
+                Ok(list_prep_artifacts())
+            }
             "get_prep" => {
+                if !cfg.voice_live.prep_artifacts {
+                    return Err("prep and brief files are turned off".into());
+                }
                 let name = str_arg(args, "name").ok_or("name is required")?;
                 read_prep_artifact(&name, self.max_chars.saturating_sub(500))
             }
             "upcoming_meetings" => {
+                if !cfg.voice_live.calendar || !cfg.calendar.enabled {
+                    return Err("calendar access is turned off".into());
+                }
                 // An empty list and an unreadable calendar look identical from
                 // here, and reporting the second as the first tells Mat his day
                 // is clear when it is not. Probe first; the probe never prompts.

@@ -18,7 +18,8 @@
 //! control that already failed: told not to write without asking, it opened a
 //! GitHub issue from one spoken sentence.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
@@ -233,6 +234,11 @@ struct Pending {
     /// token that was read out loud.
     canonical: String,
     created: Instant,
+    /// How many times the user had finished speaking when this was minted.
+    /// Redeeming requires that number to have moved, which is what makes a
+    /// confirmation evidence of a person rather than of the model's own
+    /// enthusiasm.
+    turns_at_mint: u64,
 }
 
 /// The outcome of the confirmation gate.
@@ -249,6 +255,15 @@ pub(crate) enum Gate {
 pub struct DesktopControl {
     pending: Mutex<Vec<Pending>>,
     counter: Mutex<u64>,
+    /// Bumped by the host every time the user finishes saying something.
+    user_turns: Arc<AtomicU64>,
+}
+
+impl DesktopControl {
+    /// The counter the host increments when the user finishes speaking.
+    pub fn user_turns(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.user_turns)
+    }
 }
 
 impl DesktopControl {
@@ -316,8 +331,9 @@ impl DesktopControl {
         // Validate first, so a confirmation is never read out for an action
         // that could not have run. Asking about an empty recipient and only
         // failing on the second call wastes the user's agreement.
+        reject_unknown_args(verb, args)?;
         let values = collect_params(verb, args)?;
-        let canonical = canonical_args(args);
+        let canonical = canonical_args(verb, args);
         if verb.risk == Risk::Outward {
             match args.get("confirm").and_then(Value::as_str) {
                 Some(token) => self.redeem(verb, token, &canonical)?,
@@ -342,6 +358,7 @@ impl DesktopControl {
                 verb: verb.name,
                 canonical: canonical.to_string(),
                 created: now,
+                turns_at_mint: self.user_turns.load(Ordering::SeqCst),
             });
         }
         json!({
@@ -374,6 +391,17 @@ impl DesktopControl {
                     .into(),
             );
         }
+        // The user must have spoken since this was asked for. Without this the
+        // model can call twice in a row and authorise itself, which is not a
+        // confirmation at all, only a second call. This proves a person spoke;
+        // whether they agreed is what the sentence was read out for.
+        if self.user_turns.load(Ordering::SeqCst) <= found.turns_at_mint {
+            return Err(
+                "Mat has not said anything since you asked, so that confirmation is void. \
+                 Read him the sentence again and wait for his answer."
+                    .into(),
+            );
+        }
         Ok(())
     }
 
@@ -388,31 +416,45 @@ impl DesktopControl {
     }
 }
 
-/// The arguments that identify an action, with any confirmation token removed
-/// and keys ordered, so the same request always produces the same string.
-fn canonical_args(args: &Value) -> String {
-    let mut pairs: Vec<(String, String)> = args
-        .as_object()
-        .map(|o| {
-            o.iter()
-                .filter(|(k, _)| k.as_str() != "confirm")
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| v.to_string()),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    pairs.sort();
-    pairs
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("\u{1f}")
+/// The arguments that identify an action, with the confirmation token removed.
+///
+/// Only the parameters the verb declares are included, and the form is JSON so
+/// it cannot be ambiguous. An earlier version joined `key=value` pairs with a
+/// separator, which let a value containing that separator impersonate a second
+/// argument, so a confirmation read out as one message could be redeemed for a
+/// longer one.
+fn canonical_args(verb: &'static Verb, args: &Value) -> String {
+    let mut fields = serde_json::Map::new();
+    for param in verb.params {
+        let value = args
+            .get(param.name)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        fields.insert(param.name.to_string(), Value::String(value.to_string()));
+    }
+    Value::Object(fields).to_string()
+}
+
+/// Reject arguments the verb never declared.
+///
+/// Anything unrecognised is either a mistake or an attempt to smuggle content
+/// past the sentence the user agreed to, and neither should proceed.
+fn reject_unknown_args(verb: &'static Verb, args: &Value) -> Result<(), String> {
+    let Some(object) = args.as_object() else {
+        return Ok(());
+    };
+    for key in object.keys() {
+        if key == "confirm" {
+            continue;
+        }
+        if !verb.params.iter().any(|p| p.name == key) {
+            return Err(format!(
+                "{} does not take an argument called {key}",
+                verb.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The sentence the assistant reads out before doing something outward.
@@ -430,9 +472,10 @@ fn describe(verb: &'static Verb, args: &Value) -> String {
             get("to")
         ),
         "send_email" => format!(
-            "I'm about to email {} with the subject \"{}\". Is that right?",
+            "I'm about to email {} with the subject \"{}\", saying: {}. Is that right?",
             get("to"),
-            get("subject")
+            get("subject"),
+            get("body")
         ),
         other => format!("I'm about to run {other}. Is that right?"),
     }
@@ -509,6 +552,10 @@ fn run_script(script: &str, values: &[String]) -> Result<String, String> {
     }
     let mut child = crate::engine_process::command("osascript")
         .args(["-e", script])
+        // Everything after this is a value, never an option. Without it a
+        // parameter starting with "-" is read as another "-e" fragment and
+        // becomes script source, which defeats passing values through argv.
+        .arg("--")
         .args(values)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -571,6 +618,11 @@ mod tests {
     /// A number reserved for fiction, so no test names anyone real.
     const NOBODY: &str = "555-0100";
 
+    /// Stand in for the user answering out loud.
+    fn user_speaks(control: &DesktopControl) {
+        control.user_turns.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Ask the gate, expecting it to want confirmation, and return the payload.
     fn ask_for(control: &DesktopControl, args: &Value) -> Value {
         match control
@@ -614,6 +666,7 @@ mod tests {
         confirmed["confirm"] = json!(token);
         // Spending it clears the gate exactly once. Nothing is performed: the
         // gate stops at the decision.
+        user_speaks(&control);
         assert!(matches!(
             control.gate(outward(), &confirmed),
             Ok(Gate::Cleared(_))
@@ -634,6 +687,7 @@ mod tests {
         let token = asked["confirm"].as_str().unwrap().to_string();
         // Confirmed one thing, attempted another.
         let swapped = json!({"to": NOBODY, "text": "you are fired", "confirm": token});
+        user_speaks(&control);
         let err = control.gate(outward(), &swapped).unwrap_err();
         assert!(err.contains("details changed"), "{err}");
     }
@@ -647,6 +701,72 @@ mod tests {
             .gate(outward(), &json!({"text": "hello"}))
             .unwrap_err();
         assert!(err.contains("required"), "{err}");
+    }
+
+    #[test]
+    fn a_value_cannot_impersonate_a_second_argument() {
+        let control = DesktopControl::default();
+        let honest = json!({"to": NOBODY, "text": "Hello"});
+        let token = ask_for(&control, &honest)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // The old encoding made these two identical.
+        let smuggled = json!({
+            "to": NOBODY,
+            "text": "Hello\u{1f}textx=I quit",
+            "confirm": token,
+        });
+        user_speaks(&control);
+        let err = control.gate(outward(), &smuggled).unwrap_err();
+        assert!(err.contains("details changed"), "{err}");
+    }
+
+    #[test]
+    fn an_argument_the_verb_never_declared_is_refused() {
+        let control = DesktopControl::default();
+        let err = control
+            .gate(
+                outward(),
+                &json!({"to": NOBODY, "text": "hi", "textx": "I quit"}),
+            )
+            .unwrap_err();
+        assert!(err.contains("does not take an argument"), "{err}");
+    }
+
+    #[test]
+    fn the_model_cannot_authorise_its_own_send() {
+        let control = DesktopControl::default();
+        let args = json!({"to": NOBODY, "text": "hello"});
+        let token = ask_for(&control, &args)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut confirmed = args.clone();
+        confirmed["confirm"] = json!(token);
+        // Calling straight back with its own token, having heard nothing, is
+        // the model agreeing with itself. That is not a confirmation.
+        let err = control.gate(outward(), &confirmed).unwrap_err();
+        assert!(err.contains("has not said anything"), "{err}");
+
+        // Jumping the gun spends the token, so the user cannot be talked into
+        // it afterwards by saying anything at all. It has to be asked again.
+        user_speaks(&control);
+        let spent = control.gate(outward(), &confirmed).unwrap_err();
+        assert!(spent.contains("not valid any more"), "{spent}");
+
+        // Asked properly, and answered, it goes through.
+        let fresh = ask_for(&control, &args)["confirm"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut answered = args.clone();
+        answered["confirm"] = json!(fresh);
+        user_speaks(&control);
+        assert!(matches!(
+            control.gate(outward(), &answered),
+            Ok(Gate::Cleared(_))
+        ));
     }
 
     #[test]
@@ -692,10 +812,13 @@ mod tests {
 
     #[test]
     fn canonical_arguments_ignore_the_token_and_key_order() {
-        let a = canonical_args(&json!({"to": NOBODY, "text": "hi", "confirm": "ok-1-2"}));
-        let b = canonical_args(&json!({"text": "hi", "to": NOBODY}));
+        let a = canonical_args(
+            outward(),
+            &json!({"to": NOBODY, "text": "hi", "confirm": "ok-1-2"}),
+        );
+        let b = canonical_args(outward(), &json!({"text": "hi", "to": NOBODY}));
         assert_eq!(a, b);
-        let different = canonical_args(&json!({"text": "bye", "to": NOBODY}));
+        let different = canonical_args(outward(), &json!({"text": "bye", "to": NOBODY}));
         assert_ne!(a, different);
     }
 

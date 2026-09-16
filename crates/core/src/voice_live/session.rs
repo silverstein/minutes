@@ -507,11 +507,6 @@ impl Runner {
                 .name("voice-live-tools".into())
                 .spawn(move || {
                     for call in tool_rx.iter() {
-                        // Read through the cell every time: a resumed session
-                        // has a different socket, and a result sent to the old
-                        // one is lost silently.
-                        let client =
-                            Arc::clone(&client_cell.lock().unwrap_or_else(|p| p.into_inner()));
                         // A relayed agent can take half a minute. Without this
                         // the host shows the call going out and then nothing,
                         // which is indistinguishable from a wedged session.
@@ -556,6 +551,13 @@ impl Runner {
                                 outcome.elapsed.as_millis()
                             ));
                         }
+                        // Read the socket only now, never before the tool ran.
+                        // A tool can take a minute, and the session may have
+                        // resumed onto a new socket while it did. Answering the
+                        // old one loses the result and breaks this loop, which
+                        // silently kills every later tool call in the session.
+                        let client =
+                            Arc::clone(&client_cell.lock().unwrap_or_else(|p| p.into_inner()));
                         // A frame answers as a turn, not as a tool result.
                         // Close the call silently so it produces no speech of
                         // its own, then send the frame as the turn the model
@@ -769,6 +771,12 @@ impl Runner {
 
     fn flush_transcripts(&self, you: &mut String, me: &mut String) {
         if !you.trim().is_empty() {
+            // A finished utterance is the evidence the confirmation gate needs
+            // that a person, and not the model, is agreeing to something.
+            self.tools
+                .desktop
+                .user_turns()
+                .fetch_add(1, Ordering::SeqCst);
             self.emit(VoiceLiveEvent::UserTranscript {
                 text: you.trim().to_string(),
                 partial: false,

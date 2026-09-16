@@ -74,6 +74,20 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
 # calendar = true                 # Let voice read upcoming calendar events
 # screen_on_request = true        # Let voice take ONE frame of your screen when you ask. Sends that image to the provider.
+# ask_agent = true                # Let voice relay a question to your local coding agent (see [assistant] agent)
+# delegate_agent = ""             # Override which agent. Empty follows [assistant] agent.
+# delegate_timeout_secs = 120
+
+# Reach tools Minutes does not implement. Each server is launched as a child
+# process and its tools appear to the voice assistant as `name__tool`.
+# Secrets never go here: the server inherits your environment and reads the
+# variable it already expects.
+# [[voice_live.mcp_servers]]
+# name = "hubspot"
+# command = "npx"
+# args = ["-y", "@hubspot/mcp-server"]
+# tools = ["search_contacts"]     # Allowlist. Omit to take up to max_tools.
+# max_tools = 8                   # Voice context is small; keep this low.
 
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)

@@ -17,6 +17,7 @@ use crate::events::{InsightFilter, MeetingInsight};
 use crate::graph::{PolicyProjectionRequest, PolicyProjectionResponse};
 use crate::search::{self, SearchFilters};
 
+use super::mcp::McpPool;
 use super::names::NameIndex;
 
 /// Shared, read-only context for tool execution.
@@ -25,6 +26,10 @@ pub struct ToolContext {
     pub names: Arc<NameIndex>,
     pub brain_root: Option<PathBuf>,
     pub max_chars: usize,
+    /// Connected MCP servers, if any were configured.
+    pub mcp: McpPool,
+    /// Servers that would not start, reported to the host once.
+    pub mcp_problems: Vec<String>,
 }
 
 /// Result of one tool call.
@@ -50,11 +55,14 @@ impl ToolContext {
                 None
             };
         let max_chars = config.voice_live.max_tool_chars.max(1_000);
+        let (mcp, mcp_problems) = McpPool::launch(&config);
         Self {
             config,
             names,
             brain_root,
             max_chars,
+            mcp,
+            mcp_problems,
         }
     }
 
@@ -181,6 +189,7 @@ impl ToolContext {
                 json!({}),
             ));
         }
+        d.extend(self.mcp.declarations());
         if let Some(root) = &self.brain_root {
             d.push(decl(
                 "search_brain",
@@ -204,6 +213,18 @@ impl ToolContext {
         let started = Instant::now();
         if name == "look_at_screen" {
             return self.look_at_screen(started);
+        }
+        if let Some(outcome) = self.mcp.call(name, args) {
+            let (text, is_error) = match outcome {
+                Ok(v) => (v.to_string(), false),
+                Err(e) => (json!({ "error": e }).to_string(), true),
+            };
+            return ToolOutcome {
+                text: truncate(text, self.max_chars),
+                is_error,
+                elapsed: started.elapsed(),
+                image: None,
+            };
         }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(name, args)));
@@ -855,6 +876,8 @@ mod tests {
             names,
             brain_root: brain,
             max_chars: 2_000,
+            mcp: McpPool::default(),
+            mcp_problems: Vec::new(),
         }
     }
 
@@ -928,6 +951,18 @@ mod tests {
     fn truncation_marks_dropped_chars() {
         let t = truncate("x".repeat(50), 10);
         assert!(t.starts_with("xxxxxxxxxx\n...[truncated 40 chars]"));
+    }
+
+    #[test]
+    fn an_unknown_tool_that_looks_qualified_is_still_a_spoken_error() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        // No servers configured, so a qualified name must not be mistaken for one.
+        let out = ctx.execute(
+            &format!("hubspot{}search", super::super::mcp::SEP),
+            &json!({}),
+        );
+        assert!(out.is_error);
+        assert!(out.text.contains("unknown tool"));
     }
 
     #[test]

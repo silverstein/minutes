@@ -391,6 +391,25 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `screen_on_request` | `false` | Expose `look_at_screen`, which captures one frame and sends it to the provider. Off by default because a screen frame is the most sensitive thing this feature can transmit. Pull-only: the model cannot take a frame Mat did not ask for |
 | `prep_artifacts` | `true` | Expose the prep and brief files written by the `/minutes-prep` and `/minutes-brief` skills under `~/.minutes` |
 | `calendar` | `true` | Expose upcoming calendar events. Also requires `[calendar] enabled` |
+| `ask_agent` | `true` | Expose `ask_agent`, which relays one question to a local coding agent. The agent answers with its own tools and credentials, so only its answer leaves the machine |
+| `delegate_agent` | `""` | Which agent CLI to relay to. Empty follows `[assistant] agent`, then the first agent CLI installed |
+| `delegate_timeout_secs` | `120` | How long to wait for that agent |
+| `screen_settle_ms` | `150` | Spacing between closing the screen tool call and sending the frame that answers it |
+| `mcp_servers` | `[]` | MCP servers to launch for a session, as `[[voice_live.mcp_servers]]` tables |
+
+#### `[[voice_live.mcp_servers]]` connected services
+
+Minutes publishes an MCP server; this is the other direction. Each entry launches a server as a child process, speaks newline-delimited JSON-RPC to it over stdio, and merges its `tools/list` into the voice tool surface as `name__tool`. A server that fails to start is reported and skipped, never fatal to a session.
+
+| key | default | meaning |
+|---|---|---|
+| `name` | required | Short name prefixing every tool from this server |
+| `command` | required | Executable to launch. Resolved like the agent CLI, so a bare `npx` works from a GUI bundle |
+| `args` | `[]` | Arguments for it |
+| `tools` | `[]` | Allowlist of tool names. Empty takes what fits under `max_tools` |
+| `max_tools` | `8` | Cap on tools from this server. Voice context is small and tool choice degrades quickly, so keep it low |
+
+Secrets are never named here. A server inherits the Minutes process environment and reads whatever variable it already expects.
 | `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
 | `echo_cancellation` | `true` | Also decides the default talk mode: open mic where cancellation exists, push-to-talk everywhere else, so no platform self-interrupts by default. |
 | | | Run mic and speaker through one voice-processing unit so the speaker signal is cancelled out of the mic. macOS only today; elsewhere plain capture, so `minutes talk` defaults to push-to-talk and `--open-mic` warns |

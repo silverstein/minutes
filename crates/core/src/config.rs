@@ -1162,6 +1162,11 @@ pub struct VoiceLiveConfig {
     pub delegate_agent: String,
     /// How long to wait for that agent before giving up.
     pub delegate_timeout_secs: u64,
+    /// MCP servers to launch for a voice session, so the assistant can reach
+    /// tools Minutes does not implement. Secrets are never named here: a server
+    /// inherits this process's environment and reads whatever variable it
+    /// already expects.
+    pub mcp_servers: Vec<McpServerConfig>,
     /// Pause between closing the screen tool call and sending the frame that
     /// answers it. Only spacing between two ordered messages; the frame is the
     /// turn the model answers, so this does not need to be long.
@@ -1191,9 +1196,27 @@ impl Default for VoiceLiveConfig {
             ask_agent: true,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
+            mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }
     }
+}
+
+/// One MCP server launched for a voice session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Short name. It prefixes every tool this server offers, so keep it to
+    /// letters, digits and underscores.
+    pub name: String,
+    /// Executable to launch, e.g. "npx".
+    pub command: String,
+    /// Arguments for it.
+    pub args: Vec<String>,
+    /// Only expose these tools. Empty means take what fits under `max_tools`.
+    pub tools: Vec<String>,
+    /// Cap on tools taken from this server. 0 uses the built-in default.
+    pub max_tools: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

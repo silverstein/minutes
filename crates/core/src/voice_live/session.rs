@@ -321,6 +321,11 @@ where
 
     let names = Arc::new(NameIndex::load(config, config.voice_live.known_people));
     let tools = Arc::new(ToolContext::new(config.clone(), Arc::clone(&names)));
+    for problem in &tools.mcp_problems {
+        emit(VoiceLiveEvent::Status {
+            text: format!("mcp server unavailable, {problem}"),
+        });
+    }
     let declarations = tools.declarations();
     let prompt = system_prompt(config, &names, tools.brain_root.is_some());
     emit(VoiceLiveEvent::Status {
@@ -634,6 +639,7 @@ impl Runner {
         self.flush_transcripts(&mut you, &mut me);
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
+        self.tools.mcp.shutdown();
         drop(tool_tx);
         if let Some(w) = worker {
             let _ = w.join();

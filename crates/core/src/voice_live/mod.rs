@@ -12,6 +12,7 @@
 
 pub mod audio_out;
 pub mod decimate;
+pub mod mcp;
 pub mod names;
 pub mod protocol;
 pub mod session;
@@ -143,6 +144,9 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if config.voice_live.prep_artifacts {
         p.push_str("Preps and briefs. Before a conversation Mat sometimes writes himself a prep or a brief with the /minutes-prep and /minutes-brief skills. Those are his own intentions, goals and talking points, not a transcript, so they answer what he wanted out of a meeting rather than what was said. When he mentions prepping for something, or asks what he meant to cover, call list_preps and then get_prep. Use them alongside the meeting tools when both apply.\n\n");
     }
+    if !config.voice_live.mcp_servers.is_empty() {
+        p.push_str("Connected services. Some tools are named service_then_tool, like hubspot_then_search. Those reach a system outside Minutes. Treat what they return as that system's answer, say which service a fact came from when it matters, and never mix it up with what Mat said in a meeting. If one errors, say which service failed rather than guessing at the answer.\n\n".replace("_then_", "__").as_str());
+    }
     if config.voice_live.ask_agent && tools::delegate_agent(config).is_some() {
         p.push_str("Outside your own memory. Anything that is not a meeting, a person, a commitment, a prep or a note lives outside your tools: Mat's code, his repositories, his documents, and services like a CRM or issue tracker. For those, call ask_agent with one self-contained question. It cannot hear this conversation, so put everything it needs into the question itself. It takes several seconds, so say you are checking first, then answer from what it returns and say the answer came from the agent. Never guess at code or a system you have not asked it about.\n\n");
     }
@@ -150,7 +154,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
     if config.voice_live.screen_on_request {
-        p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. If a frame does not reach you, say plainly that it did not arrive and take another rather than hedging about not making out details. When Mat says you got something on screen wrong, look at the frame again and tell him what is actually there. If you still see the same thing, say so and say where you are looking. Agreeing with his correction without checking is worse than being wrong once, because then neither of you knows what is on the screen. Fine detail like a pointer position is genuinely hard to read, so say when you are unsure rather than asserting. Never describe a screen you have not actually looked at. Naming a plausible application, a document or a cursor you did not see is a serious error and worse than saying you cannot see anything yet, because Mat cannot tell the difference from a real answer. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
+        p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. After you call look_at_screen the frame arrives as the very next thing you receive, so wait for it and say nothing in between. If it truly does not arrive, say plainly that it did not and take another rather than hedging about not making out details. When Mat says you got something on screen wrong, look at the frame again and tell him what is actually there. If you still see the same thing, say so and say where you are looking. Agreeing with his correction without checking is worse than being wrong once, because then neither of you knows what is on the screen. Fine detail like a pointer position is genuinely hard to read, so say when you are unsure rather than asserting. Never describe a screen you have not actually looked at. Naming a plausible application, a document or a cursor you did not see is a serious error and worse than saying you cannot see anything yet, because Mat cannot tell the difference from a real answer. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
     }
     p.push_str("When Mat asks why you did something, or why you got something wrong, tell him what you actually observed: which tool you called and what it returned. You do not know how Minutes is implemented, so never explain your own behaviour by inventing a mechanism inside it. Saying you do not know why is a real answer and he is usually debugging when he asks.\n\n");
     p.push_str("If Mat asks you to remember or note something, call add_note with his words. Ask before calling any tool that writes or changes something, and never rename a speaker unless Mat explicitly states the name.");
@@ -257,7 +261,8 @@ mod tests {
         assert!(p.contains("look_at_screen"));
         assert!(p.contains("Never take a frame he did not ask for"));
         assert!(p.contains("that is you, so do not describe it"));
-        assert!(p.contains("say plainly that it did not arrive"));
+        assert!(p.contains("say plainly that it did not"));
+        assert!(p.contains("wait for it and say nothing in between"));
         assert!(p.contains("Never describe a screen you have not actually looked at"));
         assert!(p.contains("Agreeing with his correction without checking"));
     }

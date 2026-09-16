@@ -28,6 +28,7 @@ mod pty;
 mod secret_store;
 mod shortcut_manager;
 mod text_insertion;
+mod workbench;
 
 const MINUTES_WEBSITE_URL: &str = "https://useminutes.app";
 const MINUTES_CHANGELOG_URL: &str = "https://github.com/silverstein/minutes/releases";
@@ -108,6 +109,7 @@ fn maybe_run_apple_speech_runtime_acceptance() -> Option<i32> {
 }
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
+    workbench::stop_for_exit(app);
     if let Some(state) = app.try_state::<commands::AppState>() {
         if state.copilot_active.load(Ordering::Relaxed) {
             state.copilot_stop_flag.store(true, Ordering::Release);
@@ -1818,6 +1820,7 @@ fn main() {
     let stop_for_detector = stop_flag.clone();
 
     tauri::Builder::default()
+        .manage(workbench::State::default())
         .menu(build_app_menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "app-show-about" => {
@@ -2949,6 +2952,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "work"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                workbench::window_closed(window.app_handle().clone());
+            }
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                     // Hide main window on close instead of quitting (app stays in tray)
@@ -2991,6 +2999,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            workbench::cmd_workbench,
             commands::cmd_capture_status,
             commands::cmd_status,
             commands::cmd_processing_jobs,

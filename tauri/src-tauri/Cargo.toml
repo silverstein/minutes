@@ -5,6 +5,7 @@ edition = "2021"
 description = "Minutes — menu bar app for conversation memory"
 
 [features]
+voice-live = ["minutes-core/voice-live"]
 parakeet = ["minutes-core/parakeet", "minutes-core/whisper"]
 engine-sherpa = ["minutes-core/engine-sherpa"]
 vad-ort = ["minutes-core/vad-ort"]

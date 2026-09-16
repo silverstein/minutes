@@ -1941,6 +1941,159 @@ fn summarize_with_agent_impl_timeout(
 
 // ── Claude API ───────────────────────────────────────────────
 
+/// Run one prompt through the user's agent CLI and return its raw text.
+///
+/// This is the delegation path. The agent runs locally with its own tools,
+/// credentials and MCP servers, so a question can reach systems Minutes holds
+/// no keys for, and only the agent's answer travels onward. Shares the
+/// process-group kill and bounded output drain the summarization path needs
+/// (#592): real agent CLIs spawn MCP servers that inherit the pipes.
+pub fn run_agent_prompt(
+    agent_cmd: &str,
+    prompt: &str,
+    extra_args: &[String],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    run_agent_prompt_cancellable(
+        agent_cmd,
+        prompt,
+        extra_args,
+        cwd,
+        timeout,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+pub fn run_agent_prompt_cancellable(
+    agent_cmd: &str,
+    prompt: &str,
+    extra_args: &[String],
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    use std::io::Write;
+    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Agent task cancelled before launch".into());
+    }
+
+    let mut invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)
+        .map_err(|e| format!("could not build the agent invocation: {e}"))?;
+    // Ahead of the built-in arguments, because those end in a positional.
+    // Without a non-interactive permission posture here an agent stops on its
+    // first tool-use prompt, which nobody can see and nobody can answer, and
+    // the call burns the whole timeout looking like a hang.
+    for (i, arg) in extra_args.iter().enumerate() {
+        invocation.args.insert(i, arg.clone());
+    }
+    let cleanup_path = invocation.cleanup_path.clone();
+    let cleanup = |path: &Option<std::path::PathBuf>| {
+        if let Some(p) = path {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+
+    let stdin_stdio = if invocation.stdin_payload.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
+    let mut command = crate::engine_process::command(&invocation.cmd);
+    command
+        .args(&invocation.args)
+        .stdin(stdin_stdio)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            cleanup(&cleanup_path);
+            return Err(format!("agent '{agent_cmd}' failed to start: {e}"));
+        }
+    };
+
+    let (stdout, stderr) = match (child.stdout.take(), child.stderr.take()) {
+        (Some(o), Some(e)) => (o, e),
+        _ => {
+            kill_process_group(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            cleanup(&cleanup_path);
+            return Err(format!("agent '{agent_cmd}' gave no output pipes"));
+        }
+    };
+    let (stdout_buf, stdout_handle) = spawn_agent_output_reader(stdout);
+    let (stderr_buf, stderr_handle) = spawn_agent_output_reader(stderr);
+    if let Some(bytes) = invocation.stdin_payload.clone() {
+        if let Some(mut stdin) = child.stdin.take() {
+            std::thread::spawn(move || {
+                stdin.write_all(&bytes).ok();
+            });
+        }
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = child.wait();
+                let out = take_agent_output(&stdout_buf, stdout_handle, "stdout");
+                let err = take_agent_output(&stderr_buf, stderr_handle, "stderr");
+                cleanup(&cleanup_path);
+                if !status.success() {
+                    return Err(format!(
+                        "agent '{agent_cmd}' exited with an error: {}",
+                        String::from_utf8_lossy(&err).trim()
+                    ));
+                }
+                let text = String::from_utf8_lossy(&out).trim().to_string();
+                if text.is_empty() {
+                    return Err(format!("agent '{agent_cmd}' returned nothing"));
+                }
+                return Ok(text);
+            }
+            Ok(None) => {
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) || start.elapsed() > timeout
+                {
+                    // Kill the group first: descendants hold the pipes open.
+                    kill_process_group(child.id());
+                    child.kill().ok();
+                    let _ = child.wait();
+                    let _ = take_agent_output(&stdout_buf, stdout_handle, "stdout");
+                    let _ = take_agent_output(&stderr_buf, stderr_handle, "stderr");
+                    cleanup(&cleanup_path);
+                    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err("Agent process group was terminated after cancellation; any already-completed external effects require reconciliation".into());
+                    }
+                    return Err(format!(
+                        "agent '{agent_cmd}' did not answer within {}s. The usual cause \
+                         is the agent waiting on a tool-use permission prompt that nothing \
+                         can answer; give it non-interactive launch flags.",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(e) => {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                cleanup(&cleanup_path);
+                return Err(format!("could not check on the agent: {e}"));
+            }
+        }
+    }
+}
+
 fn summarize_with_claude(
     transcript: &str,
     screen_files: &[std::path::PathBuf],

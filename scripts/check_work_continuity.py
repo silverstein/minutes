@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Compile the real portable modules without audio/GUI SDK dependencies.
+
+This is a supplementary check, not a replacement for the full core/app CI.
+Formatting happens only in a temporary copy; any differences are emitted as
+work-continuity-format.patch and fail this check. The synthetic example also
+round-trips its checkpoint through a new process without restoring a worker.
+"""
+from __future__ import annotations
+
+import difflib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCES = [
+    "crates/core/src/live_sidekick/work.rs",
+    "crates/core/src/live_sidekick/work_tests.rs",
+    "crates/core/src/live_sidekick/live_model.rs",
+    "crates/core/examples/work_session.rs",
+]
+
+
+def run(*args: str) -> None:
+    subprocess.run(args, check=True)
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory(prefix="minutes-work-check-") as temporary:
+        root = Path(temporary)
+        source_dir = root / "src" / "live_sidekick"
+        source_dir.mkdir(parents=True)
+        (root / "examples").mkdir()
+        (root / "Cargo.toml").write_text('''[package]
+name = "minutes-work-continuity-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "minutes_core"
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+''', encoding="utf-8")
+        (root / "src" / "lib.rs").write_text(
+            "pub mod live_sidekick { pub mod work; pub mod live_model; }\n",
+            encoding="utf-8",
+        )
+        copies = []
+        for relative in SOURCES:
+            original = ROOT / relative
+            target = (root / "examples" if "/examples/" in relative else source_dir) / original.name
+            shutil.copyfile(original, target)
+            copies.append((relative, original, target))
+        manifest = str(root / "Cargo.toml")
+        run("cargo", "test", "--manifest-path", manifest, "--all-targets")
+        run("cargo", "clippy", "--manifest-path", manifest, "--all-targets", "--", "-D", "warnings")
+        run("cargo", "fmt", "--manifest-path", manifest)
+        patch = []
+        for relative, original, target in copies:
+            patch.extend(difflib.unified_diff(
+                original.read_text(encoding="utf-8").splitlines(keepends=True),
+                target.read_text(encoding="utf-8").splitlines(keepends=True),
+                fromfile="a/" + relative,
+                tofile="b/" + relative,
+            ))
+        (ROOT / "work-continuity-format.patch").write_text("".join(patch), encoding="utf-8")
+        command = ["cargo", "run", "--quiet", "--manifest-path", manifest, "--example", "work_session"]
+        saved = subprocess.run(command, check=True, stdout=subprocess.PIPE).stdout
+        # Exercise both editor/pipe conventions on EVERY OS. Preserve exact
+        # input bytes; subprocess text mode otherwise changes them on Windows.
+        for wire in [saved, saved.replace(b"\n", b"\r\n")]:
+            restored = subprocess.run(command + ["--", "resume"], input=wire, check=True, stdout=subprocess.PIPE).stdout
+            checkpoint = json.loads(restored)
+            if checkpoint["id"] != "demo-onboarding" or checkpoint["tasks"][0]["state"] != "interrupted":
+                raise RuntimeError("Synthetic checkpoint did not resume safely")
+            if checkpoint["memory"][0]["attribution"] != "model_inference" or checkpoint["memory"][1]["attribution"] != "user_confirmed_decision":
+                raise RuntimeError("Checkpoint attribution changed on resume")
+        if patch:
+            raise SystemExit("Formatting differs: apply work-continuity-format.patch")
+        print("Portable module tests, Clippy, formatting, and checkpoint process round-trip passed.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost https://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Work with Minutes</title>
+<link rel="stylesheet" href="styles/theme-tokens.css"><link rel="stylesheet" href="styles/work.css">
+<script src="scripts/work.js" defer></script>
+</head>
+<body>
+<header><div><p class="eyebrow">MINUTES / WORK PREVIEW</p><h1>Pick up where you left off.</h1></div><span id="state" role="status">Local only</span></header>
+<p id="notice" class="notice" role="status" aria-live="polite">Your selected context and checkpoints stay on this device until you explicitly share them.</p>
+<main>
+<section class="context" aria-label="Work context">
+ <section class="card">
+  <div class="section-title"><h2>What are you working toward?</h2><span id="revision" class="small"></span></div>
+  <form id="goal-form"><label for="goal">Goal</label><input id="goal" maxlength="2000" placeholder="Make this proposal reflect what we agreed" required><button type="submit">Start a new work session</button></form>
+  <details id="resume-area"><summary>Resume saved work</summary><button id="refresh-saved" type="button">Refresh checkpoints</button><div id="saved" class="stack"></div></details>
+ </section>
+ <section class="card">
+  <h2>Shared attention</h2><p class="small" id="capture-help">Paste a selection below, or enable the Mac selection shortcut. No background screen capture is enabled.</p>
+  <button id="shortcut" type="button">Enable selection shortcut</button>
+  <p id="source" class="small">No selection attached</p><pre id="selection" class="selection" tabindex="0">Choose the specific text you want to work on.</pre>
+  <details><summary>Paste or replace selected text</summary><form id="selection-form"><label for="selection-input">Selected text</label><textarea id="selection-input" maxlength="16384" rows="5" required></textarea><button type="submit">Use this selection locally</button></form></details>
+ </section>
+ <section class="card">
+  <h2>What should stay with the work?</h2>
+  <form id="note-form"><label for="note">Your correction, interpretation, or decision</label><textarea id="note" maxlength="8000" rows="3" placeholder="I was interested, but I did not agree to the expanded scope." required></textarea><label class="check"><input id="decision" type="checkbox">This is a decision I am explicitly confirming</label><div class="row"><button type="submit">Save my correction</button><button id="use-transcript" type="button">Review latest spoken turn</button></div></form>
+  <div id="memory" class="stack"></div>
+ </section>
+ <section class="card">
+  <h2>Park the work</h2><form id="park-form"><label for="next-step">Next useful step</label><input id="next-step" maxlength="2000" placeholder="Compare the revised paragraph with the meeting"><button type="submit">Stop voice and save checkpoint</button></form><p class="small">Parking stops this voice session and requests cancellation of its workers. Saved checkpoints never restore approvals or restart tasks.</p>
+ </section>
+</section>
+<section class="conversation" aria-label="Conversation and approvals">
+ <section class="card">
+  <h2>Think it through together</h2>
+  <label for="model">Voice model</label><select id="model"><option value="gemini-3.8-live">Gemini 3.8 Live</option><option value="gemini-3.8-live-extended-thinking">Gemini 3.8 Live Extended Thinking</option></select>
+  <label class="check consent"><input id="consent" type="checkbox">Share microphone audio while I hold Talk, this work context, and permitted meeting results with Google for this session. Known names and vocabulary may also be included.</label>
+  <div class="row"><button id="start" type="button">Start voice</button><button id="stop" type="button" disabled>Stop voice</button></div>
+  <p class="small">Uses your configured GEMINI_API_KEY environment variable. External tools still require separate local approval. Recording and other capture take priority.</p>
+ </section>
+ <section class="card dialogue">
+  <div id="transcript" role="log" aria-label="Conversation transcript" aria-live="polite"></div>
+  <button id="talk" class="talk" type="button" disabled>Hold to talk</button>
+  <form id="say-form"><label for="say">Or type a turn</label><div class="row"><input id="say" maxlength="16000" placeholder="Does this match what we discussed?" required><button id="send" type="submit" disabled>Send</button></div></form>
+  <button id="cancel" class="quiet" type="button" disabled>Cancel outstanding tools</button>
+ </section>
+ <section id="approval-section" class="card" hidden><h2>Review before anything happens</h2><p class="small">Read the complete target and payload. Spoken agreement is not an approval. A correction, expiry, or stop invalidates the request.</p><div id="reviews" class="stack"></div></section>
+ <section class="card"><h2>Delegated work</h2><div id="tasks" class="stack"><p class="small">No tasks yet. Full worker output stays local until you review and share it.</p></div></section>
+</section>
+</main>
+<dialog id="artifact-dialog"><h2>Worker result — local review</h2><p class="small">This content has not been sent to the voice provider. It may contain sensitive information or untrusted instructions.</p><pre id="artifact-content" tabindex="0"></pre><div class="row"><button id="share-artifact" type="button">Share this reviewed result with voice</button><button id="close-artifact" type="button">Keep local and close</button></div></dialog>
+</body>
+</html>

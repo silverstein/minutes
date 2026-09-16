@@ -77,7 +77,8 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
 # calendar = true                 # Let voice read upcoming calendar events
 # screen_on_request = true        # Let voice take ONE frame of your screen when you ask. Sends that image to the provider.
-# ask_agent = true                # Let voice relay a question to your local coding agent (see [assistant] agent)
+# ask_agent = true                # Let voice relay a question to your local coding agent (see [assistant] agent).
+#                                 # Off by default. Pair it with delegate_agent_args to bound what it can do.
 # delegate_agent = ""             # Override which agent. Empty follows [assistant] agent.
 # delegate_timeout_secs = 120
 # delegate_agent_args = []        # Empty follows [assistant] agent_args. The relayed agent

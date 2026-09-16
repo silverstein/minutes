@@ -391,7 +391,7 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `screen_on_request` | `false` | Expose `look_at_screen`, which captures one frame and sends it to the provider. Off by default because a screen frame is the most sensitive thing this feature can transmit. Pull-only: the model cannot take a frame Mat did not ask for |
 | `prep_artifacts` | `true` | Expose the prep and brief files written by the `/minutes-prep` and `/minutes-brief` skills under `~/.minutes` |
 | `calendar` | `true` | Expose upcoming calendar events. Also requires `[calendar] enabled` |
-| `ask_agent` | `true` | Expose `ask_agent`, which relays one question to a local coding agent. The agent answers with its own tools and credentials, so only its answer leaves the machine |
+| `ask_agent` | `false` | Expose `ask_agent`, which relays one question to a local coding agent. Off by default. Only its answer travels onward, but the agent runs with whatever permissions it was given and Minutes cannot constrain it once asked, so `delegate_agent_args` is the control that matters |
 | `delegate_agent` | `""` | Which agent CLI to relay to. Empty follows `[assistant] agent`, then the first agent CLI installed |
 | `delegate_timeout_secs` | `120` | How long to wait for that agent |
 | `delegate_agent_args` | `[]` | Launch flags for the relayed agent. Empty follows `[assistant] agent_args`. A relayed agent has no terminal, so it must not stop to ask for tool-use permission: nothing can answer the prompt and the call burns its whole timeout looking like a hang |

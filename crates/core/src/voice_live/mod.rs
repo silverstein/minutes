@@ -234,7 +234,11 @@ mod tests {
             }],
             vec!["RxVIP".into()],
         );
-        let p = system_prompt(&cfg(), &names, true);
+        // Every optional surface on, because this test exists to prove no
+        // rule was dropped, not to check what is on by default.
+        let mut config = cfg();
+        config.voice_live.ask_agent = true;
+        let p = system_prompt(&config, &names, true);
         for needle in [
             "spelled with one t",
             "one to three short sentences",

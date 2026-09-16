@@ -1168,8 +1168,11 @@ pub struct VoiceLiveConfig {
     /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
     pub calendar: bool,
     /// Expose `ask_agent`, which relays a question to a local coding agent.
-    /// The agent answers with its own tools and MCP servers, so only its answer
-    /// leaves the machine, not the files or systems it consulted.
+    ///
+    /// Off by default. Only its answer travels onward, but the agent itself
+    /// runs with whatever permissions it was configured with, and Minutes
+    /// cannot constrain what it does once asked. `delegate_agent_args` is the
+    /// control that matters; the flag here only decides whether to offer it.
     pub ask_agent: bool,
     /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
     /// first agent CLI found on the machine.
@@ -1247,7 +1250,7 @@ impl Default for VoiceLiveConfig {
             speech_end_sensitivity: "low".into(),
             prep_artifacts: true,
             calendar: true,
-            ask_agent: true,
+            ask_agent: false,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
             delegate_agent_args: Vec::new(),

@@ -241,7 +241,25 @@ impl Drop for LiveClient {
 
 type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 
+fn set_write_timeout(socket: &mut Socket, timeout: Duration) {
+    match socket.get_mut() {
+        MaybeTlsStream::Plain(s) => {
+            let _ = s.set_write_timeout(Some(timeout));
+        }
+        MaybeTlsStream::Rustls(s) => {
+            let _ = s.sock.set_write_timeout(Some(timeout));
+        }
+        _ => {}
+    }
+}
+
+/// Cap on a single socket write. Microphone audio arrives continuously, so a
+/// peer that stops reading would otherwise park the writer while the outbox
+/// grows, and closing the session would then join a thread that never returns.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn set_read_timeout(socket: &mut Socket, timeout: Duration) {
+    set_write_timeout(socket, WRITE_TIMEOUT);
     match socket.get_mut() {
         MaybeTlsStream::Plain(s) => {
             let _ = s.set_read_timeout(Some(timeout));

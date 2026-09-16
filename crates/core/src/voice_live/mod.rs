@@ -143,12 +143,16 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if config.voice_live.prep_artifacts {
         p.push_str("Preps and briefs. Before a conversation Mat sometimes writes himself a prep or a brief with the /minutes-prep and /minutes-brief skills. Those are his own intentions, goals and talking points, not a transcript, so they answer what he wanted out of a meeting rather than what was said. When he mentions prepping for something, or asks what he meant to cover, call list_preps and then get_prep. Use them alongside the meeting tools when both apply.\n\n");
     }
+    if config.voice_live.ask_agent && tools::delegate_agent(config).is_some() {
+        p.push_str("Outside your own memory. Anything that is not a meeting, a person, a commitment, a prep or a note lives outside your tools: Mat's code, his repositories, his documents, and services like a CRM or issue tracker. For those, call ask_agent with one self-contained question. It cannot hear this conversation, so put everything it needs into the question itself. It takes several seconds, so say you are checking first, then answer from what it returns and say the answer came from the agent. Never guess at code or a system you have not asked it about.\n\n");
+    }
     if config.voice_live.calendar && config.calendar.enabled {
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
     if config.voice_live.screen_on_request {
         p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
     }
+    p.push_str("When Mat asks why you did something, or why you got something wrong, tell him what you actually observed: which tool you called and what it returned. You do not know how Minutes is implemented, so never explain your own behaviour by inventing a mechanism inside it. Saying you do not know why is a real answer and he is usually debugging when he asks.\n\n");
     p.push_str("If Mat asks you to remember or note something, call add_note with his words. Ask before calling any tool that writes or changes something, and never rename a speaker unless Mat explicitly states the name.");
     p
 }
@@ -228,6 +232,8 @@ mod tests {
             "Ask before calling any tool that writes",
             "never rename a speaker",
             "list_preps and then get_prep",
+            "call ask_agent with one self-contained question",
+            "never explain your own behaviour by inventing a mechanism",
             "read the current time from get_status",
         ] {
             assert!(p.contains(needle), "prompt lost rule: {needle}");

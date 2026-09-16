@@ -1153,6 +1153,15 @@ pub struct VoiceLiveConfig {
     pub prep_artifacts: bool,
     /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
     pub calendar: bool,
+    /// Expose `ask_agent`, which relays a question to a local coding agent.
+    /// The agent answers with its own tools and MCP servers, so only its answer
+    /// leaves the machine, not the files or systems it consulted.
+    pub ask_agent: bool,
+    /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
+    /// first agent CLI found on the machine.
+    pub delegate_agent: String,
+    /// How long to wait for that agent before giving up.
+    pub delegate_timeout_secs: u64,
 }
 
 impl Default for VoiceLiveConfig {
@@ -1175,6 +1184,9 @@ impl Default for VoiceLiveConfig {
             speech_end_sensitivity: "low".into(),
             prep_artifacts: true,
             calendar: true,
+            ask_agent: true,
+            delegate_agent: String::new(),
+            delegate_timeout_secs: 120,
         }
     }
 }

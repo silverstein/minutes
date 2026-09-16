@@ -159,8 +159,21 @@ impl ToolContext {
                 json!({"within_minutes": {"type": "integer", "description": "Look-ahead window in minutes (default 720)"}}),
             ));
         }
+        if self.config.voice_live.ask_agent {
+            if let Some(agent) = delegate_agent(&self.config) {
+                let agent_label = Path::new(&agent)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| agent.clone());
+                d.push(decl(
+                    "ask_agent",
+                    &format!("Relay one question to Mat's local {agent_label} agent, which can read his code, files and connected services. Use it for anything outside meeting memory: his codebase, a repository, a document, or a system like a CRM or issue tracker. Ask one self-contained question, including any context from this conversation the agent would need, because it cannot hear you. It takes several seconds, so say you are checking before you call it."),
+                    json!({"question": {"type": "string", "description": "A single self-contained question"}}),
+                ));
+            }
+        }
         if self.config.voice_live.screen_on_request {
-            d.push(decl(
+            d.push(decl_blocking(
                 "look_at_screen",
                 "Take one frame of whatever is on Mat's screen right now and look at it. Use it only when he asks about his screen, what he is looking at, or something visible in front of him. The frame is delivered as an image; describe what you actually see.",
                 json!({}),
@@ -241,15 +254,14 @@ impl ToolContext {
         let _ = std::fs::remove_file(&path);
         match bytes {
             Ok(bytes) => {
-                let app = crate::desktop_context::frontmost_app_identity()
-                    .ok()
-                    .flatten()
-                    .and_then(|f| f.app_name)
-                    .unwrap_or_else(|| "unknown".to_string());
+                // Deliberately no frontmost-app field. It named the window
+                // running this session, and the model reported that name
+                // instead of reading the frame, insisting it could only see a
+                // terminal while a browser filled the screen. The image is the
+                // only source of truth about what is on screen.
                 ToolOutcome {
                     text: json!({
                         "delivered": true,
-                        "frontmost_app": app,
                         "captured_at": Local::now().to_rfc3339(),
                         "note": "A frame of Mat's screen taken just now was added to this conversation. It replaces any earlier frame: his screen has probably changed since, so describe only this newest one and never answer from a previous one. Say so plainly if it is unreadable.",
                     })
@@ -430,6 +442,23 @@ impl ToolContext {
                 let rel = str_arg(args, "path").ok_or("path is required")?;
                 brain_read(root, &rel, self.max_chars.saturating_sub(500))
             }
+            "ask_agent" => {
+                let question = str_arg(args, "question").ok_or("question is required")?;
+                let agent =
+                    delegate_agent(cfg).ok_or("no coding agent is configured or installed")?;
+                let timeout =
+                    Duration::from_secs(cfg.voice_live.delegate_timeout_secs.clamp(10, 900));
+                let prompt = format!(
+                    "You are answering one question relayed from a voice assistant. \
+                     Answer from the files, systems and tools you can reach. Be specific and \
+                     factual, and say plainly when you could not find something. Answer only: \
+                     do not create, edit or delete anything unless the question explicitly asks \
+                     you to. Reply in under 120 words of plain prose, no markdown and no code \
+                     blocks, because it will be read aloud.\n\nQuestion: {question}"
+                );
+                crate::summarize::run_agent_prompt(&agent, &prompt, timeout)
+                    .map(|answer| json!({ "agent": agent, "answer": answer }))
+            }
             "list_preps" => Ok(list_prep_artifacts()),
             "get_prep" => {
                 let name = str_arg(args, "name").ok_or("name is required")?;
@@ -467,7 +496,26 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
     if !required.is_empty() {
         params["required"] = json!(required);
     }
-    json!({"name": name, "description": description, "parameters": params, "behavior": "NON_BLOCKING"})
+    decl_json(name, description, params, "NON_BLOCKING")
+}
+
+/// A tool the model must wait for before it answers.
+///
+/// Non-blocking is right for reads whose answer is still true a second later.
+/// It is wrong for anything about this instant: the model issues the call and
+/// answers immediately from what it already had, so a question about the screen
+/// gets described from the previous frame and the assistant runs a turn behind.
+fn decl_blocking(name: &str, description: &str, properties: Value) -> Value {
+    decl_json(
+        name,
+        description,
+        json!({"type": "object", "properties": properties}),
+        "BLOCKING",
+    )
+}
+
+fn decl_json(name: &str, description: &str, params: Value, behavior: &str) -> Value {
+    json!({"name": name, "description": description, "parameters": params, "behavior": behavior})
 }
 
 fn str_arg(args: &Value, key: &str) -> Option<String> {
@@ -580,6 +628,22 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
             }
         }
     }
+}
+
+/// Which agent CLI voice relays to: the voice override, else the assistant
+/// Minutes already hands off to, else whatever is installed.
+pub fn delegate_agent(config: &Config) -> Option<String> {
+    for candidate in [
+        config.voice_live.delegate_agent.trim(),
+        config.assistant.agent.trim(),
+    ] {
+        if !candidate.is_empty() {
+            // Resolve to a real path: Minutes can run without a login shell, so
+            // a bare "claude" fails to spawn even when it is installed.
+            return Some(crate::summarize::resolve_agent_path(candidate));
+        }
+    }
+    crate::summarize::detect_agent_cli()
 }
 
 /// The two directories the prep and brief skills write to.
@@ -847,6 +911,39 @@ mod tests {
     fn truncation_marks_dropped_chars() {
         let t = truncate("x".repeat(50), 10);
         assert!(t.starts_with("xxxxxxxxxx\n...[truncated 40 chars]"));
+    }
+
+    #[test]
+    fn the_screen_tool_blocks_so_the_answer_is_not_a_frame_behind() {
+        let mut config = Config::default();
+        config.voice_live.screen_on_request = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let screen = ctx
+            .declarations()
+            .into_iter()
+            .find(|d| d["name"] == "look_at_screen")
+            .expect("look_at_screen should be declared");
+        assert_eq!(screen["behavior"], "BLOCKING");
+    }
+
+    #[test]
+    fn a_captured_frame_reports_no_app_name_to_parrot() {
+        let mut config = Config::default();
+        config.voice_live.screen_on_request = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("look_at_screen", &json!({}));
+        // Whether or not capture works here, the result never names an app: the
+        // model reported that name instead of reading the image.
+        assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn delegation_prefers_the_voice_override_then_the_assistant_agent() {
+        let mut config = Config::default();
+        config.assistant.agent = "codex".into();
+        assert!(delegate_agent(&config).unwrap().ends_with("codex"));
+        config.voice_live.delegate_agent = "opencode".into();
+        assert!(delegate_agent(&config).unwrap().ends_with("opencode"));
     }
 
     #[test]

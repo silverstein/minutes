@@ -147,6 +147,19 @@ read-only is not enforcement. This change does not manufacture such a sandbox.
 
 ## Queue cancellation and transport lifecycle
 
+Shared-corpus reads and desktop actions stay on one serialized worker. HTML
+prototypes and music each have a separate worker with four pending slots and
+one running call, so a long build does not delay requested hold music or status
+reads. Two builds (or two music renders) do not overlap. Host-approved actions
+and selection capture always use the serialized lane. All lanes share the same
+duplicate, cancellation and shutdown registry. Generation completions cannot
+clear or re-display an unrelated host-review proposal.
+
+With music explicitly enabled, requested `make_music` calls generate and play
+directly without an additional terminal approval. The recording exclusion and
+post-generation recording check remain. The assistant must describe a pending
+call as generating, never as already drafted or playing.
+
 Each provider call is registered once. Duplicate IDs and model use of the
 reserved `host:` namespace are rejected. Cancellation before execution prevents
 the call from beginning. Cancellation during execution records a request and

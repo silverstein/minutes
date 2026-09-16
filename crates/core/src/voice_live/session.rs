@@ -2,8 +2,8 @@
 //!
 //! One session thread multiplexes three channels: server events from the IO
 //! thread, mic chunks from `AudioStream`, and control messages from the host.
-//! Tool calls run on a single worker thread so corpus reads never overlap (the
-//! active-corpus budget guard rejects concurrent readers) and never block audio.
+//! Corpus reads and desktop actions share one serialized worker. Isolated HTML
+//! and music generation have separate bounded workers and never block audio.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -506,15 +506,31 @@ struct Runner {
 /// out of a click or a breath.
 const PTT_MIN_CHUNKS: usize = 3;
 
+#[derive(Debug)]
 enum DispatchOrigin {
     Model,
     Approved(u64),
     Selection(Option<String>),
 }
 
+#[derive(Debug)]
 struct QueuedCall {
     call: FunctionCall,
     origin: DispatchOrigin,
+}
+
+impl QueuedCall {
+    fn lane(&self) -> usize {
+        match (&self.origin, self.call.name.as_str()) {
+            (DispatchOrigin::Model, "build_prototype") => 1,
+            (DispatchOrigin::Model, "make_music") => 2,
+            _ => 0,
+        }
+    }
+}
+
+fn tool_channels() -> [(Sender<QueuedCall>, Receiver<QueuedCall>); 3] {
+    [bounded(64), bounded(4), bounded(4)]
 }
 
 struct PttState {
@@ -570,13 +586,15 @@ impl Runner {
         let mut resume_handle: Option<String> = None;
         let mut resumes = 0u32;
         let mut selection_sequence = 0u64;
-        // Tool worker: one at a time, results go straight back to the socket.
-        let (tool_tx, tool_rx) = bounded::<QueuedCall>(64);
+        // Keep shared-data/actions ordered, but independent generation must not
+        // hold up another tool. Each generation kind still runs one at a time.
+        let channels = tool_channels();
+        let tool_txs = channels.each_ref().map(|(tx, _)| tx.clone());
         let calls = Arc::new(Mutex::new(Calls::default()));
         let mut activity =
             LiveActivity::new(self.setup.profile().expect("validated before connecting"));
         let (audio_out, audio_in) = unbounded::<Vec<u8>>();
-        let worker = {
+        let workers: Vec<_> = channels.into_iter().enumerate().map(|(lane, (_, tool_rx))| {
             let tools = Arc::clone(&self.tools);
             let calls = Arc::clone(&calls);
             let client_cell = Arc::clone(&self.client);
@@ -588,7 +606,7 @@ impl Runner {
             let audio_out = audio_out.clone();
             let stop_flag = Arc::clone(&self.stop_flag);
             std::thread::Builder::new()
-                .name("voice-live-tools".into())
+                .name(format!("voice-live-tools-{lane}"))
                 .spawn(move || {
                     for queued in tool_rx.iter() {
                         let call = queued.call;
@@ -637,14 +655,18 @@ impl Runner {
                         running.store(false, Ordering::Relaxed);
                         let publish = calls.lock().unwrap_or_else(|p| p.into_inner()).finish(&call.id);
                         if !publish || stop_flag.load(Ordering::SeqCst) {
-                            if let Ok(mut host) = tools.continuity.lock() { host.reject(); }
+                            if lane == 0 {
+                                if let Ok(mut host) = tools.continuity.lock() { host.reject(); }
+                            }
                             on_event(VoiceLiveEvent::Status { text: format!(
                                 "{} finished after cancellation was requested. Its external effects, if any, are not automatically undone; result withheld from the provider.", call.name) });
                             continue;
                         }
-                        if let Ok(host) = tools.continuity.lock() {
-                            if let Some(proposal) = host.review() {
-                                on_event(VoiceLiveEvent::Review { proposal });
+                        if lane == 0 {
+                            if let Ok(host) = tools.continuity.lock() {
+                                if let Some(proposal) = host.review() {
+                                    on_event(VoiceLiveEvent::Review { proposal });
+                                }
                             }
                         }
                         on_event(VoiceLiveEvent::ToolResult {
@@ -717,7 +739,7 @@ impl Runner {
                     }
                 })
                 .ok()
-        };
+        }).collect();
 
         let mut state = VoiceLiveState::Connecting;
         let mut ptt = PttState {
@@ -816,10 +838,11 @@ impl Runner {
                                     continue;
                                 }
                                 activity.provider_status(ProviderActivity::InProgress);
-                                if let Err(rejected) = tool_tx.try_send(QueuedCall { call, origin: DispatchOrigin::Model }) {
+                                let queued = QueuedCall { call, origin: DispatchOrigin::Model };
+                                if let Err(rejected) = tool_txs[queued.lane()].try_send(queued) {
                                     calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
                                     let call = rejected.into_inner().call;
-                                    let _ = self.client().send_tool_response(&call, "Tool queue full; nothing executed", "WHEN_IDLE");
+                                    let _ = self.client().send_tool_response(&call, "Tool queue full or unavailable; nothing executed", "WHEN_IDLE");
                                 }
                             }
                         }
@@ -958,7 +981,7 @@ impl Runner {
                                     Ok(HostResult::Approve(id)) => {
                                         let call_id = format!("host:approval:{id}");
                                         let registered = calls.lock().unwrap_or_else(|p| p.into_inner()).register(&call_id).is_ok();
-                                        if !registered || tool_tx.try_send(QueuedCall {
+                                        if !registered || tool_txs[0].try_send(QueuedCall {
                                             call: FunctionCall { id: call_id.clone(), name: "host-approved action".into(), args: serde_json::json!({}) },
                                             origin: DispatchOrigin::Approved(id),
                                         }).is_err() {
@@ -982,7 +1005,7 @@ impl Runner {
                                             };
                                             let id = format!("host:selection:{selection_sequence}");
                                             let registered = calls.lock().unwrap_or_else(|p| p.into_inner()).register(&id).is_ok();
-                                            if !registered || tool_tx.try_send(QueuedCall {
+                                            if !registered || tool_txs[0].try_send(QueuedCall {
                                                 call: FunctionCall { id: id.clone(), name: "user-shared selection".into(), args: serde_json::json!({}) },
                                                 origin: DispatchOrigin::Selection(bundle),
                                             }).is_err() {
@@ -1032,8 +1055,8 @@ impl Runner {
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
         self.tools.mcp.shutdown();
-        drop(tool_tx);
-        if let Some(w) = worker {
+        drop(tool_txs);
+        for w in workers.into_iter().flatten() {
             let _ = w.join();
         }
         let final_client = {
@@ -1128,6 +1151,120 @@ impl SessionLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued(id: &str, name: &str) -> QueuedCall {
+        QueuedCall {
+            call: FunctionCall {
+                id: id.into(),
+                name: name.into(),
+                args: serde_json::json!({}),
+            },
+            origin: DispatchOrigin::Model,
+        }
+    }
+
+    #[test]
+    fn only_independent_model_generation_uses_separate_lanes() {
+        assert_eq!(queued("a", "build_prototype").lane(), 1);
+        assert_eq!(queued("b", "make_music").lane(), 2);
+        for name in [
+            "get_status",
+            "search_meetings",
+            "get_meeting",
+            "look_at_screen",
+            "ask_agent",
+            "send_email",
+            "open_app",
+            "mcp__read",
+        ] {
+            assert_eq!(queued("c", name).lane(), 0, "{name}");
+        }
+        let mut approved = queued("host:1", "make_music");
+        approved.origin = DispatchOrigin::Approved(1);
+        assert_eq!(approved.lane(), 0);
+        approved.origin = DispatchOrigin::Selection(None);
+        assert_eq!(approved.lane(), 0);
+    }
+
+    #[test]
+    fn slow_build_does_not_block_music_or_status_and_cancelled_build_stays_queued() {
+        let channels = tool_channels();
+        let txs = channels.each_ref().map(|(tx, _)| tx.clone());
+        let calls = Arc::new(Mutex::new(Calls::default()));
+        let (started_tx, started_rx) = bounded(1);
+        let (release_tx, release_rx) = bounded(1);
+        let (done_tx, done_rx) = unbounded();
+        let workers: Vec<_> = channels
+            .into_iter()
+            .map(|(_, rx)| {
+                let calls = Arc::clone(&calls);
+                let started_tx = started_tx.clone();
+                let release_rx = release_rx.clone();
+                let done_tx = done_tx.clone();
+                std::thread::spawn(move || {
+                    for queued in rx.iter() {
+                        let id = queued.call.id;
+                        if !calls.lock().unwrap().begin(&id) {
+                            continue;
+                        }
+                        if id == "build" {
+                            started_tx.send(()).unwrap();
+                            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        }
+                        if calls.lock().unwrap().finish(&id) {
+                            done_tx.send(id).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        let enqueue = |id: &str, name: &str| {
+            calls.lock().unwrap().register(id).unwrap();
+            let call = queued(id, name);
+            txs[call.lane()].try_send(call).unwrap();
+        };
+        enqueue("build", "build_prototype");
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        enqueue("later-build", "build_prototype");
+        calls.lock().unwrap().cancel("later-build");
+        enqueue("music", "make_music");
+        enqueue("status", "get_status");
+        let first = done_rx.recv_timeout(Duration::from_secs(2));
+        let second = done_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        drop(txs);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let mut early = vec![first.unwrap(), second.unwrap()];
+        early.sort();
+        assert_eq!(early, ["music", "status"]);
+        assert_eq!(done_rx.try_recv().unwrap(), "build");
+        assert!(done_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn generation_queues_are_bounded_without_filling_the_other_lanes() {
+        let channels = tool_channels();
+        for n in 0..4 {
+            channels[1]
+                .0
+                .try_send(queued(&n.to_string(), "build_prototype"))
+                .unwrap();
+        }
+        assert!(channels[1]
+            .0
+            .try_send(queued("overflow", "build_prototype"))
+            .is_err());
+        assert!(channels[2]
+            .0
+            .try_send(queued("music", "make_music"))
+            .is_ok());
+        assert!(channels[0]
+            .0
+            .try_send(queued("status", "get_status"))
+            .is_ok());
+    }
 
     #[test]
     fn events_serialize_with_a_type_tag() {

@@ -68,6 +68,9 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # language = "en-US"
 # brain_search = true             # Expose knowledge base search/read when [knowledge].path is set
 # log_sessions = true             # Write each session transcript to ~/.minutes/voice-sessions/
+# echo_cancellation = true        # macOS: cancel the speaker signal out of the mic so open mic does not hear itself
+# speech_start_sensitivity = "low"  # Provider speech detection on open mic: "low" or "high"
+# speech_end_sensitivity = "low"
 
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)

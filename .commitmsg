@@ -1,0 +1,26 @@
+fix(voice-live): cancel speaker echo so open mic stops interrupting itself
+
+The first dogfood session interrupted itself continuously. On speakers the
+microphone hears the assistant, the provider's voice activity detection
+reads that as the user talking, and it barges in on its own sentence.
+
+Cancel the echo instead of muting the microphone, which would have
+defeated real barge-in. On macOS mic and speaker now run through one
+VoiceProcessingIO unit, which subtracts what it rendered from what it
+captured. A 32-tap windowed-sinc decimator brings its 24 kHz microphone
+side down to the 16 kHz the provider wants, carrying filter state across
+callbacks so chunked audio matches a single pass. This is the native
+equivalent of the `echoCancellation: true` that the working browser
+clients get from getUserMedia.
+
+Also pass start and end speech sensitivity on open mic, defaulting both
+to low, matching those clients.
+
+No platform gets a self-interrupting default. Open mic is the default
+only where the speaker signal can be cancelled; elsewhere `minutes talk`
+defaults to push-to-talk, which never sends microphone audio while the
+assistant speaks, and `--open-mic` warns that it needs headphones.
+Windows and Linux compile exactly as before: the dependency sits in the
+macOS target block and the module behind a macOS attribute.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>

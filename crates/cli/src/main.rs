@@ -424,9 +424,15 @@ enum Commands {
     #[cfg(feature = "voice-live")]
     Talk {
         /// Push-to-talk: press Enter to start talking and Enter again to stop.
-        /// Default is open mic with the provider's voice activity detection.
+        /// The default on platforms without echo cancellation, because open mic
+        /// there hears the assistant through the speakers and interrupts itself.
         #[arg(long)]
         ptt: bool,
+
+        /// Open mic using the provider's voice activity detection. The default
+        /// on macOS. Elsewhere it needs headphones.
+        #[arg(long = "open-mic", conflicts_with = "ptt")]
+        open_mic: bool,
 
         /// Audio input device name. Use `minutes devices` to list available devices.
         /// Overrides the [recording] device setting in config.toml.
@@ -2059,10 +2065,11 @@ fn main() -> Result<()> {
         #[cfg(feature = "voice-live")]
         Commands::Talk {
             ptt,
+            open_mic,
             device,
             mute,
             json,
-        } => cmd_talk(&config, ptt, device, mute, json),
+        } => cmd_talk(&config, ptt, open_mic, device, mute, json),
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2608,6 +2615,7 @@ fn main() -> Result<()> {
 fn cmd_talk(
     config: &Config,
     ptt: bool,
+    open_mic: bool,
     device: Option<String>,
     mute: bool,
     json: bool,
@@ -2623,9 +2631,16 @@ fn cmd_talk(
 
     let mode = if ptt {
         TalkMode::PushToTalk
-    } else {
+    } else if open_mic {
         TalkMode::OpenMic
+    } else {
+        voice_live::default_talk_mode(config)
     };
+    if mode == TalkMode::OpenMic && !voice_live::echo_cancellation_available(config) {
+        eprintln!(
+            "Open mic without echo cancellation. Use headphones, or the assistant hears itself through the speakers and interrupts mid-sentence. `--ptt` avoids this."
+        );
+    }
     let closed = Arc::new(AtomicBool::new(false));
     let closed_in_events = Arc::clone(&closed);
     let session = voice_live::start(

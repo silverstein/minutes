@@ -390,6 +390,10 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `brain_search` | `true` | Expose knowledge base search and read when `[knowledge].path` is set |
 | `screen_on_request` | `false` | Expose a single on-request screen frame (reserved, not yet implemented) |
 | `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
+| `echo_cancellation` | `true` | Also decides the default talk mode: open mic where cancellation exists, push-to-talk everywhere else, so no platform self-interrupts by default. |
+| | | Run mic and speaker through one voice-processing unit so the speaker signal is cancelled out of the mic. macOS only today; elsewhere plain capture, so `minutes talk` defaults to push-to-talk and `--open-mic` warns |
+| `speech_start_sensitivity` | `"low"` | Provider speech-start detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
+| `speech_end_sensitivity` | `"low"` | Provider speech-end detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
 
 ### `[screen_context]` — recording-time screenshots
 

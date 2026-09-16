@@ -1140,6 +1140,14 @@ pub struct VoiceLiveConfig {
     pub screen_on_request: bool,
     /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
     pub log_sessions: bool,
+    /// Cancel the speaker signal out of the microphone so open mic does not hear
+    /// and interrupt the assistant. Uses the platform voice-processing unit on
+    /// macOS; other platforms fall back to plain capture.
+    pub echo_cancellation: bool,
+    /// Provider speech-start sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_start_sensitivity: String,
+    /// Provider speech-end sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_end_sensitivity: String,
 }
 
 impl Default for VoiceLiveConfig {
@@ -1157,6 +1165,9 @@ impl Default for VoiceLiveConfig {
             brain_search: true,
             screen_on_request: false,
             log_sessions: true,
+            echo_cancellation: true,
+            speech_start_sensitivity: "low".into(),
+            speech_end_sensitivity: "low".into(),
         }
     }
 }

@@ -67,6 +67,10 @@ pub struct SessionSetup {
     pub language: String,
     /// `true` for push-to-talk: we send activityStart/activityEnd ourselves.
     pub manual_activity: bool,
+    /// Open-mic speech-start sensitivity: "low", "high", or empty for the provider default.
+    pub start_sensitivity: String,
+    /// Open-mic speech-end sensitivity: "low", "high", or empty for the provider default.
+    pub end_sensitivity: String,
     pub resume_handle: Option<String>,
 }
 
@@ -89,6 +93,18 @@ impl SessionSetup {
         if self.manual_activity {
             setup["realtimeInputConfig"] =
                 json!({ "automaticActivityDetection": { "disabled": true } });
+        } else {
+            let mut detection = serde_json::Map::new();
+            if let Some(v) = sensitivity_enum("START_SENSITIVITY", &self.start_sensitivity) {
+                detection.insert("startOfSpeechSensitivity".into(), Value::String(v));
+            }
+            if let Some(v) = sensitivity_enum("END_SENSITIVITY", &self.end_sensitivity) {
+                detection.insert("endOfSpeechSensitivity".into(), Value::String(v));
+            }
+            if !detection.is_empty() {
+                setup["realtimeInputConfig"] =
+                    json!({ "automaticActivityDetection": Value::Object(detection) });
+            }
         }
         setup["sessionResumption"] = match &self.resume_handle {
             Some(h) => json!({ "handle": h }),
@@ -409,6 +425,15 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "error",
 ];
 
+/// Map a config level to the provider's enum; anything else keeps the default.
+fn sensitivity_enum(prefix: &str, level: &str) -> Option<String> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(format!("{prefix}_LOW")),
+        "high" => Some(format!("{prefix}_HIGH")),
+        _ => None,
+    }
+}
+
 fn redact_key(message: &str, key: &str) -> String {
     if key.is_empty() {
         message.to_string()
@@ -432,6 +457,8 @@ mod tests {
             ],
             language: "en-US".into(),
             manual_activity: true,
+            start_sensitivity: "low".into(),
+            end_sensitivity: "low".into(),
             resume_handle: None,
         };
         let v = setup.to_json();
@@ -457,6 +484,29 @@ mod tests {
     }
 
     #[test]
+    fn open_mic_setup_passes_speech_sensitivity() {
+        let setup = SessionSetup {
+            model: "m".into(),
+            api_key: "k".into(),
+            system_instruction: String::new(),
+            function_declarations: vec![],
+            language: "en-US".into(),
+            manual_activity: false,
+            start_sensitivity: "low".into(),
+            end_sensitivity: "HIGH".into(),
+            resume_handle: None,
+        };
+        let v = setup.to_json();
+        let detection = &v["setup"]["realtimeInputConfig"]["automaticActivityDetection"];
+        assert_eq!(
+            detection["startOfSpeechSensitivity"],
+            "START_SENSITIVITY_LOW"
+        );
+        assert_eq!(detection["endOfSpeechSensitivity"], "END_SENSITIVITY_HIGH");
+        assert!(detection.get("disabled").is_none());
+    }
+
+    #[test]
     fn open_mic_setup_omits_manual_activity() {
         let setup = SessionSetup {
             model: "m".into(),
@@ -465,6 +515,8 @@ mod tests {
             function_declarations: vec![],
             language: "en-US".into(),
             manual_activity: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
             resume_handle: Some("h".into()),
         };
         let v = setup.to_json();

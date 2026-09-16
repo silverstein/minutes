@@ -18,12 +18,14 @@ use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::streaming::AudioStream;
+use crate::streaming::{AudioChunk, AudioStream};
 
 use super::audio_out::Playback;
 use super::names::NameIndex;
 use super::protocol::{FunctionCall, LiveClient, ServerEvent, SessionSetup};
 use super::tools::ToolContext;
+#[cfg(target_os = "macos")]
+use super::voice_io::VoiceIo;
 use super::{system_prompt, VoiceLiveError};
 
 /// How the user talks.
@@ -101,6 +103,143 @@ impl Default for SessionOptions {
             mute_playback: false,
         }
     }
+}
+
+/// The microphone and speaker for one session.
+enum AudioIo {
+    /// Separate capture and playback streams. No echo cancellation: on speakers
+    /// the microphone hears the assistant, so open mic is only reliable on
+    /// headphones.
+    Split {
+        mic: AudioStream,
+        playback: Option<Playback>,
+    },
+    /// One voice-processing unit doing both, with the speaker signal cancelled
+    /// out of the microphone.
+    #[cfg(target_os = "macos")]
+    Processed(VoiceIo),
+}
+
+impl AudioIo {
+    fn receiver(&self) -> &Receiver<AudioChunk> {
+        match self {
+            AudioIo::Split { mic, .. } => &mic.receiver,
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => &io.receiver,
+        }
+    }
+
+    fn push_pcm16(&mut self, bytes: &[u8]) {
+        match self {
+            AudioIo::Split { playback, .. } => {
+                if let Some(p) = playback.as_mut() {
+                    p.push_pcm16(bytes);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.push_pcm16(bytes),
+        }
+    }
+
+    fn flush(&mut self) {
+        match self {
+            AudioIo::Split { playback, .. } => {
+                if let Some(p) = playback.as_mut() {
+                    p.flush();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.flush(),
+        }
+    }
+
+    /// True when nothing is queued for the speaker (or there is no speaker).
+    fn is_idle(&self) -> bool {
+        match self {
+            AudioIo::Split { playback, .. } => {
+                playback.as_ref().map(|p| p.is_idle()).unwrap_or(true)
+            }
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.is_idle(),
+        }
+    }
+
+    fn stop(&mut self) {
+        match self {
+            AudioIo::Split { mic, .. } => mic.stop(),
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.stop(),
+        }
+    }
+}
+
+/// Open audio for a session. Prefers the echo-cancelled unit when playback is
+/// on and the platform has one; otherwise separate streams, with a status line
+/// saying why so a self-interrupting session is explainable from the log.
+fn open_audio(
+    config: &Config,
+    options: &SessionOptions,
+    device: Option<&str>,
+    emit: &dyn Fn(VoiceLiveEvent),
+) -> Result<AudioIo, VoiceLiveError> {
+    let want_cancellation = !options.mute_playback && config.voice_live.echo_cancellation;
+    #[cfg(target_os = "macos")]
+    if want_cancellation {
+        match VoiceIo::start() {
+            Ok(io) => {
+                if let Some(d) = device {
+                    emit(VoiceLiveEvent::Status {
+                        text: format!(
+                            "device override {d:?} ignored: echo cancellation follows the system default input and output"
+                        ),
+                    });
+                }
+                emit(VoiceLiveEvent::Status {
+                    text: format!(
+                        "mic: {} (echo cancellation on), speaker: {}",
+                        io.input_name, io.output_name
+                    ),
+                });
+                return Ok(AudioIo::Processed(io));
+            }
+            Err(e) => emit(VoiceLiveEvent::Status {
+                text: format!(
+                    "echo cancellation unavailable ({e}); using plain capture, expect self-interruption on speakers"
+                ),
+            }),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    if want_cancellation {
+        emit(VoiceLiveEvent::Status {
+            text: "echo cancellation is macOS-only for now; using plain capture, use headphones on open mic"
+                .into(),
+        });
+    }
+
+    let mic = AudioStream::start(device).map_err(|e| VoiceLiveError::Audio(e.to_string()))?;
+    emit(VoiceLiveEvent::Status {
+        text: format!("mic: {}", mic.device_name),
+    });
+    let playback = if options.mute_playback {
+        None
+    } else {
+        match Playback::open() {
+            Ok(p) => {
+                emit(VoiceLiveEvent::Status {
+                    text: format!("speaker: {}", p.device_name),
+                });
+                Some(p)
+            }
+            Err(e) => {
+                emit(VoiceLiveEvent::Status {
+                    text: format!("no speaker playback: {e}"),
+                });
+                None
+            }
+        }
+    };
+    Ok(AudioIo::Split { mic, playback })
 }
 
 enum Control {
@@ -201,6 +340,8 @@ where
         function_declarations: declarations,
         language: config.voice_live.language.clone(),
         manual_activity: options.mode == TalkMode::PushToTalk,
+        start_sensitivity: config.voice_live.speech_start_sensitivity.clone(),
+        end_sensitivity: config.voice_live.speech_end_sensitivity.clone(),
         resume_handle: None,
     };
     let client = Arc::new(LiveClient::connect(&setup)?);
@@ -214,30 +355,7 @@ where
     if let Some(reason) = preflight.blocking_reason {
         return Err(VoiceLiveError::Audio(reason));
     }
-    let mic =
-        AudioStream::start(device.as_deref()).map_err(|e| VoiceLiveError::Audio(e.to_string()))?;
-    emit(VoiceLiveEvent::Status {
-        text: format!("mic: {}", mic.device_name),
-    });
-
-    let playback = if options.mute_playback {
-        None
-    } else {
-        match Playback::open() {
-            Ok(p) => {
-                emit(VoiceLiveEvent::Status {
-                    text: format!("speaker: {}", p.device_name),
-                });
-                Some(p)
-            }
-            Err(e) => {
-                emit(VoiceLiveEvent::Status {
-                    text: format!("no speaker playback: {e}"),
-                });
-                None
-            }
-        }
-    };
+    let audio = open_audio(config, &options, device.as_deref(), &emit)?;
 
     let log = if config.voice_live.log_sessions {
         SessionLog::open(&config.voice_live.model, options.mode).ok()
@@ -268,8 +386,7 @@ where
     let runner = Runner {
         client,
         inbox,
-        mic,
-        playback,
+        audio,
         tools,
         control_rx,
         on_event: Arc::clone(&on_event),
@@ -294,8 +411,7 @@ where
 struct Runner {
     client: Arc<LiveClient>,
     inbox: Receiver<ServerEvent>,
-    mic: AudioStream,
-    playback: Option<Playback>,
+    audio: AudioIo,
     tools: Arc<ToolContext>,
     control_rx: Receiver<Control>,
     on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync>,
@@ -377,7 +493,7 @@ impl Runner {
             }
             // Speaking -> Ready once playback drains.
             if state == VoiceLiveState::Speaking {
-                let idle = self.playback.as_ref().map(|p| p.is_idle()).unwrap_or(true);
+                let idle = self.audio.is_idle();
                 if idle && last_audio.elapsed() > Duration::from_millis(300) {
                     set_state(&self, &mut state, VoiceLiveState::Ready);
                 }
@@ -388,7 +504,7 @@ impl Runner {
                     match ev {
                         ServerEvent::SetupComplete => set_state(&self, &mut state, VoiceLiveState::Ready),
                         ServerEvent::Audio(bytes) => {
-                            if let Some(p) = self.playback.as_mut() { p.push_pcm16(&bytes); }
+                            self.audio.push_pcm16(&bytes);
                             last_audio = Instant::now();
                             set_state(&self, &mut state, VoiceLiveState::Speaking);
                         }
@@ -401,13 +517,13 @@ impl Runner {
                             self.emit(VoiceLiveEvent::AssistantTranscript { text: t, partial: true });
                         }
                         ServerEvent::Interrupted => {
-                            if let Some(p) = self.playback.as_mut() { p.flush(); }
+                            self.audio.flush();
                             self.flush_transcripts(&mut you, &mut me);
                             set_state(&self, &mut state, VoiceLiveState::Ready);
                         }
                         ServerEvent::TurnComplete => {
                             self.flush_transcripts(&mut you, &mut me);
-                            if self.playback.as_ref().map(|p| p.is_idle()).unwrap_or(true) {
+                            if self.audio.is_idle() {
                                 set_state(&self, &mut state, VoiceLiveState::Ready);
                             }
                         }
@@ -435,7 +551,7 @@ impl Runner {
                         }
                     }
                 }
-                recv(self.mic.receiver) -> chunk => {
+                recv(self.audio.receiver()) -> chunk => {
                     let Ok(chunk) = chunk else { self.emit(VoiceLiveEvent::Closed { reason: "microphone stream ended".into() }); break; };
                     self.emit(VoiceLiveEvent::Level { rms: chunk.rms });
                     let send = match self.mode {
@@ -463,7 +579,7 @@ impl Runner {
                     match ctl {
                         Ok(Control::PttStart) if self.mode == TalkMode::PushToTalk => {
                             ptt = PttState { held: true, started: false, chunks: 0 };
-                            if let Some(p) = self.playback.as_mut() { p.flush(); }
+                            self.audio.flush();
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
                         Ok(Control::PttEnd) if self.mode == TalkMode::PushToTalk => {
@@ -495,7 +611,7 @@ impl Runner {
 
         self.flush_transcripts(&mut you, &mut me);
         set_state(&self, &mut state, VoiceLiveState::Closed);
-        self.mic.stop();
+        self.audio.stop();
         drop(tool_tx);
         if let Some(w) = worker {
             let _ = w.join();

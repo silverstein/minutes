@@ -30,6 +30,7 @@ Module: `crates/core/src/voice_live/` behind Cargo feature `voice-live` (optiona
 
 - `protocol.rs`: Live API message types and a blocking WebSocket client. Reader thread decodes server messages into a channel; a `Mutex<WebSocket>` writer sends client messages. Handles `setupComplete`, `serverContent` (audio parts, input and output transcription, `interrupted`, `turnComplete`), `toolCall`, `toolCallCancellation`, `goAway`, `sessionResumptionUpdate`.
 - `audio_out.rs`: cpal output stream (cpal is already a dependency) fed by a ring buffer. Model audio is 24 kHz PCM16; it is linearly upsampled to the device rate. `flush()` implements barge-in.
+- `voice_io.rs` (macOS): one VoiceProcessingIO unit for both microphone and speaker, so the speaker signal is cancelled out of the mic. Without it, open mic hears the assistant and the provider's speech detection interrupts it mid-sentence, which the first dogfood session hit immediately. Browser clients get this from `getUserMedia({ echoCancellation: true })`; this is the native equivalent. `decimate.rs` brings the 24 kHz mic side down to 16 kHz. Other platforms use `audio_out.rs` plus `AudioStream` and need headphones on open mic until a platform canceller lands.
 - `tools.rs`: function declarations and dispatch. Tool results are JSON text, truncated to a per-tool budget so a 128K voice context is not consumed by one transcript.
 - `names.rs`: known-name list from the people projection plus `vocabulary.toml`, injected into the system prompt as spelling bias, and `resolve_person`, a phonetic-plus-edit-distance matcher over that list.
 - `session.rs`: the runner. Owns the mic stream, the socket, the playback, the tool executor thread, the transcript log, and a state machine (`Connecting`, `Ready`, `Listening`, `Thinking`, `Speaking`, `Closed`). Emits `VoiceLiveEvent`s to the host (CLI or Tauri).
@@ -37,7 +38,7 @@ Module: `crates/core/src/voice_live/` behind Cargo feature `voice-live` (optiona
 
 Hosts:
 
-- CLI: `minutes talk` (phase 1; `minutes voice` is already speaker enrollment). Open-mic with server VAD by default, `--ptt` for Enter-to-talk. Prints both transcripts and tool calls. This is the test harness that needs no app rebuild.
+- CLI: `minutes talk` (phase 1; `minutes voice` is already speaker enrollment). Open mic with server VAD where echo cancellation exists, push-to-talk elsewhere; `--ptt` and `--open-mic` force either. Prints both transcripts and tool calls. This is the test harness that needs no app rebuild.
 - Tauri (phase 2): a third `ShortcutSlot::Voice` in the shortcut manager reusing the hold/lock state machine, `cmd_start_voice`, `cmd_stop_voice`, `cmd_voice_status`, and a voice state in the dictation overlay (listening, thinking, speaking) using the `--capture` blue for active capture per DESIGN.md. API key stored through the existing Keychain secret store and hydrated into the process at startup, mirroring the OpenAI-compatible key.
 
 ## Configuration
@@ -58,6 +59,9 @@ known_people = 200                  # names injected as spelling bias
 brain_search = true                 # expose knowledge base search/read when [knowledge].path is set
 screen_on_request = false           # expose look_at_screen (one frame, explicit ask)
 log_sessions = true                 # ~/.minutes/voice-sessions/*.md
+echo_cancellation = true            # macOS voice-processing unit; plain capture elsewhere
+speech_start_sensitivity = "low"    # provider VAD on open mic; matches the proven browser clients
+speech_end_sensitivity = "low"
 ```
 
 ## Tool surface (phase 1)
@@ -80,6 +84,7 @@ The system instruction states: spoken register, one to three sentences; facts on
 - Provider errors and socket closes change voice state only. They cannot stop, pause, or degrade capture, WAV preservation, or the event log (RFC 0004 boundary applies).
 - Tool execution runs on its own thread with a per-call timeout. A wedged tool never blocks the socket reader or playback.
 - Every session writes a markdown transcript with tool calls to `~/.minutes/voice-sessions/` with `0600` permissions, because the conversation is itself memory.
+- No platform gets a self-interrupting default. Open mic is the default only where the speaker signal can be cancelled out of the microphone; elsewhere `minutes talk` defaults to push-to-talk, which never sends microphone audio while the assistant speaks, and `--open-mic` warns that it needs headphones. A desktop voice surface must not ship to a platform before that platform can cancel echo or drive push-to-talk from the shortcut.
 - Cloud egress is gated by `allow_cloud`. The first-run UI (phase 2) states plainly that microphone audio and tool results go to the provider.
 
 ## Phases

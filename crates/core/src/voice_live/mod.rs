@@ -11,10 +11,13 @@
 //! and [`session`] ties them together on one thread per session.
 
 pub mod audio_out;
+pub mod decimate;
 pub mod names;
 pub mod protocol;
 pub mod session;
 pub mod tools;
+#[cfg(target_os = "macos")]
+pub mod voice_io;
 
 use std::path::PathBuf;
 
@@ -86,6 +89,29 @@ pub fn refuse_if_recording() -> Result<(), VoiceLiveError> {
     Ok(())
 }
 
+/// True when this build can cancel the speaker signal out of the microphone.
+///
+/// Open mic on speakers is only trustworthy when this holds. Without it the
+/// microphone hears the assistant, the provider's speech detection reads that as
+/// the user talking, and the assistant interrupts itself mid-sentence.
+pub fn echo_cancellation_available(config: &Config) -> bool {
+    cfg!(target_os = "macos") && config.voice_live.echo_cancellation
+}
+
+/// The talk mode a host should use when the user has not asked for one.
+///
+/// Open mic is the better experience and the default where cancellation exists.
+/// Everywhere else push-to-talk, which never sends microphone audio while the
+/// assistant is speaking and so cannot self-interrupt. A degraded default beats
+/// a broken one.
+pub fn default_talk_mode(config: &Config) -> TalkMode {
+    if echo_cancellation_available(config) {
+        TalkMode::OpenMic
+    } else {
+        TalkMode::PushToTalk
+    }
+}
+
 /// Where session transcripts are written.
 pub fn sessions_dir() -> PathBuf {
     crate::config::Config::minutes_dir().join("voice-sessions")
@@ -120,6 +146,26 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabling_cancellation_forces_push_to_talk() {
+        let mut config = Config::default();
+        config.voice_live.echo_cancellation = false;
+        assert!(!super::echo_cancellation_available(&config));
+        assert_eq!(
+            super::default_talk_mode(&config),
+            super::TalkMode::PushToTalk
+        );
+    }
+
+    #[test]
+    fn open_mic_is_the_default_exactly_where_cancellation_exists() {
+        let config = Config::default();
+        assert_eq!(
+            super::default_talk_mode(&config) == super::TalkMode::OpenMic,
+            super::echo_cancellation_available(&config)
+        );
+    }
+
     use super::names::KnownPerson;
     use super::*;
 

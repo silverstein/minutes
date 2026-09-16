@@ -378,7 +378,10 @@ mod tests {
     /// the command.
     #[test]
     fn names_that_would_panic_set_var_are_refused() {
-        for bad in ["BAD=NAME", "", "9LEADING", "has space", "NUL\u{0}NAME"] {
+        // An empty name is not in this list: it trims to nothing and takes the
+        // documented-default path, covered by the test below. These are the
+        // non-empty names that would reach `set_var` and panic.
+        for bad in ["BAD=NAME", "9LEADING", "has space", "NUL\u{0}NAME"] {
             let mut config = minutes_core::config::Config::default();
             config.voice_live.api_key_env = bad.into();
             assert!(
@@ -388,6 +391,9 @@ mod tests {
             );
             assert!(!is_usable_env_name(bad), "{:?}", bad);
         }
+        // The helper still rejects the empty name, which is what keeps
+        // `forget_hydrated` from calling `remove_var("")`.
+        assert!(!is_usable_env_name(""));
         for good in ["GEMINI_API_KEY", "MY_KEY_2", "_UNDERSCORE"] {
             assert!(is_usable_env_name(good), "{:?}", good);
         }

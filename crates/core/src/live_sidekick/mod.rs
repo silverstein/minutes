@@ -4,6 +4,8 @@
 //! provider. It deliberately separates typed user authority from transcript,
 //! screen, and other meeting evidence.
 
+pub mod live_model;
 mod session;
+pub mod work;
 
 pub use session::*;

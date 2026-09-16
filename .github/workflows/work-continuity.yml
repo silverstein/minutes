@@ -1,0 +1,49 @@
+name: Portable work continuity
+
+on:
+  push:
+    branches: [codex/work-continuity-20260916]
+    paths:
+      - crates/core/src/live_sidekick/**
+      - crates/core/examples/work_session.rs
+      - scripts/check_work_continuity.py
+      - .github/workflows/work-continuity.yml
+  pull_request:
+    paths:
+      - crates/core/src/live_sidekick/**
+      - crates/core/examples/work_session.rs
+      - scripts/check_work_continuity.py
+      - .github/workflows/work-continuity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: work-continuity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test exact portable source without audio or GUI SDKs
+        run: python scripts/check_work_continuity.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: work-continuity-format-${{ matrix.os }}
+          path: work-continuity-format.patch
+          if-no-files-found: ignore

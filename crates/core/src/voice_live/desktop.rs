@@ -29,6 +29,7 @@ const CONFIRM_WINDOW: Duration = Duration::from_secs(120);
 /// Never let pending confirmations accumulate.
 const MAX_PENDING: usize = 8;
 /// Bound on any single action, so a stuck script cannot wedge the tool worker.
+#[cfg(target_os = "macos")]
 const ACTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How much a verb can cost you if it fires when you did not mean it.
@@ -734,6 +735,18 @@ fn run_script(_script: &str, _values: &[String]) -> Result<String, String> {
     Err("desktop actions are macOS only for now".into())
 }
 
+/// The stored exact host-approved payload, never a model-redeemed token.
+/// Kept separate from `gate` so existing pure gate tests cannot execute it.
+pub(crate) fn execute_from_host(verb: &'static Verb, args: &Value) -> Result<Value, String> {
+    if args.get("confirm").is_some() {
+        return Err("model confirmation tokens are not authority".into());
+    }
+    reject_unknown_args(verb, args)?;
+    let values = collect_params(verb, args)?;
+    let output = run_script(verb.script, &values)?;
+    Ok(json!({"ok":true,"result":output}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,16 +1069,4 @@ mod tests {
             );
         }
     }
-}
-
-/// The stored exact host-approved payload, never a model-redeemed token.
-/// Kept separate from `gate` so existing pure gate tests cannot execute it.
-pub(crate) fn execute_from_host(verb: &'static Verb, args: &Value) -> Result<Value, String> {
-    if args.get("confirm").is_some() {
-        return Err("model confirmation tokens are not authority".into());
-    }
-    reject_unknown_args(verb, args)?;
-    let values = collect_params(verb, args)?;
-    let output = run_script(verb.script, &values)?;
-    Ok(json!({"ok":true,"result":output}))
 }

@@ -1021,7 +1021,7 @@ fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
         .into_iter()
         .take(limit)
         .map(|(f, modified, snippet)| {
-            let rel = f.strip_prefix(root).unwrap_or(&f).to_string_lossy().to_string();
+            let rel = f.strip_prefix(root).unwrap_or(&f).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
             let modified: chrono::DateTime<Local> = modified.into();
             json!({"path": rel, "modified": modified.format("%Y-%m-%d").to_string(), "snippet": snippet})
         })
@@ -1105,6 +1105,20 @@ fn brain_read(root: &Path, rel: &str, max_chars: usize) -> Result<Value, String>
         "chars": text.chars().count(),
         "content": truncate(text, max_chars),
     }))
+}
+
+fn host_outcome(result: Result<Value, String>, started: Instant) -> ToolOutcome {
+    let (text, is_error) = match result {
+        Ok(v) => (v.to_string(), false),
+        Err(e) => (json!({"error":e}).to_string(), true),
+    };
+    ToolOutcome {
+        text,
+        is_error,
+        elapsed: started.elapsed(),
+        image: None,
+        audio: None,
+    }
 }
 
 #[cfg(test)]
@@ -1486,19 +1500,5 @@ mod tests {
     fn body_strips_frontmatter() {
         assert_eq!(body_of("---\ntitle: t\n---\nhello"), "hello");
         assert_eq!(body_of("no frontmatter"), "no frontmatter");
-    }
-}
-
-fn host_outcome(result: Result<Value, String>, started: Instant) -> ToolOutcome {
-    let (text, is_error) = match result {
-        Ok(v) => (v.to_string(), false),
-        Err(e) => (json!({"error":e}).to_string(), true),
-    };
-    ToolOutcome {
-        text,
-        is_error,
-        elapsed: started.elapsed(),
-        image: None,
-        audio: None,
     }
 }

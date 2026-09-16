@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn lyrics_are_flattened_and_capped() {
         // Sanity on the cap itself; composing needs the network.
-        assert!(MAX_LYRIC_CHARS > 200 && MAX_LYRIC_CHARS < 5_000);
+        const { assert!(MAX_LYRIC_CHARS > 200 && MAX_LYRIC_CHARS < 5_000) };
     }
 
     #[test]

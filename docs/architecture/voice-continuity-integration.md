@@ -170,3 +170,14 @@ surface must preserve these host boundaries rather than recreate them in prompts
 Google contract references verified September 16, 2026:
 - https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live-extended-thinking
 - https://ai.google.dev/gemini-api/docs/live-api/tools
+
+## Lint scope
+
+The portable harness uses global `-D warnings`. The integrated voice-only
+all-targets configuration exposes inherited warnings in unrelated capture,
+knowledge, graph and other test modules. Its dedicated workflow therefore runs
+Clippy on the actual core and CLI and fails all compiler errors plus every
+warning touching changed Rust lines, while retaining other warnings in logs
+and an uploaded JSON artifact. Formatting checks every changed Rust file. This
+is a changed-code gate, not a claim that whole-workspace Clippy is clean. The
+repository-wide and native release gates remain separate.

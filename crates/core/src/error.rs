@@ -268,6 +268,9 @@ pub enum DictationError {
     #[error("live transcript in progress — stop it before dictating")]
     LiveTranscriptActive,
 
+    #[error("a voice session is open — close it before dictating")]
+    VoiceActive,
+
     #[error("dictation already active (PID: {0})")]
     AlreadyActive(u32),
 
@@ -294,6 +297,9 @@ pub enum LiveTranscriptError {
 
     #[error("dictation in progress — stop dictation before starting live transcript")]
     DictationActive,
+
+    #[error("a voice session is open — close it before starting live transcript")]
+    VoiceActive,
 
     #[error("live transcript already active (PID: {0})")]
     AlreadyActive(u32),

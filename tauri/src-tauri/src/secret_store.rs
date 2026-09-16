@@ -106,13 +106,45 @@ pub fn clear_openai_compatible_api_key() -> Result<(), String> {
 
 /// The variable voice reads for its key: whatever config names, or the
 /// documented default when config leaves it blank.
-pub fn voice_api_key_env(config: &minutes_core::config::Config) -> String {
+///
+/// This validates rather than trusting, because the name reaches
+/// `std::env::set_var`, which **panics** on a name that is empty, contains `=`
+/// or contains a NUL byte. A panic inside a Tauri command takes down more than
+/// the command, and this one is reachable from a hand-edited config file.
+///
+/// It also refuses to name the summarization key's variable. The two Keychain
+/// items are separate, but the environment is one namespace: pointing voice at
+/// the summarization variable would make each secret read, overwrite and clear
+/// the other through it.
+pub fn voice_api_key_env(config: &minutes_core::config::Config) -> Result<String, String> {
     let configured = config.voice_live.api_key_env.trim();
     if configured.is_empty() {
-        VOICE_API_KEY_ENV_DEFAULT.to_string()
-    } else {
-        configured.to_string()
+        return Ok(VOICE_API_KEY_ENV_DEFAULT.to_string());
     }
+    if configured == OPENAI_COMPATIBLE_API_KEY_ENV {
+        return Err(format!(
+            "[voice_live] api_key_env must not be {}, which holds the summarization key. \
+             Use a different variable name, or leave it blank for {}.",
+            OPENAI_COMPATIBLE_API_KEY_ENV, VOICE_API_KEY_ENV_DEFAULT
+        ));
+    }
+    if !is_usable_env_name(configured) {
+        return Err(format!(
+            "[voice_live] api_key_env is not a usable environment variable name: {:?}. \
+             Use letters, digits and underscores, not starting with a digit.",
+            configured
+        ));
+    }
+    Ok(configured.to_string())
+}
+
+/// Conservative: the set every platform agrees on, so the name can be passed to
+/// `set_var` and `remove_var` without either panicking or being unreachable
+/// from a shell.
+fn is_usable_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Put the stored voice key into the environment so the engine can read it.
@@ -126,10 +158,44 @@ pub fn hydrate_voice_api_key_env(env_var: &str) -> VoiceSecretStatus {
     if std::env::var(env_var).is_err() {
         if let Some(key) = load_voice_api_key().ok().flatten() {
             std::env::set_var(env_var, key);
+            remember_hydrated(env_var);
         }
     }
 
     voice_secret_status(env_var)
+}
+
+/// Every variable this process has put the voice key into.
+///
+/// `api_key_env` can change while the app runs, and a clear that only removes
+/// the name config happens to hold *now* leaves the secret sitting in the
+/// variable it was hydrated into earlier, where changing the config back makes
+/// it live again. Remembering the names is the only way to actually revoke it
+/// without a restart.
+static HYDRATED_VOICE_ENV_VARS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_hydrated(env_var: &str) {
+    let mut names = HYDRATED_VOICE_ENV_VARS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if !names.iter().any(|n| n == env_var) {
+        names.push(env_var.to_string());
+    }
+}
+
+/// Remove the key from every variable this process put it in, plus `env_var`.
+fn forget_hydrated(env_var: &str) {
+    let mut names = HYDRATED_VOICE_ENV_VARS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    for name in names.drain(..) {
+        if is_usable_env_name(&name) {
+            std::env::remove_var(&name);
+        }
+    }
+    if is_usable_env_name(env_var) {
+        std::env::remove_var(env_var);
+    }
 }
 
 pub fn voice_secret_status(env_var: &str) -> VoiceSecretStatus {
@@ -147,16 +213,23 @@ pub fn voice_secret_status(env_var: &str) -> VoiceSecretStatus {
     }
 }
 
-pub fn save_voice_api_key(api_key: &str) -> Result<(), String> {
+pub fn save_voice_api_key(env_var: &str, api_key: &str) -> Result<(), String> {
     if api_key.trim().is_empty() {
         return Err("Paste an API key first.".into());
     }
 
-    save_secret(VOICE_SLOT, api_key)
+    save_secret(VOICE_SLOT, api_key)?;
+    // Usable by the time this returns rather than after a restart. The name is
+    // already validated, so `set_var` cannot panic here.
+    std::env::set_var(env_var, api_key);
+    remember_hydrated(env_var);
+    Ok(())
 }
 
-pub fn clear_voice_api_key() -> Result<(), String> {
-    clear_secret(VOICE_SLOT)
+pub fn clear_voice_api_key(env_var: &str) -> Result<(), String> {
+    clear_secret(VOICE_SLOT)?;
+    forget_hydrated(env_var);
+    Ok(())
 }
 
 pub fn load_voice_api_key() -> Result<Option<String>, String> {
@@ -280,10 +353,56 @@ mod tests {
     fn blank_config_falls_back_to_the_documented_variable() {
         let mut config = minutes_core::config::Config::default();
         config.voice_live.api_key_env = "   ".into();
-        assert_eq!(voice_api_key_env(&config), VOICE_API_KEY_ENV_DEFAULT);
+        assert_eq!(
+            voice_api_key_env(&config).unwrap(),
+            VOICE_API_KEY_ENV_DEFAULT
+        );
 
         config.voice_live.api_key_env = " MY_KEY ".into();
-        assert_eq!(voice_api_key_env(&config), "MY_KEY");
+        assert_eq!(voice_api_key_env(&config).unwrap(), "MY_KEY");
+    }
+
+    /// The two Keychain items are separate, but the environment is one
+    /// namespace. Pointing voice at the summarization variable would make each
+    /// secret read, overwrite and clear the other through it.
+    #[test]
+    fn voice_may_not_borrow_the_summarization_variable() {
+        let mut config = minutes_core::config::Config::default();
+        config.voice_live.api_key_env = OPENAI_COMPATIBLE_API_KEY_ENV.into();
+        let error = voice_api_key_env(&config).unwrap_err();
+        assert!(error.contains(OPENAI_COMPATIBLE_API_KEY_ENV), "{}", error);
+    }
+
+    /// `std::env::set_var` panics on these, and the name comes from a file the
+    /// user can hand-edit. A panic inside a Tauri command takes down more than
+    /// the command.
+    #[test]
+    fn names_that_would_panic_set_var_are_refused() {
+        for bad in ["BAD=NAME", "", "9LEADING", "has space", "NUL\u{0}NAME"] {
+            let mut config = minutes_core::config::Config::default();
+            config.voice_live.api_key_env = bad.into();
+            assert!(
+                voice_api_key_env(&config).is_err(),
+                "should have refused {:?}",
+                bad
+            );
+            assert!(!is_usable_env_name(bad), "{:?}", bad);
+        }
+        for good in ["GEMINI_API_KEY", "MY_KEY_2", "_UNDERSCORE"] {
+            assert!(is_usable_env_name(good), "{:?}", good);
+        }
+    }
+
+    /// A blank name trims to empty and takes the default path, so it must not
+    /// reach the panic check as an error.
+    #[test]
+    fn whitespace_is_the_default_not_an_error() {
+        let mut config = minutes_core::config::Config::default();
+        config.voice_live.api_key_env = "\t \n".into();
+        assert_eq!(
+            voice_api_key_env(&config).unwrap(),
+            VOICE_API_KEY_ENV_DEFAULT
+        );
     }
 
     /// The message must name the variable the caller actually asked about,

@@ -3320,6 +3320,13 @@ fn cmd_record(
     if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
+    // Same reason for a voice session: it holds the microphone for a live
+    // conversation, and `minutes talk` can be running in another terminal or
+    // inside the menu-bar app.
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — close it before recording");
+    }
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;
 

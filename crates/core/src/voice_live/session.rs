@@ -472,9 +472,29 @@ where
         scheduling,
         stop_flag: Arc::clone(&stop_flag),
     };
+    // The cross-process marker, so `minutes record` in a terminal and a session
+    // in the menu-bar app can see each other. The flock is the authoritative
+    // gate; the friendlier check in `refuse_if_microphone_busy` only gets the
+    // message out earlier.
+    //
+    // It is owned by the session thread rather than by the returned handle, so
+    // the file goes away exactly when the session ends, whatever ended it. Held
+    // by the handle instead, a session that dropped its socket would leave a
+    // live-looking PID behind, and since the PID is this same still-running
+    // process, nothing would ever see it as stale.
+    let pid_guard =
+        crate::pid::create_pid_guard(&crate::pid::voice_pid_path()).map_err(|e| match e {
+            crate::error::PidError::AlreadyRecording(_) => {
+                VoiceLiveError::MicrophoneBusy("another voice session")
+            }
+            other => VoiceLiveError::Audio(format!("voice session lock: {other}")),
+        })?;
     let thread = std::thread::Builder::new()
         .name("voice-live-session".into())
-        .spawn(move || runner.run())
+        .spawn(move || {
+            let _pid_guard = pid_guard;
+            runner.run()
+        })
         .map_err(|e| VoiceLiveError::Connect(format!("session thread: {e}")))?;
 
     Ok(VoiceLiveSession {

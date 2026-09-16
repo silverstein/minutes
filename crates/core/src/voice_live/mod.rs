@@ -113,6 +113,9 @@ pub fn refuse_if_microphone_busy() -> Result<(), VoiceLiveError> {
     if crate::pid::inspect_pid_file(&crate::pid::dictation_pid_path()).is_active() {
         return Err(VoiceLiveError::MicrophoneBusy("dictation"));
     }
+    if crate::pid::inspect_pid_file(&crate::pid::voice_pid_path()).is_active() {
+        return Err(VoiceLiveError::MicrophoneBusy("another voice session"));
+    }
     Ok(())
 }
 

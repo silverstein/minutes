@@ -30,6 +30,16 @@ pub fn dictation_pid_path() -> PathBuf {
     Config::minutes_dir().join("dictation.pid")
 }
 
+/// Path to the voice session PID file (`~/.minutes/voice.pid`).
+///
+/// Voice holds the microphone for a live conversation, so it needs the same
+/// cross-process marker the other three capture modes have. Without one, a
+/// session in the menu-bar app is invisible to `minutes record` in a terminal
+/// and both open the device.
+pub fn voice_pid_path() -> PathBuf {
+    Config::minutes_dir().join("voice.pid")
+}
+
 /// Path to the live transcript PID file (`~/.minutes/live-transcript.pid`).
 pub fn live_transcript_pid_path() -> PathBuf {
     Config::minutes_dir().join("live-transcript.pid")

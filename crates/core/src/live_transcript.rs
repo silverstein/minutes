@@ -958,6 +958,14 @@ fn run_with_partials_internal(
         return Err(error);
     }
 
+    // Check conflicts: a voice session must not be holding the microphone.
+    let voice_pid = pid::voice_pid_path();
+    if pid::inspect_pid_file(&voice_pid).is_active() {
+        let error: MinutesError = LiveTranscriptError::VoiceActive.into();
+        mark_precreated_session_failed(&error);
+        return Err(error);
+    }
+
     // Clear any stale stop sentinel from a previous session
     pid::check_and_clear_sentinel();
 

@@ -392,6 +392,12 @@ where
         return Err(DictationError::LiveTranscriptActive.into());
     }
 
+    // Check for conflicts: a voice session must not be holding the microphone.
+    let voice_pid = pid::voice_pid_path();
+    if pid::inspect_pid_file(&voice_pid).is_active() {
+        return Err(DictationError::VoiceActive.into());
+    }
+
     // Check for conflicts: another dictation must not be active
     let dict_pid = pid::dictation_pid_path();
     if let Ok(Some(existing)) = pid::check_pid_file(&dict_pid) {

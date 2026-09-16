@@ -13021,11 +13021,24 @@ pub fn cmd_get_settings() -> serde_json::Value {
 
 /// Status of the voice key, hydrating the environment as a side effect so a
 /// key saved in a previous launch is usable in this one.
+///
+/// A misconfigured `api_key_env` surfaces as a status message rather than an
+/// error, because this is the call a settings pane makes on open and the user
+/// needs to be told what is wrong, not handed an empty pane.
 #[tauri::command]
 pub fn cmd_voice_secret_status() -> serde_json::Value {
-    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
-    serde_json::to_value(crate::secret_store::hydrate_voice_api_key_env(&env_var))
-        .unwrap_or_else(|_| serde_json::json!({ "keySet": false }))
+    match crate::secret_store::voice_api_key_env(&Config::load()) {
+        Ok(env_var) => {
+            serde_json::to_value(crate::secret_store::hydrate_voice_api_key_env(&env_var))
+                .unwrap_or_else(|_| serde_json::json!({ "keySet": false }))
+        }
+        Err(message) => serde_json::json!({
+            "supported": false,
+            "keySet": false,
+            "storedKeySet": false,
+            "message": message,
+        }),
+    }
 }
 
 /// Store the voice key in the Keychain and make it usable immediately, so the
@@ -13037,9 +13050,8 @@ pub fn cmd_set_voice_api_key(api_key: String) -> Result<serde_json::Value, Strin
         return Err("Paste an API key first.".into());
     }
 
-    crate::secret_store::save_voice_api_key(&api_key)?;
-    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
-    std::env::set_var(&env_var, &api_key);
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load())?;
+    crate::secret_store::save_voice_api_key(&env_var, &api_key)?;
 
     Ok(
         serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
@@ -13047,14 +13059,16 @@ pub fn cmd_set_voice_api_key(api_key: String) -> Result<serde_json::Value, Strin
     )
 }
 
-/// Forget the voice key. Clearing the variable as well as the Keychain item
+/// Forget the voice key. Clearing the environment as well as the Keychain item
 /// means the running app stops being able to open a session, rather than
 /// carrying the revoked key until the next launch.
 #[tauri::command]
 pub fn cmd_clear_voice_api_key() -> Result<serde_json::Value, String> {
-    crate::secret_store::clear_voice_api_key()?;
-    let env_var = crate::secret_store::voice_api_key_env(&Config::load());
-    std::env::remove_var(&env_var);
+    // Fall back to the default name so a misconfigured `api_key_env` cannot
+    // block revocation. Revoking has to work even when the config is wrong.
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load())
+        .unwrap_or_else(|_| crate::secret_store::VOICE_API_KEY_ENV_DEFAULT.to_string());
+    crate::secret_store::clear_voice_api_key(&env_var)?;
 
     Ok(
         serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
@@ -19897,10 +19911,42 @@ pub fn cmd_start_voice(
     // an app launched from Finder has no shell environment to have inherited
     // it from.
     let _ = crate::secret_store::hydrate_voice_api_key_env(
-        &crate::secret_store::voice_api_key_env(&config),
+        &crate::secret_store::voice_api_key_env(&config)?,
     );
     voice_live::preflight(&config).map_err(|e| e.to_string())?;
+
+    // The tray has no talk control. In push-to-talk the session discards every
+    // microphone chunk until a PttStart it will never receive, so starting one
+    // here opens a session that cannot hear the user and holds the microphone
+    // while doing it. Refuse instead of pretending. A talk control arrives with
+    // the HUD; until then the desktop surface needs an open mic, and an open
+    // mic is only trustworthy with echo cancellation, or the assistant hears
+    // itself and interrupts itself forever.
+    let mode = voice_live::default_talk_mode(&config);
+    if mode != voice_live::TalkMode::OpenMic {
+        return Err(
+            "Voice needs echo cancellation to run from the menu bar. Set [voice_live] \
+             echo_cancellation = true, or use `minutes talk` in a terminal, which has \
+             push-to-talk."
+                .into(),
+        );
+    }
+
     try_acquire_voice(&state)?;
+
+    // A previous session that ended by itself may still be tearing down: Closed
+    // is emitted before audio stops and the tool worker is joined. Retire it
+    // before opening a new microphone, or the two sessions overlap on the
+    // device. `voice_active` is already false here, so nothing else can be
+    // holding this.
+    let stale = state
+        .voice_session
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(stale) = stale {
+        stale.stop();
+    }
 
     let started = (|| -> Result<(), String> {
         let emitter = app.clone();
@@ -19913,7 +19959,10 @@ pub fn cmd_start_voice(
         let closed_active = Arc::clone(&state.voice_active);
         let session = voice_live::start(
             &config,
-            voice_live::SessionOptions::default(),
+            voice_live::SessionOptions {
+                mode,
+                ..voice_live::SessionOptions::default()
+            },
             move |event| {
                 // `Closed` is terminal: every site that emits it breaks out of
                 // the session loop.
@@ -19926,12 +19975,20 @@ pub fn cmd_start_voice(
                 let _ = emitter.emit("voice:event", &event);
                 if ending {
                     closed_active.store(false, Ordering::SeqCst);
-                    // Deliberately not touching `voice_session` here: this runs
-                    // on the session's own thread, and the handle it would take
-                    // owns the join handle for that thread. The next start
-                    // replaces it, and a stop in between joins a thread that has
-                    // already exited.
-                    crate::sync_tray_state(&emitter);
+                    // Post the tray sync to the main thread rather than doing it
+                    // here. Tray menu setters dispatch to the main thread and
+                    // wait, and the main thread may be inside `session.stop()`
+                    // joining this very thread. Calling it inline deadlocks the
+                    // two against each other. `run_on_main_thread` returns
+                    // immediately, so this thread can always finish and be
+                    // joined; the sync runs when the main thread is free.
+                    let syncing = emitter.clone();
+                    let _ = emitter.run_on_main_thread(move || {
+                        crate::sync_tray_state(&syncing);
+                    });
+                    // Deliberately not touching `voice_session` here: the handle
+                    // it would take owns the join handle for this thread. The
+                    // next start retires it instead.
                 }
             },
         )
@@ -21397,7 +21454,11 @@ impl Drop for DictationActiveGuard {
 /// hand. Adding it means every acquire learns about it, not just this one.
 #[cfg_attr(not(feature = "voice-live"), allow(dead_code))]
 fn try_acquire_voice(state: &AppState) -> Result<(), String> {
-    if recording_active(&state.recording) {
+    // `starting` as well as `recording`: a recording reserves `starting` first
+    // and does not create its PID file or set `recording` until its background
+    // thread gets there. Checking only `recording` leaves a window where voice
+    // opens the microphone underneath a recording that is on its way up.
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
         return Err("Recording in progress — stop recording before starting voice".into());
     }
     if state.live_transcript_active.load(Ordering::Relaxed) {

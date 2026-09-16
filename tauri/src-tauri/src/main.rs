@@ -647,8 +647,9 @@ pub enum TrayActivity {
     Live,
     Dictation,
     Copilot,
-    /// A voice session. Like Copilot it does not own the capture pipeline, so it
-    /// does not block the capture controls.
+    /// A voice session. It does not own the capture pipeline, but it does hold
+    /// the microphone, and recording is refused while it runs, so unlike
+    /// Copilot it grays out the capture controls.
     Voice,
 }
 
@@ -720,7 +721,16 @@ impl TrayActivity {
     }
 
     fn blocks_capture_controls(self) -> bool {
-        matches!(self, Self::Recording | Self::Live | Self::Dictation)
+        // Voice belongs here and Copilot does not, even though neither owns the
+        // capture pipeline. The test is not who owns capture, it is whether
+        // clicking Start Recording will work: a recording can begin during
+        // Coach, and is refused during Voice. An enabled item that is going to
+        // be refused is a lie, and Quick Thought's tray handler discards the
+        // launch result, so it would fail silently.
+        matches!(
+            self,
+            Self::Recording | Self::Live | Self::Dictation | Self::Voice
+        )
     }
 
     fn icon_bytes(self, appearance: TrayAppearance) -> &'static [u8] {
@@ -1788,9 +1798,14 @@ fn main() {
         }
     }
     let _ = secret_store::hydrate_openai_compatible_api_key_env();
-    let _ = secret_store::hydrate_voice_api_key_env(&secret_store::voice_api_key_env(
-        &startup_config_snapshot,
-    ));
+    match secret_store::voice_api_key_env(&startup_config_snapshot) {
+        Ok(env_var) => {
+            let _ = secret_store::hydrate_voice_api_key_env(&env_var);
+        }
+        // Never fatal at startup: voice is optional and every other feature has
+        // to keep working with a bad [voice_live] api_key_env.
+        Err(message) => tracing::warn!("voice key not hydrated: {}", message),
+    }
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -3991,8 +4006,12 @@ mod tray_activity_tests {
             derive_tray_activity(snap(false, true)),
             TrayActivity::Copilot
         );
-        // And it never claims the capture pipeline it does not own.
-        assert!(!TrayActivity::Voice.blocks_capture_controls());
+        // Voice grays out the capture controls, unlike Coach. Not because it
+        // owns capture, but because starting a recording during a voice session
+        // is refused, and an enabled menu item that is going to be refused lies
+        // about what clicking it does.
+        assert!(TrayActivity::Voice.blocks_capture_controls());
+        assert!(!TrayActivity::Copilot.blocks_capture_controls());
         assert!(TrayActivity::Voice.is_active());
     }
 

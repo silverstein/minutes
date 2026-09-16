@@ -12,8 +12,6 @@
 
 pub mod audio_out;
 pub mod decimate;
-pub mod desktop;
-pub mod mcp;
 pub mod music;
 pub mod names;
 pub mod protocol;
@@ -146,20 +144,8 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     if config.voice_live.prep_artifacts {
         p.push_str("Preps and briefs. Before a conversation Mat sometimes writes himself a prep or a brief with the /minutes-prep and /minutes-brief skills. Those are his own intentions, goals and talking points, not a transcript, so they answer what he wanted out of a meeting rather than what was said. When he mentions prepping for something, or asks what he meant to cover, call list_preps and then get_prep. Use them alongside the meeting tools when both apply.\n\n");
     }
-    if !config.voice_live.mcp_servers.is_empty() {
-        p.push_str("Connected services. Some tools are named service_then_tool, like hubspot_then_search. Those reach a system outside Minutes. Treat what they return as that system's answer, say which service a fact came from when it matters, and never mix it up with what Mat said in a meeting. If one errors, say which service failed rather than guessing at the answer.\n\n".replace("_then_", "__").as_str());
-    }
-    if config.voice_live.ask_agent && tools::delegate_agent(config).is_some() {
-        p.push_str("Outside your own memory. Anything that is not a meeting, a person, a commitment, a prep or a note lives outside your tools: Mat's code, his repositories, his documents, and services like a CRM or issue tracker. For those, call ask_agent with one self-contained question. It cannot hear this conversation, so put everything it needs into the question itself. It takes several seconds, so say you are checking first, then answer from what it returns and say the answer came from the agent. Never guess at code or a system you have not asked it about.\n\n");
-    }
     if config.voice_live.calendar && config.calendar.enabled {
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
-    }
-    if config.voice_live.desktop_control {
-        p.push_str("Doing things on the Mac. You can open an application, open a web page, show a file in the Finder, control playback, and add a reminder. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
-        if config.voice_live.desktop_outward {
-            p.push_str("Sending things. Sending a message or an email leaves the machine and cannot be taken back, so those take two calls. Call once without a confirm token, read back the exact sentence you are handed, word for word, and wait. Only when Mat clearly agrees do you call again with that token and the identical arguments. If he changes a word, start over and read the new sentence. Never tell him something was sent before the second call has returned, and never guess at a recipient: if you are not certain who he means, ask.\n\n");
-        }
     }
     if config.voice_live.music {
         p.push_str("Music. You can make and play music with make_music. When Mat asks for music for a meeting, a call or a moment, first read what you actually know about it, from upcoming_meetings, a prep, or the meeting itself, then write the brief yourself and say in a sentence what you drew on. Describe instruments, tempo and mood. It can sing: ask for vocals and say what they should be about when he wants words, and ask for instrumental when he wants background. It writes the words itself and hands them back, so quote a line if it sang. It takes most of a minute, so say you are writing something first. Never while a recording is running, and do not offer it in the middle of real work.\n\n");
@@ -234,11 +220,7 @@ mod tests {
             }],
             vec!["RxVIP".into()],
         );
-        // Every optional surface on, because this test exists to prove no
-        // rule was dropped, not to check what is on by default.
-        let mut config = cfg();
-        config.voice_live.ask_agent = true;
-        let p = system_prompt(&config, &names, true);
+        let p = system_prompt(&cfg(), &names, true);
         for needle in [
             "spelled with one t",
             "one to three short sentences",
@@ -254,7 +236,6 @@ mod tests {
             "Ask before calling any tool that writes",
             "never rename a speaker",
             "list_preps and then get_prep",
-            "call ask_agent with one self-contained question",
             "never explain your own behaviour by inventing a mechanism",
             "read the current time from get_status",
         ] {

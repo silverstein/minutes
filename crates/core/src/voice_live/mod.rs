@@ -161,7 +161,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
     if config.voice_live.desktop_control {
-        p.push_str("Doing things on the Mac. You can use a fixed AppleScript/OSA-backed catalogue of desktop verbs: open an application, open a web page, show a file in the Finder, control playback, and add a reminder. This is not arbitrary AppleScript execution: never write or run a script Mat dictates, and when he asks about OSA scriptability explain that you can use the approved desktop verbs rather than raw scripts. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
+        p.push_str("Doing things on the Mac. Mat should be able to ask in normal language, like open Calendar, show this file in Finder, play music, pause, or remind me about this tomorrow. You have approved AppleScript/OSA-backed Mac actions for those tasks, but not arbitrary script execution: never write or run a script Mat dictates. If he asks whether you can do OSA or AppleScript, answer naturally: yes for approved Mac actions from normal requests, no for running raw scripts. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");
         if config.voice_live.desktop_outward {
             p.push_str("Sending things. Sending a message or email requires local host review of the exact account, recipient and contents. Call the tool once to propose, then wait for a host receipt. Never send a confirmation token or mistake speech for local approval.\n\n");
         }
@@ -265,8 +265,9 @@ mod tests {
             "call ask_agent with one self-contained question",
             "never explain your own behaviour by inventing a mechanism",
             "read the current time from get_status",
-            "AppleScript/OSA-backed catalogue",
-            "not arbitrary AppleScript execution",
+            "ask in normal language",
+            "yes for approved Mac actions from normal requests",
+            "no for running raw scripts",
             "Sending a message or email requires local host review",
         ] {
             assert!(p.contains(needle), "prompt lost rule: {needle}");

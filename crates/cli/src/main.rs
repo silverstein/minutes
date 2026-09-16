@@ -2711,8 +2711,7 @@ fn cmd_talk(
         self, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveState,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
 
     voice_live::preflight(config).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -2730,6 +2729,8 @@ fn cmd_talk(
     }
     let closed = Arc::new(AtomicBool::new(false));
     let closed_in_events = Arc::clone(&closed);
+    let render_state = Arc::new(Mutex::new(VoiceEventRenderState::default()));
+    let render_state_in_events = Arc::clone(&render_state);
     let session = voice_live::start(
         config,
         SessionOptions {
@@ -2747,7 +2748,10 @@ fn cmd_talk(
                     println!("{line}");
                 }
             } else {
-                print_voice_event(&event);
+                let mut render_state = render_state_in_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                print_voice_event(&event, &mut render_state);
             }
             if matches!(event, VoiceLiveEvent::Closed { .. }) {
                 closed_in_events.store(true, Ordering::SeqCst);
@@ -2844,14 +2848,35 @@ fn cmd_talk(
 
 /// Human-readable rendering of one Voice Live event for `minutes talk`.
 #[cfg(feature = "voice-live")]
-fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
-    use minutes_core::voice_live::VoiceLiveEvent;
+#[derive(Default)]
+struct VoiceEventRenderState {
+    last_state: Option<minutes_core::voice_live::VoiceLiveState>,
+    printed_ready: bool,
+}
+
+#[cfg(feature = "voice-live")]
+fn print_voice_event(
+    event: &minutes_core::voice_live::VoiceLiveEvent,
+    render_state: &mut VoiceEventRenderState,
+) {
+    use minutes_core::voice_live::{VoiceLiveEvent, VoiceLiveState};
     match event {
         VoiceLiveEvent::State { state } => {
-            let label = serde_json::to_value(state)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| format!("{state:?}"));
+            if render_state.last_state == Some(*state) {
+                return;
+            }
+            render_state.last_state = Some(*state);
+            let label = match state {
+                VoiceLiveState::Connecting => "connecting",
+                VoiceLiveState::Ready if !render_state.printed_ready => {
+                    render_state.printed_ready = true;
+                    "ready"
+                }
+                VoiceLiveState::Ready | VoiceLiveState::Listening => return,
+                VoiceLiveState::Thinking => "thinking",
+                VoiceLiveState::Speaking => "speaking",
+                VoiceLiveState::Closed => "closed",
+            };
             println!("[{label}]");
         }
         VoiceLiveEvent::Status { text } => println!("  {text}"),

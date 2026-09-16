@@ -2743,6 +2743,10 @@ fn cmd_talk(
             mode,
             device,
             mute_playback: mute,
+            // The terminal has a key to hold, so if echo cancellation turns out
+            // to be unavailable the session may fall back to plain capture and
+            // say so, rather than refusing the way the tray does.
+            require_open_mic: false,
         },
         move |event| {
             // Level arrives many times a second. It is the only evidence the

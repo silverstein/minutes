@@ -643,6 +643,9 @@ pub enum TrayActivity {
     Live,
     Dictation,
     Copilot,
+    /// A voice session. Like Copilot it does not own the capture pipeline, so it
+    /// does not block the capture controls.
+    Voice,
 }
 
 /// Inferred macOS menu-bar appearance. Honestly a proxy: we read the app's
@@ -725,6 +728,12 @@ impl TrayActivity {
             (Self::Recording | Self::Dictation, TrayAppearance::Dark) => {
                 include_bytes!("../icons/icon-recording-dark.png")
             }
+            (Self::Voice, TrayAppearance::Light) => {
+                include_bytes!("../icons/icon-live.png")
+            }
+            (Self::Voice, TrayAppearance::Dark) => {
+                include_bytes!("../icons/icon-live-dark.png")
+            }
             (Self::Live | Self::Copilot, TrayAppearance::Light) => {
                 include_bytes!("../icons/icon-live.png")
             }
@@ -741,6 +750,7 @@ impl TrayActivity {
             Self::Live => "Minutes — Live Transcribing...",
             Self::Dictation => "Minutes — Dictating...",
             Self::Copilot => "Minutes — Coach Listening...",
+            Self::Voice => "Minutes — Voice...",
         }
     }
 
@@ -752,6 +762,7 @@ impl TrayActivity {
             Self::Live => "Stop Live Transcript",
             Self::Dictation => "Stop Dictation",
             Self::Copilot => "Stop Coach",
+            Self::Voice => "Close Voice",
         }
     }
 
@@ -762,6 +773,7 @@ impl TrayActivity {
             Self::Live => "live-transcript",
             Self::Dictation => "dictation",
             Self::Copilot => "copilot",
+            Self::Voice => "voice",
         }
     }
 }
@@ -775,6 +787,7 @@ pub struct TrayStateSnapshot {
     pub live: bool,
     pub dictation: bool,
     pub copilot: bool,
+    pub voice: bool,
 }
 
 /// Derive the tray activity from a state snapshot. Pure function; tested in
@@ -790,6 +803,10 @@ pub fn derive_tray_activity(snapshot: TrayStateSnapshot) -> TrayActivity {
         TrayActivity::Live
     } else if snapshot.dictation {
         TrayActivity::Dictation
+    } else if snapshot.voice {
+        // Above Copilot: voice owns the microphone for a live conversation,
+        // so it is the more specific thing to report when both are somehow on.
+        TrayActivity::Voice
     } else if snapshot.copilot {
         TrayActivity::Copilot
     } else {
@@ -806,12 +823,14 @@ fn snapshot_tray_state(app: &tauri::AppHandle) -> TrayStateSnapshot {
             live: state.live_transcript_active.load(Ordering::Relaxed),
             dictation: state.dictation_active.load(Ordering::Relaxed),
             copilot: state.copilot_active.load(Ordering::Relaxed),
+            voice: state.voice_active.load(Ordering::Relaxed),
         },
         None => TrayStateSnapshot {
             recording: false,
             live: false,
             dictation: false,
             copilot: false,
+            voice: false,
         },
     }
 }
@@ -2048,6 +2067,9 @@ fn main() {
             dictation_overlay: Arc::new(Mutex::new(commands::DictationOverlaySnapshot::default())),
             live_transcript_active: live_transcript_active.clone(),
             live_transcript_stop_flag: live_transcript_stop_flag.clone(),
+            voice_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "voice-live")]
+            voice_session: Arc::new(Mutex::new(None)),
             copilot_active: copilot_active.clone(),
             copilot_stop_flag: copilot_stop_flag.clone(),
             copilot_paused: copilot_paused.clone(),
@@ -3087,6 +3109,9 @@ fn main() {
             commands::cmd_open_meeting_url,
             commands::cmd_get_meeting_prompt,
             commands::cmd_close_meeting_prompt,
+            commands::cmd_start_voice,
+            commands::cmd_stop_voice,
+            commands::cmd_voice_status,
             commands::cmd_start_dictation,
             commands::cmd_show_dictation_permission_help,
             commands::cmd_stop_dictation,
@@ -3176,6 +3201,7 @@ mod tray_activity_tests {
             live,
             dictation,
             copilot: false,
+            voice: false,
         }
     }
 
@@ -3190,6 +3216,7 @@ mod tray_activity_tests {
             live,
             dictation,
             copilot,
+            voice: false,
         }
     }
 
@@ -3886,6 +3913,28 @@ mod tray_activity_tests {
             derive_tray_activity(snap_with_copilot(false, false, true, true)),
             TrayActivity::Dictation
         );
+    }
+
+    #[test]
+    fn voice_reports_itself_and_outranks_coach() {
+        let snap = |voice: bool, copilot: bool| TrayStateSnapshot {
+            recording: false,
+            live: false,
+            dictation: false,
+            copilot,
+            voice,
+        };
+        assert_eq!(derive_tray_activity(snap(true, false)), TrayActivity::Voice);
+        // Voice owns the microphone for a live conversation, so it is the more
+        // specific thing to report if both are somehow on.
+        assert_eq!(derive_tray_activity(snap(true, true)), TrayActivity::Voice);
+        assert_eq!(
+            derive_tray_activity(snap(false, true)),
+            TrayActivity::Copilot
+        );
+        // And it never claims the capture pipeline it does not own.
+        assert!(!TrayActivity::Voice.blocks_capture_controls());
+        assert!(TrayActivity::Voice.is_active());
     }
 
     #[test]

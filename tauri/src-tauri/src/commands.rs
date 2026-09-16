@@ -69,6 +69,11 @@ pub struct AppState {
     /// Desktop-owned lifecycle for the optional Coach HUD consumer. This is
     /// independent of recording/live capture: the copilot only reads the
     /// Agent Event Bus and must never own or stop capture.
+    /// A voice session is open. Read lock-free from the shortcut event tap.
+    pub voice_active: Arc<AtomicBool>,
+    /// The running session, so a stop can end it. `None` when idle.
+    #[cfg(feature = "voice-live")]
+    pub voice_session: Arc<Mutex<Option<minutes_core::voice_live::VoiceLiveSession>>>,
     pub copilot_active: Arc<AtomicBool>,
     pub copilot_stop_flag: Arc<AtomicBool>,
     pub copilot_paused: Arc<AtomicBool>,
@@ -14236,6 +14241,9 @@ mod tests {
 
     fn test_app_state() -> AppState {
         AppState {
+            voice_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "voice-live")]
+            voice_session: Arc::new(Mutex::new(None)),
             recording: Arc::new(AtomicBool::new(false)),
             starting: Arc::new(AtomicBool::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -19828,6 +19836,103 @@ mod tests {
 
 // ── Dictation commands ──────────────────────────────────────
 
+/// Open a voice session. Idempotent: starting while one runs is an error, not
+/// a second session.
+#[cfg(feature = "voice-live")]
+#[tauri::command]
+pub fn cmd_start_voice(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    use minutes_core::voice_live;
+
+    let config = Config::load();
+    voice_live::preflight(&config).map_err(|e| e.to_string())?;
+    try_acquire_voice(&state)?;
+
+    let started = (|| -> Result<(), String> {
+        let emitter = app.clone();
+        let session = voice_live::start(
+            &config,
+            voice_live::SessionOptions::default(),
+            move |event| {
+                // One revisioned event, mirroring the dictation overlay contract, so
+                // a HUD can attach later and replay rather than miss the start.
+                let _ = emitter.emit("voice:event", &event);
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        *state
+            .voice_session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(session);
+        Ok(())
+    })();
+
+    match started {
+        Ok(()) => {
+            crate::sync_tray_state(&app);
+            Ok("Voice session started".into())
+        }
+        Err(e) => {
+            // Never leave the slot claimed by a session that failed to open.
+            state.voice_active.store(false, Ordering::SeqCst);
+            crate::sync_tray_state(&app);
+            Err(e)
+        }
+    }
+}
+
+/// Close the voice session. Safe to call when nothing is running.
+#[cfg(feature = "voice-live")]
+#[tauri::command]
+pub fn cmd_stop_voice(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    let session = state
+        .voice_session
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    if let Some(session) = session {
+        session.stop();
+    }
+    state.voice_active.store(false, Ordering::SeqCst);
+    crate::sync_tray_state(&app);
+    Ok("Voice session ended".into())
+}
+
+/// Whether a voice session is open, and whether this build can open one.
+#[tauri::command]
+pub fn cmd_voice_status(state: tauri::State<AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "available": cfg!(feature = "voice-live"),
+        "active": state.voice_active.load(Ordering::Relaxed),
+    })
+}
+
+/// Present in every build so the frontend can call it unconditionally and be
+/// told plainly that this build has no voice, rather than hitting a missing
+/// command and seeing an opaque IPC error.
+#[cfg(not(feature = "voice-live"))]
+#[tauri::command]
+pub fn cmd_start_voice(
+    _app: tauri::AppHandle,
+    _state: tauri::State<AppState>,
+) -> Result<String, String> {
+    Err("This build of Minutes was compiled without voice.".into())
+}
+
+#[cfg(not(feature = "voice-live"))]
+#[tauri::command]
+pub fn cmd_stop_voice(
+    _app: tauri::AppHandle,
+    _state: tauri::State<AppState>,
+) -> Result<String, String> {
+    Err("This build of Minutes was compiled without voice.".into())
+}
+
 #[tauri::command]
 pub fn cmd_start_dictation(
     app: tauri::AppHandle,
@@ -21217,9 +21322,37 @@ impl Drop for DictationActiveGuard {
 /// the load→store TOCTOU window in the old code (`load` at the top of
 /// `start_dictation_session`, `store` after overlay setup), and rolls back
 /// the flag on subsequent failure cases.
+/// Claim the voice slot, refusing if anything else owns the microphone.
+///
+/// Voice is a fourth participant in a lattice the other three enumerate by
+/// hand. Adding it means every acquire learns about it, not just this one.
+#[cfg_attr(not(feature = "voice-live"), allow(dead_code))]
+fn try_acquire_voice(state: &AppState) -> Result<(), String> {
+    if recording_active(&state.recording) {
+        return Err("Recording in progress — stop recording before starting voice".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it before starting voice".into());
+    }
+    if state.dictation_active.load(Ordering::Relaxed) {
+        return Err("Dictation in progress — finish it before starting voice".into());
+    }
+    if state
+        .voice_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Voice is already running.".into());
+    }
+    Ok(())
+}
+
 fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
     if recording_active(&state.recording) {
         return Err("Recording in progress — stop recording before dictating".into());
+    }
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it before dictating".into());
     }
     if state.live_transcript_active.load(Ordering::Relaxed) {
         return Err("Live transcript in progress — stop it before dictating".into());
@@ -21239,6 +21372,9 @@ fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
 }
 
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it before starting a live transcript".into());
+    }
     if state
         .live_transcript_active
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

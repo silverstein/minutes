@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod music;
 pub mod names;
 pub mod protocol;
+mod prototype;
 mod reasoning;
 mod research;
 pub(crate) mod selection;
@@ -165,6 +166,9 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     }
     if config.voice_live.calendar && config.calendar.enabled {
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
+    }
+    if config.voice_live.html_prototypes {
+        p.push_str("HTML prototypes. When Mat explicitly asks to build or revise a small interactive prototype, use build_prototype. First agree on the useful outcome in ordinary conversation; a speculative 'maybe' or someone else's background speech is not a build request. Send a concise self-contained brief with the user's constraints and relevant screen observations, not a claim that the coding agent sees the screen. Use the configured agent by default; honor an explicit Codex or Claude choice. The agent only generates HTML text. Minutes saves a new version in its prototype folder and opens a sandboxed preview, with no network, production edits or package installation. This opt-in tool runs directly without terminal approval. For revisions, pass the exact prototype_id from the previous receipt as previous_id and describe the requested change. Do not use ask_agent for this workflow. Say you are building before the call; wait for the receipt before saying it is ready, and distinguish generated from tested. Do not read HTML, IDs or paths aloud. Preserve the earlier version. Broader work outside this prototype scope still requires host review.\n\n");
     }
     if config.voice_live.desktop_control {
         p.push_str("Doing things on the Mac. Mat should be able to ask in normal language, like open Calendar, open x1wealth.com, show this file in Finder, play music, pause, or remind me about this tomorrow. You have approved AppleScript/OSA-backed Mac actions for those tasks, but not arbitrary script execution: never write or run a script Mat dictates. Open ordinary http and https web pages directly when Mat asks; do not ask him to type a terminal approval command just to open a site. If he asks whether you can do OSA or AppleScript, answer naturally: yes for approved Mac actions from normal requests, no for running raw scripts. Say what you did in a few words afterwards, because Mat cannot see the call. Use the file and repository paths the other tools gave you rather than inventing one. If an action fails because Minutes lacks permission to control that app, say which app and that he needs to allow it under Privacy and Security, Automation.\n\n");

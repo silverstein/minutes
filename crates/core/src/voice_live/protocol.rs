@@ -928,6 +928,63 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires GEMINI_API_KEY; synthetic routing only, no prototypes generated"]
+    fn live_prototype_routing_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.html_prototypes = true;
+        config.voice_live.ask_agent = true;
+        config.voice_live.delegate_agent = "claude".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let previous = "a".repeat(64);
+        for (request, revision, should_build) in [
+            ("Build me a small interactive HTML focus timer with start, pause and reset. Use Codex.".to_owned(), false, true),
+            (format!("The prototype_id of the timer you just built is {previous}. Revise that prototype to add 15, 25 and 45 minute buttons. Keep the working timer."), true, true),
+            ("Maybe a timer could be interesting. Do not build anything yet; let's just discuss what would make it useful.".to_owned(), false, false),
+        ] {
+            let setup = SessionSetup {
+                model: config.voice_live.model.clone(), thinking_level: config.voice_live.thinking_level.clone(),
+                api_key: crate::voice_live::api_key(&config).unwrap(),
+                system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+                function_declarations: tools.declarations(), language: "en-US".into(),
+                manual_activity: true, proactive_audio: false, start_sensitivity: String::new(),
+                end_sensitivity: String::new(), resume_handle: None,
+            };
+            let client = LiveClient::connect(&setup).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(40);
+            let mut matched = false;
+            let mut answered = false;
+            while std::time::Instant::now() < deadline {
+                match client.inbox.recv_timeout(Duration::from_millis(250)) {
+                    Ok(ServerEvent::SetupComplete) => client.send_text_turn(&request).unwrap(),
+                    Ok(ServerEvent::ToolCall(calls)) => {
+                        for call in calls {
+                            assert_ne!(call.name, "ask_agent", "prototype escaped to broad delegation");
+                            if call.name == "build_prototype" {
+                                assert!(should_build, "discussion became unauthorized work");
+                                assert!(!call.args["brief"].as_str().unwrap_or("").is_empty());
+                                if revision { assert_eq!(call.args["previous_id"], previous); }
+                                else { assert_eq!(call.args["agent"], "codex"); }
+                                matched = true;
+                            }
+                            client.send_tool_response(&call, "Routing probe only. Nothing generated, saved or opened.", "WHEN_IDLE").unwrap();
+                        }
+                        if matched { break; }
+                    }
+                    Ok(ServerEvent::TurnComplete) if !should_build => { answered = true; break; }
+                    Ok(ServerEvent::Error(e) | ServerEvent::Closed(e)) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            client.close();
+            assert!(if should_build { matched } else { answered });
+            println!("prototype routing passed: revision={revision}, should_build={should_build}");
+        }
+    }
+
+    #[test]
     fn compound_status_is_decoded_after_utterance_completion() {
         let events = decode_events(
             &json!({"serverContent":{"turnComplete":true},"interactionStatus":"IN_PROGRESS"})

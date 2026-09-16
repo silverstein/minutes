@@ -124,11 +124,6 @@ pub(super) fn review(args: &Value, config: &Config) -> Result<Value, String> {
         .file_stem()
         .and_then(|p| p.to_str())
         .unwrap_or("");
-    let isolation = match label {
-        "codex" => RecallChatIsolation::CodexSubscription,
-        "claude" => RecallChatIsolation::ClaudeSubscription,
-        _ => return Err("Evidence-only PR review currently supports Codex and Claude".into()),
-    };
     let metadata = pull(repo, num)?;
     let diff = gh(&[
         "pr".into(),
@@ -160,36 +155,54 @@ pub(super) fn review(args: &Value, config: &Config) -> Result<Value, String> {
         "question": text_arg(args, "question").unwrap_or("Should this PR be landed?"),
     });
     let prompt = format!("{REVIEW_SYSTEM}\n\nPR evidence (JSON):\n{evidence}");
+    let answer = isolated_answer(
+        &agent,
+        REVIEW_SYSTEM,
+        &prompt,
+        Duration::from_secs(config.voice_live.delegate_timeout_secs.clamp(10, 900)),
+    )?;
+    Ok(json!({"agent": label, "repository": repo, "number": num,
+        "head_sha": metadata["headRefOid"], "answer": answer,
+        "diff_truncated": truncated, "merged": false,
+        "scope": "Assessment of supplied PR metadata and diff only; no tests run or changes made"}))
+}
+
+pub(super) fn isolated_answer(
+    agent: &str,
+    system: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let label = Path::new(agent)
+        .file_stem()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    let isolation = match label {
+        "codex" => RecallChatIsolation::CodexSubscription,
+        "claude" => RecallChatIsolation::ClaudeSubscription,
+        _ => return Err("Isolated generation supports Codex and Claude only".into()),
+    };
     let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let canonical = Path::new(&agent)
+    let canonical = Path::new(agent)
         .canonicalize()
         .map_err(|_| format!("{label} is not installed"))?;
     let roots = vec![canonical
         .parent()
         .ok_or("agent has no executable directory")?
         .to_path_buf()];
-    let mut invocation =
-        summarize::build_chat_invocation(&agent, &prompt, false, isolation, &roots)
-            .map_err(|e| e.to_string())?;
-    // Reuse Recall's verified isolation contract with PR-specific instructions.
-    invocation.stdin_payload = Some(prompt.into_bytes());
+    let mut invocation = summarize::build_chat_invocation(agent, prompt, false, isolation, &roots)
+        .map_err(|e| e.to_string())?;
+    // Reuse Recall's verified isolation contract without broad delegation flags.
+    invocation.stdin_payload = Some(prompt.as_bytes().to_vec());
     if let Some(i) = invocation.args.iter().position(|a| a == "--system-prompt") {
-        invocation.args[i + 1] = REVIEW_SYSTEM.into();
+        invocation.args[i + 1] = system.into();
     }
-    let output = summarize::run_chat_invocation(
-        invocation,
-        Some(workspace.path()),
-        Duration::from_secs(config.voice_live.delegate_timeout_secs.clamp(10, 900)),
-    )?;
-    let answer = if label == "codex" {
-        codex_answer(&output)?
+    let output = summarize::run_chat_invocation(invocation, Some(workspace.path()), timeout)?;
+    if label == "codex" {
+        codex_answer(&output)
     } else {
-        output
-    };
-    Ok(json!({"agent": label, "repository": repo, "number": num,
-        "head_sha": metadata["headRefOid"], "answer": answer,
-        "diff_truncated": truncated, "merged": false,
-        "scope": "Assessment of supplied PR metadata and diff only; no tests run or changes made"}))
+        Ok(output)
+    }
 }
 
 fn codex_answer(output: &str) -> Result<String, String> {
@@ -199,7 +212,7 @@ fn codex_answer(output: &str) -> Result<String, String> {
             continue;
         };
         if event["type"] == "error" || event["type"] == "turn.failed" {
-            return Err("Codex could not complete the PR assessment".into());
+            return Err("Codex could not complete the request".into());
         }
         if event["type"] == "item.completed" && event["item"]["type"] == "agent_message" {
             answer = event["item"]["text"].as_str().map(str::to_owned);
@@ -207,7 +220,7 @@ fn codex_answer(output: &str) -> Result<String, String> {
     }
     answer
         .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "Codex returned no assessment".into())
+        .ok_or_else(|| "Codex returned no answer".into())
 }
 
 #[cfg(test)]

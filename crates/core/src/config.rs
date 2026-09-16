@@ -1177,6 +1177,9 @@ pub struct VoiceLiveConfig {
     /// cannot constrain what it does once asked. `delegate_agent_args` is the
     /// control that matters; the flag here only decides whether to offer it.
     pub ask_agent: bool,
+    /// Opt in to bounded HTML generation and sandboxed local previews.
+    /// The coding agent receives only the brief and optional prior prototype.
+    pub html_prototypes: bool,
     /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
     /// first agent CLI found on the machine.
     pub delegate_agent: String,
@@ -1255,6 +1258,7 @@ impl Default for VoiceLiveConfig {
             prep_artifacts: true,
             calendar: true,
             ask_agent: false,
+            html_prototypes: false,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
             delegate_agent_args: Vec::new(),

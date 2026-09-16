@@ -91,10 +91,41 @@ and Linux return Unsupported rather than substituting a broader capture path.
 Generic text can still contain sensitive information; secure-field rejection
 is not a guarantee of comprehensive redaction.
 
+## Small HTML prototypes
+
+`[voice_live] html_prototypes = true` opts into a bounded discuss/build/revise
+loop. It is off by default and also requires voice cloud consent. Gemini Live
+distills an explicit build request into a brief; the configured coding agent
+(or explicitly requested Codex/Claude) returns text-only HTML and a title.
+The agent uses the isolated Recall launch contract, not broad `ask_agent`
+permissions or configured permission-bypass flags. Merely discussing an idea
+must not start a build. This is intent routing, not speaker identification.
+
+Minutes saves immutable versions under `~/.minutes/prototypes/` and opens a
+host-authored local viewer. Generated code runs in an opaque-origin iframe;
+inline scripts are allowed, but network, storage, popups, downloads, form
+submission and access to the surrounding document are not granted. A restrictive
+CSP blocks resource loads and frame navigation. This is an offline prototype,
+not a deployed app or permission to modify a repository. The configured agent
+service receives the brief and, on revision, the immediate prior HTML version.
+
+For a revision, the model must use the exact returned `prototype_id`; paths,
+changed records and symlinked storage are refused. Previous versions remain.
+This opted-in generate/save/open operation does not require terminal approval.
+Broader agent actions retain their existing host-review boundary. Cancellation
+uses the existing queue semantics; an already running build is timeout-bound
+and may save/open a preview even if its result is withheld after cancellation.
+
+A short rehearsal is: discuss a small interface, explicitly ask to build it,
+inspect its controls, then request one concrete revision. The assistant must
+wait for the receipt before claiming it opened anything and must not claim the
+generated app was tested. Agent generation, synthetic Live routing, and browser
+checks are separate evidence from a successful microphone rehearsal.
+
 ## Host review is an execution boundary
 
-All model-requested local mutations, desktop mutations, screen frames, music,
-MCP calls and delegated-agent invocations stage a local review. Disabled
+Operations outside explicitly opted-in, constrained capabilities stage a local
+review, including broad delegated-agent execution and MCP calls. Disabled
 capabilities fail before staging and are checked again before execution. The
 legacy `confirm` token is not in the voice tool schema and is rejected by this
 host path. Recalled text, another utterance, or a model-chosen ID cannot approve.

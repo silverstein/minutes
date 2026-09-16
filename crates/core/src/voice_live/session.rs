@@ -377,7 +377,7 @@ where
 {
     super::preflight(config)?;
     let api_key = super::api_key(config)?;
-    super::refuse_if_recording()?;
+    super::refuse_if_microphone_busy()?;
     let on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync> = Arc::new(on_event);
     let emit = |e: VoiceLiveEvent| on_event(e);
     emit(VoiceLiveEvent::State {

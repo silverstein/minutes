@@ -19904,13 +19904,35 @@ pub fn cmd_start_voice(
 
     let started = (|| -> Result<(), String> {
         let emitter = app.clone();
+        // The session can end without anyone asking it to: the socket drops,
+        // the microphone stream ends, the provider closes the turn. Nothing
+        // else observes that, so without this the flag stays set forever, the
+        // tray keeps claiming a session that is gone, and recording, dictation
+        // and live transcript all stay locked out until the user happens to
+        // click Voice again.
+        let closed_active = Arc::clone(&state.voice_active);
         let session = voice_live::start(
             &config,
             voice_live::SessionOptions::default(),
             move |event| {
-                // One revisioned event, mirroring the dictation overlay contract, so
-                // a HUD can attach later and replay rather than miss the start.
+                // `Closed` is terminal: every site that emits it breaks out of
+                // the session loop.
+                let ending = matches!(
+                    event,
+                    minutes_core::voice_live::VoiceLiveEvent::Closed { .. }
+                );
+                // Emit first, so a HUD sees why it closed before it sees the
+                // tray go idle.
                 let _ = emitter.emit("voice:event", &event);
+                if ending {
+                    closed_active.store(false, Ordering::SeqCst);
+                    // Deliberately not touching `voice_session` here: this runs
+                    // on the session's own thread, and the handle it would take
+                    // owns the join handle for that thread. The next start
+                    // replaces it, and a stop in between joins a thread that has
+                    // already exited.
+                    crate::sync_tray_state(&emitter);
+                }
             },
         )
         .map_err(|e| e.to_string())?;

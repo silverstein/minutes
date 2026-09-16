@@ -1,29 +1,58 @@
 name: Voice continuity integration
 
 on:
-  push:
-    branches: ['feat/voice-continuity-integration-20260916']
+  pull_request:
+    branches: [main, 'feat/voice-live']
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: voice-continuity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  source-snapshot:
+  contracts:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export pinned public source for isolated implementation
-        run: |
-          mkdir -p /tmp/continuity-source
-          git archive HEAD > /tmp/continuity-source/voice.tar
-          git fetch --depth=1 origin 7df6a4006dfb03afe688fe9dc5abf998c0477db0
-          git archive 7df6a4006dfb03afe688fe9dc5abf998c0477db0 > /tmp/continuity-source/foundation.tar
-      - uses: actions/upload-artifact@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          name: continuity-source
-          path: /tmp/continuity-source/*.tar
-          retention-days: 1
+          components: rustfmt, clippy
+      - run: cargo test --manifest-path tooling/interaction-contracts/Cargo.toml
+      - run: cargo fmt --manifest-path tooling/interaction-contracts/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path tooling/interaction-contracts/Cargo.toml --all-targets -- -D warnings
+
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - name: Linux audio headers
+        if: runner.os == 'Linux'
+        run: .github/scripts/apt-install.sh libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
+      - name: Voice runtime regression tests (no real messages or provider)
+        run: cargo test -p minutes-core --no-default-features --features voice-live --lib voice_live:: -- --test-threads=1
+      - name: Integrated portable contracts
+        run: cargo test -p minutes-core --no-default-features --features voice-live --lib interaction:: -- --test-threads=1
+      - name: Build actual CLI
+        run: cargo build -p minutes-cli --no-default-features --features voice-live --bin minutes
+      - name: Offline end-to-end CLI smoke
+        run: python scripts/smoke_voice_continuity.py target/debug/minutes
+      - name: Integrated lint
+        run: cargo clippy -p minutes-core -p minutes-cli --no-default-features --features voice-live --all-targets -- -D warnings
+      - name: Workspace formatting
+        run: cargo fmt --all -- --check

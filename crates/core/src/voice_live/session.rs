@@ -443,10 +443,18 @@ struct Runner {
     stop_flag: Arc<AtomicBool>,
 }
 
+/// Chunks are 100 ms, so this is 300 ms. Below it a transcriber invents a word
+/// out of a click or a breath.
+const PTT_MIN_CHUNKS: usize = 3;
+
 struct PttState {
     held: bool,
     started: bool,
     chunks: usize,
+    /// Audio captured before the press was long enough to count. Held here
+    /// rather than streamed, so a press that turns out to be too short really
+    /// did send nothing, which is what the host tells the user.
+    held_back: Vec<Vec<u8>>,
 }
 
 impl Runner {
@@ -503,10 +511,17 @@ impl Runner {
                 Duration::from_millis(self.tools.config.voice_live.screen_settle_ms.min(3_000));
             let log_tx = self.log.as_ref().map(|l| l.sender());
             let audio_out = audio_out.clone();
+            let stop_flag = Arc::clone(&self.stop_flag);
             std::thread::Builder::new()
                 .name("voice-live-tools".into())
                 .spawn(move || {
                     for call in tool_rx.iter() {
+                        // Shutdown drops the sender, but whatever was already
+                        // queued still arrives here. A send waiting behind a
+                        // slow tool must not fire after the session is over.
+                        if stop_flag.load(Ordering::SeqCst) {
+                            continue;
+                        }
                         // A relayed agent can take half a minute. Without this
                         // the host shows the call going out and then nothing,
                         // which is indistinguishable from a wedged session.
@@ -594,6 +609,7 @@ impl Runner {
             held: false,
             started: false,
             chunks: 0,
+            held_back: Vec::new(),
         };
         let mut you = String::new();
         let mut me = String::new();
@@ -690,21 +706,41 @@ impl Runner {
                 recv(self.audio.receiver()) -> chunk => {
                     let Ok(chunk) = chunk else { self.emit(VoiceLiveEvent::Closed { reason: "microphone stream ended".into() }); break; };
                     self.emit(VoiceLiveEvent::Level { rms: chunk.rms });
+                    let pcm: Vec<u8> = chunk.samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
                     let send = match self.mode {
                         TalkMode::OpenMic => true,
                         TalkMode::PushToTalk => {
-                            if !ptt.held { false } else {
+                            if !ptt.held {
+                                false
+                            } else {
                                 ptt.chunks += 1;
-                                if !ptt.started {
-                                    ptt.started = true;
-                                    let _ = self.client().activity_start();
+                                if ptt.chunks < PTT_MIN_CHUNKS {
+                                    // Not yet long enough to be speech. Keep it
+                                    // rather than sending it, so a short press
+                                    // can be discarded rather than retracted.
+                                    ptt.held_back.push(pcm.clone());
+                                    false
+                                } else {
+                                    if !ptt.started {
+                                        ptt.started = true;
+                                        let _ = self.client().activity_start();
+                                        let mut failed = false;
+                                        for earlier in ptt.held_back.drain(..) {
+                                            if self.client().send_audio(&earlier).is_err() {
+                                                failed = true;
+                                                break;
+                                            }
+                                        }
+                                        if failed {
+                                            break;
+                                        }
+                                    }
+                                    true
                                 }
-                                true
                             }
                         }
                     };
                     if send {
-                        let pcm: Vec<u8> = chunk.samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
                         if self.client().send_audio(&pcm).is_err() { break; }
                         if self.mode == TalkMode::OpenMic && chunk.rms > 0.02 && state == VoiceLiveState::Ready {
                             set_state(&self, &mut state, VoiceLiveState::Listening);
@@ -721,19 +757,23 @@ impl Runner {
                 recv(self.control_rx) -> ctl => {
                     match ctl {
                         Ok(Control::PttStart) if self.mode == TalkMode::PushToTalk => {
-                            ptt = PttState { held: true, started: false, chunks: 0 };
+                            ptt = PttState { held: true, started: false, chunks: 0, held_back: Vec::new() };
                             self.audio.flush();
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
                         Ok(Control::PttEnd) if self.mode == TalkMode::PushToTalk => {
                             let PttState { started, chunks, .. } = ptt;
-                            ptt = PttState { held: false, started: false, chunks: 0 };
+                            ptt = PttState { held: false, started: false, chunks: 0, held_back: Vec::new() };
                             // Chunks are 100 ms; require 300 ms of audio or the transcriber invents a word.
-                            if started && chunks >= 3 {
+                            if started && chunks >= PTT_MIN_CHUNKS {
                                 let _ = self.client().activity_end();
                                 set_state(&self, &mut state, VoiceLiveState::Thinking);
                             } else {
-                                if started { let _ = self.client().activity_end(); }
+                                // The audio only leaves once the press is long
+                                // enough, so there is nothing to retract here.
+                                // Closing the turn anyway would hand the model
+                                // exactly the fragment this guard exists to
+                                // withhold, while the host said nothing was sent.
                                 self.emit(VoiceLiveEvent::Status { text: "press was too short, nothing sent".into() });
                                 set_state(&self, &mut state, VoiceLiveState::Ready);
                             }

@@ -921,10 +921,18 @@ fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
             .map(|n| n.to_string_lossy().to_lowercase().contains(&needle))
             .unwrap_or(false);
         if let Some(pos) = lower.find(&needle) {
+            // The offset came from the lowercased text, and lowercasing can
+            // change byte lengths, so it may land inside a character of the
+            // original. Snippet from whichever string the offset is valid in.
+            let source = if text.is_char_boundary(pos) {
+                &text
+            } else {
+                &lower
+            };
             hits.push((
                 f,
                 meta.modified().unwrap_or(std::time::UNIX_EPOCH),
-                snippet_around(&text, pos, needle.len()),
+                snippet_around(source, pos, needle.len()),
             ));
         } else if name_hit {
             hits.push((

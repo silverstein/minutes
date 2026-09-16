@@ -14,7 +14,7 @@
 //! exports.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -31,6 +31,13 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(45);
 /// Tools taken from one server when it names no allowlist. Voice context is
 /// small and tool choice degrades quickly, so this stays low on purpose.
 const DEFAULT_MAX_TOOLS: usize = 8;
+/// Longest single line a server may send. Without a bound, a server that
+/// never writes a newline makes the reader allocate forever, which no channel
+/// bound or stash limit can stop.
+const MAX_LINE_BYTES: usize = 1 << 20;
+/// Longest request we will write. Kept well under a pipe buffer so a server
+/// that has stopped reading cannot block the write and strand the connection.
+const MAX_REQUEST_BYTES: usize = 16 * 1024;
 /// Separator between the server name and the tool name.
 pub const SEP: &str = "__";
 
@@ -38,6 +45,10 @@ pub const SEP: &str = "__";
 pub struct McpServer {
     pub name: String,
     conn: Mutex<Conn>,
+    /// Kept outside the lock so a wedged connection can still be killed. A
+    /// server that stops reading its stdin blocks the writer while it holds the
+    /// lock, and shutdown that also wanted the lock would wait forever.
+    pid: u32,
     pub tools: Vec<McpTool>,
 }
 
@@ -137,13 +148,31 @@ impl McpServer {
         std::thread::Builder::new()
             .name(format!("mcp-{}", spec.name))
             .spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().map_while(Result::ok) {
-                    let line = line.trim().to_string();
-                    if line.is_empty() {
+                let mut reader = BufReader::new(stdout);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    // Bounded: `read_line` on a server that never sends one
+                    // grows a single allocation without limit.
+                    let mut limited = (&mut reader).take(MAX_LINE_BYTES as u64);
+                    match limited.read_until(b'\n', &mut line) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            if n >= MAX_LINE_BYTES && !line.ends_with(b"\n") {
+                                // Oversized and still unterminated: this server
+                                // is broken or hostile, and continuing means
+                                // resynchronising on a stream we cannot frame.
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                    let text = String::from_utf8_lossy(&line);
+                    let text = text.trim();
+                    if text.is_empty() {
                         continue;
                     }
-                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if let Ok(value) = serde_json::from_str::<Value>(text) {
                         if tx.send(value).is_err() {
                             return;
                         }
@@ -152,8 +181,10 @@ impl McpServer {
             })
             .map_err(|e| format!("could not read from the server: {e}"))?;
 
+        let pid = child.id();
         let server = Self {
             name: spec.name.clone(),
+            pid,
             conn: Mutex::new(Conn {
                 child,
                 stdin,
@@ -163,8 +194,19 @@ impl McpServer {
             }),
             tools: Vec::new(),
         };
-        server.handshake()?;
-        let tools = server.load_tools(spec)?;
+        // A server that starts but never answers must not be left running when
+        // we give up on it.
+        if let Err(e) = server.handshake() {
+            server.shutdown();
+            return Err(e);
+        }
+        let tools = match server.load_tools(spec) {
+            Ok(tools) => tools,
+            Err(e) => {
+                server.shutdown();
+                return Err(e);
+            }
+        };
         Ok(Self { tools, ..server })
     }
 
@@ -210,7 +252,13 @@ impl McpServer {
         let mut conn = self.conn.lock().map_err(|_| "server lock poisoned")?;
         let id = conn.next_id;
         conn.next_id += 1;
-        let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let msg =
+            json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
+        if msg.len() > MAX_REQUEST_BYTES {
+            return Err(format!(
+                "that request is too large to send to {method} safely"
+            ));
+        }
         writeln!(conn.stdin, "{msg}").map_err(|e| format!("writing to the server: {e}"))?;
         conn.stdin
             .flush()
@@ -249,7 +297,15 @@ impl McpServer {
     }
 
     fn shutdown(&self) {
-        if let Ok(mut conn) = self.conn.lock() {
+        // Kill by pid first, without the lock. A server blocking our writer is
+        // exactly the case where the lock is unavailable and shutdown matters.
+        #[cfg(unix)]
+        if self.pid > 0 {
+            unsafe {
+                libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        if let Ok(mut conn) = self.conn.try_lock() {
             let _ = conn.child.kill();
             let _ = conn.child.wait();
         }
@@ -262,7 +318,18 @@ impl Drop for McpPool {
     }
 }
 
+/// The id of a genuine response to one of our requests.
+///
+/// A server may send its own requests, and those carry ids from its own
+/// numbering. Matching on the id alone let a server-initiated `ping` with the
+/// id we happened to be waiting on satisfy our call with an empty result.
 fn response_id(value: &Value) -> Option<u64> {
+    if value.get("method").is_some() {
+        return None;
+    }
+    if value.get("result").is_none() && value.get("error").is_none() {
+        return None;
+    }
     value.get("id").and_then(Value::as_u64)
 }
 
@@ -332,6 +399,12 @@ pub fn select_tools(
         if qualified.is_empty() {
             continue;
         }
+        // Two remote names can reduce to one function name, by character
+        // replacement or by truncation. Dispatch matches the first, so a call
+        // meant for the second would silently run the first with its arguments.
+        if out.iter().any(|t: &McpTool| t.qualified == qualified) {
+            continue;
+        }
         let description = tool
             .get("description")
             .and_then(Value::as_str)
@@ -382,6 +455,14 @@ pub fn qualify(server: &str, tool: &str) -> String {
 /// unsupported keyword anywhere rejects the whole session setup, which would
 /// take every other tool down with it.
 pub fn sanitize_schema(schema: &Value) -> Value {
+    sanitize_inner(schema, false)
+}
+
+/// `keys_are_names` marks an object whose keys are argument names rather than
+/// schema keywords. Without it the filter deleted a legitimate argument called
+/// `pattern` or `default` while leaving it listed in `required`, so the tool
+/// declared a parameter the model could never supply.
+fn sanitize_inner(schema: &Value, keys_are_names: bool) -> Value {
     const DROP: &[&str] = &[
         "$schema",
         "$id",
@@ -415,17 +496,24 @@ pub fn sanitize_schema(schema: &Value) -> Value {
         Value::Object(map) => {
             let mut clean = Map::new();
             for (key, value) in map {
-                if DROP.contains(&key.as_str()) {
+                if !keys_are_names && DROP.contains(&key.as_str()) {
                     continue;
                 }
-                clean.insert(key.clone(), sanitize_schema(value));
+                // The values under `properties` are schemas; its keys are not.
+                let child_keys_are_names = !keys_are_names && key == "properties";
+                clean.insert(key.clone(), sanitize_inner(value, child_keys_are_names));
             }
             if !clean.contains_key("type") && clean.contains_key("properties") {
                 clean.insert("type".into(), json!("object"));
             }
             Value::Object(clean)
         }
-        Value::Array(items) => Value::Array(items.iter().map(sanitize_schema).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| sanitize_inner(item, false))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -473,6 +561,41 @@ mod tests {
             clean["properties"]["nested"]["properties"]["x"]["type"],
             "number"
         );
+    }
+
+    #[test]
+    fn an_argument_named_like_a_keyword_survives() {
+        let clean = sanitize_schema(&json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "pattern": {"type": "string", "description": "a regex"},
+                "default": {"type": "string"}
+            },
+            "required": ["pattern"]
+        }));
+        // These are argument names, not schema keywords.
+        assert_eq!(clean["properties"]["pattern"]["description"], "a regex");
+        assert!(clean["properties"].get("default").is_some());
+        // The keyword in keyword position is still dropped.
+        assert!(clean.get("additionalProperties").is_none());
+        // And a keyword inside an argument's own schema still goes.
+        let nested = sanitize_schema(&json!({
+            "properties": {"q": {"type": "string", "minLength": 2}}
+        }));
+        assert!(nested["properties"]["q"].get("minLength").is_none());
+    }
+
+    #[test]
+    fn two_remote_names_cannot_become_one_function() {
+        let raw = vec![
+            json!({"name": "get/thing", "inputSchema": {"type": "object", "properties": {}}}),
+            json!({"name": "get_thing", "inputSchema": {"type": "object", "properties": {}}}),
+        ];
+        let picked = select_tools("s", &raw, &[], 0);
+        // Both reduce to s__get_thing; keeping both would dispatch the wrong one.
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].remote, "get/thing");
     }
 
     #[test]

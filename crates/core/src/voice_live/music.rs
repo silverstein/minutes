@@ -182,8 +182,15 @@ fn write_source(bytes: &[u8], mime: &str) -> Result<PathBuf, String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
+    // Seconds alone collide when two sessions finish together, and the file is
+    // created truncating, so one piece would be lost and a decoder could read a
+    // half-rewritten file.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or_default();
     let path = dir.join(format!(
-        "{}.{}",
+        "{}-{unique:09}.{}",
         chrono::Local::now().format("%Y-%m-%d-%H-%M-%S"),
         extension_for(mime)
     ));

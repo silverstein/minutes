@@ -79,7 +79,8 @@ impl ToolContext {
     /// Function declarations in the Live API's OpenAPI-subset schema.
     pub fn declarations(&self) -> Vec<Value> {
         let mut d = vec![
-            decl("get_status", "Whether a recording or processing job is active right now.", json!({})),
+            decl("get_status", "Current time, recording state, active voice model and available reasoning modes.", json!({})),
+            decl("think_deeply", "Use Gemini Extended Thinking for a difficult question or when Mat asks you to think harder. This runs a separate reasoning request while the normal conversation stays on its current voice model. First gather evidence with your other tools, then include the question and relevant evidence in context. Cannot fetch new facts, run actions, or change the ongoing session model. Do not call it for routine commands or simple factual lookups.", json!({"question":{"type":"string"},"context":{"type":"string"},"level":{"type":"string","enum":["low","medium","high"]}})),
             decl(
                 "list_meetings",
                 "List recent meetings and voice memos, newest first. Paths returned here are the exact strings to pass to get_meeting.",
@@ -178,6 +179,16 @@ impl ToolContext {
             ));
         }
         if self.config.voice_live.ask_agent {
+            d.push(decl(
+                "read_pull_requests",
+                "Read GitHub pull requests directly, without approval. Supply repository as exact owner/name to list open PRs; add number to read one PR and its checks. If the repository is unknown, supply query instead to search repositories, then use a returned fullName. Do not invent a repository from a misheard project name. Returns at most 30 open PRs, not necessarily all.",
+                json!({"repository":{"type":"string"},"number":{"type":"integer"},"query":{"type":"string"}}),
+            ));
+            d.push(decl(
+                "review_pull_request",
+                "Ask Codex or Claude whether a PR should land. Fetches its current metadata and diff and asks the selected agent for an evidence-only assessment. Runs directly without approval and cannot merge, edit, approve or post. Pass agent=codex when Mat says use Codex (possibly transcribed Kodak, Kodex, or code X). This is a bounded assessment, not a full checkout-and-test review.",
+                json!({"repository":{"type":"string"},"number":{"type":"integer"},"agent":{"type":"string","enum":["default","codex","claude"]},"question":{"type":"string"}}),
+            ));
             if let Some(agent) = delegate_agent(&self.config) {
                 let agent_label = Path::new(&agent)
                     .file_name()
@@ -186,14 +197,14 @@ impl ToolContext {
                 d.push(decl(
                     "ask_agent",
                     &format!(
-                        "Relay one question to Mat's local {agent_label} agent, which can read his code, files and connected services. Use it for anything outside meeting memory: his codebase, a repository, a document, or a system like a CRM or issue tracker. Ask one self-contained question, including any context from this conversation the agent would need, because it cannot hear you. It takes several seconds, so say you are checking before you call it.{}",
+                        "Relay one question to a local coding agent (default {agent_label}). Select agent=codex or agent=claude when Mat names one. Use read_pull_requests for GitHub reads and review_pull_request for an agent's PR assessment; those run without approval. Use this broader delegation only for work those tools cannot do. Ask one self-contained question with the exact repository, PR number and context, because the agent cannot hear you. It takes several seconds, so say you are checking before you call it.{}",
                         if self.config.voice_live.delegate_writes {
                             " Its configured executor may change things. A local host review is mandatory before dispatch."
                         } else {
                             " Request read-only work, but the executor's launch permissions—not this prompt—enforce access. A local host review is mandatory before dispatch."
                         }
                     ),
-                    json!({"question": {"type": "string", "description": "A single self-contained question"}}),
+                    json!({"question": {"type": "string", "description": "A single self-contained question"},"agent":{"type":"string","enum":["default","codex","claude"]}}),
                 ));
             }
         }
@@ -257,7 +268,10 @@ impl ToolContext {
         // Disabled capabilities fail before staging a review as well as at execution.
         if (name == "make_music" && !self.config.voice_live.music)
             || (name == "look_at_screen" && !self.config.voice_live.screen_on_request)
-            || (name == "ask_agent" && !self.config.voice_live.ask_agent)
+            || (matches!(
+                name,
+                "ask_agent" | "read_pull_requests" | "review_pull_request"
+            ) && !self.config.voice_live.ask_agent)
             || desktop::find(name).is_some_and(|v| {
                 !self.config.voice_live.desktop_control
                     || (v.risk == desktop::Risk::Outward && !self.config.voice_live.desktop_outward)
@@ -494,11 +508,16 @@ impl ToolContext {
                     "processing_stage": s.processing_stage,
                     "processing_title": s.processing_title,
                     "duration_secs": s.duration_secs,
+                    "voice_model": cfg.voice_live.model,
+                    "extended_thinking_available": true,
+                    "extended_thinking_tool": "think_deeply",
+                    "thinking_level": cfg.voice_live.thinking_level,
                     // The prompt carries the date from session start; a long
                     // session needs the clock read fresh.
                     "now": Local::now().format("%A %Y-%m-%d %H:%M %Z").to_string(),
                 }))
             }
+            "think_deeply" => super::reasoning::think(cfg, args),
             "list_meetings" => {
                 let limit = int_arg(args, "limit", 10).clamp(1, 50);
                 let filters = SearchFilters {
@@ -636,13 +655,22 @@ impl ToolContext {
                 let rel = str_arg(args, "path").ok_or("path is required")?;
                 brain_read(root, &rel, self.max_chars.saturating_sub(500))
             }
+            "read_pull_requests" | "review_pull_request" => {
+                if !cfg.voice_live.ask_agent {
+                    return Err("GitHub and agent access are turned off".into());
+                }
+                if name == "read_pull_requests" {
+                    super::github::read(args)
+                } else {
+                    super::github::review(args, cfg)
+                }
+            }
             "ask_agent" => {
                 if !cfg.voice_live.ask_agent {
                     return Err("relaying to the local agent is turned off".into());
                 }
                 let question = str_arg(args, "question").ok_or("question is required")?;
-                let agent =
-                    delegate_agent(cfg).ok_or("no coding agent is configured or installed")?;
+                let agent = super::github::requested_agent(args, cfg)?;
                 let timeout =
                     Duration::from_secs(cfg.voice_live.delegate_timeout_secs.clamp(10, 900));
                 // The caller is a speech model deciding on its own when to
@@ -665,7 +693,12 @@ impl ToolContext {
                      Reply in under 120 words of plain prose, no markdown and no code blocks, \
                      because it will be read aloud.\n\nQuestion: {question}"
                 );
-                let args = delegate_agent_args(cfg);
+                let args = if delegate_agent(cfg).as_deref() == Some(agent.as_str()) {
+                    delegate_agent_args(cfg)
+                } else {
+                    // Flags for Claude must not be passed to Codex (or vice versa).
+                    Vec::new()
+                };
                 let cwd = delegate_cwd(cfg);
                 crate::summarize::run_agent_prompt(&agent, &prompt, &args, cwd.as_deref(), timeout)
                     .map(|answer| json!({ "agent": agent, "answer": answer }))
@@ -768,6 +801,9 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
         "get_meeting" | "read_brain" => vec!["path"],
         "get_person_profile" | "resolve_person" => vec!["name"],
         "add_note" => vec!["text"],
+        "ask_agent" => vec!["question"],
+        "think_deeply" => vec!["question"],
+        "review_pull_request" => vec!["repository", "number"],
         _ => vec![],
     };
     let mut params = json!({"type": "object", "properties": properties});
@@ -1325,6 +1361,8 @@ mod tests {
             "reveal_path",
             "add_reminder",
             "now_playing",
+            "read_pull_requests",
+            "review_pull_request",
         ] {
             assert!(
                 !requires_host_review(name, false),
@@ -1345,6 +1383,60 @@ mod tests {
             );
         }
         assert!(requires_host_review("hubspot__search", true));
+    }
+
+    #[test]
+    fn github_tools_fail_when_disabled_without_staging_review() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        for name in ["read_pull_requests", "review_pull_request"] {
+            let result = ctx.execute(name, &json!({"repository":"owner/repo","number":1}));
+            assert!(result.is_error);
+            assert!(result.text.contains("turned off"));
+            assert!(ctx.continuity.lock().unwrap().review().is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local Calendar or authenticated GitHub and coding agent access"]
+    fn live_voice_read_smoke() {
+        let mut config = Config::default();
+        config.voice_live.ask_agent = true;
+        config.voice_live.calendar = true;
+        config.calendar.enabled = true;
+        config.voice_live.delegate_timeout_secs = 120;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let mode = std::env::var("MINUTES_VOICE_SMOKE").expect("set MINUTES_VOICE_SMOKE");
+        let (name, args) = if mode == "calendar" {
+            ("upcoming_meetings", json!({"within_minutes":720}))
+        } else {
+            let repo = std::env::var("MINUTES_VOICE_SMOKE_REPO").expect("set repo");
+            let number: u64 = std::env::var("MINUTES_VOICE_SMOKE_PR")
+                .expect("set PR")
+                .parse()
+                .unwrap();
+            (
+                "review_pull_request",
+                json!({"repository":repo,"number":number,"agent":mode}),
+            )
+        };
+        let result = ctx.execute(name, &args);
+        assert!(!result.is_error, "{}", result.text);
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        let value: Value = serde_json::from_str(&result.text).unwrap();
+        if mode == "calendar" {
+            assert_eq!(value["calendar_reader"], "eventkit");
+            println!(
+                "eventkit event_count={}",
+                value["events"].as_array().unwrap().len()
+            );
+        } else {
+            assert_eq!(value["agent"], mode);
+            assert_eq!(value["merged"], false);
+            println!(
+                "agent={} head={} assessment={}",
+                value["agent"], value["head_sha"], value["answer"]
+            );
+        }
     }
 
     #[test]

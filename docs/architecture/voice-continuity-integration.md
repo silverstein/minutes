@@ -152,6 +152,31 @@ grants authority to act.
 
 ## Validation and release boundary
 
+### Spoken reads and reasoning
+
+With `[voice_live] ask_agent = true`, `read_pull_requests` exposes fixed GitHub
+repository search, PR list and PR detail reads without terminal approval.
+`review_pull_request` fetches current PR metadata and a bounded diff, checks that
+the head SHA did not change during retrieval, and sends that evidence to Codex
+or Claude using the existing isolated Recall launch contract. It cannot merge,
+post or edit, does not inherit configured delegation flags, and reports when
+the diff was truncated. The assessment is not a checkout-and-test review.
+Broader `ask_agent` delegation still needs host approval and now accepts an
+explicit agent choice; flags are not transferred between different agents.
+
+Ordinary conversation continues to use the configured voice model. The
+`think_deeply` tool can use `gemini-3.8-live-extended-thinking` for one task using
+supplied evidence, without replacing the active voice session. It has no action
+tools. `[voice_live] thinking_level` defaults to `medium` and accepts `low`,
+`medium` or `high`; standard Live setup omits the unsupported thinking field.
+The extended model uses the v1alpha endpoint. `get_status` reports the active
+voice model and the availability of on-demand reasoning.
+
+CLI-only macOS builds find the Calendar helper produced by the core build
+script even when no desktop bundle is staged. Calendar permission probes must
+run in the same responsible application context as the user session: an SSH
+probe can have different Calendar access from Terminal.
+
 Regression tests cover actual dispatcher staging/approval, private-history
 non-disclosure, offline refusal of network actions, restricted exact-path reads,
 checkpoint persistence/tampering, queue cancellation, and real wire JSON shapes.

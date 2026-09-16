@@ -374,6 +374,7 @@ where
 
     let setup = SessionSetup {
         model: config.voice_live.model.clone(),
+        thinking_level: config.voice_live.thinking_level.clone(),
         api_key,
         system_instruction: prompt,
         function_declarations: declarations,

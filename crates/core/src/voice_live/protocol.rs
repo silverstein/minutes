@@ -22,6 +22,7 @@ use crate::interaction::live::{self, LiveProfile, ProviderActivity};
 
 /// Base endpoint for the bidirectional Live API.
 pub const LIVE_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const THINKING_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent";
 
 /// Model audio is fixed by the provider.
 pub const OUTPUT_SAMPLE_RATE: u32 = 24_000;
@@ -63,6 +64,7 @@ pub enum ServerEvent {
 #[derive(Debug, Clone)]
 pub struct SessionSetup {
     pub model: String,
+    pub thinking_level: String,
     pub api_key: String,
     pub system_instruction: String,
     pub function_declarations: Vec<Value>,
@@ -80,7 +82,18 @@ pub struct SessionSetup {
 
 impl SessionSetup {
     pub fn profile(&self) -> Result<LiveProfile, VoiceLiveError> {
-        LiveProfile::gemini(&self.model).map_err(VoiceLiveError::Connect)
+        let profile = LiveProfile::gemini(&self.model).map_err(VoiceLiveError::Connect)?;
+        if profile == LiveProfile::AsyncReasoning
+            && !matches!(
+                self.thinking_level.to_ascii_lowercase().as_str(),
+                "low" | "medium" | "high"
+            )
+        {
+            return Err(VoiceLiveError::Connect(
+                "thinking_level must be low, medium or high".into(),
+            ));
+        }
+        Ok(profile)
     }
 
     fn to_json(&self) -> Value {
@@ -110,6 +123,10 @@ impl SessionSetup {
         });
         if !self.function_declarations.is_empty() {
             setup["tools"] = json!([{ "functionDeclarations": declarations }]);
+        }
+        if profile == LiveProfile::AsyncReasoning {
+            setup["generationConfig"]["thinkingConfig"] =
+                json!({"thinkingLevel": self.thinking_level.to_ascii_uppercase()});
         }
         if self.manual_activity {
             setup["realtimeInputConfig"] =
@@ -159,7 +176,12 @@ impl LiveClient {
                 .function_declaration(declaration.clone())
                 .map_err(VoiceLiveError::Connect)?;
         }
-        let url = format!("{LIVE_WS_BASE}?key={}", setup.api_key);
+        let endpoint = if profile == LiveProfile::AsyncReasoning {
+            THINKING_WS_BASE
+        } else {
+            LIVE_WS_BASE
+        };
+        let url = format!("{endpoint}?key={}", setup.api_key);
         let (mut socket, _response) = tungstenite::connect(url.as_str())
             .map_err(|e| VoiceLiveError::Connect(redact_key(&e.to_string(), &setup.api_key)))?;
         set_read_timeout(&mut socket, Duration::from_millis(20));
@@ -555,6 +577,7 @@ mod tests {
         let setup = SessionSetup {
             model: "gemini-3.8-live".into(),
             api_key: "k".into(),
+            thinking_level: "medium".into(),
             system_instruction: "hi".into(),
             function_declarations: vec![
                 json!({"name": "t", "parameters": {"type": "object", "properties": {}}}),
@@ -568,6 +591,9 @@ mod tests {
         };
         let v = setup.to_json();
         assert_eq!(v["setup"]["model"], "models/gemini-3.8-live");
+        assert!(v["setup"]["generationConfig"]
+            .get("thinkingConfig")
+            .is_none());
         assert_eq!(
             v["setup"]["generationConfig"]["responseModalities"][0],
             "AUDIO"
@@ -593,6 +619,7 @@ mod tests {
         let setup = SessionSetup {
             model: "m".into(),
             api_key: "k".into(),
+            thinking_level: "medium".into(),
             system_instruction: "the rules".into(),
             function_declarations: vec![
                 json!({"name": "t", "parameters": {"type": "object", "properties": {}}}),
@@ -623,6 +650,7 @@ mod tests {
         let base = SessionSetup {
             model: "m".into(),
             api_key: "k".into(),
+            thinking_level: "medium".into(),
             system_instruction: String::new(),
             function_declarations: vec![],
             language: "en-US".into(),
@@ -655,6 +683,7 @@ mod tests {
         let setup = SessionSetup {
             model: "m".into(),
             api_key: "k".into(),
+            thinking_level: "medium".into(),
             system_instruction: String::new(),
             function_declarations: vec![],
             language: "en-US".into(),
@@ -679,6 +708,7 @@ mod tests {
         let setup = SessionSetup {
             model: "m".into(),
             api_key: "k".into(),
+            thinking_level: "medium".into(),
             system_instruction: String::new(),
             function_declarations: vec![],
             language: "en-US".into(),
@@ -759,6 +789,7 @@ mod tests {
         let mut setup = SessionSetup {
             model: "models/gemini-3.8-live-extended-thinking".into(),
             api_key: "fixture-never-used".into(),
+            thinking_level: "medium".into(),
             system_instruction: String::new(),
             function_declarations: vec![
                 json!({"name":"lookup","behavior":"BLOCKING","parameters":{"type":"object"}}),
@@ -782,7 +813,13 @@ mod tests {
                 "NON_BLOCKING"
             );
             assert_eq!(v["setup"]["proactivity"]["proactiveAudio"], true);
+            assert_eq!(
+                v["setup"]["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                "MEDIUM"
+            );
         }
+        setup.thinking_level = "minimal".into();
+        assert!(setup.profile().is_err());
     }
 
     #[test]
@@ -810,6 +847,63 @@ mod tests {
         assert!(value["toolResponse"]["functionResponses"][0]["response"]
             .get("scheduling")
             .is_none());
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY and sends synthetic voice-routing requests"]
+    fn live_capability_routing_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.ask_agent = true;
+        config.voice_live.delegate_agent = "codex".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        for (request, expected) in [
+            ("Ask Kodak CLI whether PR 2058 in x1wealth/x1wealth should be landed. I want an assessment only, do not merge it.", "review_pull_request"),
+            ("Use extended thinking to analyze this tradeoff: our team can ship now with one known intermittent crash, or delay two days to fix it. We have no hard deadline. Think it through.", "think_deeply"),
+        ] {
+            let setup = SessionSetup {
+                model: config.voice_live.model.clone(),
+                thinking_level: config.voice_live.thinking_level.clone(),
+                api_key: crate::voice_live::api_key(&config).unwrap(),
+                system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+                function_declarations: tools.declarations(),
+                language: "en-US".into(),
+                manual_activity: true,
+                proactive_audio: false,
+                start_sensitivity: String::new(),
+                end_sensitivity: String::new(),
+                resume_handle: None,
+            };
+            let client = LiveClient::connect(&setup).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(40);
+            let mut matched = false;
+            while std::time::Instant::now() < deadline {
+                match client.inbox.recv_timeout(Duration::from_millis(250)) {
+                    Ok(ServerEvent::SetupComplete) => client.send_text_turn(request).unwrap(),
+                    Ok(ServerEvent::ToolCall(calls)) => {
+                        for call in calls {
+                            if call.name == expected {
+                                if expected == "review_pull_request" {
+                                    assert_eq!(call.args["agent"], "codex");
+                                    assert_eq!(call.args["repository"], "x1wealth/x1wealth");
+                                    assert_eq!(call.args["number"], 2058);
+                                }
+                                matched = true;
+                            }
+                            client.send_tool_response(&call, "Routing test only. No action or review was executed.", "WHEN_IDLE").unwrap();
+                        }
+                        if matched { break; }
+                    }
+                    Ok(ServerEvent::Error(error) | ServerEvent::Closed(error)) => panic!("{error}"),
+                    _ => {}
+                }
+            }
+            client.close();
+            assert!(matched, "did not route to {expected}");
+            println!("routing passed: {expected}");
+        }
     }
 
     #[test]

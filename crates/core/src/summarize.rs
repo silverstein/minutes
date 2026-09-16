@@ -1955,8 +1955,6 @@ pub fn run_agent_prompt(
     cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    use std::io::Write;
-
     let mut invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)
         .map_err(|e| format!("could not build the agent invocation: {e}"))?;
     // Ahead of the built-in arguments, because those end in a positional.
@@ -1966,6 +1964,28 @@ pub fn run_agent_prompt(
     for (i, arg) in extra_args.iter().enumerate() {
         invocation.args.insert(i, arg.clone());
     }
+    run_chat_invocation(
+        ChatInvocation {
+            cmd: invocation.cmd,
+            args: invocation.args,
+            stdin_payload: invocation.stdin_payload,
+            cleanup_path: invocation.cleanup_path,
+        },
+        cwd,
+        timeout,
+    )
+}
+
+/// Execute a prepared invocation with the same bounded drains and process-group
+/// cleanup as delegation. Callers own the executable and argument policy.
+pub(crate) fn run_chat_invocation(
+    invocation: ChatInvocation,
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let agent_cmd = &invocation.cmd;
     let cleanup_path = invocation.cleanup_path.clone();
     let cleanup = |path: &Option<std::path::PathBuf>| {
         if let Some(p) = path {

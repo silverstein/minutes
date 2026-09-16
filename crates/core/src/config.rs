@@ -1122,6 +1122,9 @@ pub struct VoiceLiveConfig {
     pub provider: String,
     /// Model id, e.g. "gemini-3.8-live".
     pub model: String,
+    /// Reasoning depth for the extended-thinking Live model: low, medium, high.
+    /// Ignored for the standard Live model, which does not accept this field.
+    pub thinking_level: String,
     /// Name of the environment variable holding the provider API key.
     pub api_key_env: String,
     /// BCP-47 language code pinned for transcription and speech ("en-US").
@@ -1234,6 +1237,7 @@ impl Default for VoiceLiveConfig {
             enabled: false,
             provider: "gemini".into(),
             model: "gemini-3.8-live".into(),
+            thinking_level: "medium".into(),
             api_key_env: "GEMINI_API_KEY".into(),
             language: "en-US".into(),
             allow_cloud: false,

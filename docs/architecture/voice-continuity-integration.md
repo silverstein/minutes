@@ -180,6 +180,17 @@ Unstyled hold-music requests default to dry, snarky lyrics over an upbeat,
 repetitive synth/lounge loop. Explicit style, instrumental, calm or no-jokes
 requests override that default; other music requests do not inherit it.
 
+Generated songs have a separate sample queue in both audio backends. Assistant
+speech takes priority; music resumes after a 250 ms speech tail. `control_music`
+routes directly to this session's generated-song queue before desktop dispatch:
+pause retains its position, play resumes, and stop discards the remaining audio
+without deleting the saved song or cutting off speech. These local controls do
+not wait behind corpus work and remain declared with music enabled even when
+desktop automation is disabled. Playlist skipping is not supported for generated
+songs. `/cancel` stops generated playback as well as cancelling queued calls.
+The Music/Spotify fallback compiles only a fixed command for its resolved target
+application, avoiding dictionary-specific verbs in a dynamic AppleScript tell.
+
 Each provider call is registered once. Duplicate IDs and model use of the
 reserved `host:` namespace are rejected. Cancellation before execution prevents
 the call from beginning. Cancellation during execution records a request and

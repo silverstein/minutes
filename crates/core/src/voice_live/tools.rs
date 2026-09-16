@@ -213,6 +213,10 @@ impl ToolContext {
             }
         }
         if self.config.voice_live.music {
+            if !self.config.voice_live.desktop_control {
+                d.push(decl("control_music", "Control the generated song in Minutes. Pause retains its position; play resumes; stop discards playback.",
+                    json!({"action":{"type":"string","enum":["play","pause","stop"]}})));
+            }
             d.push(decl(
                 "make_music",
                 "Generate and play a piece of music. Write the brief yourself from what you know about the conversation in question: instruments, tempo, mood, and what it is for. It can sing, so ask for vocals and say what they should be about when that is what Mat wants, or ask for instrumental when it is background. It writes the words itself and returns them. Takes most of a minute, and will refuse while a recording is running.",
@@ -1563,6 +1567,21 @@ mod tests {
                 .map(|d| d["name"].as_str().unwrap_or_default().to_string())
                 .collect();
         assert!(!names.contains(&"make_music".to_string()));
+        assert!(!names.contains(&"control_music".to_string()));
+        for desktop in [false, true] {
+            let mut config = Config::default();
+            config.voice_live.music = true;
+            config.voice_live.desktop_control = desktop;
+            let declarations =
+                ToolContext::new(config, Arc::new(NameIndex::default())).declarations();
+            assert_eq!(
+                declarations
+                    .iter()
+                    .filter(|d| d["name"] == "control_music")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

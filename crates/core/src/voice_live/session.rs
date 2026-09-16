@@ -151,6 +151,28 @@ impl AudioIo {
         }
     }
 
+    fn push_music(&mut self, bytes: &[u8]) {
+        match self {
+            AudioIo::Split { playback, .. } => {
+                if let Some(p) = playback.as_mut() {
+                    p.push_music(bytes);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.push_music(bytes),
+        }
+    }
+
+    fn control_music(&self, action: &str) -> Option<Result<&'static str, &'static str>> {
+        match self {
+            AudioIo::Split { playback, .. } => {
+                playback.as_ref().and_then(|p| p.control_music(action))
+            }
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.control_music(action),
+        }
+    }
+
     fn flush(&mut self) {
         match self {
             AudioIo::Split { playback, .. } => {
@@ -839,6 +861,30 @@ impl Runner {
                                     continue;
                                 }
                                 activity.provider_status(ProviderActivity::InProgress);
+                                // Generated music belongs to this session, not Music.app.
+                                // Handle it here so a slow desktop/corpus job cannot delay Stop.
+                                if call.name == "control_music" && self.tools.config.voice_live.music {
+                                    let action = call.args["action"].as_str().unwrap_or("");
+                                    let result = self.audio.control_music(action).or_else(|| {
+                                        (!self.tools.config.voice_live.desktop_control)
+                                            .then_some(Err("No generated music is available in this session."))
+                                    });
+                                    if let Some(result) = result {
+                                        let error = result.is_err();
+                                        let receipt = match result {
+                                            Ok(message) => serde_json::json!({"ok":true,"player":"minutes","result":message}),
+                                            Err(message) => serde_json::json!({"error":message}),
+                                        }.to_string();
+                                        let mut registry = calls.lock().unwrap_or_else(|p| p.into_inner());
+                                        registry.begin(&id);
+                                        registry.finish(&id);
+                                        drop(registry);
+                                        self.emit(VoiceLiveEvent::ToolResult { name: call.name.clone(), ms: 0, chars: receipt.len(), error });
+                                        self.log_line(format!("  -> generated music control: {receipt}"));
+                                        let _ = self.client().send_tool_response(&call, &receipt, "WHEN_IDLE");
+                                        continue;
+                                    }
+                                }
                                 let queued = QueuedCall { call, origin: DispatchOrigin::Model };
                                 if let Err(rejected) = tool_txs[queued.lane()].try_send(queued) {
                                     calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
@@ -942,7 +988,7 @@ impl Runner {
                                 text: "a recording started, so the music is saved but not played".into(),
                             });
                         } else {
-                            self.audio.push_pcm16(&pcm);
+                            self.audio.push_music(&pcm);
                         }
                     }
                 }
@@ -993,6 +1039,7 @@ impl Runner {
                                     }
                                     Ok(HostResult::Cancel) => {
                                         calls.lock().unwrap_or_else(|p| p.into_inner()).cancel_all();
+                                        self.audio.control_music("stop");
                                         self.audio.flush(); activity.playback_stopped();
                                         self.emit(VoiceLiveEvent::Local { text: "Queued calls cancelled. Running work may still finish; no rollback is implied.".into() });
                                     }

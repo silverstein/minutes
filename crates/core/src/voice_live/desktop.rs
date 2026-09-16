@@ -101,11 +101,11 @@ end run"#,
     },
     Verb {
         name: "control_music",
-        description: "Play, pause or skip whatever is playing.",
+        description: "Play, pause or stop generated music in Minutes; otherwise control Music or Spotify. Generated songs do not support playlist skipping.",
         risk: Risk::Local,
         params: &[p(
             "action",
-            "One of: play, pause, next, previous",
+            "One of: play, pause, stop, next, previous",
             true,
         )],
         script: r#"on run argv
@@ -114,19 +114,18 @@ end run"#,
     try
         if application "Spotify" is running then set app_name to "Spotify"
     end try
-    tell application app_name
-        if act is "play" then
-            play
-        else if act is "pause" then
-            pause
-        else if act is "next" then
-            next track
-        else if act is "previous" then
-            previous track
-        else
-            error "unknown action"
-        end if
-    end tell
+    if act is "play" then
+        set command_text to "play"
+    else if act is "pause" or act is "stop" then
+        set command_text to "pause"
+    else if act is "next" then
+        set command_text to "next track"
+    else if act is "previous" then
+        set command_text to "previous track"
+    else
+        error "unknown action"
+    end if
+    run script ("tell application \"" & app_name & "\" to " & command_text)
     return act & " in " & app_name
 end run"#,
     },
@@ -646,8 +645,10 @@ fn validate(verb: &str, param: &str, raw: &str) -> Result<String, String> {
                 return Err(format!("there is nothing at {raw}"));
             }
         }
-        ("control_music", "action") if !["play", "pause", "next", "previous"].contains(&raw) => {
-            return Err("action must be play, pause, next or previous".into());
+        ("control_music", "action")
+            if !["play", "pause", "stop", "next", "previous"].contains(&raw) =>
+        {
+            return Err("action must be play, pause, stop, next or previous".into());
         }
         ("add_reminder", "minutes_from_now") => {
             let minutes: i64 = raw
@@ -1025,6 +1026,8 @@ mod tests {
         assert!(validate("reveal_path", "path", "/definitely/not/here").is_err());
         assert!(validate("control_music", "action", "destroy").is_err());
         assert!(validate("control_music", "action", "pause").is_ok());
+        assert!(validate("control_music", "action", "stop").is_ok());
+        assert!(validate("control_music", "action", "pause\" & do shell script \"bad").is_err());
         assert!(validate("add_reminder", "minutes_from_now", "abc").is_err());
         assert!(validate("add_reminder", "minutes_from_now", "-5").is_err());
         assert!(validate("add_reminder", "minutes_from_now", "30").is_ok());

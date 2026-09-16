@@ -14,9 +14,99 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use super::protocol::OUTPUT_SAMPLE_RATE;
 use super::VoiceLiveError;
 
+/// Speech and generated music share a device, never a FIFO. A short tail keeps
+/// music silent between adjacent speech packets instead of chattering over them.
+pub(super) struct OutputQueue {
+    speech: VecDeque<f32>,
+    music: Option<VecDeque<f32>>,
+    paused: bool,
+    speech_tail: usize,
+    tail_samples: usize,
+}
+
+impl OutputQueue {
+    pub fn new(rate: u32) -> Self {
+        Self {
+            speech: VecDeque::new(),
+            music: None,
+            paused: false,
+            speech_tail: 0,
+            tail_samples: rate as usize / 4,
+        }
+    }
+
+    pub fn extend(&mut self, samples: impl IntoIterator<Item = f32>) {
+        self.speech.extend(samples);
+    }
+
+    pub fn replace_music(&mut self, samples: Vec<f32>) {
+        self.music = Some(samples.into());
+        self.paused = false;
+    }
+
+    pub fn control_music(&mut self, action: &str) -> Option<Result<&'static str, &'static str>> {
+        let music = self.music.as_mut()?;
+        Some(match action {
+            "pause" => {
+                self.paused = true;
+                Ok("paused generated music")
+            }
+            "stop" => {
+                music.clear();
+                self.paused = true;
+                Ok("stopped generated music")
+            }
+            "play" if !music.is_empty() => {
+                self.paused = false;
+                Ok("resumed generated music")
+            }
+            "play" => {
+                Err("The generated song has ended or was stopped; request a new song to play.")
+            }
+            _ => Err("Generated music supports play, pause and stop, not playlist skipping."),
+        })
+    }
+
+    pub fn pop_front(&mut self) -> Option<f32> {
+        if let Some(sample) = self.speech.pop_front() {
+            self.speech_tail = self.tail_samples;
+            return Some(sample);
+        }
+        if self.speech_tail > 0 {
+            self.speech_tail -= 1;
+            return Some(0.0);
+        }
+        if self.paused {
+            None
+        } else {
+            self.music.as_mut().and_then(VecDeque::pop_front)
+        }
+    }
+
+    /// Barge-in discards assistant speech, not the independently controlled song.
+    pub fn clear(&mut self) {
+        self.speech.clear();
+        self.speech_tail = 0;
+    }
+
+    pub fn len(&self) -> usize {
+        self.speech.len()
+            + self.speech_tail
+            + if self.paused {
+                0
+            } else {
+                self.music.as_ref().map_or(0, VecDeque::len)
+            }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Shared queue plus the stream that drains it.
 pub struct Playback {
-    queue: Arc<Mutex<VecDeque<f32>>>,
+    queue: Arc<Mutex<OutputQueue>>,
     _stream: Stream,
     device_rate: u32,
     channels: usize,
@@ -49,9 +139,7 @@ impl Playback {
         let config: StreamConfig = supported.config();
         let device_rate = config.sample_rate;
         let channels = config.channels as usize;
-        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
-            device_rate as usize * 4,
-        )));
+        let queue = Arc::new(Mutex::new(OutputQueue::new(device_rate)));
         let err_fn = |e| tracing::warn!(error = %e, "voice playback stream error");
 
         let stream = match sample_format {
@@ -110,7 +198,32 @@ impl Playback {
         q.extend(resampled);
     }
 
-    /// Drop everything queued (barge-in).
+    pub fn push_music(&mut self, bytes: &[u8]) {
+        let samples: Vec<f32> = bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect();
+        let samples = resample_linear(
+            &samples,
+            OUTPUT_SAMPLE_RATE,
+            self.device_rate,
+            &mut 0,
+            &mut 0.0,
+        );
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace_music(samples);
+    }
+
+    pub fn control_music(&self, action: &str) -> Option<Result<&'static str, &'static str>> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .control_music(action)
+    }
+
+    /// Drop queued assistant speech (barge-in).
     pub fn flush(&mut self) {
         let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
         q.clear();
@@ -149,7 +262,7 @@ impl Playback {
 }
 
 fn fill<T: Copy>(
-    queue: &Arc<Mutex<VecDeque<f32>>>,
+    queue: &Arc<Mutex<OutputQueue>>,
     data: &mut [T],
     channels: usize,
     convert: impl Fn(f32) -> T,
@@ -207,6 +320,68 @@ pub fn resample_linear(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speech_preempts_music_and_music_resumes_after_speech_tail() {
+        let mut q = OutputQueue::new(8);
+        q.replace_music(vec![0.1, 0.2]);
+        assert_eq!(q.pop_front(), Some(0.1));
+        q.extend([0.8, 0.9]);
+        assert_eq!(q.pop_front(), Some(0.8));
+        assert_eq!(q.pop_front(), Some(0.9));
+        assert_eq!(q.pop_front(), Some(0.0));
+        assert_eq!(q.pop_front(), Some(0.0));
+        assert_eq!(q.pop_front(), Some(0.2));
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn music_pause_resume_stop_do_not_discard_speech() {
+        let mut q = OutputQueue::new(1);
+        assert!(q.control_music("pause").is_none());
+        q.replace_music(vec![0.1, 0.2]);
+        assert!(q.control_music("pause").unwrap().is_ok());
+        assert_eq!(q.pop_front(), None);
+        assert!(q.is_empty());
+        q.extend([0.8]);
+        assert_eq!(q.pop_front(), Some(0.8));
+        assert!(q.control_music("play").unwrap().is_ok());
+        assert_eq!(q.pop_front(), Some(0.1));
+        q.extend([0.9]);
+        assert!(q.control_music("stop").unwrap().is_ok());
+        assert_eq!(q.pop_front(), Some(0.9));
+        assert_eq!(q.pop_front(), None);
+        assert!(q.control_music("play").unwrap().is_err());
+        assert!(q.control_music("next").unwrap().is_err());
+    }
+
+    #[test]
+    fn barge_in_clears_speech_without_losing_music_control() {
+        let mut q = OutputQueue::new(8);
+        q.replace_music(vec![0.1]);
+        q.extend([0.9]);
+        q.clear();
+        assert!(q.control_music("pause").unwrap().is_ok());
+        assert_eq!(q.pop_front(), None);
+        q.replace_music(vec![0.2]);
+        assert_eq!(q.pop_front(), Some(0.2));
+    }
+
+    #[test]
+    fn output_callback_plays_stop_confirmation_without_waiting_for_song() {
+        let queue = Arc::new(Mutex::new(OutputQueue::new(24000)));
+        queue.lock().unwrap().replace_music(vec![0.1; 24000 * 180]);
+        let mut output = [0.0; 4];
+        fill(&queue, &mut output, 2, |s| s);
+        assert_eq!(output, [0.1; 4]);
+        {
+            let mut q = queue.lock().unwrap();
+            q.control_music("stop").unwrap().unwrap();
+            q.extend([0.8, 0.9]);
+        }
+        fill(&queue, &mut output, 2, |s| s);
+        assert_eq!(output, [0.8, 0.8, 0.9, 0.9]);
+    }
 
     #[test]
     fn same_rate_is_identity() {

@@ -12,7 +12,6 @@
 //!
 //! The unit follows the system default input and output devices.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -24,6 +23,7 @@ use coreaudio::audio_unit::{AudioUnit, Element, IOType, SampleFormat, Scope, Str
 use crossbeam_channel::{bounded, Receiver};
 use objc2_audio_toolbox::kAudioOutputUnitProperty_EnableIO;
 
+use super::audio_out::OutputQueue;
 use super::decimate::Decimator;
 use super::protocol::OUTPUT_SAMPLE_RATE;
 use super::VoiceLiveError;
@@ -37,7 +37,7 @@ const CHUNK_SAMPLES: usize = 1_600;
 /// One voice-processing unit: echo-cancelled mic chunks out, speaker samples in.
 pub struct VoiceIo {
     unit: AudioUnit,
-    queue: Arc<Mutex<VecDeque<f32>>>,
+    queue: Arc<Mutex<OutputQueue>>,
     stop: Arc<AtomicBool>,
     /// Echo-cancelled 16 kHz microphone chunks.
     pub receiver: Receiver<AudioChunk>,
@@ -102,9 +102,7 @@ impl VoiceIo {
         unit.set_stream_format(format, Scope::Output, Element::Input)
             .map_err(audio_err("microphone format"))?;
 
-        let queue: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
-            OUTPUT_SAMPLE_RATE as usize * 4,
-        )));
+        let queue = Arc::new(Mutex::new(OutputQueue::new(OUTPUT_SAMPLE_RATE)));
         let render_queue = Arc::clone(&queue);
         let mut scratch: Vec<f32> = Vec::new();
         unit.set_render_callback(move |mut args: Args<data::NonInterleaved<f32>>| {
@@ -184,7 +182,25 @@ impl VoiceIo {
         );
     }
 
-    /// Drop everything queued (barge-in).
+    pub fn push_music(&self, bytes: &[u8]) {
+        let samples = bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect();
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace_music(samples);
+    }
+
+    pub fn control_music(&self, action: &str) -> Option<Result<&'static str, &'static str>> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .control_music(action)
+    }
+
+    /// Drop queued assistant speech (barge-in).
     pub fn flush(&self) {
         self.queue.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }

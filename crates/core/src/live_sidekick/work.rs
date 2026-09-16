@@ -35,7 +35,9 @@ pub enum WorkError {
 
 fn text(value: &str) -> Result<(), WorkError> {
     if value.trim().is_empty() || value.len() > MAX_TEXT || value.contains('\0') {
-        return Err(WorkError::Invalid("empty, NUL-containing, or oversized text"));
+        return Err(WorkError::Invalid(
+            "empty, NUL-containing, or oversized text",
+        ));
     }
     Ok(())
 }
@@ -43,7 +45,9 @@ fn text(value: &str) -> Result<(), WorkError> {
 fn identifier(value: &str) -> Result<(), WorkError> {
     if value.is_empty()
         || value.len() > 128
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
     {
         return Err(WorkError::Invalid("invalid identifier"));
     }
@@ -51,7 +55,9 @@ fn identifier(value: &str) -> Result<(), WorkError> {
 }
 
 fn next(value: u64) -> Result<u64, WorkError> {
-    value.checked_add(1).ok_or(WorkError::Invalid("generation exhausted"))
+    value
+        .checked_add(1)
+        .ok_or(WorkError::Invalid("generation exhausted"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,8 +161,14 @@ impl WorkCheckpoint {
         }
         identifier(&self.id)?;
         text(&self.goal)?;
-        if [self.sources.len(), self.memory.len(), self.open_questions.len(), self.tasks.len()]
-            .iter().any(|n| *n > MAX_ITEMS)
+        if [
+            self.sources.len(),
+            self.memory.len(),
+            self.open_questions.len(),
+            self.tasks.len(),
+        ]
+        .iter()
+        .any(|n| *n > MAX_ITEMS)
         {
             return Err(WorkError::Invalid("too many records"));
         }
@@ -170,15 +182,22 @@ impl WorkCheckpoint {
         if let Some(focus) = &self.focus {
             text(&focus.selection)?;
             if sources.get(focus.source.id.as_str()).copied() != Some(&focus.source) {
-                return Err(WorkError::Invalid("focus must match an exact source version"));
+                return Err(WorkError::Invalid(
+                    "focus must match an exact source version",
+                ));
             }
         }
         for entry in &self.memory {
             text(&entry.text)?;
             if entry.source_ids.len() > MAX_ITEMS
-                || entry.source_ids.iter().any(|id| !sources.contains_key(id.as_str()))
+                || entry
+                    .source_ids
+                    .iter()
+                    .any(|id| !sources.contains_key(id.as_str()))
             {
-                return Err(WorkError::Invalid("memory contains missing source references"));
+                return Err(WorkError::Invalid(
+                    "memory contains missing source references",
+                ));
             }
             if entry.attribution == Attribution::SourceRecord && entry.source_ids.is_empty() {
                 return Err(WorkError::Invalid("source record requires provenance"));
@@ -203,13 +222,19 @@ impl WorkCheckpoint {
             if let Some(summary) = &task.spoken_summary {
                 text(summary)?;
             }
-            let completed = matches!(task.state, TaskState::Completed | TaskState::CompletedAfterCancelRequest);
-            if completed != task.artifact.is_some() || (!completed && task.spoken_summary.is_some()) {
+            let completed = matches!(
+                task.state,
+                TaskState::Completed | TaskState::CompletedAfterCancelRequest
+            );
+            if completed != task.artifact.is_some() || (!completed && task.spoken_summary.is_some())
+            {
                 return Err(WorkError::Invalid("task outcome does not match state"));
             }
         }
         if serde_json::to_vec(self)?.len() > MAX_CHECKPOINT_BYTES / 2 {
-            return Err(WorkError::Invalid("checkpoint exceeds aggregate byte budget"));
+            return Err(WorkError::Invalid(
+                "checkpoint exceeds aggregate byte budget",
+            ));
         }
         Ok(())
     }
@@ -230,7 +255,8 @@ impl WorkCheckpoint {
         if input.len() > MAX_CHECKPOINT_BYTES {
             return Err(WorkError::Invalid("checkpoint exceeds byte budget"));
         }
-        let json = input.strip_prefix(CHECKPOINT_PREFIX)
+        let json = input
+            .strip_prefix(CHECKPOINT_PREFIX)
             .and_then(|s| s.strip_suffix(CHECKPOINT_SUFFIX))
             .ok_or(WorkError::Invalid("not a work checkpoint"))?;
         let checkpoint: Self = serde_json::from_str(json)?;
@@ -260,7 +286,9 @@ impl ProposedAction {
         identifier(&self.verb)?;
         text(&self.target)?;
         if !self.payload.is_object() || serde_json::to_vec(&self.payload)?.len() > MAX_TEXT {
-            return Err(WorkError::Invalid("action payload must be a bounded object"));
+            return Err(WorkError::Invalid(
+                "action payload must be a bounded object",
+            ));
         }
         Ok(())
     }
@@ -314,11 +342,25 @@ pub struct WorkSession {
 impl WorkSession {
     pub fn new(id: String, goal: String) -> Result<Self, WorkError> {
         let data = WorkCheckpoint {
-            schema_version: 1, id, goal, revision: 0, focus: None, sources: vec![],
-            memory: vec![], open_questions: vec![], next_step: None, tasks: vec![],
+            schema_version: 1,
+            id,
+            goal,
+            revision: 0,
+            focus: None,
+            sources: vec![],
+            memory: vec![],
+            open_questions: vec![],
+            next_step: None,
+            tasks: vec![],
         };
         data.validate()?;
-        Ok(Self { data, instance: Arc::new(()), policy_generation: 0, next_proposal: 0, pending: BTreeMap::new() })
+        Ok(Self {
+            data,
+            instance: Arc::new(()),
+            policy_generation: 0,
+            next_proposal: 0,
+            pending: BTreeMap::new(),
+        })
     }
 
     /// Restores context, not running processes, grants, approval, or capability.
@@ -327,12 +369,24 @@ impl WorkSession {
         data.validate()?;
         data.revision = next(data.revision)?;
         for task in &mut data.tasks {
-            if matches!(task.state, TaskState::Queued | TaskState::Running | TaskState::AwaitingInput | TaskState::CancelRequested) {
+            if matches!(
+                task.state,
+                TaskState::Queued
+                    | TaskState::Running
+                    | TaskState::AwaitingInput
+                    | TaskState::CancelRequested
+            ) {
                 task.state = TaskState::Interrupted;
                 task.generation = next(task.generation)?;
             }
         }
-        Ok(Self { data, instance: Arc::new(()), policy_generation: 0, next_proposal: 0, pending: BTreeMap::new() })
+        Ok(Self {
+            data,
+            instance: Arc::new(()),
+            policy_generation: 0,
+            next_proposal: 0,
+            pending: BTreeMap::new(),
+        })
     }
 
     pub fn checkpoint(&self) -> WorkCheckpoint {
@@ -374,14 +428,32 @@ impl WorkSession {
     }
 
     /// Model-written entries cannot declare themselves human-confirmed.
-    pub fn add_model_note(&mut self, note: String, source_ids: Vec<String>) -> Result<(), WorkError> {
-        self.add_entry(MemoryEntry { attribution: Attribution::ModelInference, text: note, source_ids })
+    pub fn add_model_note(
+        &mut self,
+        note: String,
+        source_ids: Vec<String>,
+    ) -> Result<(), WorkError> {
+        self.add_entry(MemoryEntry {
+            attribution: Attribution::ModelInference,
+            text: note,
+            source_ids,
+        })
     }
 
-    pub fn add_host_note(&mut self, note: String, source_ids: Vec<String>, decision: bool) -> Result<(), WorkError> {
+    pub fn add_host_note(
+        &mut self,
+        note: String,
+        source_ids: Vec<String>,
+        decision: bool,
+    ) -> Result<(), WorkError> {
         self.add_entry(MemoryEntry {
-            attribution: if decision { Attribution::UserConfirmedDecision } else { Attribution::UserInterpretation },
-            text: note, source_ids,
+            attribution: if decision {
+                Attribution::UserConfirmedDecision
+            } else {
+                Attribution::UserInterpretation
+            },
+            text: note,
+            source_ids,
         })
     }
 
@@ -391,7 +463,11 @@ impl WorkSession {
         self.update(data)
     }
 
-    pub fn park(&mut self, questions: Vec<String>, next_step: Option<String>) -> Result<WorkCheckpoint, WorkError> {
+    pub fn park(
+        &mut self,
+        questions: Vec<String>,
+        next_step: Option<String>,
+    ) -> Result<WorkCheckpoint, WorkError> {
         let mut data = self.data.clone();
         data.open_questions = questions;
         data.next_step = next_step;
@@ -402,28 +478,49 @@ impl WorkSession {
 
     pub fn enqueue_task(&mut self, id: String, instruction: String) -> Result<(), WorkError> {
         let mut data = self.data.clone();
-        data.tasks.push(TaskRecord { id, instruction, generation: 0, state: TaskState::Queued, artifact: None, spoken_summary: None });
+        data.tasks.push(TaskRecord {
+            id,
+            instruction,
+            generation: 0,
+            state: TaskState::Queued,
+            artifact: None,
+            spoken_summary: None,
+        });
         self.update(data)
     }
 
     pub fn task(&self, id: &str) -> Result<&TaskRecord, WorkError> {
-        self.data.tasks.iter().find(|t| t.id == id).ok_or(WorkError::NotFound)
+        self.data
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or(WorkError::NotFound)
     }
 
     pub fn start_task(&mut self, id: &str) -> Result<RunLease, WorkError> {
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == id).ok_or(WorkError::NotFound)?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(WorkError::NotFound)?;
         if task.state != TaskState::Queued {
             return Err(WorkError::InvalidTransition);
         }
         task.state = TaskState::Running;
         let generation = task.generation;
         self.update(data)?;
-        Ok(RunLease { instance: Arc::clone(&self.instance), task_id: id.into(), generation })
+        Ok(RunLease {
+            instance: Arc::clone(&self.instance),
+            task_id: id.into(),
+            generation,
+        })
     }
 
     fn check_lease(&self, lease: &RunLease) -> Result<(), WorkError> {
-        if !Arc::ptr_eq(&self.instance, &lease.instance) || self.task(&lease.task_id)?.generation != lease.generation {
+        if !Arc::ptr_eq(&self.instance, &lease.instance)
+            || self.task(&lease.task_id)?.generation != lease.generation
+        {
             return Err(WorkError::Stale);
         }
         Ok(())
@@ -432,7 +529,11 @@ impl WorkSession {
     /// Return state distinguishes a request from confirmed worker termination.
     pub fn request_cancel(&mut self, id: &str) -> Result<TaskState, WorkError> {
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == id).ok_or(WorkError::NotFound)?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(WorkError::NotFound)?;
         task.state = match task.state {
             TaskState::Queued => TaskState::Cancelled,
             TaskState::Running | TaskState::AwaitingInput => TaskState::CancelRequested,
@@ -447,7 +548,11 @@ impl WorkSession {
     pub fn acknowledge_cancel(&mut self, lease: RunLease) -> Result<(), WorkError> {
         self.check_lease(&lease)?;
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == lease.task_id).ok_or(WorkError::NotFound)?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == lease.task_id)
+            .ok_or(WorkError::NotFound)?;
         if task.state != TaskState::CancelRequested {
             return Err(WorkError::InvalidTransition);
         }
@@ -458,8 +563,15 @@ impl WorkSession {
     pub fn fail_task(&mut self, lease: RunLease) -> Result<(), WorkError> {
         self.check_lease(&lease)?;
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == lease.task_id).ok_or(WorkError::NotFound)?;
-        if !matches!(task.state, TaskState::Running | TaskState::AwaitingInput | TaskState::CancelRequested) {
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == lease.task_id)
+            .ok_or(WorkError::NotFound)?;
+        if !matches!(
+            task.state,
+            TaskState::Running | TaskState::AwaitingInput | TaskState::CancelRequested
+        ) {
             return Err(WorkError::InvalidTransition);
         }
         task.state = TaskState::Failed;
@@ -469,11 +581,19 @@ impl WorkSession {
     pub fn set_awaiting_input(&mut self, lease: &RunLease, waiting: bool) -> Result<(), WorkError> {
         self.check_lease(lease)?;
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == lease.task_id).ok_or(WorkError::NotFound)?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == lease.task_id)
+            .ok_or(WorkError::NotFound)?;
         if !matches!(task.state, TaskState::Running | TaskState::AwaitingInput) {
             return Err(WorkError::InvalidTransition);
         }
-        task.state = if waiting { TaskState::AwaitingInput } else { TaskState::Running };
+        task.state = if waiting {
+            TaskState::AwaitingInput
+        } else {
+            TaskState::Running
+        };
         self.update(data)
     }
 
@@ -482,8 +602,15 @@ impl WorkSession {
     pub fn revise_task(&mut self, id: &str, instruction: String) -> Result<(), WorkError> {
         text(&instruction)?;
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == id).ok_or(WorkError::NotFound)?;
-        if !matches!(task.state, TaskState::Queued | TaskState::Cancelled | TaskState::Failed | TaskState::Interrupted) {
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or(WorkError::NotFound)?;
+        if !matches!(
+            task.state,
+            TaskState::Queued | TaskState::Cancelled | TaskState::Failed | TaskState::Interrupted
+        ) {
             return Err(WorkError::InvalidTransition);
         }
         task.instruction = instruction;
@@ -494,12 +621,21 @@ impl WorkSession {
         self.update(data)
     }
 
-    pub fn complete_task(&mut self, lease: RunLease, artifact: SourceRef, summary: String) -> Result<(), WorkError> {
+    pub fn complete_task(
+        &mut self,
+        lease: RunLease,
+        artifact: SourceRef,
+        summary: String,
+    ) -> Result<(), WorkError> {
         self.check_lease(&lease)?;
         artifact.validate()?;
         text(&summary)?;
         let mut data = self.data.clone();
-        let task = data.tasks.iter_mut().find(|t| t.id == lease.task_id).ok_or(WorkError::NotFound)?;
+        let task = data
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == lease.task_id)
+            .ok_or(WorkError::NotFound)?;
         task.state = match task.state {
             TaskState::Running | TaskState::AwaitingInput => TaskState::Completed,
             TaskState::CancelRequested => TaskState::CompletedAfterCancelRequest,
@@ -510,42 +646,84 @@ impl WorkSession {
         self.update(data)
     }
 
-    pub fn propose_action(&mut self, action: ProposedAction, now_ms: u64, ttl_ms: u64) -> Result<u64, WorkError> {
+    pub fn propose_action(
+        &mut self,
+        action: ProposedAction,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<u64, WorkError> {
         action.validate()?;
         if self.pending.len() >= MAX_ITEMS || ttl_ms == 0 || ttl_ms > 60_000 {
             return Err(WorkError::Invalid("proposal budget or lifetime exceeded"));
         }
-        let expires_ms = now_ms.checked_add(ttl_ms).ok_or(WorkError::Invalid("clock overflow"))?;
+        let expires_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or(WorkError::Invalid("clock overflow"))?;
         let id = next(self.next_proposal)?;
         self.next_proposal = id;
-        self.pending.insert(id, PendingAction { action, revision: self.data.revision, expires_ms, approved: false });
+        self.pending.insert(
+            id,
+            PendingAction {
+                action,
+                revision: self.data.revision,
+                expires_ms,
+                approved: false,
+            },
+        );
         Ok(id)
     }
 
     /// The trusted UI must display ALL fields and pass back the exact preview.
     /// An ASR turn, model 'yes', or model-provided token must not call this.
-    pub fn approve_from_host(&mut self, id: u64, displayed: &ProposedAction, revision: u64, now_ms: u64) -> Result<ApprovalPermit, WorkError> {
-        let pending = self.pending.get_mut(&id).ok_or(WorkError::ApprovalRequired)?;
-        if pending.approved || pending.action != *displayed || pending.revision != revision
-            || self.data.revision != revision || now_ms >= pending.expires_ms
+    pub fn approve_from_host(
+        &mut self,
+        id: u64,
+        displayed: &ProposedAction,
+        revision: u64,
+        now_ms: u64,
+    ) -> Result<ApprovalPermit, WorkError> {
+        let pending = self
+            .pending
+            .get_mut(&id)
+            .ok_or(WorkError::ApprovalRequired)?;
+        if pending.approved
+            || pending.action != *displayed
+            || pending.revision != revision
+            || self.data.revision != revision
+            || now_ms >= pending.expires_ms
         {
             return Err(WorkError::ApprovalRequired);
         }
         pending.approved = true;
-        Ok(ApprovalPermit { instance: Arc::clone(&self.instance), proposal: id, revision })
+        Ok(ApprovalPermit {
+            instance: Arc::clone(&self.instance),
+            proposal: id,
+            revision,
+        })
     }
 
     /// Denials, corrections, and 'wait' revoke; they never count as approval.
     pub fn reject_from_host(&mut self, id: u64) -> Result<(), WorkError> {
-        self.pending.remove(&id).map(|_| ()).ok_or(WorkError::NotFound)
+        self.pending
+            .remove(&id)
+            .map(|_| ())
+            .ok_or(WorkError::NotFound)
     }
 
-    pub fn consume_approval(&mut self, permit: ApprovalPermit, now_ms: u64) -> Result<AuthorizedAction, WorkError> {
+    pub fn consume_approval(
+        &mut self,
+        permit: ApprovalPermit,
+        now_ms: u64,
+    ) -> Result<AuthorizedAction, WorkError> {
         if !Arc::ptr_eq(&self.instance, &permit.instance) || self.data.revision != permit.revision {
             return Err(WorkError::ApprovalRequired);
         }
-        let pending = self.pending.remove(&permit.proposal).ok_or(WorkError::ApprovalRequired)?;
-        if !pending.approved || pending.revision != permit.revision || now_ms >= pending.expires_ms {
+        let pending = self
+            .pending
+            .remove(&permit.proposal)
+            .ok_or(WorkError::ApprovalRequired)?;
+        if !pending.approved || pending.revision != permit.revision || now_ms >= pending.expires_ms
+        {
             return Err(WorkError::ApprovalRequired);
         }
         Ok(AuthorizedAction(pending.action))
@@ -559,15 +737,29 @@ impl WorkSession {
 
     /// Host-only, explicit approval of this full contribution set to this
     /// destination. Local read access and cloud-session opt-in are insufficient.
-    pub fn approve_cloud_from_host(&self, destination: String, freshly_attested_sources: Vec<SourceRef>, now_ms: u64, ttl_ms: u64) -> Result<CloudPermit, WorkError> {
+    pub fn approve_cloud_from_host(
+        &self,
+        destination: String,
+        freshly_attested_sources: Vec<SourceRef>,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<CloudPermit, WorkError> {
         text(&destination)?;
         if ttl_ms == 0 || ttl_ms > 60_000 {
             return Err(WorkError::DisclosureDenied);
         }
         self.check_contributions(&freshly_attested_sources)?;
-        let expires_ms = now_ms.checked_add(ttl_ms).ok_or(WorkError::DisclosureDenied)?;
-        Ok(CloudPermit { instance: Arc::clone(&self.instance), destination, revision: self.data.revision,
-            policy_generation: self.policy_generation, expires_ms, sources: freshly_attested_sources })
+        let expires_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or(WorkError::DisclosureDenied)?;
+        Ok(CloudPermit {
+            instance: Arc::clone(&self.instance),
+            destination,
+            revision: self.data.revision,
+            policy_generation: self.policy_generation,
+            expires_ms,
+            sources: freshly_attested_sources,
+        })
     }
 
     fn check_contributions(&self, sources: &[SourceRef]) -> Result<(), WorkError> {
@@ -586,10 +778,19 @@ impl WorkSession {
 
     /// Re-attest immediately before egress, including ALL transitive sources
     /// for summaries. The host supplies live versions and live sensitivity.
-    pub fn validate_cloud_release(&self, permit: &CloudPermit, destination: &str, freshly_attested_sources: &[SourceRef], now_ms: u64) -> Result<(), WorkError> {
-        if !Arc::ptr_eq(&self.instance, &permit.instance) || permit.destination != destination
-            || permit.revision != self.data.revision || permit.policy_generation != self.policy_generation
-            || now_ms >= permit.expires_ms || permit.sources != freshly_attested_sources
+    pub fn validate_cloud_release(
+        &self,
+        permit: &CloudPermit,
+        destination: &str,
+        freshly_attested_sources: &[SourceRef],
+        now_ms: u64,
+    ) -> Result<(), WorkError> {
+        if !Arc::ptr_eq(&self.instance, &permit.instance)
+            || permit.destination != destination
+            || permit.revision != self.data.revision
+            || permit.policy_generation != self.policy_generation
+            || now_ms >= permit.expires_ms
+            || permit.sources != freshly_attested_sources
         {
             return Err(WorkError::DisclosureDenied);
         }

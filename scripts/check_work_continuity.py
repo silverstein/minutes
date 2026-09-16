@@ -3,11 +3,13 @@
 
 This is a supplementary check, not a replacement for the full core/app CI.
 Formatting happens only in a temporary copy; any differences are emitted as
-work-continuity-format.patch for the author to apply and review.
+work-continuity-format.patch and fail this check. The synthetic example also
+round-trips its checkpoint through a new process without restoring a worker.
 """
 from __future__ import annotations
 
 import difflib
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -71,10 +73,17 @@ thiserror = "2"
                 tofile="b/" + relative,
             ))
         (ROOT / "work-continuity-format.patch").write_text("".join(patch), encoding="utf-8")
-        run("cargo", "run", "--quiet", "--manifest-path", manifest, "--example", "work_session")
-        print("Portable module tests, Clippy, and synthetic checkpoint example passed.")
+        command = ["cargo", "run", "--quiet", "--manifest-path", manifest, "--example", "work_session"]
+        saved = subprocess.run(command, check=True, capture_output=True, text=True).stdout
+        restored = subprocess.run(command + ["--", "resume"], input=saved, check=True, capture_output=True, text=True).stdout
+        checkpoint = json.loads(restored)
+        if checkpoint["id"] != "demo-onboarding" or checkpoint["tasks"][0]["state"] != "interrupted":
+            raise RuntimeError("Synthetic checkpoint did not resume safely")
+        if checkpoint["memory"][0]["attribution"] != "model_inference" or checkpoint["memory"][1]["attribution"] != "user_confirmed_decision":
+            raise RuntimeError("Checkpoint attribution changed on resume")
         if patch:
-            print("Formatting changes are available in work-continuity-format.patch.")
+            raise SystemExit("Formatting differs: apply work-continuity-format.patch")
+        print("Portable module tests, Clippy, formatting, and checkpoint process round-trip passed.")
 
 
 if __name__ == "__main__":

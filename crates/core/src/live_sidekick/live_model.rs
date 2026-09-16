@@ -70,7 +70,13 @@ pub struct LiveActivity {
 
 impl LiveActivity {
     pub fn new(model: LiveModel) -> Self {
-        Self { model, model_activity: ModelActivity::Unknown, audio_playing: false, outstanding_tasks: 0, awaiting_approval: false }
+        Self {
+            model,
+            model_activity: ModelActivity::Unknown,
+            audio_playing: false,
+            outstanding_tasks: 0,
+            awaiting_approval: false,
+        }
     }
 
     pub fn user_turn_started(&mut self) {
@@ -84,7 +90,15 @@ impl LiveActivity {
 
     pub fn observe(&mut self, message: &Value) {
         let content = message.get("serverContent");
-        let values: Vec<&Value> = [message.get("interactionStatus"), message.get("interaction_status"), content.and_then(|c| c.get("interactionStatus")), content.and_then(|c| c.get("interaction_status"))].into_iter().flatten().collect();
+        let values: Vec<&Value> = [
+            message.get("interactionStatus"),
+            message.get("interaction_status"),
+            content.and_then(|c| c.get("interactionStatus")),
+            content.and_then(|c| c.get("interaction_status")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         if let Some(first) = values.first() {
             self.model_activity = if values.iter().any(|value| value != first) {
                 ModelActivity::Unknown
@@ -95,14 +109,21 @@ impl LiveActivity {
                     _ => ModelActivity::Unknown,
                 }
             };
-        } else if content.and_then(|c| c.get("turnComplete")).and_then(Value::as_bool) == Some(true) && self.model == LiveModel::Standard {
+        } else if content
+            .and_then(|c| c.get("turnComplete"))
+            .and_then(Value::as_bool)
+            == Some(true)
+            && self.model == LiveModel::Standard
+        {
             self.model_activity = ModelActivity::Idle;
         }
     }
 
     pub fn ready(&self) -> bool {
-        self.model_activity == ModelActivity::Idle && !self.audio_playing
-            && self.outstanding_tasks == 0 && !self.awaiting_approval
+        self.model_activity == ModelActivity::Idle
+            && !self.audio_playing
+            && self.outstanding_tasks == 0
+            && !self.awaiting_approval
     }
 }
 
@@ -120,10 +141,12 @@ mod tests {
         assert!(activity.ready());
     }
 
-   #[test]
+    #[test]
     fn nested_status_only_and_top_level_status_work() {
         let mut activity = LiveActivity::new(LiveModel::ExtendedThinking);
-        activity.observe(&json!({"serverContent": {"interactionStatus": "IN_PROGRESS", "turnComplete": true}}));
+        activity.observe(
+            &json!({"serverContent": {"interactionStatus": "IN_PROGRESS", "turnComplete": true}}),
+        );
         assert!(!activity.ready());
         activity.observe(&json!({"interaction_status": "IDLE"}));
         assert!(activity.ready());
@@ -172,19 +195,40 @@ mod tests {
 
     #[test]
     fn extended_tools_omit_unsupported_scheduling() {
-        let response = LiveModel::ExtendedThinking.tool_response("id", "tool", json!({"ok": true}), Delivery::Routine);
-        assert!(response["toolResponse"]["functionResponses"][0].get("scheduling").is_none());
-        let declaration = LiveModel::ExtendedThinking.function_declaration("tool", "Test", json!({"type": "OBJECT"}));
+        let response = LiveModel::ExtendedThinking.tool_response(
+            "id",
+            "tool",
+            json!({"ok": true}),
+            Delivery::Routine,
+        );
+        assert!(response["toolResponse"]["functionResponses"][0]
+            .get("scheduling")
+            .is_none());
+        let declaration = LiveModel::ExtendedThinking.function_declaration(
+            "tool",
+            "Test",
+            json!({"type": "OBJECT"}),
+        );
         assert_eq!(declaration["behavior"], "NON_BLOCKING");
     }
 
     #[test]
     fn standard_delivery_and_unknown_model_are_explicit() {
-        for (delivery, expected) in [(Delivery::NeedsAttention, "INTERRUPT"), (Delivery::Routine, "WHEN_IDLE"), (Delivery::Silent, "SILENT")] {
+        for (delivery, expected) in [
+            (Delivery::NeedsAttention, "INTERRUPT"),
+            (Delivery::Routine, "WHEN_IDLE"),
+            (Delivery::Silent, "SILENT"),
+        ] {
             let response = LiveModel::Standard.tool_response("id", "tool", json!({}), delivery);
-            assert_eq!(response["toolResponse"]["functionResponses"][0]["scheduling"], expected);
+            assert_eq!(
+                response["toolResponse"]["functionResponses"][0]["scheduling"],
+                expected
+            );
         }
         assert!(LiveModel::from_id("unrecognized-future-model").is_none());
-        assert_eq!(LiveModel::from_id("models/gemini-3.8-live"), Some(LiveModel::Standard));
+        assert_eq!(
+            LiveModel::from_id("models/gemini-3.8-live"),
+            Some(LiveModel::Standard)
+        );
     }
 }

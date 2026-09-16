@@ -98,6 +98,8 @@ another supported Gemini voice). Empty preserves the provider default. Optional
 `persona = "morris"` adds a dry, helpful chief-of-staff tone without changing tool,
 privacy or approval rules. Both settings take effect in a new session; a resumed
 socket retains the selected voice. Other users keep the existing tone by default.
+Morris gives useful facts first; humor must not invent urgency or contradict the
+answer. Voice selection changes the sound, independently of the persona.
 
 `[voice_live] html_prototypes = true` opts into a bounded discuss/build/revise
 loop. It is off by default and also requires voice cloud consent. Gemini Live
@@ -171,6 +173,12 @@ With music explicitly enabled, requested `make_music` calls generate and play
 directly without an additional terminal approval. The recording exclusion and
 post-generation recording check remain. The assistant must describe a pending
 call as generating, never as already drafted or playing.
+The prompt requires a brief spoken acknowledgment for each new generation
+request before calling its tool, including music requested while a build is
+pending. This is model behavior, not a deterministic host-generated audio cue.
+Unstyled hold-music requests default to dry, snarky lyrics over an upbeat,
+repetitive synth/lounge loop. Explicit style, instrumental, calm or no-jokes
+requests override that default; other music requests do not inherit it.
 
 Each provider call is registered once. Duplicate IDs and model use of the
 reserved `host:` namespace are rejected. Cancellation before execution prevents

@@ -261,9 +261,9 @@ impl ToolContext {
                 // only source of truth about what is on screen.
                 ToolOutcome {
                     text: json!({
-                        "delivered": true,
                         "captured_at": Local::now().to_rfc3339(),
-                        "note": "A frame of Mat's screen taken just now was added to this conversation immediately before this result. It replaces any earlier frame: his screen has probably changed since, so describe only this newest one and never answer from a previous one. If you cannot actually see a new image, do not hedge or guess at what might be there. Say plainly that the frame did not arrive and call look_at_screen once more.",
+                        "image_bytes": bytes.len(),
+                        "note": "Check for an image immediately before this result and answer only from what is in it. Do not describe a screen you have not looked at: naming a plausible application is a serious error, worse than admitting you cannot see. If no new image is there, say exactly that and call look_at_screen again. If there is one, it supersedes every earlier frame, because his screen has changed since.",
                     })
                     .to_string(),
                     is_error: false,

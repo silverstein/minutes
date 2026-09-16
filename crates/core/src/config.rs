@@ -1192,7 +1192,7 @@ impl Default for VoiceLiveConfig {
             ask_agent: true,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
-            screen_settle_ms: 400,
+            screen_settle_ms: 1_000,
         }
     }
 }

@@ -1951,12 +1951,21 @@ fn summarize_with_agent_impl_timeout(
 pub fn run_agent_prompt(
     agent_cmd: &str,
     prompt: &str,
+    extra_args: &[String],
+    cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
     use std::io::Write;
 
-    let invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)
+    let mut invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)
         .map_err(|e| format!("could not build the agent invocation: {e}"))?;
+    // Ahead of the built-in arguments, because those end in a positional.
+    // Without a non-interactive permission posture here an agent stops on its
+    // first tool-use prompt, which nobody can see and nobody can answer, and
+    // the call burns the whole timeout looking like a hang.
+    for (i, arg) in extra_args.iter().enumerate() {
+        invocation.args.insert(i, arg.clone());
+    }
     let cleanup_path = invocation.cleanup_path.clone();
     let cleanup = |path: &Option<std::path::PathBuf>| {
         if let Some(p) = path {
@@ -1975,6 +1984,9 @@ pub fn run_agent_prompt(
         .stdin(stdin_stdio)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -2036,7 +2048,9 @@ pub fn run_agent_prompt(
                     let _ = take_agent_output(&stderr_buf, stderr_handle, "stderr");
                     cleanup(&cleanup_path);
                     return Err(format!(
-                        "agent '{agent_cmd}' did not answer within {}s",
+                        "agent '{agent_cmd}' did not answer within {}s. The usual cause \
+                         is the agent waiting on a tool-use permission prompt that nothing \
+                         can answer; give it non-interactive launch flags.",
                         timeout.as_secs()
                     ));
                 }

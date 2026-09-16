@@ -242,6 +242,9 @@ fn open_audio(
     Ok(AudioIo::Split { mic, playback })
 }
 
+/// How often to report that a slow tool is still going.
+const TOOL_PROGRESS_EVERY: Duration = Duration::from_secs(8);
+
 /// Sent with a screen frame, as the user turn the model answers.
 const SCREEN_CAPTION: &str = "This is my screen at this exact moment, captured for the look_at_screen you just ran. Answer my question from this image and nothing else. If I dispute what you report, look at the image again and tell me what is actually there, even if that means disagreeing with me.";
 
@@ -455,7 +458,36 @@ impl Runner {
                 .name("voice-live-tools".into())
                 .spawn(move || {
                     for call in tool_rx.iter() {
+                        // A relayed agent can take half a minute. Without this
+                        // the host shows the call going out and then nothing,
+                        // which is indistinguishable from a wedged session.
+                        let running = Arc::new(AtomicBool::new(true));
+                        {
+                            let running = Arc::clone(&running);
+                            let on_event = Arc::clone(&on_event);
+                            let name = call.name.clone();
+                            std::thread::spawn(move || {
+                                let start = Instant::now();
+                                let mut next = TOOL_PROGRESS_EVERY;
+                                while running.load(Ordering::Relaxed) {
+                                    std::thread::sleep(Duration::from_millis(250));
+                                    if !running.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    if start.elapsed() >= next {
+                                        on_event(VoiceLiveEvent::Status {
+                                            text: format!(
+                                                "{name} still running, {}s",
+                                                start.elapsed().as_secs()
+                                            ),
+                                        });
+                                        next += TOOL_PROGRESS_EVERY;
+                                    }
+                                }
+                            });
+                        }
                         let outcome = tools.execute(&call.name, &call.args);
+                        running.store(false, Ordering::Relaxed);
                         on_event(VoiceLiveEvent::ToolResult {
                             name: call.name.clone(),
                             ms: outcome.elapsed.as_millis(),

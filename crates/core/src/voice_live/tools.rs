@@ -474,14 +474,19 @@ impl ToolContext {
                 let timeout =
                     Duration::from_secs(cfg.voice_live.delegate_timeout_secs.clamp(10, 900));
                 let prompt = format!(
-                    "You are answering one question relayed from a voice assistant. \
-                     Answer from the files, systems and tools you can reach. Be specific and \
-                     factual, and say plainly when you could not find something. Answer only: \
-                     do not create, edit or delete anything unless the question explicitly asks \
-                     you to. Reply in under 120 words of plain prose, no markdown and no code \
-                     blocks, because it will be read aloud.\n\nQuestion: {question}"
+                    "You are answering one question relayed from a voice assistant, and \
+                     someone is waiting out loud for the answer. Speed matters more than \
+                     completeness: look at what you need and stop. Do not survey a whole \
+                     repository or read more than a handful of files. Answer from the files, \
+                     systems and tools you can reach, be specific and factual, and say plainly \
+                     when you could not find something rather than searching on. Answer only: \
+                     do not create, edit or delete anything unless the question explicitly \
+                     asks you to. Reply in under 120 words of plain prose, no markdown and no \
+                     code blocks, because it will be read aloud.\n\nQuestion: {question}"
                 );
-                crate::summarize::run_agent_prompt(&agent, &prompt, timeout)
+                let args = delegate_agent_args(cfg);
+                let cwd = delegate_cwd(cfg);
+                crate::summarize::run_agent_prompt(&agent, &prompt, &args, cwd.as_deref(), timeout)
                     .map(|answer| json!({ "agent": agent, "answer": answer }))
             }
             "list_preps" => Ok(list_prep_artifacts()),
@@ -650,6 +655,24 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
             }
         }
     }
+}
+
+/// Launch flags for the relayed agent, falling back to the assistant's own.
+pub fn delegate_agent_args(config: &Config) -> Vec<String> {
+    if !config.voice_live.delegate_agent_args.is_empty() {
+        return config.voice_live.delegate_agent_args.clone();
+    }
+    config.assistant.agent_args.clone()
+}
+
+/// Where the relayed agent starts. `None` keeps the Minutes process directory.
+pub fn delegate_cwd(config: &Config) -> Option<PathBuf> {
+    let configured = config.voice_live.delegate_cwd.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    let path = expand_home(Path::new(configured));
+    path.is_dir().then_some(path)
 }
 
 /// Width of an on-request screen frame, in pixels.
@@ -1004,6 +1027,24 @@ mod tests {
         // Whether or not capture works here, the result never names an app: the
         // model reported that name instead of reading the image.
         assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn delegation_inherits_the_assistant_launch_flags() {
+        let mut config = Config::default();
+        config.assistant.agent_args = vec!["--yolo".into()];
+        // A relayed agent with no flags stops on its first permission prompt,
+        // so the assistant's own posture is the fallback.
+        assert_eq!(delegate_agent_args(&config), vec!["--yolo".to_string()]);
+        config.voice_live.delegate_agent_args = vec!["--other".into()];
+        assert_eq!(delegate_agent_args(&config), vec!["--other".to_string()]);
+    }
+
+    #[test]
+    fn a_missing_delegate_directory_is_ignored_rather_than_used() {
+        let mut config = Config::default();
+        config.voice_live.delegate_cwd = "/definitely/not/a/directory".into();
+        assert!(delegate_cwd(&config).is_none());
     }
 
     #[test]

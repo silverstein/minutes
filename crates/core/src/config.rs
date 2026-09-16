@@ -1162,6 +1162,16 @@ pub struct VoiceLiveConfig {
     pub delegate_agent: String,
     /// How long to wait for that agent before giving up.
     pub delegate_timeout_secs: u64,
+    /// Launch flags for the relayed agent. Empty follows `[assistant] agent_args`.
+    ///
+    /// A relayed agent runs with no terminal, so it must not stop to ask for
+    /// tool-use permission: nothing can answer, and the call burns its whole
+    /// timeout looking like a hang. Give it whatever flags your agent needs to
+    /// run non-interactively.
+    pub delegate_agent_args: Vec<String>,
+    /// Directory the relayed agent starts in. Empty uses the Minutes process
+    /// directory, which for a desktop launch is not where any code lives.
+    pub delegate_cwd: String,
     /// MCP servers to launch for a voice session, so the assistant can reach
     /// tools Minutes does not implement. Secrets are never named here: a server
     /// inherits this process's environment and reads whatever variable it
@@ -1196,6 +1206,8 @@ impl Default for VoiceLiveConfig {
             ask_agent: true,
             delegate_agent: String::new(),
             delegate_timeout_secs: 120,
+            delegate_agent_args: Vec::new(),
+            delegate_cwd: String::new(),
             mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }

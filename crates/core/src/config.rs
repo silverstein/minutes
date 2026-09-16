@@ -1144,6 +1144,12 @@ pub struct VoiceLiveConfig {
     /// and interrupt the assistant. Uses the platform voice-processing unit on
     /// macOS; other platforms fall back to plain capture.
     pub echo_cancellation: bool,
+    /// Reopen a session the provider ended, carrying its context forward.
+    ///
+    /// A Live session has a cap of roughly fifteen minutes. The provider offers
+    /// a resumption handle before it closes, so a new socket can continue the
+    /// same conversation instead of starting over with no memory of it.
+    pub resume_sessions: bool,
     /// Let the model decide not to answer at all.
     ///
     /// Open mic otherwise treats everything it hears as addressed to it, so a
@@ -1235,6 +1241,7 @@ impl Default for VoiceLiveConfig {
             screen_on_request: false,
             log_sessions: true,
             echo_cancellation: true,
+            resume_sessions: true,
             proactive_audio: false,
             speech_start_sensitivity: "low".into(),
             speech_end_sensitivity: "low".into(),

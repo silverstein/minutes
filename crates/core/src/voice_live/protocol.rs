@@ -538,6 +538,36 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_setup_keeps_everything_the_session_needs() {
+        let setup = SessionSetup {
+            model: "m".into(),
+            api_key: "k".into(),
+            system_instruction: "the rules".into(),
+            function_declarations: vec![
+                json!({"name": "t", "parameters": {"type": "object", "properties": {}}}),
+            ],
+            language: "en-US".into(),
+            manual_activity: false,
+            proactive_audio: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: Some("handle-1".into()),
+        };
+        let v = setup.to_json();
+        assert_eq!(v["setup"]["sessionResumption"]["handle"], "handle-1");
+        // A resumed socket that lost the instructions or the tools would look
+        // like the same conversation and behave like a different assistant.
+        assert_eq!(
+            v["setup"]["systemInstruction"]["parts"][0]["text"],
+            "the rules"
+        );
+        assert_eq!(
+            v["setup"]["tools"][0]["functionDeclarations"][0]["name"],
+            "t"
+        );
+    }
+
+    #[test]
     fn proactivity_is_asked_for_only_with_provider_detection() {
         let base = SessionSetup {
             model: "m".into(),

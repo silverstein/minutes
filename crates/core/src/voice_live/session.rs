@@ -9,7 +9,7 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -242,6 +242,10 @@ fn open_audio(
     Ok(AudioIo::Split { mic, playback })
 }
 
+/// Ceiling on reconnects in one session, so a provider that closes instantly
+/// cannot become a reconnect loop.
+const MAX_RESUMES: u32 = 12;
+
 /// How often to report that a slow tool is still going.
 const TOOL_PROGRESS_EVERY: Duration = Duration::from_secs(8);
 
@@ -356,8 +360,9 @@ where
         end_sensitivity: config.voice_live.speech_end_sensitivity.clone(),
         resume_handle: None,
     };
-    let client = Arc::new(LiveClient::connect(&setup)?);
-    let inbox = client.inbox.clone();
+    let connected = LiveClient::connect(&setup)?;
+    let inbox = connected.inbox.clone();
+    let client = Arc::new(Mutex::new(Arc::new(connected)));
 
     let device = options
         .device
@@ -398,6 +403,7 @@ where
     let runner = Runner {
         client,
         inbox,
+        setup,
         audio,
         tools,
         control_rx,
@@ -421,8 +427,12 @@ where
 }
 
 struct Runner {
-    client: Arc<LiveClient>,
+    /// Swappable, because resuming replaces the socket underneath a session
+    /// that is still running. The tool worker reads the current one per call.
+    client: Arc<Mutex<Arc<LiveClient>>>,
     inbox: Receiver<ServerEvent>,
+    /// Kept so a resumed session can be opened with the same instructions.
+    setup: SessionSetup,
     audio: AudioIo,
     tools: Arc<ToolContext>,
     control_rx: Receiver<Control>,
@@ -444,13 +454,49 @@ impl Runner {
         (self.on_event)(e);
     }
 
+    /// The socket in use right now.
+    fn client(&self) -> Arc<LiveClient> {
+        Arc::clone(&self.client.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+
+    /// Open a fresh socket that continues this conversation.
+    ///
+    /// Returns the new inbox on success. The old client is dropped, which ends
+    /// its reader thread; the tool worker picks the replacement up on its next
+    /// call because it reads through the same cell.
+    fn resume(&self, handle: &str) -> Option<Receiver<ServerEvent>> {
+        let mut setup = self.setup.clone();
+        setup.resume_handle = Some(handle.to_string());
+        match LiveClient::connect(&setup) {
+            Ok(fresh) => {
+                let inbox = fresh.inbox.clone();
+                let mut slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
+                let previous = std::mem::replace(&mut *slot, Arc::new(fresh));
+                drop(slot);
+                if let Ok(previous) = Arc::try_unwrap(previous) {
+                    previous.close();
+                }
+                Some(inbox)
+            }
+            Err(e) => {
+                self.emit(VoiceLiveEvent::Status {
+                    text: format!("could not resume the session: {e}"),
+                });
+                None
+            }
+        }
+    }
+
     fn run(mut self) {
+        let mut inbox = self.inbox.clone();
+        let mut resume_handle: Option<String> = None;
+        let mut resumes = 0u32;
         // Tool worker: one at a time, results go straight back to the socket.
         let (tool_tx, tool_rx) = bounded::<FunctionCall>(64);
         let (audio_out, audio_in) = unbounded::<Vec<u8>>();
         let worker = {
             let tools = Arc::clone(&self.tools);
-            let client = Arc::clone(&self.client);
+            let client_cell = Arc::clone(&self.client);
             let on_event = Arc::clone(&self.on_event);
             let scheduling = self.scheduling.clone();
             let settle =
@@ -461,6 +507,11 @@ impl Runner {
                 .name("voice-live-tools".into())
                 .spawn(move || {
                     for call in tool_rx.iter() {
+                        // Read through the cell every time: a resumed session
+                        // has a different socket, and a result sent to the old
+                        // one is lost silently.
+                        let client =
+                            Arc::clone(&client_cell.lock().unwrap_or_else(|p| p.into_inner()));
                         // A relayed agent can take half a minute. Without this
                         // the host shows the call going out and then nothing,
                         // which is indistinguishable from a wedged session.
@@ -564,7 +615,7 @@ impl Runner {
                 }
             }
             select! {
-                recv(self.inbox) -> msg => {
+                recv(inbox) -> msg => {
                     let Ok(ev) = msg else { self.emit(VoiceLiveEvent::Closed { reason: "io thread ended".into() }); break; };
                     match ev {
                         ServerEvent::SetupComplete => set_state(&self, &mut state, VoiceLiveState::Ready),
@@ -606,11 +657,29 @@ impl Runner {
                             self.emit(VoiceLiveEvent::Status { text: format!("tool calls cancelled: {}", ids.join(",")) });
                         }
                         ServerEvent::GoAway(t) => self.emit(VoiceLiveEvent::Status { text: format!("server ending session in {t}") }),
-                        ServerEvent::ResumptionHandle(_) => {}
+                        ServerEvent::ResumptionHandle(h) => resume_handle = Some(h),
                         ServerEvent::Error(e) => self.emit(VoiceLiveEvent::Status { text: format!("provider: {e}") }),
                         ServerEvent::Other(keys) => self.emit(VoiceLiveEvent::Status { text: format!("unhandled server message: {}", keys.join(",")) }),
                         ServerEvent::Closed(reason) => {
                             self.flush_transcripts(&mut you, &mut me);
+                            // A Live session is capped at around fifteen
+                            // minutes. The provider hands out a handle before
+                            // it goes, so carry the conversation to a new
+                            // socket rather than losing it mid-sentence.
+                            let wanted = self.tools.config.voice_live.resume_sessions
+                                && !self.stop_flag.load(Ordering::SeqCst)
+                                && resumes < MAX_RESUMES;
+                            if let (true, Some(handle)) = (wanted, resume_handle.clone()) {
+                                if let Some(fresh) = self.resume(&handle) {
+                                    inbox = fresh;
+                                    resumes += 1;
+                                    set_state(&self, &mut state, VoiceLiveState::Connecting);
+                                    self.emit(VoiceLiveEvent::Status {
+                                        text: format!("session resumed after {reason}"),
+                                    });
+                                    continue;
+                                }
+                            }
                             self.emit(VoiceLiveEvent::Closed { reason });
                             break;
                         }
@@ -626,7 +695,7 @@ impl Runner {
                                 ptt.chunks += 1;
                                 if !ptt.started {
                                     ptt.started = true;
-                                    let _ = self.client.activity_start();
+                                    let _ = self.client().activity_start();
                                 }
                                 true
                             }
@@ -634,7 +703,7 @@ impl Runner {
                     };
                     if send {
                         let pcm: Vec<u8> = chunk.samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
-                        if self.client.send_audio(&pcm).is_err() { break; }
+                        if self.client().send_audio(&pcm).is_err() { break; }
                         if self.mode == TalkMode::OpenMic && chunk.rms > 0.02 && state == VoiceLiveState::Ready {
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
@@ -659,10 +728,10 @@ impl Runner {
                             ptt = PttState { held: false, started: false, chunks: 0 };
                             // Chunks are 100 ms; require 300 ms of audio or the transcriber invents a word.
                             if started && chunks >= 3 {
-                                let _ = self.client.activity_end();
+                                let _ = self.client().activity_end();
                                 set_state(&self, &mut state, VoiceLiveState::Thinking);
                             } else {
-                                if started { let _ = self.client.activity_end(); }
+                                if started { let _ = self.client().activity_end(); }
                                 self.emit(VoiceLiveEvent::Status { text: "press was too short, nothing sent".into() });
                                 set_state(&self, &mut state, VoiceLiveState::Ready);
                             }
@@ -670,7 +739,7 @@ impl Runner {
                         Ok(Control::Text(text)) => {
                             self.log_line(format!("**You (typed):** {text}"));
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
-                            if self.client.send_text_turn(&text).is_err() { break; }
+                            if self.client().send_text_turn(&text).is_err() { break; }
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         Ok(Control::Stop) | Err(_) => break,
@@ -689,7 +758,11 @@ impl Runner {
         if let Some(w) = worker {
             let _ = w.join();
         }
-        if let Ok(client) = Arc::try_unwrap(self.client) {
+        let final_client = {
+            let slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
+            Arc::clone(&slot)
+        };
+        if let Ok(client) = Arc::try_unwrap(final_client) {
             client.close();
         }
     }

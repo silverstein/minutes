@@ -1,13 +1,10 @@
 name: Work integration source snapshot
-
 on:
   push:
     branches: ['codex/work-continuity-20260916']
     paths: ['.github/workflows/work-integration-snapshot.yml']
-
 permissions:
   contents: read
-
 jobs:
   snapshot:
     runs-on: ubuntu-latest
@@ -16,16 +13,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export tracked source only for isolated integration review
+      - name: Export exact current-main changes for reconciliation
         shell: bash
         run: |
-          mkdir -p /tmp/minutes-integration
-          git archive --format=zip --output=/tmp/minutes-integration/work-source.zip HEAD
-          git fetch --no-tags origin refs/heads/feat/voice-live
-          git rev-parse FETCH_HEAD > /tmp/minutes-integration/voice-sha.txt
-          git archive --format=zip --output=/tmp/minutes-integration/voice-source.zip FETCH_HEAD
+          mkdir -p /tmp/main-reconciliation
+          git fetch --no-tags origin 0b1d8c031ddd30c5abb969db5b8fd9e55de2667a 5a9d59fcba09d8b81dd72c96f538a7508b7a6505
+          git archive --format=zip --output=/tmp/main-reconciliation/main-source.zip 0b1d8c031ddd30c5abb969db5b8fd9e55de2667a
+          git diff --binary 5a9d59fcba09d8b81dd72c96f538a7508b7a6505 0b1d8c031ddd30c5abb969db5b8fd9e55de2667a > /tmp/main-reconciliation/main-vs-voice.patch
+          git ls-tree -r 0b1d8c031ddd30c5abb969db5b8fd9e55de2667a > /tmp/main-reconciliation/main-tree.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: minutes-integration-source
-          path: /tmp/minutes-integration/
+          name: main-reconciliation
+          path: /tmp/main-reconciliation/
           retention-days: 1

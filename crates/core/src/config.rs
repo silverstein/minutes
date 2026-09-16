@@ -1172,6 +1172,14 @@ pub struct VoiceLiveConfig {
     /// Directory the relayed agent starts in. Empty uses the Minutes process
     /// directory, which for a desktop launch is not where any code lives.
     pub delegate_cwd: String,
+    /// Labs toy: let the assistant generate and play music steered by what it
+    /// knows about a conversation. Off by default and deliberately separate
+    /// from the memory features.
+    pub music: bool,
+    /// Music model id.
+    pub music_model: String,
+    /// Longest piece to play, in seconds.
+    pub music_max_secs: u64,
     /// Let the relayed agent change things: write files, open issues, call a
     /// service that writes. Off by default.
     ///
@@ -1217,6 +1225,9 @@ impl Default for VoiceLiveConfig {
             delegate_agent_args: Vec::new(),
             delegate_cwd: String::new(),
             delegate_writes: false,
+            music: false,
+            music_model: "lyria-3.5".into(),
+            music_max_secs: 45,
             mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }

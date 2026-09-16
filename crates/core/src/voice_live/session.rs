@@ -446,6 +446,7 @@ impl Runner {
     fn run(mut self) {
         // Tool worker: one at a time, results go straight back to the socket.
         let (tool_tx, tool_rx) = bounded::<FunctionCall>(64);
+        let (audio_out, audio_in) = unbounded::<Vec<u8>>();
         let worker = {
             let tools = Arc::clone(&self.tools);
             let client = Arc::clone(&self.client);
@@ -454,6 +455,7 @@ impl Runner {
             let settle =
                 Duration::from_millis(self.tools.config.voice_live.screen_settle_ms.min(3_000));
             let log_tx = self.log.as_ref().map(|l| l.sender());
+            let audio_out = audio_out.clone();
             std::thread::Builder::new()
                 .name("voice-live-tools".into())
                 .spawn(move || {
@@ -506,6 +508,9 @@ impl Runner {
                         // Close the call silently so it produces no speech of
                         // its own, then send the frame as the turn the model
                         // actually answers.
+                        if let Some(pcm) = &outcome.audio {
+                            audio_out.send(pcm.clone()).ok();
+                        }
                         let media = outcome.image.is_some();
                         let this_scheduling = if media { "SILENT" } else { &scheduling };
                         if client
@@ -632,6 +637,13 @@ impl Runner {
                         if self.mode == TalkMode::OpenMic && chunk.rms > 0.02 && state == VoiceLiveState::Ready {
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
+                    }
+                }
+                // Audio a tool produced, queued for the speaker on this thread
+                // because the playback handle lives here.
+                recv(audio_in) -> pcm => {
+                    if let Ok(pcm) = pcm {
+                        self.audio.push_pcm16(&pcm);
                     }
                 }
                 recv(self.control_rx) -> ctl => {

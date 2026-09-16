@@ -13,6 +13,7 @@
 pub mod audio_out;
 pub mod decimate;
 pub mod mcp;
+pub mod music;
 pub mod names;
 pub mod protocol;
 pub mod session;
@@ -152,6 +153,9 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
     }
     if config.voice_live.calendar && config.calendar.enabled {
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
+    }
+    if config.voice_live.music {
+        p.push_str("Music. You can make and play a short instrumental piece with make_music. When Mat asks for music for a meeting, a call or a moment, first read what you actually know about it, from upcoming_meetings, a prep, or the meeting itself, then write the brief yourself and say in a sentence what you drew on. Describe instruments, tempo and mood; it is instrumental, so do not ask for lyrics or singing. It takes most of a minute, so say you are writing something first. Never while a recording is running, and do not offer it in the middle of real work.\n\n");
     }
     if config.voice_live.screen_on_request {
         p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. After you call look_at_screen the frame arrives as the very next thing you receive, so wait for it and say nothing in between. If it truly does not arrive, say plainly that it did not and take another rather than hedging about not making out details. When Mat says you got something on screen wrong, look at the frame again and tell him what is actually there. If you still see the same thing, say so and say where you are looking. Agreeing with his correction without checking is worse than being wrong once, because then neither of you knows what is on the screen. Fine detail like a pointer position is genuinely hard to read, so say when you are unsure rather than asserting. Never describe a screen you have not actually looked at. Naming a plausible application, a document or a cursor you did not see is a serious error and worse than saying you cannot see anything yet, because Mat cannot tell the difference from a real answer. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");

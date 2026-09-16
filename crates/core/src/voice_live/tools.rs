@@ -42,6 +42,9 @@ pub struct ToolOutcome {
     /// Tool results are text, so a frame reaches the model as session media and
     /// the text only tells it the frame is there.
     pub image: Option<Vec<u8>>,
+    /// Audio for the host to play: PCM16 mono at the provider's rate. Not sent
+    /// to the model, which has no reason to listen to it.
+    pub audio: Option<Vec<u8>>,
 }
 
 impl ToolContext {
@@ -187,6 +190,13 @@ impl ToolContext {
                 ));
             }
         }
+        if self.config.voice_live.music {
+            d.push(decl(
+                "make_music",
+                "Generate and play a short instrumental piece. Write the brief yourself from what you know about the conversation in question: instruments, tempo, mood, and what it is for. Instrumental only, so never ask for lyrics or singing. Takes most of a minute, and will refuse while a recording is running.",
+                json!({"description": {"type": "string", "description": "What the music should sound like, in a sentence or two"}}),
+            ));
+        }
         if self.config.voice_live.screen_on_request {
             // Non-blocking on purpose: the frame is delivered as its own turn
             // and answered there, so the tool result itself is closed silently.
@@ -221,6 +231,9 @@ impl ToolContext {
         if name == "look_at_screen" {
             return self.look_at_screen(started);
         }
+        if name == "make_music" {
+            return self.make_music(args, started);
+        }
         if let Some(outcome) = self.mcp.call(name, args) {
             let (text, is_error) = match outcome {
                 Ok(v) => (v.to_string(), false),
@@ -231,6 +244,7 @@ impl ToolContext {
                 is_error,
                 elapsed: started.elapsed(),
                 image: None,
+                audio: None,
             };
         }
         let result =
@@ -249,6 +263,47 @@ impl ToolContext {
             is_error,
             elapsed: started.elapsed(),
             image: None,
+            audio: None,
+        }
+    }
+
+    /// Render a piece of music. Outside `dispatch` because it answers with
+    /// audio for the host to play rather than with text for the model.
+    fn make_music(&self, args: &Value, started: Instant) -> ToolOutcome {
+        let fail = |msg: String| ToolOutcome {
+            text: json!({ "error": msg }).to_string(),
+            is_error: true,
+            elapsed: started.elapsed(),
+            image: None,
+            audio: None,
+        };
+        if !self.config.voice_live.music {
+            return fail("music is off; set [voice_live] music = true in config.toml".into());
+        }
+        // Music reaches the microphone and then the transcript. Capture is
+        // never degraded by an optional consumer.
+        if crate::pid::status().recording {
+            return fail("a recording is running, so music stays off until it stops".into());
+        }
+        let Some(description) = str_arg(args, "description") else {
+            return fail("description is required".into());
+        };
+        match super::music::compose(&self.config, &description) {
+            Ok(piece) => ToolOutcome {
+                text: json!({
+                    "playing": true,
+                    "seconds": piece.seconds.round() as i64,
+                    "saved_to": piece.path.display().to_string(),
+                    "structure": piece.structure,
+                    "note": "The piece is playing now. Say one short sentence about what you made and what you based it on, then stop talking and let it play.",
+                })
+                .to_string(),
+                is_error: false,
+                elapsed: started.elapsed(),
+                image: None,
+                audio: Some(piece.pcm16),
+            },
+            Err(e) => fail(e),
         }
     }
 
@@ -260,6 +315,7 @@ impl ToolContext {
             is_error: true,
             elapsed: started.elapsed(),
             image: None,
+            audio: None,
         };
         if !self.config.voice_live.screen_on_request {
             return fail(
@@ -301,6 +357,7 @@ impl ToolContext {
                     is_error: false,
                     elapsed: started.elapsed(),
                     image: Some(bytes),
+                    audio: None,
                 }
             }
             Err(e) => fail(format!("could not read the captured frame: {e}")),
@@ -1043,6 +1100,26 @@ mod tests {
         // Whether or not capture works here, the result never names an app: the
         // model reported that name instead of reading the image.
         assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn music_is_refused_while_the_switch_is_off() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        let out = ctx.execute("make_music", &json!({"description": "something warm"}));
+        assert!(out.is_error);
+        assert!(out.audio.is_none());
+        assert!(out.text.contains("music is off"));
+    }
+
+    #[test]
+    fn music_is_not_declared_until_it_is_turned_on() {
+        let names: Vec<String> =
+            ToolContext::new(Config::default(), Arc::new(NameIndex::default()))
+                .declarations()
+                .into_iter()
+                .map(|d| d["name"].as_str().unwrap_or_default().to_string())
+                .collect();
+        assert!(!names.contains(&"make_music".to_string()));
     }
 
     #[test]

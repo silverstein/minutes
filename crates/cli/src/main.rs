@@ -3424,7 +3424,9 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -7612,7 +7614,9 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        std::process::exit(0);
+        // Skip C++ static teardown: a transcription may still hold a live
+        // whisper context on the worker thread (#998).
+        minutes_core::exit_without_cxx_teardown(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -11255,6 +11259,50 @@ life (qmd://life/)
     }
 
     #[test]
+    /// #1001 fixed the Ctrl-C abort in #998 by skipping C++ static teardown on
+    /// every interrupt path. #1008 then reverted all four call sites without
+    /// mentioning it, because it was built on a stale copy of this file, and
+    /// nothing caught the revert: `exit_without_cxx_teardown` is `pub`, so its
+    /// disappearance from here raised no dead-code warning, and no test named
+    /// the call sites. The reporter of #998 kept crashing against a `main` that
+    /// had quietly lost its own fix.
+    ///
+    /// A plain `exit()` here runs `__cxa_finalize`, which tears down ggml's
+    /// Metal device while an interrupted transcription may still hold a live
+    /// whisper context, and the process dies on SIGABRT instead of exiting.
+    #[test]
+    fn every_interrupt_path_skips_cxx_teardown() {
+        let source = std::fs::read_to_string(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
+            .expect("failed to read main.rs");
+
+        let force_quit = "InterruptAction::ForceExit(code) = handle_graceful_interrupt(";
+        let sites: Vec<_> = source.match_indices(force_quit).collect();
+        assert!(
+            !sites.is_empty(),
+            "the force-quit interrupt shape moved; this guard needs updating rather than deleting"
+        );
+        for (start, _) in &sites {
+            // The exit call sits a few lines below the match. A window is
+            // enough and does not depend on brace formatting.
+            let window = &source[*start..source.len().min(start + 500)];
+            assert!(
+                window.contains("exit_without_cxx_teardown"),
+                "a force-quit path calls plain exit, which runs C++ static \
+                 destructors while a whisper context may still be live (#998)"
+            );
+        }
+
+        let watch = source
+            .find("Stopping watcher...")
+            .expect("the watch interrupt handler moved; update this guard");
+        let window = &source[watch..source.len().min(watch + 500)];
+        assert!(
+            window.contains("exit_without_cxx_teardown"),
+            "the watch Ctrl-C handler calls plain exit; this is the exact path \
+             reported in #998 and fixed in #1001"
+        );
+    }
+
     fn graceful_interrupt_requests_shutdown_before_force_exit() {
         let stop = AtomicBool::new(false);
         let shutdowns = AtomicUsize::new(0);
@@ -17599,7 +17647,9 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -18112,7 +18162,9 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })
     .ok();

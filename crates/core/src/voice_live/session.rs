@@ -153,6 +153,19 @@ impl AudioIo {
         }
     }
 
+    /// True when the microphone cannot hear the speaker.
+    ///
+    /// Matters for more than comfort: without cancellation the assistant's own
+    /// voice is transcribed as user input, and anything treating that as a
+    /// person speaking is trusting the model's echo.
+    fn cancels_echo(&self) -> bool {
+        match self {
+            AudioIo::Split { .. } => false,
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(_) => true,
+        }
+    }
+
     /// True when nothing is queued for the speaker (or there is no speaker).
     fn is_idle(&self) -> bool {
         match self {
@@ -654,7 +667,17 @@ impl Runner {
                             // gate needs to know a person spoke and when, and a
                             // flush at a turn boundary is too late and can
                             // replay the very request that asked the question.
-                            self.tools.desktop.heard_user();
+                            //
+                            // Only count it as a person when it cannot be the
+                            // assistant hearing itself. With cancellation the
+                            // microphone never carries the speaker, so speaking
+                            // over it is genuinely the user. Without it, a
+                            // transcript arriving while audio is still playing
+                            // is most likely the echo of the very sentence that
+                            // asked for confirmation.
+                            if self.audio.cancels_echo() || self.audio.is_idle() {
+                                self.tools.desktop.heard_user();
+                            }
                             you.push_str(&t);
                             self.emit(VoiceLiveEvent::UserTranscript { text: t, partial: true });
                         }

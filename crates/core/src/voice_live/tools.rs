@@ -795,10 +795,7 @@ impl ToolContext {
 fn requires_host_review(name: &str, connected: bool) -> bool {
     connected
         || desktop::find(name).is_some_and(|v| v.risk == desktop::Risk::Outward)
-        || matches!(
-            name,
-            "propose_checkpoint" | "add_note" | "ask_agent" | "make_music"
-        )
+        || matches!(name, "propose_checkpoint" | "add_note" | "ask_agent")
 }
 
 fn decl(name: &str, description: &str, properties: Value) -> Value {
@@ -1371,6 +1368,7 @@ mod tests {
             "read_pull_requests",
             "review_pull_request",
             "research_public",
+            "make_music",
         ] {
             assert!(
                 !requires_host_review(name, false),
@@ -1383,7 +1381,6 @@ mod tests {
             "propose_checkpoint",
             "add_note",
             "ask_agent",
-            "make_music",
         ] {
             assert!(
                 requires_host_review(name, false),
@@ -1391,6 +1388,19 @@ mod tests {
             );
         }
         assert!(requires_host_review("hubspot__search", true));
+    }
+
+    #[test]
+    fn enabled_music_does_not_stage_approval_before_validating_its_brief() {
+        let mut config = Config::default();
+        config.voice_live.music = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("make_music", &json!({}));
+        assert!(out.is_error);
+        assert!(!out.text.contains("local host review"));
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        assert!(!requires_host_review("make_music", false));
+        assert!(requires_host_review("ask_agent", false));
     }
 
     #[test]

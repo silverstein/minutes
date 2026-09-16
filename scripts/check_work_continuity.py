@@ -74,13 +74,16 @@ thiserror = "2"
             ))
         (ROOT / "work-continuity-format.patch").write_text("".join(patch), encoding="utf-8")
         command = ["cargo", "run", "--quiet", "--manifest-path", manifest, "--example", "work_session"]
-        saved = subprocess.run(command, check=True, capture_output=True, text=True).stdout
-        restored = subprocess.run(command + ["--", "resume"], input=saved, check=True, capture_output=True, text=True).stdout
-        checkpoint = json.loads(restored)
-        if checkpoint["id"] != "demo-onboarding" or checkpoint["tasks"][0]["state"] != "interrupted":
-            raise RuntimeError("Synthetic checkpoint did not resume safely")
-        if checkpoint["memory"][0]["attribution"] != "model_inference" or checkpoint["memory"][1]["attribution"] != "user_confirmed_decision":
-            raise RuntimeError("Checkpoint attribution changed on resume")
+        saved = subprocess.run(command, check=True, stdout=subprocess.PIPE).stdout
+        # Exercise both editor/pipe conventions on EVERY OS. Preserve exact
+        # input bytes; subprocess text mode otherwise changes them on Windows.
+        for wire in [saved, saved.replace(b"\n", b"\r\n")]:
+            restored = subprocess.run(command + ["--", "resume"], input=wire, check=True, stdout=subprocess.PIPE).stdout
+            checkpoint = json.loads(restored)
+            if checkpoint["id"] != "demo-onboarding" or checkpoint["tasks"][0]["state"] != "interrupted":
+                raise RuntimeError("Synthetic checkpoint did not resume safely")
+            if checkpoint["memory"][0]["attribution"] != "model_inference" or checkpoint["memory"][1]["attribution"] != "user_confirmed_decision":
+                raise RuntimeError("Checkpoint attribution changed on resume")
         if patch:
             raise SystemExit("Formatting differs: apply work-continuity-format.patch")
         print("Portable module tests, Clippy, formatting, and checkpoint process round-trip passed.")

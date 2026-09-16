@@ -15,6 +15,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         io::stdin()
             .take((minutes_core::live_sidekick::work::MAX_CHECKPOINT_BYTES + 1) as u64)
             .read_to_string(&mut input)?;
+        if input.len() > minutes_core::live_sidekick::work::MAX_CHECKPOINT_BYTES {
+            return Err("checkpoint exceeds byte budget".into());
+        }
+        // Text pipes/editors may translate line endings. The codec is canonical LF.
+        let input = input.replace("\r\n", "\n");
         let restored = WorkSession::resume(WorkCheckpoint::from_markdown(&input)?)?;
         println!("{}", serde_json::to_string_pretty(&restored.checkpoint())?);
         return Ok(());

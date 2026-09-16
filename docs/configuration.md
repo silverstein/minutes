@@ -81,6 +81,8 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 #                                 # has no terminal, so it needs flags that let it run without
 #                                 # stopping to ask permission, or the call just times out.
 # delegate_cwd = "~/Sites"        # Where the relayed agent starts looking
+# delegate_writes = false         # Let the relayed agent change things. Off by default:
+#                                 # a misheard sentence should not open an issue or edit a file.
 
 # Reach tools Minutes does not implement. Each server is launched as a child
 # process and its tools appear to the voice assistant as `name__tool`.

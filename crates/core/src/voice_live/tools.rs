@@ -175,7 +175,14 @@ impl ToolContext {
                     .unwrap_or_else(|| agent.clone());
                 d.push(decl(
                     "ask_agent",
-                    &format!("Relay one question to Mat's local {agent_label} agent, which can read his code, files and connected services. Use it for anything outside meeting memory: his codebase, a repository, a document, or a system like a CRM or issue tracker. Ask one self-contained question, including any context from this conversation the agent would need, because it cannot hear you. It takes several seconds, so say you are checking before you call it."),
+                    &format!(
+                        "Relay one question to Mat's local {agent_label} agent, which can read his code, files and connected services. Use it for anything outside meeting memory: his codebase, a repository, a document, or a system like a CRM or issue tracker. Ask one self-contained question, including any context from this conversation the agent would need, because it cannot hear you. It takes several seconds, so say you are checking before you call it.{}",
+                        if self.config.voice_live.delegate_writes {
+                            " It can also change things, so confirm with Mat out loud before asking it to."
+                        } else {
+                            " It only reads. If Mat wants something created, edited or sent, tell him writing through the agent is turned off rather than trying."
+                        }
+                    ),
                     json!({"question": {"type": "string", "description": "A single self-contained question"}}),
                 ));
             }
@@ -473,16 +480,25 @@ impl ToolContext {
                     delegate_agent(cfg).ok_or("no coding agent is configured or installed")?;
                 let timeout =
                     Duration::from_secs(cfg.voice_live.delegate_timeout_secs.clamp(10, 900));
+                // The caller is a speech model deciding on its own when to
+                // relay, from audio it may have misheard. Writing is opt-in.
+                let rule = if cfg.voice_live.delegate_writes {
+                    "You may change things when the question plainly asks you to, but say \
+                     exactly what you changed."
+                } else {
+                    "Answer only. Never create, edit, delete or send anything, and never call \
+                     a tool that writes, even if the question asks you to. If it does, say \
+                     that writing through the agent is turned off, and stop."
+                };
                 let prompt = format!(
                     "You are answering one question relayed from a voice assistant, and \
                      someone is waiting out loud for the answer. Speed matters more than \
                      completeness: look at what you need and stop. Do not survey a whole \
                      repository or read more than a handful of files. Answer from the files, \
                      systems and tools you can reach, be specific and factual, and say plainly \
-                     when you could not find something rather than searching on. Answer only: \
-                     do not create, edit or delete anything unless the question explicitly \
-                     asks you to. Reply in under 120 words of plain prose, no markdown and no \
-                     code blocks, because it will be read aloud.\n\nQuestion: {question}"
+                     when you could not find something rather than searching on. {rule} \
+                     Reply in under 120 words of plain prose, no markdown and no code blocks, \
+                     because it will be read aloud.\n\nQuestion: {question}"
                 );
                 let args = delegate_agent_args(cfg);
                 let cwd = delegate_cwd(cfg);
@@ -1027,6 +1043,30 @@ mod tests {
         // Whether or not capture works here, the result never names an app: the
         // model reported that name instead of reading the image.
         assert!(!out.text.contains("frontmost_app"));
+    }
+
+    #[test]
+    fn relayed_writes_are_off_until_deliberately_turned_on() {
+        assert!(
+            !Config::default().voice_live.delegate_writes,
+            "a speech model must not reach a write channel by default"
+        );
+        let describe = |writes: bool| {
+            let mut c = Config::default();
+            c.voice_live.ask_agent = true;
+            c.voice_live.delegate_writes = writes;
+            ToolContext::new(c, Arc::new(NameIndex::default()))
+                .declarations()
+                .into_iter()
+                .find(|d| d["name"] == "ask_agent")
+                .map(|d| d["description"].as_str().unwrap_or_default().to_string())
+        };
+        if let Some(text) = describe(false) {
+            assert!(text.contains("only reads"), "{text}");
+        }
+        if let Some(text) = describe(true) {
+            assert!(text.contains("confirm with Mat out loud"), "{text}");
+        }
     }
 
     #[test]

@@ -1172,6 +1172,14 @@ pub struct VoiceLiveConfig {
     /// Directory the relayed agent starts in. Empty uses the Minutes process
     /// directory, which for a desktop launch is not where any code lives.
     pub delegate_cwd: String,
+    /// Let the relayed agent change things: write files, open issues, call a
+    /// service that writes. Off by default.
+    ///
+    /// The caller here is a cloud speech model deciding on its own when to
+    /// relay, from audio it may have misheard, with nobody reviewing the
+    /// request. RFC 0007 keeps phase 1 to a single write, `add_note`, for that
+    /// reason. Turning this on is a deliberate widening of that boundary.
+    pub delegate_writes: bool,
     /// MCP servers to launch for a voice session, so the assistant can reach
     /// tools Minutes does not implement. Secrets are never named here: a server
     /// inherits this process's environment and reads whatever variable it
@@ -1208,6 +1216,7 @@ impl Default for VoiceLiveConfig {
             delegate_timeout_secs: 120,
             delegate_agent_args: Vec::new(),
             delegate_cwd: String::new(),
+            delegate_writes: false,
             mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }

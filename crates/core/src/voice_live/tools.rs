@@ -251,7 +251,7 @@ impl ToolContext {
                         "delivered": true,
                         "frontmost_app": app,
                         "captured_at": Local::now().to_rfc3339(),
-                        "note": "One frame of Mat's screen was just added to this conversation. Describe what you can actually see in it, and say so plainly if it is unreadable.",
+                        "note": "A frame of Mat's screen taken just now was added to this conversation. It replaces any earlier frame: his screen has probably changed since, so describe only this newest one and never answer from a previous one. Say so plainly if it is unreadable.",
                     })
                     .to_string(),
                     is_error: false,

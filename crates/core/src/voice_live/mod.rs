@@ -147,7 +147,7 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
         p.push_str("Time and calendar. The date above is from when this session started, so for anything clock-dependent read the current time from get_status rather than assuming. For what is next, when something starts, or who is attending, call upcoming_meetings.\n\n");
     }
     if config.voice_live.screen_on_request {
-        p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
+        p.push_str("Screen. You can take one frame of Mat's screen with look_at_screen when he asks about his screen, what he is looking at, or something in front of him. The frame arrives as an image in this conversation. Describe only what is actually visible in it, in as much detail as he asks for, and say plainly if it is unreadable. You are looking at Mat's work, not at your own interface: if the terminal or window running this session is in the frame, that is you, so do not describe it and do not count it as what he is looking at. Lead with the application he is actually working in. If that window is all you can see, say so and ask what he wants you to look at instead. Never take a frame he did not ask for, and never take one just to check something for yourself.\n\n");
     }
     p.push_str("If Mat asks you to remember or note something, call add_note with his words. Ask before calling any tool that writes or changes something, and never rename a speaker unless Mat explicitly states the name.");
     p
@@ -250,6 +250,7 @@ mod tests {
         let p = system_prompt(&config, &NameIndex::default(), false);
         assert!(p.contains("look_at_screen"));
         assert!(p.contains("Never take a frame he did not ask for"));
+        assert!(p.contains("that is you, so do not describe it"));
     }
 
     #[test]

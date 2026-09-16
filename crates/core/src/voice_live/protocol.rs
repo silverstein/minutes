@@ -165,9 +165,16 @@ impl LiveClient {
         }}}))
     }
 
-    /// Push one image frame (JPEG or PNG bytes) into the session.
+    /// Deliver one image frame as an ordered part of the conversation.
+    ///
+    /// Deliberately not `realtimeInput`. That is the media timeline, and it is
+    /// not ordered against `toolResponse`: a frame pushed there can still be
+    /// ingesting when the model answers the tool call, so it answers from the
+    /// previous frame and appears to be one turn behind. `clientContent` lands
+    /// in send order, and `turnComplete: false` leaves the turn open for the
+    /// tool response that explains the frame.
     pub fn send_image(&self, bytes: &[u8], mime: &str) -> Result<(), VoiceLiveError> {
-        self.send_json(json!({ "realtimeInput": { "video": { "data": B64.encode(bytes), "mimeType": mime } } }))
+        self.send_json(client_image_json(bytes, mime))
     }
 
     /// Manual voice activity markers (push-to-talk mode only).
@@ -425,6 +432,18 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "error",
 ];
 
+/// The wire message for one image frame. Split out so the shape is testable
+/// without a socket.
+fn client_image_json(bytes: &[u8], mime: &str) -> Value {
+    json!({ "clientContent": {
+        "turns": [{ "role": "user", "parts": [{ "inlineData": {
+            "mimeType": mime,
+            "data": B64.encode(bytes),
+        }}]}],
+        "turnComplete": false,
+    }})
+}
+
 /// Map a config level to the provider's enum; anything else keeps the default.
 fn sensitivity_enum(prefix: &str, level: &str) -> Option<String> {
     match level.trim().to_ascii_lowercase().as_str() {
@@ -445,6 +464,18 @@ fn redact_key(message: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_frame_is_an_ordered_turn_not_realtime_media() {
+        let msg = client_image_json(&[1u8, 2, 3], "image/png");
+        // Ordered channel, so the frame is in context before the tool response.
+        assert!(msg.get("realtimeInput").is_none());
+        let part = &msg["clientContent"]["turns"][0]["parts"][0]["inlineData"];
+        assert_eq!(part["mimeType"], "image/png");
+        assert!(part["data"].as_str().is_some_and(|d| !d.is_empty()));
+        // The tool response completes the turn, not the frame.
+        assert_eq!(msg["clientContent"]["turnComplete"], false);
+    }
 
     #[test]
     fn setup_json_has_required_shape() {

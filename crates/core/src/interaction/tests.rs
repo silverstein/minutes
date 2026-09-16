@@ -119,12 +119,10 @@ fn cloud_opt_in_is_not_a_restricted_override() {
     for sensitivity in [Sensitivity::Restricted, Sensitivity::Unknown] {
         let mut s = source();
         s.sensitivity = sensitivity;
-        assert!(validate_cloud_release(
-            true,
-            std::slice::from_ref(&s),
-            std::slice::from_ref(&s)
-        )
-        .is_err());
+        assert!(
+            validate_cloud_release(true, std::slice::from_ref(&s), std::slice::from_ref(&s))
+                .is_err()
+        );
     }
     assert!(validate_cloud_release(false, &[source()], &[source()]).is_err());
     assert!(validate_cloud_release(true, &[source()], &[source()]).is_ok());
@@ -279,7 +277,9 @@ fn debrief_does_not_rewrite_observation_or_promote_an_idea() {
 fn capsule_roundtrip_and_stale_updates_are_safe() {
     let mut capsule = WorkCapsule::new("work-1", "Review the proposal").unwrap();
     capsule.add_constraint_from_host("Keep pricing", 0).unwrap();
-    capsule.set_next_step("Compare the two versions", 1).unwrap();
+    capsule
+        .set_next_step("Compare the two versions", 1)
+        .unwrap();
     let restored = WorkCapsule::from_json(&capsule.to_json().unwrap()).unwrap();
     assert_eq!(restored.goal(), "Review the proposal");
     assert_eq!(restored.revision(), 2);
@@ -298,7 +298,8 @@ fn capsule_rejects_future_versions_and_invalid_decision_history() {
     assert!(WorkCapsule::from_json(&value.to_string()).is_err());
     value["version"] = json!(1);
     value["revision"] = json!(1);
-    value["records"] = json!([{"id":1,"kind":"accepted_decision","text":"Do it","sources":[],"supersedes":99}]);
+    value["records"] =
+        json!([{"id":1,"kind":"accepted_decision","text":"Do it","sources":[],"supersedes":99}]);
     assert!(WorkCapsule::from_json(&value.to_string()).is_err());
 }
 
@@ -313,7 +314,8 @@ fn steering_waits_for_cancellation_and_rejects_old_completion() {
     let new = task.start_from_host().unwrap();
     assert_eq!(task.spec().instruction, "Review only authorization");
     assert!(task.finish(&old, true, "stale result").is_err());
-    task.finish(&new, true, "review artifact reference").unwrap();
+    task.finish(&new, true, "review artifact reference")
+        .unwrap();
     assert_eq!(task.state(), &TaskState::Completed);
 }
 

@@ -22,7 +22,9 @@ fn text(value: &str) -> Result<()> {
 }
 
 fn next(value: u64) -> Result<u64> {
-    value.checked_add(1).ok_or_else(|| "generation exhausted".into())
+    value
+        .checked_add(1)
+        .ok_or_else(|| "generation exhausted".into())
 }
 
 #[cfg(test)]

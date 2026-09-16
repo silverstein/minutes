@@ -122,7 +122,13 @@ impl WorkCapsule {
         sources: Vec<SourceRef>,
         expected: u64,
     ) -> Result<u64> {
-        self.append(RecordKind::UserInterpretation, value, sources, None, expected)
+        self.append(
+            RecordKind::UserInterpretation,
+            value,
+            sources,
+            None,
+            expected,
+        )
     }
 
     pub fn accept_from_host(&mut self, suggestion: u64, expected: u64) -> Result<u64> {
@@ -133,7 +139,11 @@ impl WorkCapsule {
             .find(|r| r.id == suggestion && r.kind == RecordKind::Suggestion)
             .ok_or("not a suggestion")?
             .clone();
-        if self.records.iter().any(|r| r.supersedes == Some(suggestion)) {
+        if self
+            .records
+            .iter()
+            .any(|r| r.supersedes == Some(suggestion))
+        {
             return Err("suggestion already accepted".into());
         }
         self.append(

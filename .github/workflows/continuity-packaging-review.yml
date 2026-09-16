@@ -1,0 +1,51 @@
+name: Record reviewed continuity packaging manifest
+
+on:
+  push:
+    branches: ['feat/voice-continuity-integration-20260916']
+    paths: ['.github/workflows/continuity-packaging-review.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    if: github.repository == 'silverstein/minutes' && github.ref == 'refs/heads/feat/voice-continuity-integration-20260916'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Record only the reviewed manifest fingerprint and retain all checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          manifest = Path('crates/cli/Cargo.toml').read_bytes()
+          expected = '1227703085c874c6822b6227d1b7e6fa78bdce0a658bb53d649125dd74b2c193'
+          previous = '1d5a652297a62f4f566ad74e7e8b70eaacac9d2e3c2d42db5f11be3b0e94c147'
+          assert hashlib.sha256(manifest).hexdigest() == expected
+          addition = b'# Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).\n# Off by default: it is a cloud provider behind an explicit config opt-in.\nvoice-live = ["minutes-core/voice-live"]\n'
+          assert manifest.count(addition) == 1
+          assert hashlib.sha256(manifest.replace(addition, b'')).hexdigest() == previous
+          path = Path('scripts/check_graph_worker_packaging.mjs')
+          source = path.read_text()
+          assert source.count(previous) == 1
+          path.write_text(source.replace(previous, expected))
+          PY
+          node scripts/check_graph_worker_packaging.mjs
+          node scripts/check_graph_worker_packaging.mjs --self-test
+          python3 scripts/seal_graph_worker_hash.py --self-test
+          node scripts/check_apple_speech_worker_packaging.mjs
+          node scripts/check_apple_speech_worker_packaging.mjs --self-test
+          python3 scripts/test_apple_speech_watcher.py
+          python3 scripts/seal_apple_speech_worker_hash.py --self-test
+          git diff --check
+          git add -- scripts/check_graph_worker_packaging.mjs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(ci): record reviewed opt-in voice feature in graph packaging fingerprint' -m 'The complete CLI manifest differs from the prior golden only by two comments and the opt-in voice-live feature. Worker binary entries, default features, dependencies, XPC authority and signing remain unchanged. All packaging and mutation self-tests remain enabled and pass.'
+          git fetch origin feat/voice-continuity-integration-20260916
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git push origin HEAD:refs/heads/feat/voice-continuity-integration-20260916

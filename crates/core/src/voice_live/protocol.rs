@@ -18,6 +18,7 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
 use super::VoiceLiveError;
+use crate::interaction::live::{self, LiveProfile, ProviderActivity};
 
 /// Base endpoint for the bidirectional Live API.
 pub const LIVE_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -48,6 +49,7 @@ pub enum ServerEvent {
     Text(String),
     Interrupted,
     TurnComplete,
+    InteractionStatus(ProviderActivity),
     ToolCall(Vec<FunctionCall>),
     ToolCallCancellation(Vec<String>),
     GoAway(String),
@@ -77,9 +79,26 @@ pub struct SessionSetup {
 }
 
 impl SessionSetup {
+    pub fn profile(&self) -> Result<LiveProfile, VoiceLiveError> {
+        LiveProfile::gemini(&self.model).map_err(VoiceLiveError::Connect)
+    }
+
     fn to_json(&self) -> Value {
+        // connect() validates the profile before network access. Fixtures may
+        // still inspect an unknown model's generic JSON shape.
+        let profile = self.profile().unwrap_or(LiveProfile::Standard);
+        let declarations: Vec<Value> = self
+            .function_declarations
+            .iter()
+            .cloned()
+            .map(|d| {
+                profile
+                    .function_declaration(d)
+                    .expect("validated function object")
+            })
+            .collect();
         let mut setup = json!({
-            "model": format!("models/{}", self.model),
+            "model": format!("models/{}", self.model.strip_prefix("models/").unwrap_or(&self.model)),
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": { "languageCode": self.language },
@@ -90,7 +109,7 @@ impl SessionSetup {
             "contextWindowCompression": { "slidingWindow": {} },
         });
         if !self.function_declarations.is_empty() {
-            setup["tools"] = json!([{ "functionDeclarations": self.function_declarations }]);
+            setup["tools"] = json!([{ "functionDeclarations": declarations }]);
         }
         if self.manual_activity {
             setup["realtimeInputConfig"] =
@@ -110,7 +129,8 @@ impl SessionSetup {
         }
         // Only meaningful with the provider's own detection running: in
         // push-to-talk the user has already said every turn is for it.
-        if self.proactive_audio && !self.manual_activity {
+        if profile == LiveProfile::AsyncReasoning || (self.proactive_audio && !self.manual_activity)
+        {
             setup["proactivity"] = json!({ "proactiveAudio": true });
         }
         setup["sessionResumption"] = match &self.resume_handle {
@@ -124,6 +144,7 @@ impl SessionSetup {
 /// Handle to a live session. Cloning the sender side is cheap; the IO thread
 /// exits when the socket closes or [`LiveClient::close`] is called.
 pub struct LiveClient {
+    profile: LiveProfile,
     outbox: Sender<Message>,
     pub inbox: Receiver<ServerEvent>,
     io_thread: Option<JoinHandle<()>>,
@@ -132,6 +153,12 @@ pub struct LiveClient {
 impl LiveClient {
     /// Open the socket, send the setup message, and start the IO thread.
     pub fn connect(setup: &SessionSetup) -> Result<Self, VoiceLiveError> {
+        let profile = setup.profile()?;
+        for declaration in &setup.function_declarations {
+            profile
+                .function_declaration(declaration.clone())
+                .map_err(VoiceLiveError::Connect)?;
+        }
         let url = format!("{LIVE_WS_BASE}?key={}", setup.api_key);
         let (mut socket, _response) = tungstenite::connect(url.as_str())
             .map_err(|e| VoiceLiveError::Connect(redact_key(&e.to_string(), &setup.api_key)))?;
@@ -140,13 +167,14 @@ impl LiveClient {
             .send(Message::Text(setup.to_json().to_string().into()))
             .map_err(|e| VoiceLiveError::Connect(format!("setup send failed: {e}")))?;
 
-        let (outbox, out_rx) = unbounded::<Message>();
+        let (outbox, out_rx) = crossbeam_channel::bounded::<Message>(128);
         let (in_tx, inbox) = unbounded::<ServerEvent>();
         let io_thread = std::thread::Builder::new()
             .name("voice-live-io".into())
             .spawn(move || io_loop(socket, out_rx, in_tx))
             .map_err(|e| VoiceLiveError::Connect(format!("io thread: {e}")))?;
         Ok(Self {
+            profile,
             outbox,
             inbox,
             io_thread: Some(io_thread),
@@ -214,11 +242,11 @@ impl LiveClient {
         result: &str,
         scheduling: &str,
     ) -> Result<(), VoiceLiveError> {
-        self.send_json(json!({ "toolResponse": { "functionResponses": [{
-            "id": call.id,
-            "name": call.name,
-            "response": { "result": result, "scheduling": scheduling },
-        }]}}))
+        let response = self
+            .profile
+            .function_response(&call.id, &call.name, json!(result), scheduling)
+            .map_err(VoiceLiveError::Connect)?;
+        self.send_json(json!({ "toolResponse": { "functionResponses": [response] }}))
     }
 
     /// Ask the IO thread to close the socket and wait for it.
@@ -274,8 +302,8 @@ fn set_read_timeout(socket: &mut Socket, timeout: Duration) {
 fn io_loop(mut socket: Socket, out_rx: Receiver<Message>, in_tx: Sender<ServerEvent>) {
     let mut closing = false;
     loop {
-        // Drain outbound first so a tool response or audio chunk never waits on a read timeout.
-        loop {
+        // Bound each batch so continuous mic input cannot starve provider events.
+        for _ in 0..16 {
             match out_rx.try_recv() {
                 Ok(Message::Close(frame)) => {
                     let _ = socket.close(frame);
@@ -430,6 +458,9 @@ pub fn decode_events(text: &str) -> Vec<ServerEvent> {
     if let Some(err) = v.get("error") {
         events.push(ServerEvent::Error(err.to_string()));
     }
+    if let Some(status) = live::interaction_status(&v) {
+        events.push(ServerEvent::InteractionStatus(status));
+    }
     // Only genuinely new top-level keys are worth surfacing. Known envelopes that
     // carried nothing actionable this time (a `serverContent` with only
     // `generationComplete`, a bare `usageMetadata`, a keepalive `{}`) stay quiet.
@@ -459,6 +490,8 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "goAway",
     "sessionResumptionUpdate",
     "usageMetadata",
+    "interactionStatus",
+    "interaction_status",
     "error",
 ];
 
@@ -719,5 +752,80 @@ mod tests {
             redact_key("bad url ?key=SECRET x", "SECRET"),
             "bad url ?key=<redacted> x"
         );
+    }
+
+    #[test]
+    fn real_extended_setup_and_resume_use_one_capability_profile() {
+        let mut setup = SessionSetup {
+            model: "models/gemini-3.8-live-extended-thinking".into(),
+            api_key: "fixture-never-used".into(),
+            system_instruction: String::new(),
+            function_declarations: vec![
+                json!({"name":"lookup","behavior":"BLOCKING","parameters":{"type":"object"}}),
+            ],
+            language: "en-US".into(),
+            manual_activity: true,
+            proactive_audio: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        for handle in [None, Some("resume-fixture".into())] {
+            setup.resume_handle = handle;
+            let v = setup.to_json();
+            assert_eq!(
+                v["setup"]["model"],
+                "models/gemini-3.8-live-extended-thinking"
+            );
+            assert_eq!(
+                v["setup"]["tools"][0]["functionDeclarations"][0]["behavior"],
+                "NON_BLOCKING"
+            );
+            assert_eq!(v["setup"]["proactivity"]["proactiveAudio"], true);
+        }
+    }
+
+    #[test]
+    fn actual_client_response_omits_unsupported_extended_scheduling() {
+        let (outbox, receiver) = crossbeam_channel::bounded(4);
+        let (_, inbox) = unbounded();
+        let client = LiveClient {
+            profile: LiveProfile::AsyncReasoning,
+            outbox,
+            inbox,
+            io_thread: None,
+        };
+        let call = FunctionCall {
+            id: "call-1".into(),
+            name: "lookup".into(),
+            args: json!({}),
+        };
+        client
+            .send_tool_response(&call, "fixture", "INTERRUPT")
+            .unwrap();
+        let Message::Text(text) = receiver.recv().unwrap() else {
+            panic!("expected JSON");
+        };
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert!(value["toolResponse"]["functionResponses"][0]["response"]
+            .get("scheduling")
+            .is_none());
+    }
+
+    #[test]
+    fn compound_status_is_decoded_after_utterance_completion() {
+        let events = decode_events(
+            &json!({"serverContent":{"turnComplete":true},"interactionStatus":"IN_PROGRESS"})
+                .to_string(),
+        );
+        assert!(matches!(events[0], ServerEvent::TurnComplete));
+        assert!(matches!(
+            events[1],
+            ServerEvent::InteractionStatus(ProviderActivity::InProgress)
+        ));
+        assert!(matches!(
+            decode_events(r#"{"interaction_status":"IDLE"}"#)[0],
+            ServerEvent::InteractionStatus(ProviderActivity::Idle)
+        ));
     }
 }

@@ -1057,3 +1057,15 @@ mod tests {
         }
     }
 }
+
+/// The stored exact host-approved payload, never a model-redeemed token.
+/// Kept separate from `gate` so existing pure gate tests cannot execute it.
+pub(crate) fn execute_from_host(verb: &'static Verb, args: &Value) -> Result<Value, String> {
+    if args.get("confirm").is_some() {
+        return Err("model confirmation tokens are not authority".into());
+    }
+    reject_unknown_args(verb, args)?;
+    let values = collect_params(verb, args)?;
+    let output = run_script(verb.script, &values)?;
+    Ok(json!({"ok":true,"result":output}))
+}

@@ -423,6 +423,10 @@ enum Commands {
     /// in the environment variable named by `api_key_env` (default GEMINI_API_KEY).
     #[cfg(feature = "voice-live")]
     Talk {
+        /// Local checkpoint shell only: no microphone, provider, credentials or agents.
+        #[arg(long, conflicts_with_all = ["ptt", "open_mic", "device", "mute"])]
+        local_work: bool,
+
         /// Push-to-talk: press Enter to start talking and Enter again to stop.
         /// The default on platforms without echo cancellation, because open mic
         /// there hears the assistant through the speakers and interrupts itself.
@@ -2064,12 +2068,19 @@ fn main() -> Result<()> {
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         #[cfg(feature = "voice-live")]
         Commands::Talk {
+            local_work,
             ptt,
             open_mic,
             device,
             mute,
             json,
-        } => cmd_talk(&config, ptt, open_mic, device, mute, json),
+        } => {
+            if local_work {
+                cmd_local_work(json)
+            } else {
+                cmd_talk(&config, ptt, open_mic, device, mute, json)
+            }
+        }
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2605,6 +2616,50 @@ fn main() -> Result<()> {
     result
 }
 
+/// Offline counterpart using the exact same checkpoint store as Voice Live.
+#[cfg(feature = "voice-live")]
+fn cmd_local_work(json: bool) -> Result<()> {
+    let mut work = minutes_core::voice_live::LocalWork::new();
+    eprintln!("Offline work mode. /work new GOAL, /work debrief WORDS, /work park, /work list, /work resume ID, /work show; q exits. Nothing is shared.");
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        let mut line = String::new();
+        let count = std::io::Read::by_ref(&mut input)
+            .take(16_385)
+            .read_line(&mut line)?;
+        if count == 0 {
+            break;
+        }
+        if count > 16_384 {
+            anyhow::bail!("local command exceeds 16384 bytes");
+        }
+        let line = line.trim();
+        if matches!(line, "q" | "quit" | "exit") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let result = work.command(line);
+        if json {
+            println!(
+                "{}",
+                match result {
+                    Ok(text) => serde_json::json!({"type":"local", "text":text}),
+                    Err(error) => serde_json::json!({"type":"local_error", "error":error}),
+                }
+            );
+        } else {
+            match result {
+                Ok(text) => println!("{text}"),
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `minutes talk`: run one Voice Live session in the terminal.
 /// (`minutes voice` is speaker enrollment, so the assistant uses a different verb.)
 ///
@@ -2669,6 +2724,7 @@ fn cmd_talk(
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    eprintln!("Local work commands: /help, /work new GOAL, /work park, /work resume ID, /work share. Actions require /approve ID; /cancel stops queued calls.");
     if let Some(path) = &session.log_path {
         eprintln!("Session log: {}", path.display());
     }
@@ -2767,6 +2823,16 @@ fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
             println!("[{label}]");
         }
         VoiceLiveEvent::Status { text } => println!("  {text}"),
+        VoiceLiveEvent::Local { text } => println!("[local] {text}"),
+        VoiceLiveEvent::Review { proposal } => {
+            // JSON escaping prevents terminal control sequences in untrusted
+            // document/email bodies from controlling the terminal.
+            println!(
+                "[review] {}\nType /approve {} to execute these exact details, or /reject.",
+                serde_json::to_string_pretty(proposal).unwrap_or_default(),
+                proposal.id
+            );
+        }
         VoiceLiveEvent::UserTranscript { text, partial } => {
             if !partial {
                 println!("you: {text}");

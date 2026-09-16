@@ -1,0 +1,59 @@
+name: Apply verified work integration
+
+on:
+  push:
+    branches: ['codex/work-continuity-20260916']
+    paths: ['.integration-transfer/**', '.github/workflows/apply-work-integration.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'silverstein/minutes' && github.ref == 'refs/heads/codex/work-continuity-20260916'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+      - name: Verify and apply the exact reviewed integration patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib
+          from pathlib import Path
+          packed = b''.join(Path(f'.integration-transfer/part-{i}.gzpart').read_bytes() for i in range(5))
+          assert len(packed) == 48591
+          assert hashlib.sha256(packed).hexdigest() == 'a4b049f89aedf3ba0cb32820bf6f65801d18143c683fe81203545ca2ce4c17c4'
+          patch = gzip.decompress(packed)
+          assert len(patch) == 175747
+          assert hashlib.sha256(patch).hexdigest() == '7654b7186df89d45cad7d47a189fdf3c55e60c68b13ad6c7f26be1f4173e2687'
+          Path('/tmp/work-integration.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/work-integration.patch
+          git apply /tmp/work-integration.patch
+          cargo fmt --all
+          git diff --check
+      - name: Commit integration on this branch only
+        shell: bash
+        run: |
+          rm -rf .integration-transfer
+          rm -f .github/workflows/apply-work-integration.yml
+          git config user.name 'Minutes integration'
+          git config user.email 'noreply@github.com'
+          git add -A
+          git commit -m 'feat(work): integrate native workbench, private persistence, local approvals and live task control'
+          git push origin HEAD:refs/heads/codex/work-continuity-20260916
+          mkdir -p /tmp/work-integration-result
+          git rev-parse HEAD > /tmp/work-integration-result/head.txt
+          git rev-parse 'HEAD^{tree}' > /tmp/work-integration-result/tree.txt
+          git archive --format=zip --output=/tmp/work-integration-result/source.zip HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: work-integration-applied
+          path: /tmp/work-integration-result/
+          retention-days: 1

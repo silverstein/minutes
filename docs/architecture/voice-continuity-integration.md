@@ -93,6 +93,12 @@ is not a guarantee of comprehensive redaction.
 
 ## Small HTML prototypes
 
+The Live voice can be selected with `[voice_live] voice_name = "Charon"` (or
+another supported Gemini voice). Empty preserves the provider default. Optional
+`persona = "morris"` adds a dry, helpful chief-of-staff tone without changing tool,
+privacy or approval rules. Both settings take effect in a new session; a resumed
+socket retains the selected voice. Other users keep the existing tone by default.
+
 `[voice_live] html_prototypes = true` opts into a bounded discuss/build/revise
 loop. It is off by default and also requires voice cloud consent. Gemini Live
 distills an explicit build request into a brief; the configured coding agent
@@ -100,6 +106,12 @@ distills an explicit build request into a brief; the configured coding agent
 The agent uses the isolated Recall launch contract, not broad `ask_agent`
 permissions or configured permission-bypass flags. Merely discussing an idea
 must not start a build. This is intent routing, not speaker identification.
+
+New prototypes without a requested visual style default to a restrained lo-fi
+cyberpunk developer-tool direction: charcoal, readable monospace, crisp borders,
+pixel details and selective bright accents. An explicit user style overrides
+that default. Revisions preserve their existing look unless a change is requested.
+This is generation guidance, not a deterministic theme applied to arbitrary HTML.
 
 Minutes saves immutable versions under `~/.minutes/prototypes/` and opens a
 host-authored local viewer. Generated code runs in an opaque-origin iframe;

@@ -413,6 +413,7 @@ where
         system_instruction: prompt,
         function_declarations: declarations,
         language: config.voice_live.language.clone(),
+        voice_name: config.voice_live.voice_name.clone(),
         manual_activity: options.mode == TalkMode::PushToTalk,
         proactive_audio: config.voice_live.proactive_audio,
         start_sensitivity: config.voice_live.speech_start_sensitivity.clone(),

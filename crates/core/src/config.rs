@@ -1129,6 +1129,10 @@ pub struct VoiceLiveConfig {
     pub api_key_env: String,
     /// BCP-47 language code pinned for transcription and speech ("en-US").
     pub language: String,
+    /// Named Gemini voice. Empty leaves the provider's default unchanged.
+    pub voice_name: String,
+    /// Conversation persona: empty/default, or "morris" for restrained dry humor.
+    pub persona: String,
     /// Explicit acknowledgement that microphone audio and tool results leave the device.
     pub allow_cloud: bool,
     /// How async tool results are delivered: "when_idle" (after the model finishes speaking) or "interrupt".
@@ -1244,6 +1248,8 @@ impl Default for VoiceLiveConfig {
             api_key_env: "GEMINI_API_KEY".into(),
             language: "en-US".into(),
             allow_cloud: false,
+            voice_name: String::new(),
+            persona: String::new(),
             tool_scheduling: "when_idle".into(),
             max_tool_chars: 12_000,
             known_people: 200,

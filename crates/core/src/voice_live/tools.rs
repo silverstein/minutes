@@ -1151,7 +1151,7 @@ mod tests {
         config.voice_live.desktop_outward = false;
         let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
         // Declared or not, the dispatch path must refuse it too.
-        let out = ctx.execute("send_message", &json!({"to": "Kim", "text": "hi"}));
+        let out = ctx.execute("send_message", &json!({"to": "555-0100", "text": "hi"}));
         assert!(out.is_error);
         assert!(out.text.contains("unknown tool"), "{}", out.text);
     }

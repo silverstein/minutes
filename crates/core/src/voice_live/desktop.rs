@@ -235,6 +235,15 @@ struct Pending {
     created: Instant,
 }
 
+/// The outcome of the confirmation gate.
+#[derive(Debug)]
+pub(crate) enum Gate {
+    /// Nothing happened. This payload must be read to the user.
+    Ask(Value),
+    /// Cleared to act, with the parameters in declaration order.
+    Cleared(Vec<String>),
+}
+
 /// Holds what is awaiting spoken confirmation.
 #[derive(Default)]
 pub struct DesktopControl {
@@ -287,16 +296,35 @@ impl DesktopControl {
 
     /// Run a verb, or ask for confirmation first when it needs one.
     pub fn execute(&self, verb: &'static Verb, args: &Value) -> Result<Value, String> {
+        match self.gate(verb, args)? {
+            Gate::Ask(payload) => Ok(payload),
+            Gate::Cleared(values) => {
+                let output = run_script(verb.script, &values)?;
+                Ok(json!({ "ok": true, "result": output }))
+            }
+        }
+    }
+
+    /// Everything that decides whether an action may happen, and nothing that
+    /// makes it happen.
+    ///
+    /// Split out so the gate can be tested without a test being able to perform
+    /// a real action. That is not hypothetical: an earlier version of these
+    /// tests redeemed a token and then genuinely attempted an iMessage on every
+    /// run.
+    pub(crate) fn gate(&self, verb: &'static Verb, args: &Value) -> Result<Gate, String> {
+        // Validate first, so a confirmation is never read out for an action
+        // that could not have run. Asking about an empty recipient and only
+        // failing on the second call wastes the user's agreement.
+        let values = collect_params(verb, args)?;
         let canonical = canonical_args(args);
         if verb.risk == Risk::Outward {
             match args.get("confirm").and_then(Value::as_str) {
                 Some(token) => self.redeem(verb, token, &canonical)?,
-                None => return Ok(self.ask(verb, &canonical, args)),
+                None => return Ok(Gate::Ask(self.ask(verb, &canonical, args))),
             }
         }
-        let values = collect_params(verb, args)?;
-        let output = run_script(verb.script, &values)?;
-        Ok(json!({ "ok": true, "result": output }))
+        Ok(Gate::Cleared(values))
     }
 
     /// Record what we are about to do and hand back a sentence to say.
@@ -472,6 +500,13 @@ fn validate(verb: &str, param: &str, raw: &str) -> Result<String, String> {
 #[cfg(target_os = "macos")]
 fn run_script(script: &str, values: &[String]) -> Result<String, String> {
     use std::io::Read;
+    // No test may ever perform a real desktop action. An earlier version of
+    // these tests redeemed a confirmation token and then genuinely tried to
+    // send an iMessage on every `cargo test`. Tests exercise the gate; anything
+    // reaching here under test is a bug, and failing loudly beats acting.
+    if cfg!(test) {
+        return Err("desktop actions never run under test".into());
+    }
     let mut child = crate::engine_process::command("osascript")
         .args(["-e", script])
         .args(values)
@@ -533,16 +568,35 @@ mod tests {
         find("send_message").expect("send_message exists")
     }
 
+    /// A number reserved for fiction, so no test names anyone real.
+    const NOBODY: &str = "555-0100";
+
+    /// Ask the gate, expecting it to want confirmation, and return the payload.
+    fn ask_for(control: &DesktopControl, args: &Value) -> Value {
+        match control
+            .gate(outward(), args)
+            .expect("gate should not error")
+        {
+            Gate::Ask(payload) => payload,
+            Gate::Cleared(_) => panic!("an outward verb cleared without confirmation"),
+        }
+    }
+
+    #[test]
+    fn no_test_can_perform_a_real_action() {
+        assert!(run_script("on run argv\nreturn \"x\"\nend run", &[]).is_err());
+    }
+
     #[test]
     fn an_outward_verb_never_acts_on_the_first_call() {
         let control = DesktopControl::default();
-        let args = json!({"to": "Kim", "text": "running five late"});
-        let asked = control.execute(outward(), &args).unwrap();
+        let args = json!({"to": NOBODY, "text": "running five late"});
+        let asked = ask_for(&control, &args);
         assert_eq!(asked["needs_confirmation"], true);
         // The sentence must contain what is actually going to happen.
         let say = asked["say"].as_str().unwrap();
         assert!(
-            say.contains("running five late") && say.contains("Kim"),
+            say.contains("running five late") && say.contains(NOBODY),
             "{say}"
         );
         assert!(asked["confirm"].as_str().is_some_and(|t| !t.is_empty()));
@@ -551,20 +605,20 @@ mod tests {
     #[test]
     fn a_token_is_single_use() {
         let control = DesktopControl::default();
-        let args = json!({"to": "Kim", "text": "hello"});
-        let token = control.execute(outward(), &args).unwrap()["confirm"]
+        let args = json!({"to": NOBODY, "text": "hello"});
+        let token = ask_for(&control, &args)["confirm"]
             .as_str()
             .unwrap()
             .to_string();
         let mut confirmed = args.clone();
         confirmed["confirm"] = json!(token);
-        // The first redemption gets as far as running the script; on a machine
-        // without Messages that fails, but it must not fail as a bad token.
-        let first = control.execute(outward(), &confirmed);
-        if let Err(e) = &first {
-            assert!(!e.contains("not valid any more"), "{e}");
-        }
-        let second = control.execute(outward(), &confirmed).unwrap_err();
+        // Spending it clears the gate exactly once. Nothing is performed: the
+        // gate stops at the decision.
+        assert!(matches!(
+            control.gate(outward(), &confirmed),
+            Ok(Gate::Cleared(_))
+        ));
+        let second = control.gate(outward(), &confirmed).unwrap_err();
         assert!(second.contains("not valid any more"), "{second}");
     }
 
@@ -574,23 +628,34 @@ mod tests {
         let asked = control
             .execute(
                 outward(),
-                &json!({"to": "Kim", "text": "running five late"}),
+                &json!({"to": NOBODY, "text": "running five late"}),
             )
             .unwrap();
         let token = asked["confirm"].as_str().unwrap().to_string();
         // Confirmed one thing, attempted another.
-        let swapped = json!({"to": "Kim", "text": "you are fired", "confirm": token});
-        let err = control.execute(outward(), &swapped).unwrap_err();
+        let swapped = json!({"to": NOBODY, "text": "you are fired", "confirm": token});
+        let err = control.gate(outward(), &swapped).unwrap_err();
         assert!(err.contains("details changed"), "{err}");
+    }
+
+    #[test]
+    fn an_unusable_action_is_refused_before_it_is_read_out() {
+        let control = DesktopControl::default();
+        // No recipient: this can never run, so it must not become a sentence
+        // the user is asked to agree to.
+        let err = control
+            .gate(outward(), &json!({"text": "hello"}))
+            .unwrap_err();
+        assert!(err.contains("required"), "{err}");
     }
 
     #[test]
     fn an_invented_token_is_refused() {
         let control = DesktopControl::default();
         let err = control
-            .execute(
+            .gate(
                 outward(),
-                &json!({"to": "Kim", "text": "hi", "confirm": "ok-1-12345"}),
+                &json!({"to": NOBODY, "text": "hi", "confirm": "ok-1-12345"}),
             )
             .unwrap_err();
         assert!(err.contains("not valid any more"), "{err}");
@@ -627,10 +692,10 @@ mod tests {
 
     #[test]
     fn canonical_arguments_ignore_the_token_and_key_order() {
-        let a = canonical_args(&json!({"to": "Kim", "text": "hi", "confirm": "ok-1-2"}));
-        let b = canonical_args(&json!({"text": "hi", "to": "Kim"}));
+        let a = canonical_args(&json!({"to": NOBODY, "text": "hi", "confirm": "ok-1-2"}));
+        let b = canonical_args(&json!({"text": "hi", "to": NOBODY}));
         assert_eq!(a, b);
-        let different = canonical_args(&json!({"text": "bye", "to": "Kim"}));
+        let different = canonical_args(&json!({"text": "bye", "to": NOBODY}));
         assert_ne!(a, different);
     }
 

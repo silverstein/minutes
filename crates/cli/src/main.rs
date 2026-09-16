@@ -418,6 +418,36 @@ enum Commands {
         meeting: Option<PathBuf>,
     },
 
+    /// Talk to Minutes by voice: a spoken assistant over your meeting memory (RFC 0007).
+    /// Requires `[voice_live] enabled = true`, `allow_cloud = true`, and the provider API key
+    /// in the environment variable named by `api_key_env` (default GEMINI_API_KEY).
+    #[cfg(feature = "voice-live")]
+    Talk {
+        /// Push-to-talk: press Enter to start talking and Enter again to stop.
+        /// The default on platforms without echo cancellation, because open mic
+        /// there hears the assistant through the speakers and interrupts itself.
+        #[arg(long)]
+        ptt: bool,
+
+        /// Open mic using the provider's voice activity detection. The default
+        /// on macOS. Elsewhere it needs headphones.
+        #[arg(long = "open-mic", conflicts_with = "ptt")]
+        open_mic: bool,
+
+        /// Audio input device name. Use `minutes devices` to list available devices.
+        /// Overrides the [recording] device setting in config.toml.
+        #[arg(short = 'D', long)]
+        device: Option<String>,
+
+        /// Do not play the assistant's speech; print transcripts only.
+        #[arg(long)]
+        mute: bool,
+
+        /// Print every session event except audio levels as one JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Stop recording and process the audio
     Stop,
 
@@ -2032,6 +2062,14 @@ fn main() -> Result<()> {
             }
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
+        #[cfg(feature = "voice-live")]
+        Commands::Talk {
+            ptt,
+            open_mic,
+            device,
+            mute,
+            json,
+        } => cmd_talk(&config, ptt, open_mic, device, mute, json),
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2565,6 +2603,196 @@ fn main() -> Result<()> {
 
     minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
     result
+}
+
+/// `minutes talk`: run one Voice Live session in the terminal.
+/// (`minutes voice` is speaker enrollment, so the assistant uses a different verb.)
+///
+/// Stdin drives the session: an empty line toggles push-to-talk (in `--ptt` mode),
+/// any other line is sent to the model as typed text, and `q` ends the session.
+/// Ctrl-C ends it too. Events print to stdout; instructions print to stderr.
+#[cfg(feature = "voice-live")]
+fn cmd_talk(
+    config: &Config,
+    ptt: bool,
+    open_mic: bool,
+    device: Option<String>,
+    mute: bool,
+    json: bool,
+) -> Result<()> {
+    use minutes_core::voice_live::{
+        self, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveState,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+
+    voice_live::preflight(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mode = if ptt {
+        TalkMode::PushToTalk
+    } else if open_mic {
+        TalkMode::OpenMic
+    } else {
+        voice_live::default_talk_mode(config)
+    };
+    if mode == TalkMode::OpenMic && !voice_live::echo_cancellation_available(config) {
+        eprintln!(
+            "Open mic without echo cancellation. Use headphones, or the assistant hears itself through the speakers and interrupts mid-sentence. `--ptt` avoids this."
+        );
+    }
+    let closed = Arc::new(AtomicBool::new(false));
+    let closed_in_events = Arc::clone(&closed);
+    let session = voice_live::start(
+        config,
+        SessionOptions {
+            mode,
+            device,
+            mute_playback: mute,
+        },
+        move |event| {
+            // Level events arrive many times a second and only matter to a HUD.
+            if matches!(event, VoiceLiveEvent::Level { .. }) {
+                return;
+            }
+            if json {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    println!("{line}");
+                }
+            } else {
+                print_voice_event(&event);
+            }
+            if matches!(event, VoiceLiveEvent::Closed { .. }) {
+                closed_in_events.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if let Some(path) = &session.log_path {
+        eprintln!("Session log: {}", path.display());
+    }
+    match mode {
+        TalkMode::PushToTalk => {
+            eprintln!("Push-to-talk. Enter: start talking, Enter again: stop. Type text to send it. q: quit.")
+        }
+        TalkMode::OpenMic => {
+            eprintln!("Open mic. Just talk; speaking over the assistant interrupts it. Type text to send it. q: quit.")
+        }
+    }
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupted_in_handler = Arc::clone(&interrupted);
+    ctrlc::set_handler(move || {
+        if interrupted_in_handler.swap(true, Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+    })?;
+
+    // Stdin on its own thread so Ctrl-C and a remote close are noticed promptly.
+    let (lines_tx, lines_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    if lines_tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut talking = false;
+    loop {
+        if interrupted.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) {
+            break;
+        }
+        if !session.is_running() {
+            break;
+        }
+        match lines_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                let text = line.trim();
+                if text.eq_ignore_ascii_case("q")
+                    || text.eq_ignore_ascii_case("quit")
+                    || text.eq_ignore_ascii_case("exit")
+                {
+                    break;
+                }
+                if text.is_empty() {
+                    if mode == TalkMode::PushToTalk {
+                        if talking {
+                            session.ptt_end();
+                            talking = false;
+                            if !json {
+                                eprintln!("(sent)");
+                            }
+                        } else {
+                            session.ptt_start();
+                            talking = true;
+                            if !json {
+                                eprintln!("(listening, Enter to send)");
+                            }
+                        }
+                    }
+                    continue;
+                }
+                session.send_text(text);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = VoiceLiveState::Closed;
+    session.stop();
+    if !json {
+        eprintln!("Voice session ended.");
+    }
+    Ok(())
+}
+
+/// Human-readable rendering of one Voice Live event for `minutes talk`.
+#[cfg(feature = "voice-live")]
+fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
+    use minutes_core::voice_live::VoiceLiveEvent;
+    match event {
+        VoiceLiveEvent::State { state } => {
+            let label = serde_json::to_value(state)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| format!("{state:?}"));
+            println!("[{label}]");
+        }
+        VoiceLiveEvent::Status { text } => println!("  {text}"),
+        VoiceLiveEvent::UserTranscript { text, partial } => {
+            if !partial {
+                println!("you: {text}");
+            }
+        }
+        VoiceLiveEvent::AssistantTranscript { text, partial } => {
+            if !partial {
+                println!("minutes: {text}");
+            }
+        }
+        VoiceLiveEvent::ToolCall { name, args } => {
+            let args = serde_json::to_string(args).unwrap_or_default();
+            println!("  -> {name} {args}");
+        }
+        VoiceLiveEvent::ToolResult {
+            name,
+            ms,
+            chars,
+            error,
+        } => {
+            let flag = if *error { " (error)" } else { "" };
+            println!("  <- {name} {ms} ms, {chars} chars{flag}");
+        }
+        VoiceLiveEvent::Level { .. } => {}
+        VoiceLiveEvent::Closed { reason } => println!("[closed] {reason}"),
+    }
 }
 
 fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {

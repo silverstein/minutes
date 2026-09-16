@@ -36,6 +36,9 @@ engine-sherpa = ["minutes-core/engine-sherpa"]
 # Streaming Silero VAD via ort. Pulls minutes-core's vad-ort. Also
 # wires the setup-time download for silero-vad-v6.2.0.onnx.
 vad-ort = ["minutes-core/vad-ort", "dep:ort"]
+# Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
+# Off by default: it is a cloud provider behind an explicit config opt-in.
+voice-live = ["minutes-core/voice-live"]
 coreml = ["minutes-core/coreml"]
 cuda = ["minutes-core/cuda"]
 hipblas = ["minutes-core/hipblas"]

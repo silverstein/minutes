@@ -273,7 +273,19 @@ const MAX_SCREENSHOTS: u32 = 60;
 const TARGET_WIDTH: u32 = 1280;
 
 /// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.
-fn capture_screenshot(path: &Path) -> std::io::Result<()> {
+///
+/// Public so on-request surfaces (Voice Live's `look_at_screen`) can take one
+/// frame without starting an interval capture session.
+pub fn capture_screenshot(path: &Path) -> std::io::Result<()> {
+    capture_screenshot_at_width(path, TARGET_WIDTH)
+}
+
+/// Capture one screenshot downscaled to `width` pixels across.
+///
+/// The recording pipeline wants many small frames. A single on-request frame
+/// can afford more detail, and needs it: at [`TARGET_WIDTH`] a mouse pointer on
+/// a Retina display is a couple of pixels and cannot be located reliably.
+pub fn capture_screenshot_at_width(path: &Path, width: u32) -> std::io::Result<()> {
     // macOS: screencapture to temp file, then resize with sips
     #[cfg(target_os = "macos")]
     {
@@ -291,13 +303,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
 
         // Downscale to reduce file size (Retina screenshots are 3-8 MB)
         let _ = crate::engine_process::command("sips")
-            .args([
-                "--resampleWidth",
-                &TARGET_WIDTH.to_string(),
-                "-s",
-                "format",
-                "png",
-            ])
+            .args(["--resampleWidth", &width.to_string(), "-s", "format", "png"])
             .arg(path)
             .output(); // Best-effort — if sips fails, keep the full-res image
     }
@@ -305,6 +311,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
     // Linux: try scrot, fall back to gnome-screenshot
     #[cfg(target_os = "linux")]
     {
+        let _ = width;
         let result = crate::engine_process::command("scrot").arg(path).output();
 
         match result {
@@ -325,6 +332,7 @@ fn capture_screenshot(path: &Path) -> std::io::Result<()> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        let _ = width;
         return Err(std::io::Error::other(
             "screen capture not supported on this platform",
         ));

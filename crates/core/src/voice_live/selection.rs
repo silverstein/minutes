@@ -349,10 +349,10 @@ mod native {
                 });
                 let clipboard_restored = clipboard.as_mut().map(|c| c.restore());
                 Ok(
-                    json!({"inserted":verified,"accepted_by_app":true,"app":name,"bundle_id":bundle,
+                    json!({"inserted":verified,"request_sent":true,"app":name,"bundle_id":bundle,
                     "characters":text.chars().count(),"replaced_selection":expected.is_some(),"submitted":false,"clipboard_restored":clipboard_restored,
                     "note":if verified { "Text insertion verified. No Return, Send or Submit action was performed. The app may autosave or sync." }
-                        else { "App accepted the edit but readback did not confirm it. Do not retry automatically; ask the user to check." }}),
+                        else { "The edit was requested but readback did not confirm it. Do not retry automatically; ask the user to check." }}),
                 )
             }
         })

@@ -1,0 +1,71 @@
+name: Voice continuity integration
+
+on:
+  pull_request:
+    branches: [main, 'feat/voice-live']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voice-continuity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo test --manifest-path tooling/interaction-contracts/Cargo.toml
+      - run: cargo fmt --manifest-path tooling/interaction-contracts/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path tooling/interaction-contracts/Cargo.toml --all-targets -- -D warnings
+      - run: python scripts/check_voice_continuity.py self-test
+
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux audio headers
+        if: runner.os == 'Linux'
+        run: .github/scripts/apt-install.sh libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
+      - name: Voice runtime regression tests (no real messages or provider)
+        run: |
+          cargo test -p minutes-core --no-default-features --features voice-live --lib voice_live:: -- --test-threads=1
+      - name: Integrated portable contracts
+        run: |
+          cargo test -p minutes-core --no-default-features --features voice-live --lib interaction:: -- --test-threads=1
+      - name: Build actual CLI
+        run: cargo build -p minutes-cli --no-default-features --features voice-live --bin minutes
+      - name: Offline end-to-end CLI smoke
+        run: python scripts/smoke_voice_continuity.py target/debug/minutes
+      - name: Load pinned base for changed-code checks
+        run: git fetch --depth=1 origin 5a9d59fcba09d8b81dd72c96f538a7508b7a6505
+      - name: Integrated changed-code lint (retains inherited warnings)
+        run: python scripts/check_voice_continuity.py lint
+      - name: Changed Rust file formatting
+        run: python scripts/check_voice_continuity.py fmt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: continuity-clippy-${{ runner.os }}
+          path: continuity-clippy.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

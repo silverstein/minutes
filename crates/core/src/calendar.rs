@@ -651,7 +651,10 @@ fn find_calendar_helper() -> Option<std::path::PathBuf> {
             return Some(legacy);
         }
     }
-    None
+    // CLI-only builds compile the helper in core's build script without staging
+    // a desktop bundle. Use that exact build artifact for local CLI runs.
+    let built = std::path::Path::new(env!("OUT_DIR")).join("calendar-events");
+    built.is_file().then_some(built)
 }
 
 /// AppleScript approach: fetch ALL events for today+tomorrow, filter by time.

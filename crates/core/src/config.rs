@@ -58,7 +58,6 @@ pub struct Config {
 ///   back to English when the OS locale isn't a supported language.
 /// - `"en"`: force English (the untranslated source strings).
 /// - `"zh-CN"`: Simplified Chinese.
-/// - `"pt-BR"`: Brazilian Portuguese.
 ///
 /// The `MINUTES_LANG` environment variable overrides this field at runtime,
 /// which is handy for one-off CLI invocations. `#[serde(default)]` keeps old
@@ -69,7 +68,7 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    /// Display language: `"auto"`, `"en"`, `"zh-CN"`, or `"pt-BR"`.
+    /// Display language: `"auto"`, `"en"`, or `"zh-CN"`.
     pub language: String,
     /// Remembered edge anchor for the movable dictation HUD.
     pub dictation_hud_anchor: String,
@@ -1123,6 +1122,9 @@ pub struct VoiceLiveConfig {
     pub provider: String,
     /// Model id, e.g. "gemini-3.8-live".
     pub model: String,
+    /// Reasoning depth for the extended-thinking Live model: low, medium, high.
+    /// Ignored for the standard Live model, which does not accept this field.
+    pub thinking_level: String,
     /// Name of the environment variable holding the provider API key.
     pub api_key_env: String,
     /// BCP-47 language code pinned for transcription and speech ("en-US").
@@ -1168,6 +1170,35 @@ pub struct VoiceLiveConfig {
     pub prep_artifacts: bool,
     /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
     pub calendar: bool,
+    /// Expose `ask_agent`, which relays a question to a local coding agent.
+    ///
+    /// Off by default. Only its answer travels onward, but the agent itself
+    /// runs with whatever permissions it was configured with, and Minutes
+    /// cannot constrain what it does once asked. `delegate_agent_args` is the
+    /// control that matters; the flag here only decides whether to offer it.
+    pub ask_agent: bool,
+    /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
+    /// first agent CLI found on the machine.
+    pub delegate_agent: String,
+    /// How long to wait for that agent before giving up.
+    pub delegate_timeout_secs: u64,
+    /// Launch flags for the relayed agent. Empty follows `[assistant] agent_args`.
+    ///
+    /// A relayed agent runs with no terminal, so it must not stop to ask for
+    /// tool-use permission: nothing can answer, and the call burns its whole
+    /// timeout looking like a hang. Give it whatever flags your agent needs to
+    /// run non-interactively.
+    pub delegate_agent_args: Vec<String>,
+    /// Directory the relayed agent starts in. Empty uses the Minutes process
+    /// directory, which for a desktop launch is not where any code lives.
+    pub delegate_cwd: String,
+    /// Let the assistant act on the desktop: open things, control playback,
+    /// add a reminder. A fixed catalogue of verbs, never arbitrary script.
+    pub desktop_control: bool,
+    /// Also allow the verbs that leave the machine, such as sending a message
+    /// or an email. Each one is confirmed out loud before it happens, and that
+    /// gate is enforced in code rather than asked for in the prompt.
+    pub desktop_outward: bool,
     /// Labs toy: let the assistant generate and play music steered by what it
     /// knows about a conversation. Off by default and deliberately separate
     /// from the memory features.
@@ -1181,6 +1212,19 @@ pub struct VoiceLiveConfig {
     /// hears it. The cost is that unprompted speech waits behind queued music.
     /// Talking flushes the queue, so anything the user starts is unaffected.
     pub music_max_secs: u64,
+    /// Let the relayed agent change things: write files, open issues, call a
+    /// service that writes. Off by default.
+    ///
+    /// The caller here is a cloud speech model deciding on its own when to
+    /// relay, from audio it may have misheard, with nobody reviewing the
+    /// request. RFC 0007 keeps phase 1 to a single write, `add_note`, for that
+    /// reason. Turning this on is a deliberate widening of that boundary.
+    pub delegate_writes: bool,
+    /// MCP servers to launch for a voice session, so the assistant can reach
+    /// tools Minutes does not implement. Secrets are never named here: a server
+    /// inherits this process's environment and reads whatever variable it
+    /// already expects.
+    pub mcp_servers: Vec<McpServerConfig>,
     /// Pause between closing the screen tool call and sending the frame that
     /// answers it. Only spacing between two ordered messages; the frame is the
     /// turn the model answers, so this does not need to be long.
@@ -1193,6 +1237,7 @@ impl Default for VoiceLiveConfig {
             enabled: false,
             provider: "gemini".into(),
             model: "gemini-3.8-live".into(),
+            thinking_level: "medium".into(),
             api_key_env: "GEMINI_API_KEY".into(),
             language: "en-US".into(),
             allow_cloud: false,
@@ -1209,12 +1254,38 @@ impl Default for VoiceLiveConfig {
             speech_end_sensitivity: "low".into(),
             prep_artifacts: true,
             calendar: true,
+            ask_agent: false,
+            delegate_agent: String::new(),
+            delegate_timeout_secs: 120,
+            delegate_agent_args: Vec::new(),
+            delegate_cwd: String::new(),
+            delegate_writes: false,
+            desktop_control: false,
+            desktop_outward: false,
             music: false,
             music_model: "lyria-3.5".into(),
             music_max_secs: 0,
+            mcp_servers: Vec::new(),
             screen_settle_ms: 150,
         }
     }
+}
+
+/// One MCP server launched for a voice session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Short name. It prefixes every tool this server offers, so keep it to
+    /// letters, digits and underscores.
+    pub name: String,
+    /// Executable to launch, e.g. "npx".
+    pub command: String,
+    /// Arguments for it.
+    pub args: Vec<String>,
+    /// Only expose these tools. Empty means take what fits under `max_tools`.
+    pub tools: Vec<String>,
+    /// Cap on tools taken from this server. 0 uses the built-in default.
+    pub max_tools: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

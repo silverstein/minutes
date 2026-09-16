@@ -269,9 +269,6 @@ const MAX_SCREENSHOTS: u32 = 60;
 
 /// Target resolution for screenshots (width in pixels).
 /// Full Retina screenshots are 3-8 MB; resizing to 1280px wide reduces to ~200KB.
-///
-/// Only the macOS path resizes, but the width is part of the public capture
-/// signature on every platform, so the constant cannot be gated to one.
 const TARGET_WIDTH: u32 = 1280;
 
 /// Capture a single screenshot to the given path, downscaled to TARGET_WIDTH.
@@ -334,12 +331,13 @@ pub fn capture_screenshot_at_width(path: &Path, width: u32) -> std::io::Result<(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = width;
-        return Err(std::io::Error::other(
+        let _ = (path, width);
+        Err(std::io::Error::other(
             "screen capture not supported on this platform",
-        ));
+        ))
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     Ok(())
 }
 

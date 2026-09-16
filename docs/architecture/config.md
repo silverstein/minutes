@@ -391,10 +391,39 @@ Push-to-talk conversation with a realtime speech model over your meeting memory,
 | `screen_on_request` | `false` | Expose `look_at_screen`, which captures one frame and sends it to the provider. Off by default because a screen frame is the most sensitive thing this feature can transmit. Pull-only: the model cannot take a frame Mat did not ask for |
 | `prep_artifacts` | `true` | Expose the prep and brief files written by the `/minutes-prep` and `/minutes-brief` skills under `~/.minutes` |
 | `calendar` | `true` | Expose upcoming calendar events. Also requires `[calendar] enabled` |
+| `ask_agent` | `false` | Expose `ask_agent`, which relays one question to a local coding agent. Off by default. Only its answer travels onward, but the agent runs with whatever permissions it was given and Minutes cannot constrain it once asked, so `delegate_agent_args` is the control that matters |
+| `delegate_agent` | `""` | Which agent CLI to relay to. Empty follows `[assistant] agent`, then the first agent CLI installed |
+| `delegate_timeout_secs` | `120` | How long to wait for that agent |
+| `delegate_agent_args` | `[]` | Launch flags for the relayed agent. Empty follows `[assistant] agent_args`. A relayed agent has no terminal, so it must not stop to ask for tool-use permission: nothing can answer the prompt and the call burns its whole timeout looking like a hang |
+| `delegate_cwd` | `""` | Directory the relayed agent starts in. Empty uses the Minutes process directory, which for a desktop launch is not where any code lives |
+| `desktop_control` | `false` | Let the assistant act on the Mac through a fixed catalogue of verbs: open an app or a page, reveal a file, control playback, add a reminder. The model picks a verb and fills typed parameters; it never writes AppleScript, and parameters reach the interpreter as `argv` rather than as source, so there is no injection to reason about |
+| `desktop_outward` | `false` | Also allow the verbs that leave the machine, sending an iMessage or an email. Each is two-phase: the first call performs nothing and returns a sentence to read out loud plus a single-use token bound to those exact arguments, and only a second call carrying that token acts. Enforced in code, because a prompt asking the model to confirm is the control that already failed |
 | `music` | `false` | Labs toy. Generate and play music, sung or instrumental, steered by what the assistant knows about a conversation. The model writes any lyrics itself and returns them alongside the audio. Deliberately separate from the memory features and off by default. Refuses while a recording is running, because music through the speakers reaches the microphone and then the transcript |
 | `music_model` | `"lyria-3.5"` | Music model id |
 | `music_max_secs` | `0` | Ceiling on how much of a piece to play, in seconds. `0` plays all of it. Music and speech share one output queue, which is what lets the echo canceller keep the music out of the microphone; the cost is that unprompted speech waits behind queued music, though talking flushes it. Every piece is kept whole under `~/.minutes/music` |
+| `delegate_writes` | `false` | Let the relayed agent change things. Off by default: the caller is a cloud speech model deciding on its own when to relay, from audio it may have misheard, with nobody reviewing the request. RFC 0007 holds phase 1 to a single write, `add_note`, for that reason. Note this instructs the agent; narrowing its own tool access through `delegate_agent_args` is the enforcing control |
 | `screen_settle_ms` | `150` | Spacing between closing the screen tool call and sending the frame that answers it |
+| `mcp_servers` | `[]` | MCP servers to launch for a session, as `[[voice_live.mcp_servers]]` tables |
+
+#### `[[voice_live.mcp_servers]]` connected services
+
+Minutes publishes an MCP server; this is the other direction. Each entry launches a server as a child process, speaks newline-delimited JSON-RPC to it over stdio, and merges its `tools/list` into the voice tool surface as `name__tool`. A server that fails to start is reported and skipped, never fatal to a session.
+
+| key | default | meaning |
+|---|---|---|
+| `name` | required | Short name prefixing every tool from this server |
+| `command` | required | Executable to launch. Resolved like the agent CLI, so a bare `npx` works from a GUI bundle |
+| `args` | `[]` | Arguments for it |
+| `tools` | `[]` | Allowlist of tool names. Empty takes what fits under `max_tools` |
+| `max_tools` | `8` | Cap on tools from this server. Voice context is small and tool choice degrades quickly, so keep it low |
+
+Secrets are never named here. A server inherits the Minutes process environment and reads whatever variable it already expects.
+| `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
+| `echo_cancellation` | `true` | Also decides the default talk mode: open mic where cancellation exists, push-to-talk everywhere else, so no platform self-interrupts by default. |
+| | | Run mic and speaker through one voice-processing unit so the speaker signal is cancelled out of the mic. macOS only today; elsewhere plain capture, so `minutes talk` defaults to push-to-talk and `--open-mic` warns |
+| `proactive_audio` | `false` | Let the model decide not to answer. Open mic otherwise treats everything it hears as addressed to it, so a half sentence to someone else, or noise a transcriber turns into words, becomes a prompt. Ignored in push-to-talk, where the user has already said every turn is for it. Off by default because an unsupported setup field fails the whole session |
+| `speech_start_sensitivity` | `"low"` | Provider speech-start detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
+| `speech_end_sensitivity` | `"low"` | Provider speech-end detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
 
 ### `[screen_context]` — recording-time screenshots
 

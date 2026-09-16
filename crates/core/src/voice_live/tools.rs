@@ -2,21 +2,22 @@
 //!
 //! The model sees only what these return. Results are JSON text, truncated to a
 //! per-call budget so one transcript cannot consume the voice context. Reads use
-//! `include_restricted: true` because voice runs on the operator's own surface,
-//! matching the desktop app. Phase 1 writes exactly one thing: `add_note`.
+//! normal-sensitivity records only. Local readability is not cloud permission.
+//! Mutations, delegation, connected services and screen access require host review.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{Duration as ChronoDuration, Local};
+use chrono::Local;
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::events::{InsightFilter, MeetingInsight};
 use crate::graph::{PolicyProjectionRequest, PolicyProjectionResponse};
 use crate::search::{self, SearchFilters};
 
+use super::desktop::{self, DesktopControl};
+use super::mcp::McpPool;
 use super::names::NameIndex;
 
 /// Shared, read-only context for tool execution.
@@ -25,6 +26,13 @@ pub struct ToolContext {
     pub names: Arc<NameIndex>,
     pub brain_root: Option<PathBuf>,
     pub max_chars: usize,
+    /// Connected MCP servers, if any were configured.
+    pub mcp: McpPool,
+    /// Servers that would not start, reported to the host once.
+    pub mcp_problems: Vec<String>,
+    /// Desktop verbs, and anything awaiting spoken confirmation.
+    pub desktop: DesktopControl,
+    pub(crate) continuity: Mutex<super::continuity::Continuity>,
 }
 
 /// Result of one tool call.
@@ -53,18 +61,26 @@ impl ToolContext {
                 None
             };
         let max_chars = config.voice_live.max_tool_chars.max(1_000);
+        let (mcp, mcp_problems) = McpPool::launch(&config);
         Self {
             config,
             names,
             brain_root,
             max_chars,
+            mcp,
+            mcp_problems,
+            desktop: DesktopControl::default(),
+            continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
+                Config::minutes_dir().join("work-capsules"),
+            )),
         }
     }
 
     /// Function declarations in the Live API's OpenAPI-subset schema.
     pub fn declarations(&self) -> Vec<Value> {
         let mut d = vec![
-            decl("get_status", "Whether a recording or processing job is active right now.", json!({})),
+            decl("get_status", "Current time, recording state, active voice model and available reasoning modes.", json!({})),
+            decl("think_deeply", "Use Gemini Extended Thinking for a difficult question or when Mat asks you to think harder. This runs a separate reasoning request while the normal conversation stays on its current voice model. First gather evidence with your other tools, then include the question and relevant evidence in context. Cannot fetch new facts, run actions, or change the ongoing session model. Do not call it for routine commands or simple factual lookups.", json!({"question":{"type":"string"},"context":{"type":"string"},"level":{"type":"string","enum":["low","medium","high"]}})),
             decl(
                 "list_meetings",
                 "List recent meetings and voice memos, newest first. Paths returned here are the exact strings to pass to get_meeting.",
@@ -162,6 +178,43 @@ impl ToolContext {
                 json!({"within_minutes": {"type": "integer", "description": "Look-ahead window in minutes (default 720)"}}),
             ));
         }
+        if self.config.voice_live.ask_agent {
+            d.push(decl(
+                "read_pull_requests",
+                "Read GitHub pull requests directly, without approval. Supply repository as exact owner/name to list open PRs; add number to read one PR and its checks. If the repository is unknown, supply query instead to search repositories, then use a returned fullName. Do not invent a repository from a misheard project name. Returns at most 30 open PRs, not necessarily all.",
+                json!({"repository":{"type":"string"},"number":{"type":"integer"},"query":{"type":"string"}}),
+            ));
+            d.push(decl(
+                "review_pull_request",
+                "Ask Codex or Claude whether a PR should land. Fetches its current metadata and diff and asks the selected agent for an evidence-only assessment. Runs directly without approval and cannot merge, edit, approve or post. Pass agent=codex when Mat says use Codex (possibly transcribed Kodak, Kodex, or code X). This is a bounded assessment, not a full checkout-and-test review.",
+                json!({"repository":{"type":"string"},"number":{"type":"integer"},"agent":{"type":"string","enum":["default","codex","claude"]},"question":{"type":"string"}}),
+            ));
+            if let Some(agent) = delegate_agent(&self.config) {
+                let agent_label = Path::new(&agent)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| agent.clone());
+                d.push(decl(
+                    "ask_agent",
+                    &format!(
+                        "Relay one question to a local coding agent (default {agent_label}). Select agent=codex or agent=claude when Mat names one. Use read_pull_requests for GitHub reads and review_pull_request for an agent's PR assessment; those run without approval. Use this broader delegation only for work those tools cannot do. Ask one self-contained question with the exact repository, PR number and context, because the agent cannot hear you. It takes several seconds, so say you are checking before you call it.{}",
+                        if self.config.voice_live.delegate_writes {
+                            " Its configured executor may change things. A local host review is mandatory before dispatch."
+                        } else {
+                            " Request read-only work, but the executor's launch permissions—not this prompt—enforce access. A local host review is mandatory before dispatch."
+                        }
+                    ),
+                    json!({"question": {"type": "string", "description": "A single self-contained question"},"agent":{"type":"string","enum":["default","codex","claude"]}}),
+                ));
+            }
+        }
+        if self.config.voice_live.music {
+            d.push(decl(
+                "make_music",
+                "Generate and play a piece of music. Write the brief yourself from what you know about the conversation in question: instruments, tempo, mood, and what it is for. It can sing, so ask for vocals and say what they should be about when that is what Mat wants, or ask for instrumental when it is background. It writes the words itself and returns them. Takes most of a minute, and will refuse while a recording is running.",
+                json!({"description": {"type": "string", "description": "What the music should sound like, in a sentence or two"}}),
+            ));
+        }
         if self.config.voice_live.screen_on_request {
             // Non-blocking on purpose: the frame is delivered as its own turn
             // and answered there, so the tool result itself is closed silently.
@@ -171,6 +224,13 @@ impl ToolContext {
                 json!({}),
             ));
         }
+        if self.config.voice_live.desktop_control {
+            d.extend(
+                self.desktop
+                    .declarations(self.config.voice_live.desktop_outward),
+            );
+        }
+        d.extend(self.mcp.declarations());
         if let Some(root) = &self.brain_root {
             d.push(decl(
                 "search_brain",
@@ -186,17 +246,122 @@ impl ToolContext {
                 json!({"path": {"type": "string", "description": "Relative path inside the knowledge base"}}),
             ));
         }
+        // Historical insights currently lack a final-egress live-source gate.
+        // Do not expose a derived-cache bypass around restricted meeting reads.
+        d.retain(|v| v["name"] != "get_meeting_insights");
+        for declaration in &mut d {
+            if let Some(properties) = declaration
+                .pointer_mut("/parameters/properties")
+                .and_then(Value::as_object_mut)
+            {
+                properties.remove("confirm");
+            }
+        }
+        d.push(decl("propose_checkpoint",
+            "Propose a working checkpoint with goal, uncertain interpretation and next step. Does not save or authorize actions. The user must review and approve it locally.",
+            json!({"goal":{"type":"string"},"summary":{"type":"string"},"next_step":{"type":"string"}})));
         d
     }
 
     /// Execute one tool. Never panics; errors come back as text the model can speak.
     pub fn execute(&self, name: &str, args: &Value) -> ToolOutcome {
+        // Disabled capabilities fail before staging a review as well as at execution.
+        if (name == "make_music" && !self.config.voice_live.music)
+            || (name == "look_at_screen" && !self.config.voice_live.screen_on_request)
+            || (matches!(
+                name,
+                "ask_agent" | "read_pull_requests" | "review_pull_request"
+            ) && !self.config.voice_live.ask_agent)
+            || desktop::find(name).is_some_and(|v| {
+                !self.config.voice_live.desktop_control
+                    || (v.risk == desktop::Risk::Outward && !self.config.voice_live.desktop_outward)
+            })
+        {
+            return self.execute_raw(name, args);
+        }
+        let connected = self.mcp.declarations().iter().any(|v| v["name"] == name);
+        if requires_host_review(name, connected) {
+            let started = Instant::now();
+            let result = self
+                .continuity
+                .lock()
+                .map_err(|_| "host state unavailable".to_string())
+                .and_then(|mut host| host.propose(name, args));
+            return host_outcome(result, started);
+        }
+        self.execute_raw(name, args)
+    }
+
+    /// Trusted host worker only. The model cannot call this method by name.
+    pub(crate) fn execute_approved(&self, id: u64) -> ToolOutcome {
+        let started = Instant::now();
+        let result = (|| {
+            let action = self
+                .continuity
+                .lock()
+                .map_err(|_| "host state unavailable".to_string())?
+                .take(id)?;
+            let args: Value = serde_json::from_str(&action.payload).map_err(|e| e.to_string())?;
+            if action.operation == "propose_checkpoint" {
+                return self
+                    .continuity
+                    .lock()
+                    .map_err(|_| "host state unavailable".to_string())?
+                    .save_proposal(&args);
+            }
+            if let Some(verb) = desktop::find(&action.operation) {
+                if verb.risk != desktop::Risk::Read {
+                    if !self.config.voice_live.desktop_control
+                        || (verb.risk == desktop::Risk::Outward
+                            && !self.config.voice_live.desktop_outward)
+                    {
+                        return Err("outward desktop actions disabled".into());
+                    }
+                    return desktop::execute_from_host(verb, &args);
+                }
+            }
+            // Re-check all configuration gates in the original dispatch path.
+            Ok(json!({"internal_dispatch": action.operation, "args": args}))
+        })();
+        match result {
+            Ok(v) if v.get("internal_dispatch").is_some() => self.execute_raw(
+                v["internal_dispatch"].as_str().unwrap_or_default(),
+                &v["args"],
+            ),
+            other => host_outcome(other, started),
+        }
+    }
+
+    pub(crate) fn capture_selection_from_host(&self, bundle: Option<&str>) -> ToolOutcome {
+        let started = Instant::now();
+        let result = if self.config.voice_live.screen_on_request {
+            super::selection::capture(bundle)
+        } else {
+            Err("Selection sharing requires screen_on_request=true; nothing captured.".into())
+        };
+        host_outcome(result, started)
+    }
+
+    fn execute_raw(&self, name: &str, args: &Value) -> ToolOutcome {
         let started = Instant::now();
         if name == "look_at_screen" {
             return self.look_at_screen(started);
         }
         if name == "make_music" {
             return self.make_music(args, started);
+        }
+        if let Some(outcome) = self.mcp.call(name, args) {
+            let (text, is_error) = match outcome {
+                Ok(v) => (v.to_string(), false),
+                Err(e) => (json!({ "error": e }).to_string(), true),
+            };
+            return ToolOutcome {
+                text: truncate(text, self.max_chars),
+                is_error,
+                elapsed: started.elapsed(),
+                image: None,
+                audio: None,
+            };
         }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.dispatch(name, args)));
@@ -343,16 +508,21 @@ impl ToolContext {
                     "processing_stage": s.processing_stage,
                     "processing_title": s.processing_title,
                     "duration_secs": s.duration_secs,
+                    "voice_model": cfg.voice_live.model,
+                    "extended_thinking_available": true,
+                    "extended_thinking_tool": "think_deeply",
+                    "thinking_level": cfg.voice_live.thinking_level,
                     // The prompt carries the date from session start; a long
                     // session needs the clock read fresh.
                     "now": Local::now().format("%A %Y-%m-%d %H:%M %Z").to_string(),
                 }))
             }
+            "think_deeply" => super::reasoning::think(cfg, args),
             "list_meetings" => {
                 let limit = int_arg(args, "limit", 10).clamp(1, 50);
                 let filters = SearchFilters {
                     content_type: str_arg(args, "type"),
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let results = search::search("", cfg, &filters).map_err(|e| e.to_string())?;
@@ -369,7 +539,7 @@ impl ToolContext {
                     content_type: str_arg(args, "type"),
                     since: str_arg(args, "since"),
                     attendee: str_arg(args, "attendee"),
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let results = search::search(&query, cfg, &filters).map_err(|e| e.to_string())?;
@@ -380,7 +550,7 @@ impl ToolContext {
             }
             "get_meeting" => {
                 let path = str_arg(args, "path").ok_or("path is required")?;
-                let snap = search::read_authorized_meeting(Path::new(&path), cfg, true)
+                let snap = search::read_authorized_meeting(Path::new(&path), cfg, false)
                     .map_err(|e| e.to_string())?;
                 let fm = &snap.frontmatter;
                 Ok(json!({
@@ -395,25 +565,11 @@ impl ToolContext {
                     "content": body_of(&snap.content),
                 }))
             }
-            "get_meeting_insights" => {
-                let since_days = int_arg(args, "since_days", 30).clamp(1, 3650) as i64;
-                let filter = InsightFilter {
-                    kind: str_arg(args, "kind").and_then(|k| serde_json::from_value(json!(k)).ok()),
-                    min_confidence: None,
-                    participant: str_arg(args, "participant"),
-                    since: Some(Local::now() - ChronoDuration::days(since_days)),
-                    limit: Some(int_arg(args, "limit", 25).clamp(1, 100)),
-                };
-                let rows = crate::events::read_insights(&filter);
-                Ok(json!(rows
-                    .iter()
-                    .map(|(at, insight, _)| insight_row(at, insight))
-                    .collect::<Vec<_>>()))
-            }
+            "get_meeting_insights" => Err("derived insights are unavailable to cloud voice until live-source policy validation is implemented; use authorized meeting reads".into()),
             "research_topic" => {
                 let query = str_arg(args, "query").ok_or("query is required")?;
                 let filters = SearchFilters {
-                    include_restricted: true,
+                    include_restricted: false,
                     ..Default::default()
                 };
                 let r = search::cross_meeting_research(&query, cfg, &filters)
@@ -499,6 +655,54 @@ impl ToolContext {
                 let rel = str_arg(args, "path").ok_or("path is required")?;
                 brain_read(root, &rel, self.max_chars.saturating_sub(500))
             }
+            "read_pull_requests" | "review_pull_request" => {
+                if !cfg.voice_live.ask_agent {
+                    return Err("GitHub and agent access are turned off".into());
+                }
+                if name == "read_pull_requests" {
+                    super::github::read(args)
+                } else {
+                    super::github::review(args, cfg)
+                }
+            }
+            "ask_agent" => {
+                if !cfg.voice_live.ask_agent {
+                    return Err("relaying to the local agent is turned off".into());
+                }
+                let question = str_arg(args, "question").ok_or("question is required")?;
+                let agent = super::github::requested_agent(args, cfg)?;
+                let timeout =
+                    Duration::from_secs(cfg.voice_live.delegate_timeout_secs.clamp(10, 900));
+                // The caller is a speech model deciding on its own when to
+                // relay, from audio it may have misheard. Writing is opt-in.
+                let rule = if cfg.voice_live.delegate_writes {
+                    "You may change things when the question plainly asks you to, but say \
+                     exactly what you changed."
+                } else {
+                    "Answer only. Never create, edit, delete or send anything, and never call \
+                     a tool that writes, even if the question asks you to. If it does, say \
+                     that writing through the agent is turned off, and stop."
+                };
+                let prompt = format!(
+                    "You are answering one question relayed from a voice assistant, and \
+                     someone is waiting out loud for the answer. Speed matters more than \
+                     completeness: look at what you need and stop. Do not survey a whole \
+                     repository or read more than a handful of files. Answer from the files, \
+                     systems and tools you can reach, be specific and factual, and say plainly \
+                     when you could not find something rather than searching on. {rule} \
+                     Reply in under 120 words of plain prose, no markdown and no code blocks, \
+                     because it will be read aloud.\n\nQuestion: {question}"
+                );
+                let args = if delegate_agent(cfg).as_deref() == Some(agent.as_str()) {
+                    delegate_agent_args(cfg)
+                } else {
+                    // Flags for Claude must not be passed to Codex (or vice versa).
+                    Vec::new()
+                };
+                let cwd = delegate_cwd(cfg);
+                crate::summarize::run_agent_prompt(&agent, &prompt, &args, cwd.as_deref(), timeout)
+                    .map(|answer| json!({ "agent": agent, "answer": answer }))
+            }
             "list_preps" => {
                 if !cfg.voice_live.prep_artifacts {
                     return Err("prep and brief files are turned off".into());
@@ -518,16 +722,36 @@ impl ToolContext {
                 }
                 // An empty list and an unreadable calendar look identical from
                 // here, and reporting the second as the first tells Mat his day
-                // is clear when it is not. Probe first; the probe never prompts.
+                // is clear when it is not. Prefer the EventKit probe, but allow
+                // the AppleScript read path that `minutes health` already uses
+                // so Terminal-launched dogfood builds work when the helper is
+                // missing or only has add-only Calendar access.
                 let access = crate::calendar::calendar_access_status();
-                if !access.can_read() {
-                    return Err(format!(
-                        "cannot read the calendar ({}). Tell Mat his calendar is unreachable and never that it is empty.",
-                        calendar_access_label(access)
-                    ));
-                }
+                let calendar_reader = if access.can_read() {
+                    "eventkit"
+                } else {
+                    let health = crate::health::calendar_status(cfg);
+                    if health.state == "ready" {
+                        "applescript"
+                    } else {
+                        return Err(format!(
+                            "cannot read the calendar ({}). Tell Mat Minutes needs Full Calendar Access, not Add Events Only, and never that his calendar is empty.",
+                            calendar_access_label(access)
+                        ));
+                    }
+                };
                 let minutes = int_arg(args, "within_minutes", 720).clamp(5, 10_080) as u32;
-                let events: Vec<Value> = crate::calendar::upcoming_events(minutes)
+                let raw_events = crate::calendar::upcoming_events(minutes);
+                if raw_events.is_empty() && calendar_reader == "applescript" {
+                    let health = crate::health::calendar_status(cfg);
+                    if health.state != "ready" {
+                        return Err(format!(
+                            "cannot read the calendar ({}). Tell Mat Minutes needs Full Calendar Access, not Add Events Only, and never that his calendar is empty.",
+                            calendar_access_label(access)
+                        ));
+                    }
+                }
+                let events: Vec<Value> = raw_events
                     .into_iter()
                     .map(|e| {
                         json!({
@@ -538,13 +762,37 @@ impl ToolContext {
                         })
                     })
                     .collect();
-                Ok(
-                    json!({ "within_minutes": minutes, "calendar_readable": true, "events": events }),
-                )
+                Ok(json!({
+                    "within_minutes": minutes,
+                    "calendar_readable": true,
+                    "calendar_reader": calendar_reader,
+                    "calendar_access": calendar_access_label(access),
+                    "events": events
+                }))
             }
-            other => Err(format!("unknown tool {other}")),
+            other => {
+                if self.config.voice_live.desktop_control {
+                    if let Some(verb) = desktop::find(other) {
+                        if verb.risk != desktop::Risk::Outward
+                            || self.config.voice_live.desktop_outward
+                        {
+                            return self.desktop.execute(verb, args);
+                        }
+                    }
+                }
+                Err(format!("unknown tool {other}"))
+            }
         }
     }
+}
+
+fn requires_host_review(name: &str, connected: bool) -> bool {
+    connected
+        || desktop::find(name).is_some_and(|v| v.risk == desktop::Risk::Outward)
+        || matches!(
+            name,
+            "propose_checkpoint" | "add_note" | "ask_agent" | "make_music"
+        )
 }
 
 fn decl(name: &str, description: &str, properties: Value) -> Value {
@@ -553,6 +801,9 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
         "get_meeting" | "read_brain" => vec!["path"],
         "get_person_profile" | "resolve_person" => vec!["name"],
         "add_note" => vec!["text"],
+        "ask_agent" => vec!["question"],
+        "think_deeply" => vec!["question"],
+        "review_pull_request" => vec!["repository", "number"],
         _ => vec![],
     };
     let mut params = json!({"type": "object", "properties": properties});
@@ -589,20 +840,6 @@ fn int_arg(args: &Value, key: &str, default: usize) -> usize {
 
 fn meeting_row(r: &search::SearchResult) -> Value {
     json!({"path": r.path, "title": r.title, "date": r.date, "type": r.content_type, "snippet": r.snippet})
-}
-
-fn insight_row(at: &chrono::DateTime<Local>, i: &MeetingInsight) -> Value {
-    json!({
-        "at": at.to_rfc3339(),
-        "kind": serde_json::to_value(i.kind).unwrap_or(Value::Null),
-        "content": i.content,
-        "confidence": serde_json::to_value(i.confidence).unwrap_or(Value::Null),
-        "participants": i.participants,
-        "owner": i.owner,
-        "deadline": i.deadline,
-        "topic": i.topic,
-        "source_meeting": i.source_meeting,
-    })
 }
 
 /// Strip YAML frontmatter so the model reads the transcript, not the metadata twice.
@@ -678,6 +915,24 @@ fn walk_markdown(root: &Path, out: &mut Vec<PathBuf>, deadline: Instant) {
     }
 }
 
+/// Launch flags for the relayed agent, falling back to the assistant's own.
+pub fn delegate_agent_args(config: &Config) -> Vec<String> {
+    if !config.voice_live.delegate_agent_args.is_empty() {
+        return config.voice_live.delegate_agent_args.clone();
+    }
+    config.assistant.agent_args.clone()
+}
+
+/// Where the relayed agent starts. `None` keeps the Minutes process directory.
+pub fn delegate_cwd(config: &Config) -> Option<PathBuf> {
+    let configured = config.voice_live.delegate_cwd.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    let path = expand_home(Path::new(configured));
+    path.is_dir().then_some(path)
+}
+
 /// Width of an on-request screen frame, in pixels.
 const SCREEN_FRAME_WIDTH: u32 = 1920;
 
@@ -692,6 +947,22 @@ fn calendar_access_label(access: crate::calendar::CalendarAccess) -> &'static st
         CalendarAccess::NotDetermined => "calendar access has not been granted yet",
         CalendarAccess::Unknown => "the calendar helper did not answer",
     }
+}
+
+/// Which agent CLI voice relays to: the voice override, else the assistant
+/// Minutes already hands off to, else whatever is installed.
+pub fn delegate_agent(config: &Config) -> Option<String> {
+    for candidate in [
+        config.voice_live.delegate_agent.trim(),
+        config.assistant.agent.trim(),
+    ] {
+        if !candidate.is_empty() {
+            // Resolve to a real path: Minutes can run without a login shell, so
+            // a bare "claude" fails to spawn even when it is installed.
+            return Some(crate::summarize::resolve_agent_path(candidate));
+        }
+    }
+    crate::summarize::detect_agent_cli()
 }
 
 /// The two directories the prep and brief skills write to.
@@ -812,7 +1083,7 @@ fn brain_search(root: &Path, query: &str, limit: usize) -> Value {
         .into_iter()
         .take(limit)
         .map(|(f, modified, snippet)| {
-            let rel = f.strip_prefix(root).unwrap_or(&f).to_string_lossy().to_string();
+            let rel = f.strip_prefix(root).unwrap_or(&f).components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
             let modified: chrono::DateTime<Local> = modified.into();
             json!({"path": rel, "modified": modified.format("%Y-%m-%d").to_string(), "snippet": snippet})
         })
@@ -898,6 +1169,20 @@ fn brain_read(root: &Path, rel: &str, max_chars: usize) -> Result<Value, String>
     }))
 }
 
+fn host_outcome(result: Result<Value, String>, started: Instant) -> ToolOutcome {
+    let (text, is_error) = match result {
+        Ok(v) => (v.to_string(), false),
+        Err(e) => (json!({"error":e}).to_string(), true),
+    };
+    ToolOutcome {
+        text,
+        is_error,
+        elapsed: started.elapsed(),
+        image: None,
+        audio: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +1204,12 @@ mod tests {
             names,
             brain_root: brain,
             max_chars: 2_000,
+            mcp: McpPool::default(),
+            mcp_problems: Vec::new(),
+            desktop: DesktopControl::default(),
+            continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
+                Config::minutes_dir().join("work-capsules"),
+            )),
         }
     }
 
@@ -995,6 +1286,18 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_tool_that_looks_qualified_is_still_a_spoken_error() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        // No servers configured, so a qualified name must not be mistaken for one.
+        let out = ctx.execute(
+            &format!("hubspot{}search", super::super::mcp::SEP),
+            &json!({}),
+        );
+        assert!(out.is_error);
+        assert!(out.text.contains("unknown tool"));
+    }
+
+    #[test]
     fn an_unreadable_calendar_is_an_error_not_an_empty_day() {
         let mut config = Config::default();
         config.voice_live.calendar = true;
@@ -1004,7 +1307,7 @@ mod tests {
         // On a machine with no calendar access this must fail loudly. Where it
         // does succeed the result says so explicitly instead of being a bare list.
         if out.is_error {
-            assert!(out.text.contains("never that it is empty"));
+            assert!(out.text.contains("never that"));
         } else {
             assert!(out.text.contains("calendar_readable"));
         }
@@ -1036,6 +1339,139 @@ mod tests {
     }
 
     #[test]
+    fn explicit_screen_request_runs_without_host_review() {
+        let mut config = Config::default();
+        config.voice_live.screen_on_request = true;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let out = ctx.execute("look_at_screen", &json!({}));
+        assert!(
+            !out.text.contains("local host review"),
+            "explicit screen requests should not ask Mat to type /approve: {}",
+            out.text
+        );
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+    }
+
+    #[test]
+    fn local_desktop_actions_run_without_host_review() {
+        for name in [
+            "open_app",
+            "open_url",
+            "control_music",
+            "reveal_path",
+            "add_reminder",
+            "now_playing",
+            "read_pull_requests",
+            "review_pull_request",
+        ] {
+            assert!(
+                !requires_host_review(name, false),
+                "{name} should not ask Mat to type /approve"
+            );
+        }
+        for name in [
+            "send_message",
+            "send_email",
+            "propose_checkpoint",
+            "add_note",
+            "ask_agent",
+            "make_music",
+        ] {
+            assert!(
+                requires_host_review(name, false),
+                "{name} should still require host review"
+            );
+        }
+        assert!(requires_host_review("hubspot__search", true));
+    }
+
+    #[test]
+    fn github_tools_fail_when_disabled_without_staging_review() {
+        let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
+        for name in ["read_pull_requests", "review_pull_request"] {
+            let result = ctx.execute(name, &json!({"repository":"owner/repo","number":1}));
+            assert!(result.is_error);
+            assert!(result.text.contains("turned off"));
+            assert!(ctx.continuity.lock().unwrap().review().is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local Calendar or authenticated GitHub and coding agent access"]
+    fn live_voice_read_smoke() {
+        let mut config = Config::default();
+        config.voice_live.ask_agent = true;
+        config.voice_live.calendar = true;
+        config.calendar.enabled = true;
+        config.voice_live.delegate_timeout_secs = 120;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        let mode = std::env::var("MINUTES_VOICE_SMOKE").expect("set MINUTES_VOICE_SMOKE");
+        let (name, args) = if mode == "calendar" {
+            ("upcoming_meetings", json!({"within_minutes":720}))
+        } else {
+            let repo = std::env::var("MINUTES_VOICE_SMOKE_REPO").expect("set repo");
+            let number: u64 = std::env::var("MINUTES_VOICE_SMOKE_PR")
+                .expect("set PR")
+                .parse()
+                .unwrap();
+            (
+                "review_pull_request",
+                json!({"repository":repo,"number":number,"agent":mode}),
+            )
+        };
+        let result = ctx.execute(name, &args);
+        assert!(!result.is_error, "{}", result.text);
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        let value: Value = serde_json::from_str(&result.text).unwrap();
+        if mode == "calendar" {
+            assert_eq!(value["calendar_reader"], "eventkit");
+            println!(
+                "eventkit event_count={}",
+                value["events"].as_array().unwrap().len()
+            );
+        } else {
+            assert_eq!(value["agent"], mode);
+            assert_eq!(value["merged"], false);
+            println!(
+                "agent={} head={} assessment={}",
+                value["agent"], value["head_sha"], value["answer"]
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_verbs_are_absent_until_turned_on() {
+        let names = |config: Config| -> Vec<String> {
+            ToolContext::new(config, Arc::new(NameIndex::default()))
+                .declarations()
+                .into_iter()
+                .map(|d| d["name"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        assert!(!names(Config::default()).contains(&"open_app".to_string()));
+        let mut on = Config::default();
+        on.voice_live.desktop_control = true;
+        let with_desktop = names(on.clone());
+        assert!(with_desktop.contains(&"open_app".to_string()));
+        // Outward verbs need their own switch, not just the feature.
+        assert!(!with_desktop.contains(&"send_message".to_string()));
+        on.voice_live.desktop_outward = true;
+        assert!(names(on).contains(&"send_message".to_string()));
+    }
+
+    #[test]
+    fn an_outward_verb_stays_unreachable_through_dispatch() {
+        let mut config = Config::default();
+        config.voice_live.desktop_control = true;
+        config.voice_live.desktop_outward = false;
+        let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+        // Declared or not, the dispatch path must refuse it too.
+        let out = ctx.execute("send_message", &json!({"to": "555-0100", "text": "hi"}));
+        assert!(out.is_error);
+        assert!(out.text.contains("unknown tool"), "{}", out.text);
+    }
+
+    #[test]
     fn music_is_refused_while_the_switch_is_off() {
         let ctx = ToolContext::new(Config::default(), Arc::new(NameIndex::default()));
         let out = ctx.execute("make_music", &json!({"description": "something warm"}));
@@ -1053,6 +1489,57 @@ mod tests {
                 .map(|d| d["name"].as_str().unwrap_or_default().to_string())
                 .collect();
         assert!(!names.contains(&"make_music".to_string()));
+    }
+
+    #[test]
+    fn relayed_writes_are_off_until_deliberately_turned_on() {
+        assert!(
+            !Config::default().voice_live.delegate_writes,
+            "a speech model must not reach a write channel by default"
+        );
+        let describe = |writes: bool| {
+            let mut c = Config::default();
+            c.voice_live.ask_agent = true;
+            c.voice_live.delegate_writes = writes;
+            ToolContext::new(c, Arc::new(NameIndex::default()))
+                .declarations()
+                .into_iter()
+                .find(|d| d["name"] == "ask_agent")
+                .map(|d| d["description"].as_str().unwrap_or_default().to_string())
+        };
+        if let Some(text) = describe(false) {
+            assert!(text.contains("executor's launch permissions"), "{text}");
+        }
+        if let Some(text) = describe(true) {
+            assert!(text.contains("local host review"), "{text}");
+        }
+    }
+
+    #[test]
+    fn delegation_inherits_the_assistant_launch_flags() {
+        let mut config = Config::default();
+        config.assistant.agent_args = vec!["--yolo".into()];
+        // A relayed agent with no flags stops on its first permission prompt,
+        // so the assistant's own posture is the fallback.
+        assert_eq!(delegate_agent_args(&config), vec!["--yolo".to_string()]);
+        config.voice_live.delegate_agent_args = vec!["--other".into()];
+        assert_eq!(delegate_agent_args(&config), vec!["--other".to_string()]);
+    }
+
+    #[test]
+    fn a_missing_delegate_directory_is_ignored_rather_than_used() {
+        let mut config = Config::default();
+        config.voice_live.delegate_cwd = "/definitely/not/a/directory".into();
+        assert!(delegate_cwd(&config).is_none());
+    }
+
+    #[test]
+    fn delegation_prefers_the_voice_override_then_the_assistant_agent() {
+        let mut config = Config::default();
+        config.assistant.agent = "codex".into();
+        assert!(delegate_agent(&config).unwrap().ends_with("codex"));
+        config.voice_live.delegate_agent = "opencode".into();
+        assert!(delegate_agent(&config).unwrap().ends_with("opencode"));
     }
 
     #[test]
@@ -1085,6 +1572,91 @@ mod tests {
         assert!(out.is_error);
         assert!(out.image.is_none());
         assert!(out.text.contains("screen_on_request"));
+    }
+
+    #[test]
+    fn model_cannot_approve_or_redeem_host_actions_or_write_notes() {
+        let ctx = ctx_with(None);
+        let out = ctx.execute("add_note", &json!({"text":"fixture: never written"}));
+        assert!(!out.is_error);
+        assert!(out.text.contains("needs_host_approval"));
+        let id = serde_json::from_str::<Value>(&out.text).unwrap()["proposal_id"]
+            .as_u64()
+            .unwrap();
+        assert!(ctx.execute_approved(id).is_error);
+        for name in [
+            "/approve",
+            "approve_from_host",
+            "execute_approved",
+            "host:approval:1",
+        ] {
+            assert!(ctx.execute(name, &json!({"id":id})).is_error);
+        }
+        assert!(
+            ctx.execute("add_note", &json!({"text":"fixture", "confirm":"yes"}))
+                .is_error
+        );
+    }
+
+    #[test]
+    fn checkpoint_pipeline_saves_only_exact_host_reviewed_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ctx = ctx_with(None);
+        ctx.continuity = Mutex::new(crate::voice_live::continuity::Continuity::new(
+            temp.path().join("capsules"),
+        ));
+        let args = json!({"goal":"Simplify","summary":"Still a suggestion","next_step":"Compare"});
+        let proposed = ctx.execute("propose_checkpoint", &args);
+        assert!(!proposed.is_error, "{}", proposed.text);
+        let id = serde_json::from_str::<Value>(&proposed.text).unwrap()["proposal_id"]
+            .as_u64()
+            .unwrap();
+        ctx.continuity
+            .lock()
+            .unwrap()
+            .host_command(&format!("/approve {id}"))
+            .unwrap()
+            .unwrap();
+        let done = ctx.execute_approved(id);
+        assert!(!done.is_error, "{}", done.text);
+        assert!(done.text.contains("\"saved\":true"));
+        assert!(!done.text.contains("Still a suggestion"));
+        assert!(ctx.execute_approved(id).is_error);
+    }
+
+    #[test]
+    fn restricted_exact_path_and_unattested_insights_never_reach_voice() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("private.md");
+        std::fs::write(&path, "---\ntitle: Private\ntype: meeting\ndate: 2026-09-15T11:00:00Z\nsensitivity: restricted\n---\n\nSECRET_CANARY").unwrap();
+        let mut ctx = ctx_with(None);
+        ctx.config.output_dir = temp.path().to_path_buf();
+        let read = ctx.execute("get_meeting", &json!({"path":path}));
+        assert!(read.is_error);
+        assert!(!read.text.contains("SECRET_CANARY"));
+        assert!(ctx.execute("get_meeting_insights", &json!({})).is_error);
+        assert!(!ctx
+            .declarations()
+            .iter()
+            .any(|d| d["name"] == "get_meeting_insights"));
+    }
+
+    #[test]
+    fn outbound_model_calls_only_stage_and_disabled_features_do_not_stage() {
+        let mut ctx = ctx_with(None);
+        let args = json!({"to":"fixture@example.invalid", "subject":"Test", "body":"Never sent"});
+        assert!(ctx.execute("send_email", &args).is_error);
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
+        ctx.config.voice_live.desktop_control = true;
+        ctx.config.voice_live.desktop_outward = true;
+        let result = ctx.execute("send_email", &args);
+        assert!(!result.is_error);
+        assert!(result.text.contains("needs_host_approval"));
+        assert!(!ctx
+            .declarations()
+            .iter()
+            .any(|d| d["parameters"]["properties"].get("confirm").is_some()));
+        // No approval or native execution in this test.
     }
 
     #[test]

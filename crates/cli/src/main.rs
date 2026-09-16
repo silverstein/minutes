@@ -423,6 +423,10 @@ enum Commands {
     /// in the environment variable named by `api_key_env` (default GEMINI_API_KEY).
     #[cfg(feature = "voice-live")]
     Talk {
+        /// Local checkpoint shell only: no microphone, provider, credentials or agents.
+        #[arg(long, conflicts_with_all = ["ptt", "open_mic", "device", "mute"])]
+        local_work: bool,
+
         /// Push-to-talk: press Enter to start talking and Enter again to stop.
         /// The default on platforms without echo cancellation, because open mic
         /// there hears the assistant through the speakers and interrupts itself.
@@ -1925,6 +1929,10 @@ fn main() -> Result<()> {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    #[cfg(feature = "voice-live")]
+    if let Some(result) = local_work_fast_path() {
+        return result;
+    }
     let mut cli = Cli::parse();
     let verbose = cli.verbose;
     // This must remain the first action after parsing. In particular, do not
@@ -1932,6 +1940,16 @@ fn main() -> Result<()> {
     // above the fd claim.
     let mut claimed_authorized_process_input = claim_authorized_process_input(&mut cli.command)?;
     install_authorized_process_containment(claimed_authorized_process_input.is_some())?;
+
+    #[cfg(feature = "voice-live")]
+    if let Commands::Talk {
+        local_work: true,
+        json,
+        ..
+    } = &cli.command
+    {
+        return cmd_local_work(*json);
+    }
 
     // Initialize logging.
     //
@@ -2064,12 +2082,19 @@ fn main() -> Result<()> {
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
         #[cfg(feature = "voice-live")]
         Commands::Talk {
+            local_work,
             ptt,
             open_mic,
             device,
             mute,
             json,
-        } => cmd_talk(&config, ptt, open_mic, device, mute, json),
+        } => {
+            if local_work {
+                cmd_local_work(json)
+            } else {
+                cmd_talk(&config, ptt, open_mic, device, mute, json)
+            }
+        }
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2605,6 +2630,68 @@ fn main() -> Result<()> {
     result
 }
 
+#[cfg(feature = "voice-live")]
+fn local_work_fast_path() -> Option<Result<()>> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let is_local_work = args.iter().any(|arg| arg.to_str() == Some("talk"))
+        && args.iter().any(|arg| arg.to_str() == Some("--local-work"));
+    if !is_local_work {
+        return None;
+    }
+    if std::env::var_os("MINUTES_MCP_OUTER_PROCESS_GROUP").is_some() {
+        return Some(Err(anyhow::anyhow!(
+            "local work mode cannot run inside authorized process containment"
+        )));
+    }
+    Some(cmd_local_work(
+        args.iter().any(|arg| arg.to_str() == Some("--json")),
+    ))
+}
+
+/// Offline counterpart using the exact same checkpoint store as Voice Live.
+#[cfg(feature = "voice-live")]
+fn cmd_local_work(json: bool) -> Result<()> {
+    let mut work = minutes_core::voice_live::LocalWork::new();
+    eprintln!("Offline work mode. /work new GOAL, /work debrief WORDS, /work park, /work list, /work resume ID, /work show; q exits. Nothing is shared.");
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        let mut line = String::new();
+        let count = std::io::Read::by_ref(&mut input)
+            .take(16_385)
+            .read_line(&mut line)?;
+        if count == 0 {
+            break;
+        }
+        if count > 16_384 {
+            anyhow::bail!("local command exceeds 16384 bytes");
+        }
+        let line = line.trim();
+        if matches!(line, "q" | "quit" | "exit") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let result = work.command(line);
+        if json {
+            println!(
+                "{}",
+                match result {
+                    Ok(text) => serde_json::json!({"type":"local", "text":text}),
+                    Err(error) => serde_json::json!({"type":"local_error", "error":error}),
+                }
+            );
+        } else {
+            match result {
+                Ok(text) => println!("{text}"),
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `minutes talk`: run one Voice Live session in the terminal.
 /// (`minutes voice` is speaker enrollment, so the assistant uses a different verb.)
 ///
@@ -2624,8 +2711,7 @@ fn cmd_talk(
         self, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveState,
     };
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
-    use std::sync::Arc;
+    use std::sync::{mpsc, Arc, Mutex};
 
     voice_live::preflight(config).map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -2643,6 +2729,8 @@ fn cmd_talk(
     }
     let closed = Arc::new(AtomicBool::new(false));
     let closed_in_events = Arc::clone(&closed);
+    let render_state = Arc::new(Mutex::new(VoiceEventRenderState::default()));
+    let render_state_in_events = Arc::clone(&render_state);
     // Shared with the event callback so the meter only draws while a press is
     // in progress. Without any visible sign of input, a session waiting for the
     // user is indistinguishable from a microphone that is not working, which
@@ -2672,7 +2760,10 @@ fn cmd_talk(
                     println!("{line}");
                 }
             } else {
-                print_voice_event(&event);
+                let mut render_state = render_state_in_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                print_voice_event(&event, &mut render_state);
             }
             if matches!(event, VoiceLiveEvent::Closed { .. }) {
                 closed_in_events.store(true, Ordering::SeqCst);
@@ -2681,6 +2772,7 @@ fn cmd_talk(
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    eprintln!("Local work commands: /help, /work new GOAL, /work park, /work resume ID, /work share. /cancel stops queued calls. Requests that need review display their approval command here.");
     if let Some(path) = &session.log_path {
         eprintln!("Session log: {}", path.display());
     }
@@ -2797,17 +2889,48 @@ fn input_meter(rms: f32) -> String {
 
 /// Human-readable rendering of one Voice Live event for `minutes talk`.
 #[cfg(feature = "voice-live")]
-fn print_voice_event(event: &minutes_core::voice_live::VoiceLiveEvent) {
-    use minutes_core::voice_live::VoiceLiveEvent;
+#[derive(Default)]
+struct VoiceEventRenderState {
+    last_state: Option<minutes_core::voice_live::VoiceLiveState>,
+    printed_ready: bool,
+}
+
+#[cfg(feature = "voice-live")]
+fn print_voice_event(
+    event: &minutes_core::voice_live::VoiceLiveEvent,
+    render_state: &mut VoiceEventRenderState,
+) {
+    use minutes_core::voice_live::{VoiceLiveEvent, VoiceLiveState};
     match event {
         VoiceLiveEvent::State { state } => {
-            let label = serde_json::to_value(state)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_else(|| format!("{state:?}"));
+            if render_state.last_state == Some(*state) {
+                return;
+            }
+            render_state.last_state = Some(*state);
+            let label = match state {
+                VoiceLiveState::Connecting => "connecting",
+                VoiceLiveState::Ready if !render_state.printed_ready => {
+                    render_state.printed_ready = true;
+                    "ready"
+                }
+                VoiceLiveState::Ready | VoiceLiveState::Listening => return,
+                VoiceLiveState::Thinking => "thinking",
+                VoiceLiveState::Speaking => "speaking",
+                VoiceLiveState::Closed => "closed",
+            };
             println!("[{label}]");
         }
         VoiceLiveEvent::Status { text } => println!("  {text}"),
+        VoiceLiveEvent::Local { text } => println!("[local] {text}"),
+        VoiceLiveEvent::Review { proposal } => {
+            // JSON escaping prevents terminal control sequences in untrusted
+            // document/email bodies from controlling the terminal.
+            println!(
+                "[review] {}\nType /approve {} to execute these exact details, or /reject.",
+                serde_json::to_string_pretty(proposal).unwrap_or_default(),
+                proposal.id
+            );
+        }
         VoiceLiveEvent::UserTranscript { text, partial } => {
             if !partial {
                 println!("you: {text}");
@@ -3301,9 +3424,7 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            // Skip C++ static teardown: the interrupted work may still hold a
-            // live whisper context on another thread (#998).
-            minutes_core::exit_without_cxx_teardown(code);
+            std::process::exit(code);
         }
     })?;
 
@@ -7491,9 +7612,7 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        // Skip C++ static teardown: a transcription may still hold a live
-        // whisper context on the worker thread (#998).
-        minutes_core::exit_without_cxx_teardown(0);
+        std::process::exit(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -17480,9 +17599,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            // Skip C++ static teardown: the interrupted work may still hold a
-            // live whisper context on another thread (#998).
-            minutes_core::exit_without_cxx_teardown(code);
+            std::process::exit(code);
         }
     })?;
 
@@ -17995,9 +18112,7 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            // Skip C++ static teardown: the interrupted work may still hold a
-            // live whisper context on another thread (#998).
-            minutes_core::exit_without_cxx_teardown(code);
+            std::process::exit(code);
         }
     })
     .ok();

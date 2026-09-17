@@ -264,11 +264,12 @@ impl ToolContext {
             d.push(decl("copy_text", "Copy the requested exact text to the clipboard. Does not paste, send or submit anything.", json!({"text":{"type":"string"}})));
         }
         if self.config.voice_live.text_input {
-            d.push(decl("read_selected_text", "Read exactly the selected text in a named running app, on request. Does not read the clipboard or whole document.", json!({"target_app":{"type":"string","description":"Exact app name or bundle identifier"}})));
+            d.push(decl("read_selected_text", "Read exactly the selected text in a named running app, on request. Returns a single-use selection_id bound to the exact editable field and document snapshot for 120 seconds. Does not share the clipboard or whole document.", json!({"target_app":{"type":"string","description":"Exact app name or bundle identifier"}})));
             d.push(decl("paste_text", "Insert exact writing into the named frontmost app's editable field. No Send, Submit, Return or terminal input. Use open_app first if needed. To replace selection, supply mode=replace_selection and the exact expected_selection from read_selected_text. Refuses changed targets or unsupported editors; never retry an uncertain edit automatically.", json!({
                 "target_app":{"type":"string"},"text":{"type":"string"},
                 "mode":{"type":"string","enum":["insert","replace_selection"]},
-                "expected_selection":{"type":"string"}
+                "expected_selection":{"type":"string"},
+                "selection_id":{"type":"string","description":"For replace_selection: exact single-use selection_id from read_selected_text; do not invent or reuse"}
             })));
         }
         // Historical insights currently lack a final-egress live-source gate.

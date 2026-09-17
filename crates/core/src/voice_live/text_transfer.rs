@@ -76,9 +76,13 @@ pub(super) fn execute(
         "read_clipboard_text" if voice.clipboard => &[][..],
         "copy_text" if voice.clipboard => &["text"][..],
         "read_selected_text" if voice.text_input => &["target_app"][..],
-        "paste_text" if voice.text_input => {
-            &["target_app", "text", "mode", "expected_selection"][..]
-        }
+        "paste_text" if voice.text_input => &[
+            "target_app",
+            "text",
+            "mode",
+            "expected_selection",
+            "selection_id",
+        ][..],
         _ => return Err("That text capability is disabled; nothing read or changed.".into()),
     };
     let object = args
@@ -103,7 +107,7 @@ pub(super) fn execute(
                 .map(|m| m.as_str().unwrap_or(""))
                 .unwrap_or("insert");
             let expected = match mode {
-                "insert" if !object.contains_key("expected_selection") => None,
+                "insert" if !object.contains_key("expected_selection") && !object.contains_key("selection_id") => None,
                 "replace_selection" => Some(field("expected_selection")?),
                 _ => return Err("Use insert without expected_selection, or replace_selection with the exact previously read selection.".into()),
             };
@@ -111,6 +115,11 @@ pub(super) fn execute(
                 field("target_app")?,
                 field("text")?,
                 expected,
+                if expected.is_some() {
+                    Some(field("selection_id")?)
+                } else {
+                    None
+                },
                 &voice.text_input_apps,
             )
         }

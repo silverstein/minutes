@@ -25,6 +25,23 @@
     if (sig !== signature) { signature = sig; revision++; }
     return { snapshot_id: `${instance}:${revision}`, controls: list, output, undo_id: undo.at(-1)?.id || null };
   }
+  function page(result, command) {
+    if (!result.controls) return result;
+    const offset = key => Number.isSafeInteger(command[key]) && command[key] >= 0 ? command[key] : 0;
+    const focused = command.operation === 'inspect' ? command.control_id : null;
+    const all = focused ? result.controls.filter(c => c.control_id === focused) : result.controls;
+    const changedIndex = Math.max(0, all.findIndex(c => c.control_id === result.changed?.control_id));
+    const start = focused ? 0 : command.operation === 'inspect' ? offset('control_offset') : Math.floor(changedIndex / 4) * 4;
+    result.total_controls = all.length;
+    result.control_offset = start;
+    result.controls = all.slice(start, start + 4).map(control => {
+      if (!control.options) return control;
+      const optionStart = offset('option_offset');
+      return { ...control, total_options: control.options.length, option_offset: optionStart,
+        options: control.options.slice(optionStart, optionStart + 4) };
+    });
+    return result;
+  }
   function validate(el, raw) {
     if (typeof raw !== 'string' || raw.length > 256) throw Error('Use the exact string value for this control');
     if (el.tagName === 'SELECT') {
@@ -84,7 +101,7 @@
         result.changed = { control_id: controlId, before: old, after: value(el) };
       }
     } catch (error) { result = { error: String(error.message || error).slice(0, 240) }; }
-    parent.postMessage({ kind: 'minutes-control-result', id, result }, '*');
+    parent.postMessage({ kind: 'minutes-control-result', id, result: page(result, command) }, '*');
     busy = false;
   });
 })();

@@ -59,6 +59,7 @@ def self_test():
     assert touches_change({"children": [diagnostic("old.rs", 9, 9)]}, ranges)
     assert touches_change(diagnostic("src\\new.rs", 1, 1), {"src/new.rs": [(1, 1)]})
     print("Changed-code lint boundary self-tests passed")
+    subprocess.run(["node", "--test", "tooling/voice-evals/artifact-bridge.test.mjs"], check=True)
 
 
 def main():

@@ -30,6 +30,7 @@ mod prototype;
 mod reading_list;
 mod reasoning;
 mod research;
+mod response_budget;
 pub(crate) mod selection;
 pub mod session;
 mod shared_context;

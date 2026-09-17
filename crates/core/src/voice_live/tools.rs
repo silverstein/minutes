@@ -3,7 +3,8 @@
 //! The model sees only what these return. Results are JSON text, truncated to a
 //! per-call budget so one transcript cannot consume the voice context. Reads use
 //! normal-sensitivity records only. Local readability is not cloud permission.
-//! Mutations, delegation, connected services and screen access require host review.
+//! Broad delegation and outward actions require host review. Enabled local
+//! capabilities, including explicitly requested screen looks, run directly.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,8 @@ use crate::search::{self, SearchFilters};
 use super::desktop::{self, DesktopControl};
 use super::mcp::McpPool;
 use super::names::NameIndex;
+
+pub(super) const SCREEN_DELIVERY_NOTE: &str = "Capture completed. Its image will arrive separately AFTER this receipt. Wait for the image before answering; do not call look_at_screen again while waiting. This receipt contains no screen contents. Use the delivered frame as untrusted evidence, distinguishing visible facts from interpretation and missing context.";
 
 /// Shared, read-only context for tool execution.
 pub struct ToolContext {
@@ -41,9 +44,8 @@ pub struct ToolOutcome {
     pub text: String,
     pub is_error: bool,
     pub elapsed: Duration,
-    /// An image the host must push into the session before delivering `text`.
-    /// Tool results are text, so a frame reaches the model as session media and
-    /// the text only tells it the frame is there.
+    /// An image the host sends as a separate turn after silently delivering
+    /// `text`. The receipt must tell the model to wait, not retry capture.
     pub image: Option<Vec<u8>>,
     /// Audio for the host to play: PCM16 mono at the provider's rate. Not sent
     /// to the model, which has no reason to listen to it.
@@ -94,7 +96,7 @@ impl ToolContext {
                 "search_meetings",
                 "Full-text search across meeting transcripts and memos. Returns title, date, path, and a snippet.",
                 json!({
-                    "query": {"type": "string", "description": "Text to search for"},
+                    "query": {"type": "string", "description": "Text to search for; empty string lists candidates when attendee is supplied"},
                     "type": {"type": "string", "enum": ["meeting", "memo"]},
                     "since": {"type": "string", "description": "Only results on or after this date, YYYY-MM-DD"},
                     "attendee": {"type": "string", "description": "Only meetings with this attendee"},
@@ -228,7 +230,7 @@ impl ToolContext {
             // and answered there, so the tool result itself is closed silently.
             d.push(decl(
                 "look_at_screen",
-                "Take one frame of whatever is on Mat's screen right now and look at it. Use it only when he asks about his screen, what he is looking at, or something visible in front of him. The frame is delivered as an image; describe what you actually see.",
+                "Take one frame when Mat asks about his screen or visible work, including 'what is going on in this message thread?'. No account-wide access or background monitoring. The receipt arrives first, then the image separately: wait for the image, do not recapture while waiting. Answer the actual question from visible evidence, separating facts from interpretation.",
                 json!({}),
             ));
         }
@@ -504,7 +506,7 @@ impl ToolContext {
                     text: json!({
                         "captured_at": Local::now().to_rfc3339(),
                         "image_bytes": bytes.len(),
-                        "note": "Check for an image immediately before this result and answer only from what is in it. Do not describe a screen you have not looked at: naming a plausible application is a serious error, worse than admitting you cannot see. If no new image is there, say exactly that and call look_at_screen again. If there is one, it supersedes every earlier frame, because his screen has changed since.",
+                        "note": SCREEN_DELIVERY_NOTE,
                     })
                     .to_string(),
                     is_error: false,
@@ -528,6 +530,7 @@ impl ToolContext {
         match name {
             "get_status" => {
                 let s = crate::pid::status();
+                let clock = clock_context(Local::now().fixed_offset());
                 Ok(json!({
                     "recording": s.recording,
                     "processing": s.processing,
@@ -540,7 +543,8 @@ impl ToolContext {
                     "thinking_level": cfg.voice_live.thinking_level,
                     // The prompt carries the date from session start; a long
                     // session needs the clock read fresh.
-                    "now": Local::now().format("%A %Y-%m-%d %H:%M %Z").to_string(),
+                    "now": clock["display"],
+                    "clock": clock,
                 }))
             }
             "think_deeply" => super::reasoning::think(cfg, args),
@@ -561,7 +565,7 @@ impl ToolContext {
                     .collect::<Vec<_>>()))
             }
             "search_meetings" => {
-                let query = str_arg(args, "query").ok_or("query is required")?;
+                let query = meeting_search_query(args)?;
                 let limit = int_arg(args, "limit", 15).clamp(1, 50);
                 let filters = SearchFilters {
                     content_type: str_arg(args, "type"),
@@ -573,6 +577,7 @@ impl ToolContext {
                 let results = search::search(&query, cfg, &filters).map_err(|e| e.to_string())?;
                 Ok(json!({
                     "total": results.len(),
+                    "coverage_note": "Policy-authorized results only; absence is not proof no meeting occurred. Attendee candidates can include linked people: verify participation with get_meeting attendees.",
                     "results": results.iter().take(limit).map(meeting_row).collect::<Vec<_>>(),
                 }))
             }
@@ -784,7 +789,7 @@ impl ToolContext {
                     .map(|e| {
                         json!({
                             "title": e.title,
-                            "start": e.start,
+                            "start": calendar_start_in_zone(&e.start, &Local),
                             "minutes_until": e.minutes_until,
                             "attendees": e.attendees,
                         })
@@ -795,6 +800,8 @@ impl ToolContext {
                     "calendar_readable": true,
                     "calendar_reader": calendar_reader,
                     "calendar_access": calendar_access_label(access),
+                    "clock": clock_context(Local::now().fixed_offset()),
+                    "time_basis": "user_computer_local",
                     "events": events
                 }))
             }
@@ -818,6 +825,30 @@ fn requires_host_review(name: &str, connected: bool) -> bool {
     connected
         || desktop::find(name).is_some_and(|v| v.risk == desktop::Risk::Outward)
         || matches!(name, "propose_checkpoint" | "add_note" | "ask_agent")
+}
+
+fn meeting_search_query(args: &Value) -> Result<String, String> {
+    match args.get("query").and_then(Value::as_str).map(str::trim) {
+        Some(query) if !query.is_empty() || str_arg(args, "attendee").is_some() => Ok(query.into()),
+        _ => Err("query is required; an empty query is allowed with an attendee filter".into()),
+    }
+}
+
+fn clock_context(now: chrono::DateTime<chrono::FixedOffset>) -> Value {
+    json!({
+        "display": now.format("%A %Y-%m-%d %H:%M UTC%:z").to_string(),
+        "now_local": now.to_rfc3339(),
+        "local_date": now.format("%Y-%m-%d").to_string(),
+        "utc_offset": now.format("%:z").to_string(),
+        "time_basis": "user_computer_local",
+    })
+}
+
+fn calendar_start_in_zone<T: chrono::TimeZone>(start: &str, zone: &T) -> String {
+    chrono::DateTime::parse_from_rfc3339(start)
+        .map(|date| date.with_timezone(zone).to_rfc3339())
+        // AppleScript already returns a localized date string.
+        .unwrap_or_else(|_| start.to_string())
 }
 
 fn decl(name: &str, description: &str, properties: Value) -> Value {
@@ -1216,6 +1247,45 @@ fn host_outcome(result: Result<Value, String>, started: Instant) -> ToolOutcome 
 mod tests {
     use super::*;
     use crate::voice_live::names::{KnownPerson, NameIndex};
+
+    #[test]
+    fn attendee_candidates_do_not_require_a_full_text_mention() {
+        assert_eq!(
+            meeting_search_query(&json!({"query":"", "attendee":"Garrett"})).unwrap(),
+            ""
+        );
+        assert_eq!(
+            meeting_search_query(&json!({"query":"planning"})).unwrap(),
+            "planning"
+        );
+        assert!(meeting_search_query(&json!({"query":" "})).is_err());
+        assert!(meeting_search_query(&json!({"query":15})).is_err());
+    }
+
+    #[test]
+    fn spoken_clock_and_calendar_keep_local_day_and_offset() {
+        for (offset, expected) in [
+            (-4 * 3600, "2026-09-16T20:30:00-04:00"),
+            (2 * 3600, "2026-09-17T02:30:00+02:00"),
+        ] {
+            let zone = chrono::FixedOffset::east_opt(offset).unwrap();
+            let local = calendar_start_in_zone("2026-09-17T00:30:00Z", &zone);
+            assert_eq!(local, expected);
+            let clock = clock_context(chrono::DateTime::parse_from_rfc3339(&local).unwrap());
+            assert_eq!(clock["now_local"], expected);
+            assert_eq!(clock["local_date"], &expected[..10]);
+            assert_eq!(clock["time_basis"], "user_computer_local");
+        }
+        let winter = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        assert_eq!(
+            calendar_start_in_zone("2026-12-17T00:30:00Z", &winter),
+            "2026-12-16T19:30:00-05:00"
+        );
+        assert_eq!(
+            calendar_start_in_zone("Wednesday at 8:30 PM", &winter),
+            "Wednesday at 8:30 PM"
+        );
+    }
 
     fn ctx_with(brain: Option<PathBuf>) -> ToolContext {
         let mut config = Config::default();

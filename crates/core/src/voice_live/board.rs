@@ -354,44 +354,43 @@ mod tests {
     #[test]
     fn persistence_rejects_stale_writes_and_reopens_exact_board() {
         let root = tempfile::tempdir().unwrap();
+        let private_root = root.path().join("boards");
+        let root = private_root.as_path();
         let mut boards = Boards::default();
         let created = boards
             .execute_at(
                 "create_decision_board",
                 &json!({"title":"Decisions","cards":[{"title":"First"}]}),
-                root.path(),
+                root,
                 false,
             )
             .unwrap();
         let id = created["board_id"].as_str().unwrap();
         let args = json!({"board_id":id,"revision":1,"change":{"operation":"rename_column","column_id":"column-1","title":"Today"}});
         let changed = boards
-            .execute_at("edit_decision_board", &args, root.path(), false)
+            .execute_at("edit_decision_board", &args, root, false)
             .unwrap();
         assert_eq!(changed["revision"], 2);
         assert!(boards
-            .execute_at("edit_decision_board", &args, root.path(), false)
+            .execute_at("edit_decision_board", &args, root, false)
             .is_err());
         drop(boards);
         let mut other = Boards::default();
         assert_eq!(
             other
-                .execute_at(
-                    "read_decision_board",
-                    &json!({"board_id":id}),
-                    root.path(),
-                    false
-                )
+                .execute_at("read_decision_board", &json!({"board_id":id}), root, false)
                 .unwrap()["columns"][0]["title"],
             "Today"
         );
-        assert!(load(root.path(), "../../private").is_err());
+        assert!(load(root, "../../private").is_err());
     }
     #[test]
     fn pointer_and_voice_share_revisions_and_selection_expires() {
         let root = tempfile::tempdir().unwrap();
+        let private_root = root.path().join("boards");
+        let root = private_root.as_path();
         let mut boards = Boards::default();
-        let created=boards.execute_at("create_decision_board",&json!({"title":"Work","cards":[{"title":"One","body":"Original"},{"title":"Two","body":"Second"}]}),root.path(),false).unwrap();
+        let created=boards.execute_at("create_decision_board",&json!({"title":"Work","cards":[{"title":"One","body":"Original"},{"title":"Two","body":"Second"}]}),root,false).unwrap();
         let id = created["board_id"].as_str().unwrap();
         {
             let mut pointer = boards.server.as_ref().unwrap().state.lock().unwrap();
@@ -410,18 +409,18 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":1,"change":{"operation":"move_card","card_id":"card-4","column_id":"column-2"}}),root.path(),false).is_err());
-        let moved=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":2,"change":{"operation":"move_card","card_id":"card-4","column_id":"column-2"}}),root.path(),false).unwrap();
+        assert!(boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":1,"change":{"operation":"move_card","card_id":"card-4","column_id":"column-2"}}),root,false).is_err());
+        let moved=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":2,"change":{"operation":"move_card","card_id":"card-4","column_id":"column-2"}}),root,false).unwrap();
         assert_eq!(moved["columns"][1]["cards"][0]["body"], "Manual text");
-        let added=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":3,"change":{"operation":"add_column","title":"Never"}}),root.path(),false).unwrap();
+        let added=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":3,"change":{"operation":"add_column","title":"Never"}}),root,false).unwrap();
         let new_id = added["columns"][3]["id"].as_str().unwrap();
-        let reordered=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":4,"change":{"operation":"reorder_columns","column_ids":[new_id,"column-1","column-2","column-3"]}}),root.path(),false).unwrap();
+        let reordered=boards.execute_at("edit_decision_board",&json!({"board_id":id,"revision":4,"change":{"operation":"reorder_columns","column_ids":[new_id,"column-1","column-2","column-3"]}}),root,false).unwrap();
         assert_eq!(reordered["columns"][0]["title"], "Never");
         let undone = boards
             .execute_at(
                 "edit_decision_board",
                 &json!({"board_id":id,"revision":5,"change":{"operation":"undo","change_id":5}}),
-                root.path(),
+                root,
                 false,
             )
             .unwrap();
@@ -431,12 +430,13 @@ mod tests {
     #[test]
     fn local_http_requires_token_host_and_origin() {
         let root = tempfile::tempdir().unwrap();
+        let private_root = root.path().join("boards");
         let mut boards = Boards::default();
         boards
             .execute_at(
                 "create_decision_board",
                 &json!({"title":"Fixture","cards":[]}),
-                root.path(),
+                &private_root,
                 false,
             )
             .unwrap();

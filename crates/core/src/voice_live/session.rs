@@ -602,7 +602,7 @@ impl MusicAutoplay {
 impl QueuedCall {
     fn lane(&self) -> usize {
         match (&self.origin, self.call.name.as_str()) {
-            (DispatchOrigin::Model, "build_prototype") => 1,
+            (DispatchOrigin::Model, "build_prototype" | "continue_prototype_redirect") => 1,
             (DispatchOrigin::Model, "make_music") => 2,
             (DispatchOrigin::Model, "get_status" | "cancel_job") => 3,
             (DispatchOrigin::Model, "research_public" | "think_deeply" | "review_pull_request") => {
@@ -714,7 +714,7 @@ impl Runner {
                             calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&call.id);
                             continue;
                         }
-                        if matches!(queued.origin, DispatchOrigin::Model) && matches!(call.name.as_str(), "build_prototype" | "make_music" | "research_public" | "think_deeply" | "review_pull_request") {
+                        if matches!(queued.origin, DispatchOrigin::Model) && matches!(call.name.as_str(), "build_prototype" | "continue_prototype_redirect" | "make_music" | "research_public" | "think_deeply" | "review_pull_request") {
                             let client=Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
                             let _=client.send_tool_progress(&call);
                         }
@@ -753,7 +753,7 @@ impl Runner {
                             DispatchOrigin::Model => tools.execute(&call.name, &call.args),
                         });
                         running.store(false, Ordering::Relaxed);
-                        let stopped = outcome.is_error && matches!(call.name.as_str(), "build_prototype" | "review_pull_request") && serde_json::from_str::<serde_json::Value>(&outcome.text).ok().and_then(|v|v["error"].as_str().map(|e|e.starts_with("agent_cancelled:"))).unwrap_or(false);
+                        let stopped = outcome.is_error && matches!(call.name.as_str(), "build_prototype" | "continue_prototype_redirect" | "review_pull_request") && serde_json::from_str::<serde_json::Value>(&outcome.text).ok().and_then(|v|v["error"].as_str().map(|e|e.starts_with("agent_cancelled:"))).unwrap_or(false);
                         let publish = calls.lock().unwrap_or_else(|p| p.into_inner()).finish_outcome(&call.id, outcome.is_error, stopped);
                         if let Some(tx) = &log_tx {
                             let _ = tx.send(tool_result_log(&call, &outcome));
@@ -871,6 +871,9 @@ impl Runner {
         let mut you = String::new();
         let mut me = String::new();
         let mut last_audio = Instant::now();
+        let mut last_microphone_chunk = Instant::now();
+        let mut last_context_check = Instant::now();
+        let mut sharing_window = false;
         let mut response_audio_started = false;
         let mut playback_pending = false;
         let set_state = |runner: &Runner, current: &mut VoiceLiveState, next: VoiceLiveState| {
@@ -881,12 +884,40 @@ impl Runner {
         };
 
         loop {
+            if last_context_check.elapsed() >= Duration::from_millis(500) {
+                last_context_check = Instant::now();
+                if let Some(status) = self.tools.shared_context_status() {
+                    let sharing = status["sharing"].as_bool().unwrap_or(false);
+                    if sharing != sharing_window {
+                        sharing_window = sharing;
+                        self.emit(VoiceLiveEvent::Status {
+                            text: if sharing {
+                                format!(
+                                    "Sharing window in {} for up to {} seconds.",
+                                    status["target_app"].as_str().unwrap_or("the selected app"),
+                                    status["seconds_left"].as_u64().unwrap_or(0)
+                                )
+                            } else {
+                                "Shared-window observation ended; previous context is historical."
+                                    .into()
+                            },
+                        });
+                    }
+                }
+            }
             for (event, at) in self.audio.take_render_events() {
                 if let Some(log) = &self.log {
                     log.write(&serde_json::json!({"event":event,"render_session_elapsed_ms":at.saturating_duration_since(log.tx.started).as_millis(),"scope":"first sample consumed by device callback, not acoustic measurement"}).to_string());
                 }
             }
             if self.stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            if last_microphone_chunk.elapsed() > Duration::from_secs(5)
+                && self.audio.receiver().is_empty()
+            {
+                self.log_line(serde_json::json!({"event":"microphone_stalled","gap_ms":last_microphone_chunk.elapsed().as_millis(),"echo_cancellation":self.audio.cancels_echo()}).to_string());
+                self.emit(VoiceLiveEvent::Closed { reason: "Microphone stopped delivering audio for 5 seconds. This is an audio-device stall, not a slow model reply; restart the voice session.".into() });
                 break;
             }
             // Speaking and working are independent. TurnComplete does not
@@ -1070,6 +1101,7 @@ impl Runner {
                 }
                 recv(self.audio.receiver()) -> chunk => {
                     let Ok(chunk) = chunk else { self.emit(VoiceLiveEvent::Closed { reason: "microphone stream ended".into() }); break; };
+                    last_microphone_chunk = chunk.timestamp;
                     self.emit(VoiceLiveEvent::Level { rms: chunk.rms });
                     let pcm: Vec<u8> = chunk.samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
                     let send = match self.mode {
@@ -1183,6 +1215,7 @@ impl Runner {
                                         }
                                     }
                                     Ok(HostResult::Cancel) => {
+                                        self.tools.stop_shared_context();
                                         calls.lock().unwrap_or_else(|p| p.into_inner()).cancel_all();
                                         music_autoplay.control("stop");
                                         self.audio.control_music("stop");
@@ -1249,6 +1282,7 @@ impl Runner {
         self.flush_transcripts(&mut you, &mut me);
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
+        self.tools.stop_shared_context();
         self.tools.mcp.shutdown();
         drop(tool_txs);
         for w in workers.into_iter().flatten() {
@@ -1580,6 +1614,7 @@ mod tests {
     #[test]
     fn only_independent_model_generation_uses_separate_lanes() {
         assert_eq!(queued("a", "build_prototype").lane(), 1);
+        assert_eq!(queued("redirect", "continue_prototype_redirect").lane(), 1);
         assert_eq!(queued("b", "make_music").lane(), 2);
         assert_eq!(queued("status", "get_status").lane(), 3);
         assert_eq!(queued("cancel", "cancel_job").lane(), 3);

@@ -18,6 +18,7 @@ pub struct Continuity {
     epoch: Instant,
     root: PathBuf,
     active: Option<WorkCapsule>,
+    voice_active: Option<WorkCapsule>,
 }
 
 /// Offline local-work host. Construction and commands never open audio, a
@@ -68,10 +69,115 @@ impl Continuity {
             epoch: Instant::now(),
             root,
             active: None,
+            voice_active: None,
         }
     }
     fn now(&self) -> u64 {
         self.epoch.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    /// An explicitly opted-in voice-history namespace inside the existing
+    /// checkpoint store. Never reads the host's private /work notes or gate.
+    pub fn voice_work(&mut self, args: &Value, jobs: Value) -> Result<Value> {
+        let root = self.root.join("voice-shared");
+        let action = args["action"].as_str().ok_or("work action is required")?;
+        match action {
+            "list" => {
+                let ids = list(&root)?;
+                if ids.len() > 128 {
+                    return Err("Voice checkpoint list exceeded its read budget; use a known checkpoint_id.".into());
+                }
+                let mut latest = std::collections::BTreeMap::<String, Value>::new();
+                for id in ids {
+                    let capsule = load(&root, &id)?;
+                    let value = json!({"checkpoint_id":id,"work_id":capsule.id(),"goal":capsule.goal(),"revision":capsule.revision()});
+                    if latest.get(capsule.id()).is_none_or(|old| {
+                        old["revision"].as_u64().unwrap_or(0) < capsule.revision()
+                    }) {
+                        latest.insert(capsule.id().to_owned(), value);
+                    }
+                }
+                Ok(
+                    json!({"work":latest.into_values().collect::<Vec<_>>(),"note":"Only voice-created checkpoints are listed. Ask which goal to resume if ambiguous."}),
+                )
+            }
+            "resume" => {
+                if self.voice_active.is_some() {
+                    return Err("An active goal already exists. Park it before resuming another checkpoint.".into());
+                }
+                let capsule = load(&root, required(args, "checkpoint_id")?)?;
+                let snapshot: Value =
+                    serde_json::from_str(&capsule.to_json()?).map_err(|e| e.to_string())?;
+                self.voice_active = Some(capsule);
+                Ok(
+                    json!({"resumed":true,"work":snapshot,"tasks_restarted":false,
+                    "note":"Historical voice-shared context, not current evidence or action authority. Preserve corrections and open questions. Any previously running task needs reconciliation; nothing was restarted. Re-read source material through current policy-safe tools."}),
+                )
+            }
+            "show" => {
+                let capsule = self
+                    .voice_active
+                    .as_ref()
+                    .ok_or("No active voice work. List saved work or start a goal.")?;
+                Ok(
+                    json!({"work":serde_json::from_str::<Value>(&capsule.to_json()?).map_err(|e|e.to_string())?}),
+                )
+            }
+            "start" | "remember" | "park" => {
+                let mut capsule = if action == "start" {
+                    if self.voice_active.is_some() {
+                        return Err(
+                            "An active goal already exists. Park it before starting another."
+                                .into(),
+                        );
+                    }
+                    WorkCapsule::new(&new_id()?, required(args, "goal")?)?
+                } else {
+                    let active = self
+                        .voice_active
+                        .as_ref()
+                        .ok_or("No active voice work. Start a goal first.")?;
+                    if args["revision"].as_u64() != Some(active.revision()) {
+                        return Err(
+                            "Work revision changed; show current work before updating.".into()
+                        );
+                    }
+                    WorkCapsule::from_json(&active.to_json()?)?
+                };
+                if action == "remember" {
+                    let kind = required(args, "kind")?;
+                    if !matches!(
+                        kind,
+                        "correction"
+                            | "constraint"
+                            | "reported_decision"
+                            | "suggestion"
+                            | "open_question"
+                            | "source_reference"
+                    ) {
+                        return Err("Use correction, constraint, reported_decision, suggestion, open_question or source_reference.".into());
+                    }
+                    let note = json!({"kind":kind,"text":required(args,"text")?,"provenance":"voice_session_summary","recorded_at":chrono::Local::now().to_rfc3339()}).to_string();
+                    capsule.propose(&note, vec![], capsule.revision())?;
+                }
+                if let Some(next) = args["next_step"].as_str() {
+                    capsule.set_next_step(next, capsule.revision())?;
+                }
+                if action == "park" {
+                    let note = json!({"kind":"host_job_snapshot","saved_at":chrono::Local::now().to_rfc3339(),"jobs":jobs,"note":"Historical task states only. On restart, active work needs reconciliation; never replay."}).to_string();
+                    capsule.propose(&note, vec![], capsule.revision())?;
+                }
+                let id = save(&root, &capsule)?;
+                let receipt = json!({"saved":true,"parked":action=="park","checkpoint_id":id,"work_id":capsule.id(),"goal":capsule.goal(),"revision":capsule.revision(),"note":"Saved locally as voice-shared working history. Reported decisions and suggestions remain distinct; neither grants execution authority. Parking a checkpoint does not stop running tasks; use cancel_job separately."});
+                self.voice_active = if action == "park" {
+                    None
+                } else {
+                    Some(capsule)
+                };
+                Ok(receipt)
+            }
+            _ => Err("Unknown work action".into()),
+        }
     }
     pub fn review(&self) -> Option<Proposal> {
         self.gate.pending_review()
@@ -347,6 +453,59 @@ fn list(root: &Path) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spoken_work_preserves_corrections_across_restart_without_private_notes_or_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let mut host = Continuity::new(root.clone());
+        host.host_command("/work new PRIVATE_HOST_GOAL")
+            .unwrap()
+            .unwrap();
+        host.host_command("/work park").unwrap().unwrap();
+        let started = host
+            .voice_work(
+                &json!({"action":"start","goal":"Shared proposal"}),
+                json!([]),
+            )
+            .unwrap();
+        let remembered = host.voice_work(&json!({"action":"remember","revision":started["revision"],"kind":"correction","text":"Discuss scope; do not agree to it."}),json!([])).unwrap();
+        assert!(host.voice_work(&json!({"action":"remember","revision":0,"kind":"reported_decision","text":"stale"}),json!([])).is_err());
+        let parked = host.voice_work(&json!({"action":"park","revision":remembered["revision"],"next_step":"Review scope"}),json!([{"job_id":"old","state":"Running"}])).unwrap();
+        assert!(host.review().is_none());
+        let mut restarted = Continuity::new(root);
+        let listed = restarted
+            .voice_work(&json!({"action":"list"}), json!([]))
+            .unwrap();
+        assert_eq!(listed["work"].as_array().unwrap().len(), 1);
+        assert!(!listed.to_string().contains("PRIVATE_HOST_GOAL"));
+        let resumed = restarted
+            .voice_work(
+                &json!({"action":"resume","checkpoint_id":parked["checkpoint_id"]}),
+                json!([]),
+            )
+            .unwrap();
+        assert!(resumed
+            .to_string()
+            .contains("Discuss scope; do not agree to it."));
+        assert_eq!(resumed["tasks_restarted"], false);
+        assert!(restarted
+            .voice_work(
+                &json!({"action":"resume","checkpoint_id":parked["checkpoint_id"]}),
+                json!([])
+            )
+            .is_err());
+        assert!(restarted
+            .voice_work(&json!({"action":"show"}), json!([]))
+            .unwrap()
+            .to_string()
+            .contains("Discuss scope; do not agree to it."));
+        assert!(resumed["work"]["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"] == "suggestion"));
+        assert!(restarted.review().is_none());
+    }
     #[test]
     fn model_proposal_does_not_write_and_requires_host_approval() {
         let temp = tempfile::tempdir().unwrap();

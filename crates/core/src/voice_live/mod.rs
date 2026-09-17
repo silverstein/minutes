@@ -307,7 +307,7 @@ mod tests {
             "RxVIP",
             "search_brain then read_brain",
             "Clarify an ambiguous request before changing anything",
-            "never rename a speaker",
+            "Never rename a speaker",
             "list_preps and then get_prep",
             "call ask_agent with one self-contained question",
             "use research_public directly without confirmation",

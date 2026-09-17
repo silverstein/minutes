@@ -1151,6 +1151,8 @@ pub struct VoiceLiveConfig {
     pub clipboard: bool,
     /// Named-app selected-text reads and guarded text insertion.
     pub text_input: bool,
+    /// Save and resume voice-created work history on explicit spoken request.
+    pub work_memory: bool,
     /// Exact bundle identifiers allowed to receive text. Never shell/agent consoles.
     pub text_input_apps: Vec<String>,
     /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
@@ -1266,6 +1268,7 @@ impl Default for VoiceLiveConfig {
             screen_on_request: false,
             clipboard: false,
             text_input: false,
+            work_memory: false,
             text_input_apps: [
                 "com.apple.TextEdit",
                 "com.apple.Notes",

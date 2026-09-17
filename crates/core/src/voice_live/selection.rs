@@ -2,6 +2,29 @@
 //! Browser pastes preserve the existing clipboard; no Return or Submit events.
 use serde_json::Value;
 
+pub(super) fn observe_window(
+    target: &str,
+    duration: std::time::Duration,
+    generation: u64,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    requests: crossbeam_channel::Receiver<super::shared_context::Request>,
+    ready: crossbeam_channel::Sender<Result<Value, String>>,
+) {
+    #[cfg(target_os = "macos")]
+    native::observe_window(target, duration, generation, stop, requests, ready);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (target, duration, generation, stop);
+        let _ = ready.send(Err(
+            "Shared-window accessibility is currently macOS-only.".into()
+        ));
+        super::shared_context::reject_pending(
+            &requests,
+            "Shared-window accessibility is currently macOS-only.",
+        );
+    }
+}
+
 pub fn capture(bundle: Option<&str>) -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
@@ -68,6 +91,7 @@ fn replaced_value(
 
 #[cfg(target_os = "macos")]
 mod native {
+    include!("shared_context_native.rs");
     use objc2::rc::autoreleasepool;
     use objc2_app_kit::NSWorkspace;
     use serde_json::{json, Value};
@@ -127,6 +151,7 @@ mod native {
         range: Range,
         value_hash: String,
         created: Instant,
+        shared_generation: u64,
     }
     thread_local! {
         static SELECTION: RefCell<Option<SelectionReference>> = const { RefCell::new(None) };
@@ -307,6 +332,7 @@ mod native {
                         }
                         let reference = slot.take().ok_or("Selection reference expired")?;
                         if reference.created.elapsed() >= Duration::from_secs(120)
+                            || reference.shared_generation != super::super::shared_context::generation()
                             || reference.pid != pid
                             || CFEqual(reference.window.0, window.0) == 0
                             || CFEqual(reference.field.0, focused.0) == 0
@@ -502,6 +528,7 @@ mod native {
                             range,
                             value_hash: crate::policy_fs::content_sha256_hex(value.as_bytes()),
                             created: Instant::now(),
+                            shared_generation: super::super::shared_context::generation(),
                         })
                     });
                     Some(id)

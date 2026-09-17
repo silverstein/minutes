@@ -14953,8 +14953,38 @@
 
         const question = recallTerminalInputDraft.trim();
         if (recallTerminalContextPending && (!question || !recallTerminalInputReliable)) {
+          // Refusing is correct and stays exactly as it was. What follows is
+          // only about telling the user what happened.
+          //
+          // The Enter is swallowed and the typed text stays on the terminal
+          // line, so the natural response of typing it again appends a second
+          // copy. Observed in the wild as
+          // "Change PBM tab name to AR ReconChange PBM tab name to ARdd": two
+          // attempts fused into one unsendable line, reported as the pane being
+          // broken. Typing had been working the whole time; only Enter was
+          // withheld, which is indistinguishable from a frozen input unless you
+          // already know the rule.
+          //
+          // An earlier draft of this fix sent Ctrl-E and Ctrl-U to the child and
+          // reset the shadow line to a trusted empty state. Review rejected it,
+          // and was right: a successful PTY write is not proof the child
+          // interpreted those bytes as a clear. Those keys clear the current
+          // logical line, not a multiline buffer, other agents bind them
+          // differently, and the pane permits any assistant binary. Marking the
+          // shadow trusted and empty while the child still held text would let
+          // the next Enter attach meeting context to a line Minutes could not
+          // actually account for, which is the precise thing this gate exists to
+          // prevent. Automating a keystroke is not worth weakening it.
+          //
+          // So the message does the work instead: say it was not sent, say the
+          // text is still there, and name the reason without overclaiming.
+          // Reliability is lost to any cursor key, Tab, Escape, mouse report or
+          // other control sequence, not only to cursor editing, so the wording
+          // stays broad enough to be true.
           setRecallProviderNotice(
-            'For privacy, Minutes could not verify a complete question or command. Press Ctrl-U, retype it without cursor editing, and submit again. No meeting context was read.',
+            !recallTerminalInputReliable
+              ? 'Not sent. Your text is still on the line. Minutes could not account for it, because the line includes editing or control keys it cannot replay. Press Ctrl-U to clear the line, then type the question again using only plain text. No meeting context was read.'
+              : 'Not sent. Your text is still on the line. Minutes did not see a complete question there. Press Ctrl-U to clear the line, then type the question again. No meeting context was read.',
             'error'
           );
           return;

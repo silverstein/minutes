@@ -228,6 +228,25 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "runs the configured local CLI in the real no-tools generation path"]
+    fn live_isolated_generation_probe() {
+        let config = Config::default();
+        let agent = requested_agent(&json!({"agent":"claude"}), &config).unwrap();
+        let start = std::time::Instant::now();
+        let answer = isolated_answer(&agent,
+            "Return only the requested JSON. Do not use tools or inspect files.",
+            "Return exactly this JSON: {\"title\":\"Generation probe\",\"html\":\"<h1>Ready</h1>\"}",
+            Duration::from_secs(30)).unwrap();
+        let value: Value = serde_json::from_str(&answer).unwrap();
+        assert_eq!(value["title"], "Generation probe");
+        println!(
+            "ISOLATED_GENERATION elapsed_ms={} bytes={}",
+            start.elapsed().as_millis(),
+            answer.len()
+        );
+    }
+
+    #[test]
     fn rejects_options_paths_and_missing_pr_identity() {
         for repo in [
             "--help",

@@ -2047,8 +2047,23 @@ pub(crate) fn run_chat_invocation(
                 let err = take_agent_output(&stderr_buf, stderr_handle, "stderr");
                 cleanup(&cleanup_path);
                 if !status.success() {
+                    #[cfg(test)]
+                    if std::env::var_os("MINUTES_SYNTHETIC_AGENT_DIAGNOSTICS").is_some() {
+                        eprintln!(
+                            "SYNTHETIC_AGENT_EXIT status={status} stdout={} stderr={}",
+                            String::from_utf8_lossy(&out),
+                            String::from_utf8_lossy(&err)
+                        );
+                    }
+                    if err.is_empty()
+                        && String::from_utf8_lossy(&out).trim()
+                            == "Not logged in · Please run /login"
+                    {
+                        return Err(format!("agent_auth_required: agent '{agent_cmd}' reported that it is not logged in. Check authentication in the same user and launch environment as Minutes; this is not a tool permission prompt."));
+                    }
                     return Err(format!(
-                        "agent '{agent_cmd}' exited with an error: {}",
+                        "agent_exit: agent '{agent_cmd}' exited with {status} ({} stdout bytes, {} stderr bytes): {}",
+                        out.len(), err.len(),
                         String::from_utf8_lossy(&err).trim()
                     ));
                 }
@@ -2064,14 +2079,17 @@ pub(crate) fn run_chat_invocation(
                     kill_process_group(child.id());
                     child.kill().ok();
                     let _ = child.wait();
-                    let _ = take_agent_output(&stdout_buf, stdout_handle, "stdout");
-                    let _ = take_agent_output(&stderr_buf, stderr_handle, "stderr");
+                    let out = take_agent_output(&stdout_buf, stdout_handle, "stdout");
+                    let err = take_agent_output(&stderr_buf, stderr_handle, "stderr");
                     cleanup(&cleanup_path);
                     return Err(format!(
-                        "agent '{agent_cmd}' did not answer within {}s. The usual cause \
-                         is the agent waiting on a tool-use permission prompt that nothing \
-                         can answer; give it non-interactive launch flags.",
-                        timeout.as_secs()
+                        "agent_timeout: agent '{agent_cmd}' did not complete within {}s; \
+                         the process was stopped ({} stdout bytes, {} stderr bytes). \
+                         The cause is unknown. A timeout does not establish a permission \
+                         prompt or a content-policy refusal. No completed answer is available.",
+                        timeout.as_secs(),
+                        out.len(),
+                        err.len()
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -4953,6 +4971,52 @@ EOF
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
         path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn chat_failure_recognizes_stdout_only_auth_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_grandchild_agent(
+            dir.path(),
+            "auth-chat.sh",
+            "printf 'Not logged in · Please run /login\\n'\nexit 1",
+        );
+        let result = run_chat_invocation(
+            ChatInvocation {
+                cmd: script.to_string_lossy().into_owned(),
+                args: vec![],
+                stdin_payload: Some(b"synthetic input".to_vec()),
+                cleanup_path: None,
+            },
+            Some(dir.path()),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(result.starts_with("agent_auth_required:"));
+        assert!(result.contains("same user and launch environment"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn chat_timeout_reports_observation_without_inventing_a_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_grandchild_agent(dir.path(), "slow-chat.sh", "sleep 30");
+        let result = run_chat_invocation(
+            ChatInvocation {
+                cmd: script.to_string_lossy().into_owned(),
+                args: vec![],
+                stdin_payload: Some(b"synthetic input".to_vec()),
+                cleanup_path: None,
+            },
+            Some(dir.path()),
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(result.starts_with("agent_timeout:"));
+        assert!(result.contains("cause is unknown"));
+        assert!(result.contains("0 stdout bytes, 0 stderr bytes"));
+        assert!(!result.contains("usual cause") && !result.contains("give it"));
     }
 
     #[test]

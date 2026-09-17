@@ -1153,6 +1153,179 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires GEMINI_API_KEY and MINUTES_SCREEN_FIXTURE_PNG (synthetic image only)"]
+    fn live_visible_thread_interpretation_smoke() {
+        let image = std::fs::read(std::env::var("MINUTES_SCREEN_FIXTURE_PNG").expect(
+            "generate the synthetic image with scripts/fixtures/voice-thread-fixture.swift",
+        ))
+        .unwrap();
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.screen_on_request = true;
+        config.voice_live.persona = "morris".into();
+        config.voice_live.voice_name = "Kore".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let setup = SessionSetup {
+            model: config.voice_live.model.clone(),
+            thinking_level: config.voice_live.thinking_level.clone(),
+            api_key: crate::voice_live::api_key(&config).unwrap(),
+            system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+            function_declarations: tools.declarations(),
+            language: "en-US".into(),
+            voice_name: "Kore".into(),
+            manual_activity: true,
+            proactive_audio: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        let client = LiveClient::connect(&setup).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut captures = 0;
+        let mut image_due = None;
+        let mut image_sent = false;
+        let mut replies = [String::new(), String::new()];
+        let mut phase = 0;
+        let mut completed = false;
+        while std::time::Instant::now() < deadline {
+            if image_due.is_some_and(|due| std::time::Instant::now() >= due) {
+                client
+                    .send_image(&image, "image/png", super::super::session::SCREEN_CAPTION)
+                    .unwrap();
+                image_due = None;
+                image_sent = true;
+            }
+            match client.inbox.recv_timeout(Duration::from_millis(50)) {
+                Ok(ServerEvent::SetupComplete) => client
+                    .send_text_turn("Can you tell what's going on in this message thread?")
+                    .unwrap(),
+                Ok(ServerEvent::ToolCall(calls)) => {
+                    for call in calls {
+                        assert_eq!(
+                            call.name, "look_at_screen",
+                            "no real tool execution; unexpected call: {}",
+                            call.name
+                        );
+                        captures += 1;
+                        assert_eq!(captures, 1, "duplicate capture instead of waiting or interpreting existing evidence");
+                        client
+                            .send_tool_response(
+                                &call,
+                                &json!({"note": super::super::tools::SCREEN_DELIVERY_NOTE})
+                                    .to_string(),
+                                "SILENT",
+                            )
+                            .unwrap();
+                        // Match the host's separate receipt/image ordering, including its delay.
+                        image_due = Some(std::time::Instant::now() + Duration::from_millis(800));
+                    }
+                }
+                Ok(ServerEvent::OutputTranscript(text)) => replies[phase].push_str(&text),
+                // A tool-call turn can finish after the image was sent. Do not
+                // mistake its pre-image acknowledgment for the image answer.
+                Ok(ServerEvent::TurnComplete)
+                    if image_sent
+                        && [
+                            "robin", "casey", "place", "location", "venue", "book", "where",
+                        ]
+                        .iter()
+                        .any(|word| replies[phase].to_lowercase().contains(word)) =>
+                {
+                    if phase == 0 {
+                        phase = 1;
+                        client
+                            .send_text_turn("Yeah, but you can't reason about that.")
+                            .unwrap();
+                    } else {
+                        completed = true;
+                        break;
+                    }
+                }
+                Ok(ServerEvent::Error(e) | ServerEvent::Closed(e)) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        client.close();
+        println!(
+            "VISIBLE_THREAD captures={captures} initial={} repair={}",
+            replies[0], replies[1]
+        );
+        assert!(completed, "two spoken answers were not completed");
+        assert_eq!(captures, 1);
+        for reply in &replies {
+            let lower = reply.to_lowercase();
+            assert!(
+                !lower.contains("don't have access") && !lower.contains("/approve"),
+                "{reply}"
+            );
+            assert!(
+                !lower.contains("actually, i can")
+                    && !lower.contains("extended thinking capabilities"),
+                "{reply}"
+            );
+            assert!(
+                lower.contains("place")
+                    || lower.contains("location")
+                    || lower.contains("venue")
+                    || lower.contains("book")
+                    || lower.contains("where"),
+                "missing actionable interpretation: {reply}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY; checks first-tool routing only, never executes tools"]
+    fn live_research_before_artifact_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.html_prototypes = true;
+        config.voice_live.voice_name = "Kore".into();
+        config.voice_live.persona = "morris".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        for request in [
+            "How would you define popular mainstream taste in erotica in 2026?",
+            "Can you create a reading-list artifact of reputable scholarly resources on erotic romance audiences, representation and consent?",
+        ] {
+            let setup = SessionSetup {
+                model: config.voice_live.model.clone(), thinking_level: config.voice_live.thinking_level.clone(),
+                api_key: crate::voice_live::api_key(&config).unwrap(),
+                system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+                function_declarations: tools.declarations(), language: "en-US".into(),
+                voice_name: "Kore".into(), manual_activity: true, proactive_audio: false,
+                start_sensitivity: String::new(), end_sensitivity: String::new(), resume_handle: None,
+            };
+            let client = LiveClient::connect(&setup).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut researched = false;
+            let mut speech = String::new();
+            while std::time::Instant::now() < deadline {
+                match client.inbox.recv_timeout(Duration::from_millis(100)) {
+                    Ok(ServerEvent::SetupComplete) => client.send_text_turn(request).unwrap(),
+                    Ok(ServerEvent::OutputTranscript(text)) => speech.push_str(&text),
+                    Ok(ServerEvent::ToolCall(calls)) => {
+                        assert!(!calls.is_empty());
+                        for call in calls {
+                            assert_eq!(call.name, "research_public", "must research before analysis or artifact creation");
+                            researched = true;
+                        }
+                        break;
+                    }
+                    Ok(ServerEvent::Error(e) | ServerEvent::Closed(e)) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            client.close();
+            assert!(researched, "no research call; speech={speech}");
+            println!("RESEARCH_FIRST request={request}; speech={speech}");
+        }
+    }
+
+    #[test]
     fn compound_status_is_decoded_after_utterance_completion() {
         let events = decode_events(
             &json!({"serverContent":{"turnComplete":true},"interactionStatus":"IN_PROGRESS"})

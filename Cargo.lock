@@ -4141,6 +4141,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-audio-toolbox",
  "objc2-av-foundation",
+ "objc2-core-audio-types",
  "objc2-foundation",
  "ort",
  "pyannote-rs",

@@ -245,6 +245,26 @@ impl LiveClient {
         self.send_json(client_image_json(bytes, mime, caption))
     }
 
+    /// Bind the image to its function response instead of racing two turns.
+    pub fn send_screen_result(
+        &self,
+        call: &FunctionCall,
+        result: &str,
+        bytes: &[u8],
+        caption: &str,
+    ) -> Result<(), VoiceLiveError> {
+        let mut receipt = completed_tool_result(call, result);
+        receipt["screen"] = json!({"$ref":"screen.png"});
+        receipt["caption"] = json!(caption);
+        let mut response = self
+            .profile
+            .function_response(&call.id, &call.name, receipt, "WHEN_IDLE")
+            .map_err(VoiceLiveError::Connect)?;
+        response["parts"] = json!([{"inlineData":{"mimeType":"image/png","data":B64.encode(bytes),"displayName":"screen.png"}}]);
+        response["willContinue"] = json!(false);
+        self.send_json(json!({"toolResponse":{"functionResponses":[response]}}))
+    }
+
     /// Manual voice activity markers (push-to-talk mode only).
     pub fn activity_start(&self) -> Result<(), VoiceLiveError> {
         self.send_json(json!({ "realtimeInput": { "activityStart": {} } }))
@@ -280,7 +300,12 @@ impl LiveClient {
     ) -> Result<(), VoiceLiveError> {
         let mut response = self
             .profile
-            .function_response(&call.id, &call.name, json!(result), scheduling)
+            .function_response(
+                &call.id,
+                &call.name,
+                completed_tool_result(call, result),
+                scheduling,
+            )
             .map_err(VoiceLiveError::Connect)?;
         response["willContinue"] = json!(false);
         self.send_json(json!({ "toolResponse": { "functionResponses": [response] }}))
@@ -548,6 +573,20 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
 /// tool call without it and only saw the frame on the following turn. Waiting
 /// longer did not help, because the frame was not part of the turn being
 /// generated at all.
+fn completed_tool_result(call: &FunctionCall, result: &str) -> Value {
+    let result = serde_json::from_str::<Value>(result).unwrap_or_else(|_| json!({"text": result}));
+    let state = if result.get("error").is_some() {
+        "Failed"
+    } else if result["cancelled"] == true || result["state"] == "Cancelled" {
+        "Cancelled"
+    } else if result["state"] == "FinishedAfterCancellation" {
+        "FinishedAfterCancellation"
+    } else {
+        "Completed"
+    };
+    json!({"job_id":call.id,"tool":call.name,"state":state,"finished":true,"completion_scope":"This tool call finished. Whether an action occurred is specified by result; a proposal is not execution, and a cancellation request is not a stopped job.","result":result})
+}
+
 fn client_image_json(bytes: &[u8], mime: &str, caption: &str) -> Value {
     json!({ "clientContent": {
         "turns": [{ "role": "user", "parts": [
@@ -578,6 +617,90 @@ fn redact_key(message: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_receipt_is_structured_and_overrides_running_state() {
+        let call = FunctionCall {
+            id: "job-1".into(),
+            name: "build_prototype".into(),
+            args: json!({}),
+        };
+        let receipt = completed_tool_result(&call, r#"{"prototype_id":"a","opened":true}"#);
+        assert_eq!(receipt["state"], "Completed");
+        assert_eq!(receipt["finished"], true);
+        assert_eq!(receipt["result"]["opened"], true);
+        assert_eq!(
+            completed_tool_result(&call, r#"{"error":"agent_timeout: timed out"}"#)["state"],
+            "Failed"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY; synthetic native Live control and completion routing"]
+    fn live_control_and_completion_routing() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.html_prototypes = true;
+        config.voice_live.model = "gemini-3.8-live-extended-thinking".into();
+        config.voice_live.voice_name = "Zephyr".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let setup = SessionSetup {
+            model: config.voice_live.model.clone(),
+            thinking_level: config.voice_live.thinking_level.clone(),
+            api_key: crate::voice_live::api_key(&config).unwrap(),
+            system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+            function_declarations: tools.declarations(),
+            language: "en-US".into(),
+            voice_name: "Zephyr".into(),
+            manual_activity: true,
+            proactive_audio: false,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        let client = LiveClient::connect(&setup).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        let mut phase = 0;
+        let mut status_read = false;
+        let mut speech = String::new();
+        while std::time::Instant::now() < deadline {
+            match client.inbox.recv_timeout(Duration::from_millis(100)) {
+                Ok(ServerEvent::SetupComplete)=>client.send_text_turn("Build a small interactive revenue simulator with a revenue slider. Please build it now.").unwrap(),
+                Ok(ServerEvent::ToolCall(calls))=>for call in calls {
+                    let result=match call.name.as_str() {
+                        "build_prototype" if phase==0=> { client.send_tool_progress(&call).unwrap(); phase=1;json!({"prototype_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","opened":true,"live_controls":true,"title":"Revenue simulator","generated":true,"tested":false}) },
+                        "inspect_prototype" if phase==2=> { phase=3;json!({"prototype_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","snapshot_id":"fixture:1","controls":[{"control_id":"control-1","label":"Revenue","type":"range","value":"25","min":"0","max":"100","step":"5"}],"output":"50"}) },
+                        "set_prototype_control" if phase==3=> { assert_eq!(call.args["snapshot_id"],"fixture:1");assert_eq!(call.args["control_id"],"control-1");assert_eq!(call.args["value"],"75"); phase=4;json!({"changed":{"before":"25","after":"75"},"output":"150","snapshot_id":"fixture:2","undo_id":"change-1"}) },
+                        "get_status" if phase>=1=> { if phase>=4 {status_read=true;phase=6;} json!({"active_jobs":[],"active_job_count":0,"jobs":[{"tool":"build_prototype","state":"Completed","prototype_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","opened":true,"live_controls":true}],"note":"The prototype has finished and its live controls can be inspected now. No jobs are running."}) },
+                        other=>panic!("Unexpected tool {other} in phase {phase}; {speech}"),
+                    };
+                    client.send_tool_response(&call,&result.to_string(),"WHEN_IDLE").unwrap();
+                },
+                Ok(ServerEvent::OutputTranscript(t))=>speech.push_str(&t),
+                Ok(ServerEvent::TurnComplete) if phase==1=> { phase=2; client.send_text_turn("Set the Revenue slider in that prototype to 75, without rebuilding it.").unwrap(); },
+                Ok(ServerEvent::TurnComplete) if phase==4=> {phase=5;speech.clear();client.send_text_turn("What is still running? Is that prototype still building?").unwrap();},
+                Ok(ServerEvent::TurnComplete) if phase==6 && !speech.is_empty()=>break,
+                Ok(ServerEvent::Error(e)|ServerEvent::Closed(e))=>panic!("{e}"),
+                _=>{}
+            }
+        }
+        client.close();
+        assert!(
+            status_read,
+            "No current status read; phase={phase}; {speech}"
+        );
+        let lower = speech.to_lowercase();
+        assert!(
+            lower.contains("nothing")
+                || lower.contains("no tasks")
+                || lower.contains("finished")
+                || lower.contains("complete"),
+            "{speech}"
+        );
+        println!("Native Live control and completion routing passed: {speech}");
+    }
 
     #[test]
     fn an_image_frame_is_an_ordered_turn_not_realtime_media() {
@@ -1264,6 +1387,7 @@ mod tests {
         config.voice_live.enabled = true;
         config.voice_live.allow_cloud = true;
         config.voice_live.screen_on_request = true;
+        config.voice_live.model = "gemini-3.8-live-extended-thinking".into();
         config.voice_live.persona = "morris".into();
         config.voice_live.voice_name = "Kore".into();
         let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
@@ -1285,19 +1409,11 @@ mod tests {
         let client = LiveClient::connect(&setup).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let mut captures = 0;
-        let mut image_due = None;
         let mut image_sent = false;
         let mut replies = [String::new(), String::new()];
         let mut phase = 0;
         let mut completed = false;
         while std::time::Instant::now() < deadline {
-            if image_due.is_some_and(|due| std::time::Instant::now() >= due) {
-                client
-                    .send_image(&image, "image/png", super::super::session::SCREEN_CAPTION)
-                    .unwrap();
-                image_due = None;
-                image_sent = true;
-            }
             match client.inbox.recv_timeout(Duration::from_millis(50)) {
                 Ok(ServerEvent::SetupComplete) => client
                     .send_text_turn("Can you tell what's going on in this message thread?")
@@ -1312,15 +1428,15 @@ mod tests {
                         captures += 1;
                         assert_eq!(captures, 1, "duplicate capture instead of waiting or interpreting existing evidence");
                         client
-                            .send_tool_response(
+                            .send_screen_result(
                                 &call,
                                 &json!({"note": super::super::tools::SCREEN_DELIVERY_NOTE})
                                     .to_string(),
-                                "SILENT",
+                                &image,
+                                super::super::session::SCREEN_CAPTION,
                             )
                             .unwrap();
-                        // Match the host's separate receipt/image ordering, including its delay.
-                        image_due = Some(std::time::Instant::now() + Duration::from_millis(800));
+                        image_sent = true;
                     }
                 }
                 Ok(ServerEvent::OutputTranscript(text)) => replies[phase].push_str(&text),

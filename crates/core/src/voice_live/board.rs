@@ -34,7 +34,7 @@ struct State {
     selected: Option<(String, u64, Instant)>,
 }
 
-fn random_id() -> Result<String> {
+pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
     Ok(bytes.iter().map(|v| format!("{v:02x}")).collect())
@@ -235,6 +235,10 @@ impl Boards {
                 serde_json::from_value(args["change"].clone())
                     .map_err(|e| format!("Invalid board change: {e}"))?,
             ),
+            "select_decision_card" => state.select(
+                args["revision"].as_u64().ok_or("revision is required")?,
+                args["card_id"].as_str().ok_or("card_id is required")?,
+            ),
             _ => Err("Unknown board operation".into()),
         }
     }
@@ -275,14 +279,14 @@ impl Drop for Preview {
         }
     }
 }
-fn header<'a>(request: &'a Request, key: &str) -> Option<&'a str> {
+pub(super) fn header<'a>(request: &'a Request, key: &str) -> Option<&'a str> {
     request
         .headers()
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(key))
         .map(|h| h.value.as_str())
 }
-fn authorized(request: &Request, origin: &str, token: &str) -> bool {
+pub(super) fn authorized(request: &Request, origin: &str, token: &str) -> bool {
     header(request, "Host") == origin.strip_prefix("http://")
         && header(request, "X-Minutes-Token") == Some(token)
         && (request.method() == &Method::Get || header(request, "Origin") == Some(origin))
@@ -366,6 +370,31 @@ mod tests {
             )
             .unwrap();
         let id = created["board_id"].as_str().unwrap();
+        let selected = boards
+            .execute_at(
+                "select_decision_card",
+                &json!({"board_id":id,"revision":1,"card_id":"card-4"}),
+                root,
+                false,
+            )
+            .unwrap();
+        assert_eq!(selected["selected_card_id"], "card-4");
+        assert!(boards
+            .execute_at(
+                "select_decision_card",
+                &json!({"board_id":id,"revision":2,"card_id":"card-4"}),
+                root,
+                false
+            )
+            .is_err());
+        assert!(boards
+            .execute_at(
+                "select_decision_card",
+                &json!({"board_id":id,"revision":1,"card_id":"missing"}),
+                root,
+                false
+            )
+            .is_err());
         let args = json!({"board_id":id,"revision":1,"change":{"operation":"rename_column","column_id":"column-1","title":"Today"}});
         let changed = boards
             .execute_at("edit_decision_board", &args, root, false)

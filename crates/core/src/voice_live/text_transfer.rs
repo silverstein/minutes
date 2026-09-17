@@ -100,7 +100,13 @@ pub(super) fn execute(
     match name {
         "read_clipboard_text" => clipboard_read(),
         "copy_text" => clipboard_write(field("text")?),
-        "read_selected_text" => super::selection::capture(Some(field("target_app")?)),
+        "read_selected_text" => super::selection::capture(Some(field("target_app")?)).map_err(|error| {
+            let code=if error.starts_with("No selected text") { "selection_not_exposed" }
+                else if error.contains("Accessibility permission") { "selection_permission_required" }
+                else if error.contains("Secure fields") { "selection_secure_field" }
+                else { "selection_unavailable" };
+            format!("{code}: {error} No whole-document or clipboard fallback was performed. Do not infer a specific app defect from this failure. Offer explicit clipboard sharing or ask for a supported editable selection; do not retry unchanged.")
+        }),
         "paste_text" => {
             let mode = args
                 .get("mode")

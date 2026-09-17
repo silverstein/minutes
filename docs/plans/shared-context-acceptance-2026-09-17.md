@@ -212,3 +212,22 @@ not a second checklist whose rows can be declared complete from code presence.
    tranche is not a main-branch merge, a desktop release or user acceptance.
 
 Do not mark the epic complete while any required behavior above lacks a receipt.
+
+### Default-branch landing qualification, 2026-09-17
+
+The repository's verified default branch is `main`, not `master`. Config
+preservation PR #1023 merged there as `cca94d9290ad90447d5000de2e1f652e1735693f`.
+The publication branch incorporates that change; the only merge conflict was
+the generated site test count, regenerated from the combined source (3295).
+Combined Mac qualification passed 66 configuration tests, 178 voice tests and
+the changed-file formatting check (42 Rust files). The 29 optional/live/native
+tests remain excluded from the ordinary voice suite; explicit native receipts
+above are separate.
+
+PR #1022 is the source landing vehicle for the audio repair, bounded shared
+context, editable artifacts, cancellable jobs and durable voice work. Merging
+that implementation does not close the acceptance epic or retrofit either
+installed desktop bundle. The existing terminal build remains available for
+testing without waiting on remote CI. Browser diversity, acoustic playback and
+route changes, real prototype redirect, outward confirmation, signed desktop
+qualification and the combined hands-free rehearsal remain open as listed above.

@@ -20,8 +20,7 @@ use serde::Serialize;
 use super::continuity::HostResult;
 use crate::config::Config;
 use crate::interaction::authority::Proposal;
-#[cfg(test)]
-use crate::interaction::calls::Calls;
+use crate::interaction::calls::{CallState, Calls};
 use crate::interaction::live::{LiveActivity, ProviderActivity};
 use crate::streaming::{AudioChunk, AudioStream};
 
@@ -572,6 +571,32 @@ enum DispatchOrigin {
 struct QueuedCall {
     call: FunctionCall,
     origin: DispatchOrigin,
+    music_epoch: u64,
+}
+
+// A stop/pause invalidates autoplay for requests already admitted, including
+// results waiting between the worker and the audio thread. New requests opt in.
+#[derive(Default)]
+struct MusicAutoplay {
+    epoch: u64,
+}
+
+impl MusicAutoplay {
+    fn control(&mut self, action: &str) -> bool {
+        if matches!(action, "stop" | "pause") {
+            self.epoch += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn permits(&self, epoch: u64, calls: &Calls, id: &str) -> bool {
+        epoch == self.epoch
+            && calls
+                .cancellation(id)
+                .is_some_and(|flag| !flag.load(Ordering::SeqCst))
+    }
 }
 
 impl QueuedCall {
@@ -652,7 +677,8 @@ impl Runner {
         let calls = Arc::clone(&self.tools.calls);
         let mut activity =
             LiveActivity::new(self.setup.profile().expect("validated before connecting"));
-        let (audio_out, audio_in) = unbounded::<(String, Vec<u8>)>();
+        let mut music_autoplay = MusicAutoplay::default();
+        let (audio_out, audio_in) = unbounded::<(String, u64, Vec<u8>)>();
         let workers: Vec<_> = channels.into_iter().enumerate().map(|(lane, (_, tool_rx))| {
             let tools = Arc::clone(&self.tools);
             let calls = Arc::clone(&calls);
@@ -781,9 +807,6 @@ impl Runner {
                         // Close the call silently so it produces no speech of
                         // its own, then send the frame as the turn the model
                         // actually answers.
-                        if let Some(pcm) = &outcome.audio {
-                            audio_out.send((call.id.clone(), pcm.clone())).ok();
-                        }
                         let media = outcome.image.is_some();
                         let this_scheduling = if media { "SILENT" } else { &scheduling };
                         let delivery = if let Some(image) = outcome.image.as_ref().filter(|_| !host_origin) {
@@ -795,6 +818,11 @@ impl Runner {
                         } else {
                             client.send_tool_response(&call, &outcome.text, this_scheduling)
                         };
+                        // Queue the generation receipt first, so a later host
+                        // playback/withheld update cannot be overwritten by it.
+                        if let Some(pcm) = &outcome.audio {
+                            audio_out.send((call.id.clone(), queued.music_epoch, pcm.clone())).ok();
+                        }
                         if let Some(tx) = &log_tx {
                             let _ = tx.send(serde_json::json!({"event":"tool_delivery_enqueued","call_id":call.id,"tool":call.name,"ok":delivery.is_ok(),"scope":"queued to provider socket, not proof of spoken acknowledgement"}).to_string());
                         }
@@ -967,19 +995,25 @@ impl Runner {
                                     let started = Instant::now();
                                     self.log_line(serde_json::json!({"event":"tool_started","call_id":id,"tool":call.name}).to_string());
                                     let action = call.args["action"].as_str().unwrap_or("");
+                                    let suppress_autoplay = music_autoplay.control(action);
+                                    let pending_music = !audio_in.is_empty() || calls.lock().unwrap_or_else(|p| p.into_inner()).snapshots().iter().any(|(_, name, state, _)| {
+                                        name == "make_music" && matches!(state, CallState::Queued | CallState::Running | CallState::CancelRequested)
+                                    });
                                     let result = self.audio.control_music(action).or_else(|| {
+                                        (suppress_autoplay && pending_music).then_some(Ok("Pending generated music will not start playing. Generation may still finish and be saved."))
+                                    }).or_else(|| {
                                         (!self.tools.config.voice_live.desktop_control)
                                             .then_some(Err("No generated music is available in this session."))
                                     });
                                     if let Some(result) = result {
                                         let error = result.is_err();
                                         let receipt = match result {
-                                            Ok(message) => serde_json::json!({"ok":true,"player":"minutes","result":message}),
+                                            Ok(message) => serde_json::json!({"ok":true,"player":"minutes","result":message,"earlier_music_autoplay_suppressed":suppress_autoplay,"note":if suppress_autoplay {"Earlier music requests will not start automatically. This stops/pauses playback, not remote generation; unfinished generation may still finish and be saved."}else{"Playback command applies to music already loaded in this session."}}),
                                             Err(message) => serde_json::json!({"error":message}),
                                         }.to_string();
                                         let mut registry = calls.lock().unwrap_or_else(|p| p.into_inner());
                                         registry.begin(&id);
-                                        registry.finish(&id);
+                                        registry.finish_outcome(&id, error, false);
                                         drop(registry);
                                         self.emit(VoiceLiveEvent::ToolResult { name: call.name.clone(), ms: 0, chars: receipt.len(), error });
                                         self.log_line(format!("  -> generated music control: {receipt}"));
@@ -988,7 +1022,7 @@ impl Runner {
                                         continue;
                                     }
                                 }
-                                let queued = QueuedCall { call, origin: DispatchOrigin::Model };
+                                let queued = QueuedCall { call, origin: DispatchOrigin::Model, music_epoch: music_autoplay.epoch };
                                 if let Err(rejected) = tool_txs[queued.lane()].try_send(queued) {
                                     calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
                                     let call = rejected.into_inner().call;
@@ -1081,7 +1115,12 @@ impl Runner {
                 // Audio a tool produced, queued for the speaker on this thread
                 // because the playback handle lives here.
                 recv(audio_in) -> pcm => {
-                    if let Ok((job_id, pcm)) = pcm {
+                    if let Ok((job_id, epoch, pcm)) = pcm {
+                        if !music_autoplay.permits(epoch, &calls.lock().unwrap_or_else(|p| p.into_inner()), &job_id) {
+                            self.log_line(serde_json::json!({"event":"music_playback_withheld","call_id":job_id,"reason":"stopped_paused_or_cancelled"}).to_string());
+                            let _ = self.client().send_context_update(&format!("Host playback state: music for job {job_id} finished generation, but autoplay was withheld after stop, pause or cancellation. It is not playing. Do not start it again without a new user request. This is state, not a new request."));
+                            continue;
+                        }
                         // Checked again here, not only where it was generated:
                         // a piece can wait in this queue while a recording
                         // starts, and music in the transcript is the one thing
@@ -1136,6 +1175,7 @@ impl Runner {
                                         if !registered || tool_txs[0].try_send(QueuedCall {
                                             call: FunctionCall { id: call_id.clone(), name: "host-approved action".into(), args: serde_json::json!({}) },
                                             origin: DispatchOrigin::Approved(id),
+                                            music_epoch: music_autoplay.epoch,
                                         }).is_err() {
                                             calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&call_id);
                                             if let Ok(mut host) = self.tools.continuity.lock() { host.reject(); }
@@ -1144,6 +1184,7 @@ impl Runner {
                                     }
                                     Ok(HostResult::Cancel) => {
                                         calls.lock().unwrap_or_else(|p| p.into_inner()).cancel_all();
+                                        music_autoplay.control("stop");
                                         self.audio.control_music("stop");
                                         self.audio.flush(); activity.playback_stopped();
                                         self.emit(VoiceLiveEvent::Local { text: "Queued calls cancelled. Running work may still finish; no rollback is implied.".into() });
@@ -1161,6 +1202,7 @@ impl Runner {
                                             if !registered || tool_txs[0].try_send(QueuedCall {
                                                 call: FunctionCall { id: id.clone(), name: "user-shared selection".into(), args: serde_json::json!({}) },
                                                 origin: DispatchOrigin::Selection(bundle),
+                                                music_epoch: music_autoplay.epoch,
                                             }).is_err() {
                                                 calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
                                                 self.emit(VoiceLiveEvent::Local { text: "Selection was not queued; nothing captured or shared.".into() });
@@ -1394,6 +1436,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stop_and_pause_block_late_music_but_not_a_new_request() {
+        for action in ["stop", "pause"] {
+            let mut autoplay = MusicAutoplay::default();
+            let mut calls = Calls::default();
+            calls.register("old").unwrap();
+            calls.begin("old");
+            let old_epoch = autoplay.epoch;
+            assert!(autoplay.control(action));
+            assert!(calls.finish("old"));
+            assert!(!autoplay.permits(old_epoch, &calls, "old"));
+            // Resume must not resurrect generation suppressed by an earlier stop.
+            assert!(!autoplay.control("play"));
+            assert!(!autoplay.permits(old_epoch, &calls, "old"));
+            calls.register("new").unwrap();
+            calls.begin("new");
+            calls.finish("new");
+            assert!(autoplay.permits(autoplay.epoch, &calls, "new"));
+        }
+    }
+
+    #[test]
+    fn completed_music_waiting_in_delivery_queue_honors_cancellation() {
+        let autoplay = MusicAutoplay::default();
+        let mut calls = Calls::default();
+        calls.register("music").unwrap();
+        calls.begin("music");
+        assert!(calls.finish("music"));
+        let (tx, rx) = bounded(1);
+        tx.send(("music", autoplay.epoch, vec![0u8, 0])).unwrap();
+        // Completion of generation is not proof that playback already started.
+        calls.cancel("music");
+        let (id, epoch, _) = rx.recv().unwrap();
+        assert!(!autoplay.permits(epoch, &calls, id));
+        assert!(!autoplay.permits(epoch, &calls, "unknown"));
+    }
+
+    #[test]
+    fn stop_after_music_completion_blocks_queued_playback_only() {
+        let mut autoplay = MusicAutoplay::default();
+        let mut calls = Calls::default();
+        for id in ["music", "board"] {
+            calls.register(id).unwrap();
+            calls.begin(id);
+        }
+        let (tx, rx) = bounded(1);
+        assert!(calls.finish("music"));
+        tx.send(("music", autoplay.epoch)).unwrap();
+        assert!(!autoplay.control("invalid"));
+        assert!(autoplay.permits(autoplay.epoch, &calls, "music"));
+        autoplay.control("stop");
+        let (id, epoch) = rx.recv().unwrap();
+        assert!(!autoplay.permits(epoch, &calls, id));
+        assert!(calls.finish("board"));
+        assert!(!calls.cancellation("board").unwrap().load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn timestamped_events_preserve_duration_and_private_boundaries() {
         let event = stamp_log(
             r#"{"event":"tool_result","elapsed_ms":97}"#,
@@ -1474,6 +1573,7 @@ mod tests {
                 args: serde_json::json!({}),
             },
             origin: DispatchOrigin::Model,
+            music_epoch: 0,
         }
     }
 

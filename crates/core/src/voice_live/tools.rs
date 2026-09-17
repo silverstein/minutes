@@ -611,7 +611,7 @@ impl ToolContext {
                 let id=args["job_id"].as_str().ok_or("job_id is required")?;
                 let state=self.calls.lock().map_err(|_|"Job state unavailable")?.cancel(id).ok_or("Unknown job; read get_status")?;
                 let active=matches!(state,crate::interaction::calls::CallState::CancelRequested|crate::interaction::calls::CallState::Cancelled);
-                Ok(json!({"job_id":id,"state":format!("{state:?}"),"cancellation_requested":active,"note":if active {"Cancellation requested for this job only. CancelRequested is not stopped. External effects are not undone."}else{"This job already finished; no cancellation was performed and its effects were not undone."}}))
+                Ok(json!({"job_id":id,"state":format!("{state:?}"),"cancellation_requested":active,"note":if active {"Cancellation requested for this job only. CancelRequested is not stopped. External effects are not undone."}else{"This job already finished; its execution and external effects were not undone. Any generated music still waiting for host playback is withheld; use control_music to stop audio already playing."}}))
             }
             "research_public" => {
                 let answer = super::research::research(cfg, args)?;
@@ -636,7 +636,10 @@ impl ToolContext {
                 result["opened"] = json!(opened.as_ref().is_ok_and(|v| *v));
                 result["live_controls"] = json!(opened.is_ok());
                 result["note"] = json!("Generated and saved a new version, not independently tested. If opened=true, the live sandboxed preview supports inspect_prototype and set_prototype_control without rebuilding. Changes affect the current preview only, not the saved HTML.");
-                if let Err(error) = opened { result["preview_error"] = json!(error); }
+                if let Err(error) = opened {
+                    if error.starts_with("agent_cancelled:") { return Err(error); }
+                    result["preview_error"] = json!(error);
+                }
                 Ok(result)
             }
             "list_prototypes" | "inspect_prototype" | "set_prototype_control" | "undo_prototype_control" => {

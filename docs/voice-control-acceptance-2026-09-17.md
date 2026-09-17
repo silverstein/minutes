@@ -143,3 +143,33 @@ documents. The daily terminal profile was opted in after explicit user consent.
 - Focused voice suite: 165 passed, 27 optional/live tests skipped at this point.
   Core library Clippy with voice-live and warnings denied passed.
 - Configuration suite: 66 passed. Local timing-report self-test passed.
+
+## Late-Completion Cancellation Follow-Up
+
+Music requests now carry a session playback generation. Stop or pause invalidates
+autoplay for earlier requests, including completed audio waiting for delivery to
+the player. A new music request can still play normally; resuming an existing
+track does not resurrect a suppressed request. The delivery boundary also checks
+the exact job's cancellation token. `/cancel` invalidates queued autoplay as well
+as cancelling work. This does not cancel an already-sent remote music request or
+claim a refund: generation may finish and save its file without playing it.
+
+The host logs `music_playback_withheld` and tells the conversational model when a
+late result was not played. Stop/pause during generation is handled by Minutes
+even if no generated track is loaded yet. Errors from direct music controls are
+recorded as failed jobs, not completed successes.
+
+Preview opening checks cancellation after acquiring the artifact lock and again
+after loading HTML and starting the preview server. A cancelled preview is not
+registered or opened; the unused server is dropped. Once an OS browser-open
+request has actually been issued, cancellation does not claim to undo it.
+
+Regression cases cover stop/pause before completion, stop after completion while
+audio is queued, per-job cancellation at delivery, new music after stop,
+unrelated board completion, and cancelled preview registration. These are
+deterministic host checks, not a new microphone/AirPods or foreground-app test.
+
+Verification: 169 voice tests passed (27 optional/live tests skipped), core
+voice-live library Clippy passed with warnings denied, and the terminal CLI
+build passed. The desktop app bundle and audio-device configuration were not
+changed during this follow-up.

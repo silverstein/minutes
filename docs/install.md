@@ -233,8 +233,8 @@ minutes setup --diarization
 # Build the plugin, then the CLI, then copy the plugin where the CLI looks:
 #   (cd crates/sherpa-plugin && cargo build --release)
 #   cargo build --release -p minutes-cli --features engine-sherpa,metal
-#   mkdir -p ~/.minutes/lib && \
-#     cp crates/sherpa-plugin/target/release/libminutes_sherpa.dylib ~/.minutes/lib/
+#     cp crates/sherpa-plugin/target/release/libminutes_sherpa.dylib ~/.local/bin/
+#   (beside the minutes binary, wherever you installed it)
 # Then enable in one command:
 minutes setup --sherpa        # downloads the int8 ONNX model (~670MB) + sets engine = "sherpa"
 # If you select sherpa without the feature, model, or plugin, transcription auto-falls-back

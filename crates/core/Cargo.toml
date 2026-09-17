@@ -49,7 +49,7 @@ engine-sherpa = ["dep:libloading", "whisper"]
 # Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
 # Implies `streaming` for the 16 kHz mic stream. Blocking WebSocket (tungstenite +
 # rustls) so core stays tokio-free. Off by default: it is a cloud provider.
-voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:tiny_http"]
+voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:objc2-core-audio-types", "dep:tiny_http"]
 
 [dependencies]
 tiny_http = { version = "0.12", optional = true }
@@ -100,6 +100,7 @@ libc = "0.2"
 # Voice Live echo cancellation through the VoiceProcessingIO unit (already in the
 # tree via cpal). Optional: only the voice-live feature pulls it in.
 coreaudio-rs = { version = "0.14", optional = true }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"], optional = true }
 # Only for the AudioUnit property constants coreaudio-rs does not re-export.
 # Already in the tree transitively via cpal; declared here so voice-live builds explicitly.
 objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [

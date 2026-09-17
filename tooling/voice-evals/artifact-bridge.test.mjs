@@ -57,3 +57,62 @@ test('artifact inspection pages controls and exact option values without changin
   assert.equal(result.controls[0].control_id, 'control-5');
   assert.equal(result.controls[0].value, 'option-4-0');
 });
+
+test('Unicode-heavy mutation receipts pass through the actual host byte boundary', { timeout: 3000 }, async () => {
+  const controls = Array.from({ length: 4 }, (_, i) => ({
+    tagName: 'SELECT', value: '語'.repeat(255) + '0', id: `select-${i}`, labels: [],
+    isConnected: true, dispatchEvent: () => {}, getClientRects: () => [1],
+    getAttribute: key => key === 'aria-label' ? '語'.repeat(180) : null,
+    options: Array.from({ length: 4 }, (_, j) => ({ value: '語'.repeat(255) + j, label: '語'.repeat(180), disabled: false })),
+  }));
+  let bridgeHandler, hostHandler, poll, command, delivered, rawBytes;
+  let resolveReceipt;
+  const parent = { postMessage: async data => {
+    rawBytes = new TextEncoder().encode(JSON.stringify({ id: data.id, result: data.result })).length;
+    await hostHandler({ source: frame.contentWindow, data });
+  } };
+  const frame = {
+    contentWindow: { postMessage: data => { void bridgeHandler({ source: parent, data }); } },
+    addEventListener: (_, callback) => { poll = callback; },
+  };
+  class Select {}
+  Object.defineProperty(Select.prototype, 'value', { set(value) { this.value = value; } });
+  vm.runInNewContext(readFileSync(new URL('../../crates/core/src/voice_live/artifact_bridge.js', import.meta.url), 'utf8'), {
+    crypto: { randomUUID: () => 'fixture-instance' }, parent, HTMLSelectElement: Select, Event: class {}, setTimeout,
+    document: { querySelectorAll: selector => selector.startsWith('input') ? controls : Array.from({ length: 12 }, () => ({ textContent: '語'.repeat(180) })), getElementById: () => null },
+    getComputedStyle: () => ({ visibility: 'visible' }),
+    addEventListener: (_, callback) => { bridgeHandler = callback; },
+  });
+  vm.runInNewContext(readFileSync(new URL('../../crates/core/src/voice_live/artifact_host.js', import.meta.url), 'utf8'), {
+    location: { hash: '#fixture-token' }, history: { replaceState: () => {} },
+    document: { querySelector: () => frame }, TextEncoder, setTimeout: () => {},
+    btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    addEventListener: (_, callback) => { hostHandler = callback; },
+    fetch: async (url, init) => {
+      if (url === '/command') return { ok: true, json: async () => ({ id: 'request-id', command }) };
+      assert.equal(url, '/result');
+      const bytes = Buffer.from(init.headers['X-Minutes-Result'], 'base64');
+      assert.ok(bytes.length <= 34000);
+      assert.ok(init.headers['X-Minutes-Result'].length <= 48000);
+      delivered = JSON.parse(bytes.toString('utf8')).result;
+      resolveReceipt();
+      return { ok: true };
+    },
+  });
+  const request = async next => {
+    command = next;
+    const received = new Promise(resolve => { resolveReceipt = resolve; });
+    await poll();
+    await received;
+    return delivered;
+  };
+  const initial = await request({ operation: 'inspect', control_id: 'control-4' });
+  const desired = '語'.repeat(255) + '1';
+  const changed = await request({ operation: 'set', snapshot_id: initial.snapshot_id, control_id: 'control-4', value: desired });
+  assert.ok(rawBytes > 34000, 'fixture must reproduce the original dropped receipt');
+  assert.equal(changed.changed.after, desired);
+  assert.equal(changed.changed.before, '語'.repeat(255) + '0');
+  assert.equal(changed.transport_shortened, true);
+  assert.ok(changed.undo_id);
+  assert.notEqual(changed.snapshot_id, initial.snapshot_id);
+});

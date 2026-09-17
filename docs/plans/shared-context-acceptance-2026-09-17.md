@@ -249,3 +249,14 @@ pagination, Unicode/escaping, long dropdowns, small budgets and malformed receip
 shapes. The actual JavaScript bridge passes isolated inspection/paging/set/undo
 tests, now invoked by the CI continuity self-test. This is source/fixture proof,
 not a replacement for the pending real-browser and spoken rehearsal.
+
+Follow-up review also reproduced a Unicode-heavy mutation receipt exceeding the
+preview host's byte limit. The host now budgets the UTF-8 envelope, retaining
+snapshot/undo/change metadata and paging controls instead of silently dropping
+the result. A final oversized-identity fallback explicitly reports an unverified
+receipt, not a failed mutation that is safe to repeat. Both actual bridge and
+host scripts pass a synthetic Unicode mutation test that exceeded the previous
+34,000-byte boundary, plus the inspection/paging/set/undo test. These lightweight
+portable tests ran with a 64 MiB Node heap cap while the daily Mac was temporarily
+unreachable. This follow-up still requires CI and installation on that Mac; no
+native or acoustic acceptance is claimed by the portable test.

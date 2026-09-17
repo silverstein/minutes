@@ -1193,7 +1193,7 @@ mod tests {
                         for call in calls {
                             if call.name == "read_selected_text" {
                                 read_selection = true;
-                                client.send_tool_response(&call, r#"{"source":"host_selected_text","bundle_id":"com.apple.Notes","selected_text":"We should schedule fewer meetings to leave more time for focused work."}"#, "INTERRUPT").unwrap();
+                                client.send_tool_response(&call, r#"{"source":"host_selected_text","bundle_id":"com.apple.Notes","selection_id":"fixture-selection-1","selected_text":"We should schedule fewer meetings to leave more time for focused work."}"#, "INTERRUPT").unwrap();
                                 continue;
                             }
                             if call.name == "open_app" {
@@ -1207,6 +1207,7 @@ mod tests {
                                     assert!(read_selection);
                                     assert_eq!(call.args["mode"], "replace_selection");
                                     assert_eq!(call.args["expected_selection"], "We should schedule fewer meetings to leave more time for focused work.");
+                                    assert_eq!(call.args["selection_id"], "fixture-selection-1");
                                 } else {
                                     assert_eq!(call.args["text"], "A better way to work.");
                                 }

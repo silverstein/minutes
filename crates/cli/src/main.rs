@@ -11269,44 +11269,73 @@ life (qmd://life/)
     /// A plain `exit()` here runs `__cxa_finalize`, which tears down ggml's
     /// Metal device while an interrupted transcription may still hold a live
     /// whisper context, and the process dies on SIGABRT instead of exiting.
+    ///
+    /// Works on lines rather than byte offsets: slicing a byte window out of
+    /// UTF-8 source panics if the edge lands mid-character, and this file has
+    /// plenty of non-ASCII in its strings.
     #[test]
     fn every_interrupt_path_skips_cxx_teardown() {
         let source = std::fs::read_to_string(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
             .expect("failed to read main.rs");
+        let lines: Vec<&str> = source.lines().collect();
 
-        // Built from halves so the needle never appears whole in this file.
-        // Spelled literally, the guard matches its own source and then fails
-        // on itself, which is how the first draft of this test behaved.
+        // Needles built from halves so they never appear whole in this file.
+        // Spelled literally, the guard matches its own source and fails on
+        // itself, which is how the first draft of this test behaved.
         let force_quit = format!(
             "{}{}",
             "InterruptAction::ForceExit(code) = ", "handle_graceful_interrupt("
         );
-        let sites: Vec<_> = source.match_indices(force_quit.as_str()).collect();
-        assert!(
-            !sites.is_empty(),
-            "the force-quit interrupt shape moved; this guard needs updating rather than deleting"
-        );
-        for (start, _) in &sites {
-            // The exit call sits a few lines below the match. A window is
-            // enough and does not depend on brace formatting.
-            let window = &source[*start..source.len().min(start + 500)];
-            assert!(
-                window.contains("exit_without_cxx_teardown"),
-                "a force-quit path calls plain exit, which runs C++ static \
-                 destructors while a whisper context may still be live (#998)"
-            );
-        }
-
         let watch_banner = format!("{}{}", "Stopping ", "watcher...");
-        let watch = source
-            .find(watch_banner.as_str())
-            .expect("the watch interrupt handler moved; update this guard");
-        let window = &source[watch..source.len().min(watch + 500)];
-        assert!(
-            window.contains("exit_without_cxx_teardown"),
-            "the watch Ctrl-C handler calls plain exit; this is the exact path \
-             reported in #998 and fixed in #1001"
+        let safe_exit = format!("{}{}", "exit_without_", "cxx_teardown");
+        let plain_exit = format!("{}{}", "std::process::", "exit(");
+
+        // Asserting the exact count, not just "some", is the point. A rename
+        // or a reshaped handler that stops matching would otherwise drop a
+        // call site out of this guard silently, which is the same way #1008
+        // removed them in the first place.
+        let force_quit_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(force_quit.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            force_quit_sites.len(),
+            3,
+            "expected three force-quit interrupt paths (record, dictate, live transcript); \
+             the shape changed, so update this guard deliberately rather than deleting it"
         );
+
+        let watch_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(watch_banner.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            watch_sites.len(),
+            1,
+            "expected exactly one watch interrupt handler; update this guard"
+        );
+
+        // Every one of the four reaches the teardown-skipping exit, and does
+        // not reach a plain exit on the way there.
+        for site in force_quit_sites.into_iter().chain(watch_sites) {
+            let window = &lines[site..lines.len().min(site + 20)];
+            let safe = window.iter().position(|l| l.contains(safe_exit.as_str()));
+            let plain = window.iter().position(|l| l.contains(plain_exit.as_str()));
+            match (safe, plain) {
+                (Some(_), None) => {}
+                (Some(s), Some(p)) if s < p => {}
+                _ => panic!(
+                    "the interrupt path at line {} does not reach {} first; a plain exit here \
+                     runs C++ static destructors while a whisper context may still be live (#998)",
+                    site + 1,
+                    safe_exit
+                ),
+            }
+        }
     }
 
     #[test]
@@ -17715,6 +17744,14 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         |result| {
             if stdout {
                 println!("{}", result.text);
+                // Flush at the write, not at exit. Piped stdout is block
+                // buffered, and a force quit takes `_exit` on macOS, which
+                // discards the buffer: a completed utterance the user already
+                // saw the app finish would never reach the pipe. Flushing here
+                // also makes `minutes dictate --stdout | ...` stream per
+                // utterance instead of arriving in one lump at the end.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
             }
             if let Some(ref path) = result.file_path {
                 eprintln!("[minutes] Saved: {}", path.display());

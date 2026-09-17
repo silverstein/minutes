@@ -103,9 +103,10 @@ mod tests {
         )
         .is_err());
         let root = tempfile::tempdir().unwrap();
-        let result = create_at(&args, &sources, root.path(), false).unwrap();
+        let private_root = root.path().join("reading-lists");
+        let result = create_at(&args, &sources, &private_root, false).unwrap();
         assert_eq!(result["coding_agent_used"], false);
         assert_eq!(result["saved"], true);
-        create_at(&args, &sources, root.path(), false).unwrap();
+        create_at(&args, &sources, &private_root, false).unwrap();
     }
 }

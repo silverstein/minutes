@@ -3424,7 +3424,9 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -7612,7 +7614,9 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        std::process::exit(0);
+        // Skip C++ static teardown: a transcription may still hold a live
+        // whisper context on the worker thread (#998).
+        minutes_core::exit_without_cxx_teardown(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -17679,7 +17683,9 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -18200,7 +18206,9 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })
     .ok();

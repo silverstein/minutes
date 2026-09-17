@@ -69,11 +69,34 @@ fn pull(repo: &str, number: u64) -> Result<Value, String> {
 }
 
 pub(super) fn read(args: &Value) -> Result<Value, String> {
+    if args["review_requested"] == true {
+        let mut command = vec![
+            "search".into(),
+            "prs".into(),
+            "--review-requested".into(),
+            "@me".into(),
+            "--state".into(),
+            "open".into(),
+            "--limit".into(),
+            "30".into(),
+            "--json".into(),
+            "number,title,url,isDraft,repository,updatedAt".into(),
+        ];
+        if args.get("repository").is_some() {
+            command.extend(["--repo".into(), repository(args)?.into()]);
+        }
+        return Ok(
+            json!({"scope":"open PRs requesting review from the authenticated GitHub user", "pull_requests":gh_json(&command)?}),
+        );
+    }
     if text_arg(args, "repository").is_none() {
         let query = text_arg(args, "query")
             .ok_or("Provide repository owner/name or a repository search query")?;
         if query.len() > 200 || query.starts_with('-') {
             return Err("invalid repository search query".into());
+        }
+        if query.contains("is:pr") || query.contains("review-requested:") {
+            return Err("repository_query_mismatch: query searches repository names, not PRs. For PRs awaiting Mat's review use review_requested=true without query. Do not substitute a guessed repository.".into());
         }
         return gh_json(&[
             "search".into(),

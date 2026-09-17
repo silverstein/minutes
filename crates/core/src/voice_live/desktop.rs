@@ -72,6 +72,37 @@ const fn p(name: &'static str, description: &'static str, required: bool) -> Par
 /// widen what it can reach.
 pub const VERBS: &[Verb] = &[
     Verb {
+        name: "create_apple_note",
+        description: "Create a NEW Apple Notes document on explicit request, with a title and plain text. Never appends to or replaces existing notes. Uses the default Notes account, which may sync. Returns the created note ID after reading its text back; do not use add_note for Apple Notes.",
+        risk: Risk::Local,
+        params: &[p("title", "Title of the new note", true), p("text", "Plain text of the new note", true)],
+        script: r#"on replace_text(source_text, search_text, replacement)
+    set AppleScript's text item delimiters to search_text
+    set parts to text items of source_text
+    set AppleScript's text item delimiters to replacement
+    set answer to parts as text
+    set AppleScript's text item delimiters to ""
+    return answer
+end replace_text
+on run argv
+    set note_title to item 1 of argv
+    set note_text to item 2 of argv
+    set escaped to my replace_text(note_text, "&", "&amp;")
+    set escaped to my replace_text(escaped, "<", "&lt;")
+    set escaped to my replace_text(escaped, ">", "&gt;")
+    set escaped to my replace_text(escaped, linefeed, "<br>")
+    tell application "Notes"
+        set created_note to make new note with properties {name:note_title, body:escaped}
+        set saved_text to plaintext of created_note
+        set saved_id to id of created_note
+    end tell
+    set expected to my replace_text(note_text, return, "")
+    set observed to my replace_text(saved_text, return, "")
+    if observed does not contain expected then error "A new note was created but text verification failed. Do not retry automatically; inspect Notes."
+    return "Created Apple Notes document; text read back; note ID: " & saved_id
+end run"#,
+    },
+    Verb {
         name: "now_playing",
         description: "What music is playing right now, if anything.",
         risk: Risk::Read,

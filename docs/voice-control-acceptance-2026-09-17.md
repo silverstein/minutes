@@ -56,8 +56,90 @@ Google Docs selected-text replacement remain unqualified. No generic DOM
 attachment to personal browser tabs or pixel-coordinate fallback is enabled.
 The safe fallback is an explicit explanation, or an explicitly requested artifact
 revision that preserves the previous version. Do not imply these gaps are solved
-by the native slider adapter. Private Jev evaluation remains disabled.
+by the native slider adapter. Jev evaluation is off by default; the explicit
+request-scoped opt-in below is now available for the terminal profile.
 
 The installed terminal binary and signed desktop application are separate
 deliverables. These controls require the updated terminal build; this receipt
 does not assert that the desktop voice UI has been rebuilt with them.
+
+## Follow-Up: 10:04 and 10:12 Demo Sessions
+
+Base: 135aeeed. The truffle failure was a call ID passed as prototype_id, followed
+by an invented Chrome window ID; no set-control call ran. The actual artifact's
+native controls were supported. Fixes and boundaries:
+
+- `list_prototypes` discovers registered preview identities. Unknown references
+  return the actual identities and a recovery instruction, with no write or reset.
+  Writes still require an exact artifact and freshly observed control/snapshot.
+- A late running-status context injection was removed. Final receipts explicitly
+  supersede progress; approval proposals are `AwaitingApproval`, not executed.
+  `get_status` separates pending review, active jobs and completed history.
+- `create_apple_note` creates a new Apple Notes document on explicit request and
+  reads back its plain text. It cannot overwrite/append existing notes. Notes may
+  sync through the default account. `add_note` remains a reviewed Minutes meeting
+  annotation, never an Apple Notes substitute.
+- Personal review requests use `read_pull_requests(review_requested=true)` across
+  repositories; repository-name search rejects misplaced PR filters.
+- Room-conversation guidance distinguishes demo commentary from direct requests.
+  This is not speaker authentication or guaranteed background-speech filtering.
+- Songs about review findings must wait for those findings, unlike independent
+  music requests. Music receipts distinguish generation from host playback.
+
+### Timing Evidence
+
+Every log item now has local wall time and monotonic session elapsed time.
+Structured events include tool queued/started/result/delivery, input transcript
+chunks, provider interruptions/turn completion, first response audio received,
+and first speech/music sample consumed in the output callback. No raw audio is
+stored. Callback consumption is not proof of acoustic sound. Transcript arrival
+is not microphone end-of-speech; do not report it as true end-to-end latency.
+The selected-session report stays local:
+
+```sh
+node tooling/voice-evals/session-timing.mjs /absolute/path/to/session.md
+node tooling/voice-evals/session-timing.mjs --self-test
+```
+
+Two synthetic simple text requests per model gave first-audio samples of
+891/1047 ms for standard Live and 751/1127 ms for Extended Thinking at low depth.
+This small sample does not establish parity on complex spoken tasks. Zephyr and
+Extended Thinking low remain configured; no microphone was restarted.
+
+### Request-Scoped Jev
+
+`voice_live.jev_evaluation` defaults to false. When explicitly enabled, completed
+search/inspection results can carry an `evaluation_id` valid for 60 seconds.
+`evaluate_candidates` can rank at most eight host-observed candidates, each capped
+at 600 characters, and a goal capped at 512 bytes. Only whitelisted short
+titles/snippets/labels/date/type fields are sent to `typesafe-ai/jev` through
+Vercel AI Gateway; local file paths and control identities remain local.
+Screenshots, clipboard, full documents and conversation histories are not sent.
+There is no background index/upload or scheduled evaluation. The evaluator has
+an eight-second deadline, rejects unknown choices, and cannot authorize actions.
+Failure leaves original search candidates available. This ranks retrieved
+candidates; it does not add a semantic index that can retrieve otherwise missing
+documents. The daily terminal profile was opted in after explicit user consent.
+
+### Additional Verification
+
+- Actual saved truffle HTML, opened in an isolated test preview: recover identity,
+  inspect price 45, set 100, verify monthly output 25,000, undo to 45 and 11,250.
+  Screenshot confirmed the live 100/25,000 state. Saved HTML was unchanged.
+- Native Live synthetic bad-reference recovery, set-control and completed-status
+  sequence passed. It recovered the ID instead of rebuilding or changing apps.
+- Native Live synthetic demo-commentary test triggered no actions; explicit
+  Apple Notes and cross-repository review-queue requests selected the right tools.
+  The initial PR-routing probe timed out; the explicit personal-review guidance
+  was then added and the repeated three-case probe passed. This is not real
+  multi-speaker audio qualification.
+- Apple Notes disposable creation passed text readback, including literal HTML
+  characters and a newline; the test note was then removed by exact ID/title.
+- Browser scratch insertion safely refused because the clipboard exceeded the
+  preservation limit. No clipboard or draft content changed. Successful paste
+  remains unproven for that run; no clipboard-clearing workaround was used.
+- Request-scoped Jev runtime path selected the correct synthetic slider in 806 ms.
+  No private corpus or conversation was used in qualification.
+- Focused voice suite: 165 passed, 27 optional/live tests skipped at this point.
+  Core library Clippy with voice-live and warnings denied passed.
+- Configuration suite: 66 passed. Local timing-report self-test passed.

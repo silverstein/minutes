@@ -1326,6 +1326,72 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires GEMINI_API_KEY; synthetic source routing only, no browser or research actions"]
+    fn live_research_source_recovery_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.desktop_control = true;
+        config.voice_live.model = "gemini-3.8-live-extended-thinking".into();
+        config.voice_live.thinking_level = "low".into();
+        config.voice_live.voice_name = "Kore".into();
+        config.voice_live.persona = "morris".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let setup = SessionSetup {
+            model: config.voice_live.model.clone(),
+            thinking_level: "low".into(),
+            api_key: crate::voice_live::api_key(&config).unwrap(),
+            system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+            function_declarations: tools.declarations(),
+            language: "en-US".into(),
+            voice_name: "Kore".into(),
+            manual_activity: true,
+            proactive_audio: true,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        let client = LiveClient::connect(&setup).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let mut phase = 0;
+        let mut speech = String::new();
+        while std::time::Instant::now() < deadline && phase < 3 {
+            match client.inbox.recv_timeout(Duration::from_millis(100)) {
+                Ok(ServerEvent::SetupComplete) => client.send_text_turn("Find the specific Circana report about romance print sales and open that article in my browser.").unwrap(),
+                Ok(ServerEvent::OutputTranscript(text)) => speech.push_str(&text),
+                Ok(ServerEvent::ToolCall(calls)) => {
+                    for call in calls {
+                        match phase {
+                            0 => {
+                                assert_eq!(call.name, "research_public", "{speech}");
+                                client.send_tool_response(&call, &json!({"answer":"A publisher report describes US print romance sales, not per-capita consumption.","sources":[{"source_id":"source-17","title":"Romance sales report","url":"https://source.test/exact-returned-link"}],"navigation_note":"Use open_research_source with source-17, not a reconstructed URL."}).to_string(), "INTERRUPT").unwrap();
+                                phase = 1;
+                            }
+                            1 => {
+                                assert_eq!(call.name, "open_research_source", "{speech}");
+                                assert_eq!(call.args["source_id"], "source-17");
+                                client.send_tool_response(&call, r#"{"error":"The source could not be opened. It is no longer available. Find a replacement source for the user's requested article; do not retry this source or only promise to search."}"#, "INTERRUPT").unwrap();
+                                phase = 2;
+                            }
+                            2 => {
+                                assert_eq!(call.name, "research_public", "recovery must perform research, not only promise it: {speech}");
+                                phase = 3;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(ServerEvent::Error(e) | ServerEvent::Closed(e)) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        client.close();
+        assert_eq!(phase, 3, "incomplete research/open/recovery flow: {speech}");
+        println!("SOURCE_RECOVERY: {speech}");
+    }
+
+    #[test]
     fn compound_status_is_decoded_after_utterance_completion() {
         let events = decode_events(
             &json!({"serverContent":{"turnComplete":true},"interactionStatus":"IN_PROGRESS"})

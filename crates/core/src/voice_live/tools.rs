@@ -35,6 +35,7 @@ pub struct ToolContext {
     pub mcp_problems: Vec<String>,
     /// Desktop verbs, and anything awaiting spoken confirmation.
     pub desktop: DesktopControl,
+    research_sources: Mutex<super::research::Sources>,
     pub(crate) continuity: Mutex<super::continuity::Continuity>,
 }
 
@@ -72,6 +73,7 @@ impl ToolContext {
             mcp,
             mcp_problems,
             desktop: DesktopControl::default(),
+            research_sources: Mutex::default(),
             continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
                 Config::minutes_dir().join("work-capsules"),
             )),
@@ -235,6 +237,7 @@ impl ToolContext {
             ));
         }
         if self.config.voice_live.desktop_control {
+            d.push(decl("open_research_source", "Open the exact source returned by research_public using its source_id, when the user asks to see that article. Prefer this over open_url for research references. Does not verify page availability or article content; a successful receipt means only that the browser launch succeeded.", json!({"source_id":{"type":"string","description":"Exact source_id from research_public; never a reconstructed URL"}})));
             d.extend(
                 self.desktop
                     .declarations(self.config.voice_live.desktop_outward),
@@ -530,7 +533,22 @@ impl ToolContext {
                 }))
             }
             "think_deeply" => super::reasoning::think(cfg, args),
-            "research_public" => super::research::research(cfg, args),
+            "research_public" => {
+                let answer = super::research::research(cfg, args)?;
+                self.research_sources.lock().map_err(|_| "Research source state unavailable")?
+                    .register(answer, self.max_chars)
+            }
+            "open_research_source" => {
+                if !cfg.voice_live.desktop_control {
+                    return Err("Desktop control is disabled".into());
+                }
+                let id = args["source_id"].as_str().ok_or("source_id is required")?;
+                let source = self.research_sources.lock().map_err(|_| "Research source state unavailable")?.get(id)?;
+                let verb = desktop::find("open_url").ok_or("Browser opening unavailable")?;
+                let receipt = self.desktop.execute(verb, &json!({"url":source["url"]}))?;
+                Ok(json!({"source":source,"browser_receipt":receipt,"page_verified":false,
+                    "note":"Browser launch completed. This does not confirm the page loaded, matches the request or supports any claim. If the user reports an error, acknowledge the failed link and research a replacement now, not merely promise to."}))
+            }
             "build_prototype" => super::prototype::build(cfg, args),
             "list_meetings" => {
                 let limit = int_arg(args, "limit", 10).clamp(1, 50);
@@ -841,6 +859,7 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
         "add_note" => vec!["text"],
         "ask_agent" => vec!["question"],
         "think_deeply" | "research_public" => vec!["question"],
+        "open_research_source" => vec!["source_id"],
         "build_prototype" => vec!["brief"],
         "review_pull_request" => vec!["repository", "number"],
         _ => vec![],
@@ -1285,6 +1304,7 @@ mod tests {
             mcp: McpPool::default(),
             mcp_problems: Vec::new(),
             desktop: DesktopControl::default(),
+            research_sources: Mutex::default(),
             continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
                 Config::minutes_dir().join("work-capsules"),
             )),
@@ -1435,6 +1455,7 @@ mod tests {
         for name in [
             "open_app",
             "open_url",
+            "open_research_source",
             "control_music",
             "reveal_path",
             "add_reminder",
@@ -1462,6 +1483,33 @@ mod tests {
             );
         }
         assert!(requires_host_review("hubspot__search", true));
+    }
+
+    #[test]
+    fn research_source_open_is_gated_and_rejects_unknown_ids() {
+        let mut ctx = ctx_with(None);
+        assert!(!ctx
+            .declarations()
+            .iter()
+            .any(|d| d["name"] == "open_research_source"));
+        assert!(ctx
+            .execute("open_research_source", &json!({"source_id":"source-1"}))
+            .text
+            .contains("disabled"));
+        ctx.config.voice_live.desktop_control = true;
+        let declaration = ctx
+            .declarations()
+            .into_iter()
+            .find(|d| d["name"] == "open_research_source")
+            .unwrap();
+        assert_eq!(declaration["parameters"]["required"], json!(["source_id"]));
+        let result = ctx.execute(
+            "open_research_source",
+            &json!({"source_id":"source-1", "url":"https://invented.test"}),
+        );
+        assert!(result.is_error);
+        assert!(result.text.contains("Unknown or expired"));
+        assert!(ctx.continuity.lock().unwrap().review().is_none());
     }
 
     #[test]

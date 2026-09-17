@@ -231,3 +231,21 @@ installed desktop bundle. The existing terminal build remains available for
 testing without waiting on remote CI. Browser diversity, acoustic playback and
 route changes, real prototype redirect, outward confirmation, signed desktop
 qualification and the combined hands-free rehearsal remain open as listed above.
+
+### Large-artifact receipt correction
+
+Pre-merge review reproduced raw JSON truncation for four long board cards and
+a 64-option dropdown: required revision/snapshot references could disappear.
+The correction budgets structured responses instead of clipping JSON. Board
+reads expose card pagination and exact-card detail; prototype inspection pages
+controls and options before transport without changing its full-state snapshot.
+Abbreviated content is labelled, while IDs, revisions, values, mutation receipts
+and undo tokens remain exact. A too-small budget returns a truthful metadata-only
+receipt rather than encouraging a repeated mutation.
+
+Mac source verification: 183 voice tests pass, 29 optional/native tests ignored;
+Clippy with warnings denied passes. New cases cover large boards, complete card
+pagination, Unicode/escaping, long dropdowns, small budgets and malformed receipt
+shapes. The actual JavaScript bridge passes isolated inspection/paging/set/undo
+tests, now invoked by the CI continuity self-test. This is source/fixture proof,
+not a replacement for the pending real-browser and spoken rehearsal.

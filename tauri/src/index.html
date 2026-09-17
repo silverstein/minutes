@@ -15285,6 +15285,14 @@
           // Marked so a second error event appends a notice under this text
           // rather than repeating it verbatim.
           bubble.dataset.errorShown = '1';
+          // Deliberately does NOT end the turn. An empty bubble is not proof
+          // that one finished: text chunks render on the next animation frame,
+          // reasoning and tool chunks change only data-status, and CLI stderr
+          // arrives on a different thread from stdout. Ending here would null
+          // the bubble that chunks already in flight still render into, and a
+          // late completion would then land on whatever turn came next.
+          // Recovery belongs on Stop, which the user controls, not on a guess
+          // about backend state the frontend cannot see.
           return;
         }
         if (bubble.dataset.errorShown === '1' && !bubble.querySelector('.chat-incomplete-notice')) {
@@ -15357,7 +15365,16 @@
         await invoke('cmd_recall_chat_cancel');
       } catch (e) {
         console.error('cmd_recall_chat_cancel failed:', e);
-        if (recallChatSendBtn) recallChatSendBtn.disabled = false;
+      } finally {
+        // Unconditionally, and without waiting for `recall-chat-done`. Stop is
+        // the user asking for their panel back, and it is the only escape from
+        // a streaming state that disables the input. Making it depend on an
+        // event from a backend that may already be gone is what turned a lost
+        // event into a panel nobody could type into again.
+        //
+        // A late `recall-chat-done` after this is harmless: finishRecallChatUi
+        // is idempotent.
+        finishRecallChatUi();
       }
     }
 

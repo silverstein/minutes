@@ -259,6 +259,18 @@ impl ToolContext {
                 json!({"path": {"type": "string", "description": "Relative path inside the knowledge base"}}),
             ));
         }
+        if self.config.voice_live.clipboard {
+            d.push(decl("read_clipboard_text", "Read current clipboard plain text only when the user explicitly asks. No clipboard monitoring, image reading or file access.", json!({})));
+            d.push(decl("copy_text", "Copy the requested exact text to the clipboard. Does not paste, send or submit anything.", json!({"text":{"type":"string"}})));
+        }
+        if self.config.voice_live.text_input {
+            d.push(decl("read_selected_text", "Read exactly the selected text in a named running app, on request. Does not read the clipboard or whole document.", json!({"target_app":{"type":"string","description":"Exact app name or bundle identifier"}})));
+            d.push(decl("paste_text", "Insert exact writing into the named frontmost app's editable field. No Send, Submit, Return or terminal input. Use open_app first if needed. To replace selection, supply mode=replace_selection and the exact expected_selection from read_selected_text. Refuses changed targets or unsupported editors; never retry an uncertain edit automatically.", json!({
+                "target_app":{"type":"string"},"text":{"type":"string"},
+                "mode":{"type":"string","enum":["insert","replace_selection"]},
+                "expected_selection":{"type":"string"}
+            })));
+        }
         // Historical insights currently lack a final-egress live-source gate.
         // Do not expose a derived-cache bypass around restricted meeting reads.
         d.retain(|v| v["name"] != "get_meeting_insights");
@@ -511,6 +523,12 @@ impl ToolContext {
     }
 
     fn dispatch(&self, name: &str, args: &Value) -> Result<Value, String> {
+        if matches!(
+            name,
+            "read_clipboard_text" | "copy_text" | "read_selected_text" | "paste_text"
+        ) {
+            return super::text_transfer::execute(&self.config, name, args);
+        }
         let cfg = &self.config;
         match name {
             "get_status" => {
@@ -861,6 +879,9 @@ fn decl(name: &str, description: &str, properties: Value) -> Value {
         "think_deeply" | "research_public" => vec!["question"],
         "open_research_source" => vec!["source_id"],
         "build_prototype" => vec!["brief"],
+        "copy_text" => vec!["text"],
+        "read_selected_text" => vec!["target_app"],
+        "paste_text" => vec!["target_app", "text"],
         "review_pull_request" => vec!["repository", "number"],
         _ => vec![],
     };
@@ -1868,6 +1889,44 @@ mod tests {
             .iter()
             .any(|d| d["parameters"]["properties"].get("confirm").is_some()));
         // No approval or native execution in this test.
+    }
+
+    #[test]
+    fn text_tools_are_opt_in_and_do_not_require_terminal_review() {
+        for (clipboard, input) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut config = Config::default();
+            config.voice_live.clipboard = clipboard;
+            config.voice_live.text_input = input;
+            let ctx = ToolContext::new(config, Arc::new(NameIndex::default()));
+            let declarations = ctx.declarations();
+            for (name, enabled) in [
+                ("read_clipboard_text", clipboard),
+                ("copy_text", clipboard),
+                ("read_selected_text", input),
+                ("paste_text", input),
+            ] {
+                assert_eq!(
+                    declarations.iter().filter(|d| d["name"] == name).count(),
+                    usize::from(enabled)
+                );
+                assert!(!requires_host_review(name, false));
+                // Missing consent/arguments must fail before any native access,
+                // and never create the old terminal-approval interaction.
+                let result = ctx.execute(name, &json!({"unexpected":true}));
+                assert!(result.is_error);
+                assert!(ctx.continuity.lock().unwrap().review().is_none());
+            }
+            if input {
+                let paste = declarations
+                    .iter()
+                    .find(|d| d["name"] == "paste_text")
+                    .unwrap();
+                assert_eq!(
+                    paste["parameters"]["required"],
+                    json!(["target_app", "text"])
+                );
+            }
+        }
     }
 
     #[test]

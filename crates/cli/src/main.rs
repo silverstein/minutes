@@ -3424,7 +3424,9 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -7612,7 +7614,9 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        std::process::exit(0);
+        // Skip C++ static teardown: a transcription may still hold a live
+        // whisper context on the worker thread (#998).
+        minutes_core::exit_without_cxx_teardown(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -11252,6 +11256,86 @@ life (qmd://life/)
             assert_eq!(second.total_fixtures, 5);
             assert_eq!(second.updated_fixtures, 0);
         });
+    }
+
+    /// #1001 fixed the Ctrl-C abort in #998 by skipping C++ static teardown on
+    /// every interrupt path. #1008 then reverted all four call sites without
+    /// mentioning it, because it was built on a stale copy of this file, and
+    /// nothing caught the revert: `exit_without_cxx_teardown` is `pub`, so its
+    /// disappearance from here raised no dead-code warning, and no test named
+    /// the call sites. The reporter of #998 kept crashing against a `main` that
+    /// had quietly lost its own fix.
+    ///
+    /// A plain `exit()` here runs `__cxa_finalize`, which tears down ggml's
+    /// Metal device while an interrupted transcription may still hold a live
+    /// whisper context, and the process dies on SIGABRT instead of exiting.
+    ///
+    /// Works on lines rather than byte offsets: slicing a byte window out of
+    /// UTF-8 source panics if the edge lands mid-character, and this file has
+    /// plenty of non-ASCII in its strings.
+    #[test]
+    fn every_interrupt_path_skips_cxx_teardown() {
+        let source = std::fs::read_to_string(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
+            .expect("failed to read main.rs");
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Needles built from halves so they never appear whole in this file.
+        // Spelled literally, the guard matches its own source and fails on
+        // itself, which is how the first draft of this test behaved.
+        let force_quit = format!(
+            "{}{}",
+            "InterruptAction::ForceExit(code) = ", "handle_graceful_interrupt("
+        );
+        let watch_banner = format!("{}{}", "Stopping ", "watcher...");
+        let safe_exit = format!("{}{}", "exit_without_", "cxx_teardown");
+        let plain_exit = format!("{}{}", "std::process::", "exit(");
+
+        // Asserting the exact count, not just "some", is the point. A rename
+        // or a reshaped handler that stops matching would otherwise drop a
+        // call site out of this guard silently, which is the same way #1008
+        // removed them in the first place.
+        let force_quit_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(force_quit.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            force_quit_sites.len(),
+            3,
+            "expected three force-quit interrupt paths (record, dictate, live transcript); \
+             the shape changed, so update this guard deliberately rather than deleting it"
+        );
+
+        let watch_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(watch_banner.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            watch_sites.len(),
+            1,
+            "expected exactly one watch interrupt handler; update this guard"
+        );
+
+        // Every one of the four reaches the teardown-skipping exit, and does
+        // not reach a plain exit on the way there.
+        for site in force_quit_sites.into_iter().chain(watch_sites) {
+            let window = &lines[site..lines.len().min(site + 20)];
+            let safe = window.iter().position(|l| l.contains(safe_exit.as_str()));
+            let plain = window.iter().position(|l| l.contains(plain_exit.as_str()));
+            match (safe, plain) {
+                (Some(_), None) => {}
+                (Some(s), Some(p)) if s < p => {}
+                _ => panic!(
+                    "the interrupt path at line {} does not reach {} first; a plain exit here \
+                     runs C++ static destructors while a whisper context may still be live (#998)",
+                    site + 1,
+                    safe_exit
+                ),
+            }
+        }
     }
 
     #[test]
@@ -17599,7 +17683,9 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -17658,6 +17744,14 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         |result| {
             if stdout {
                 println!("{}", result.text);
+                // Flush at the write, not at exit. Piped stdout is block
+                // buffered, and a force quit takes `_exit` on macOS, which
+                // discards the buffer: a completed utterance the user already
+                // saw the app finish would never reach the pipe. Flushing here
+                // also makes `minutes dictate --stdout | ...` stream per
+                // utterance instead of arriving in one lump at the end.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
             }
             if let Some(ref path) = result.file_path {
                 eprintln!("[minutes] Saved: {}", path.display());
@@ -18112,7 +18206,9 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })
     .ok();

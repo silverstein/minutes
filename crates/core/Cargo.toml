@@ -110,7 +110,8 @@ objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = 
 block2 = "0.6"
 cidre = { version = "0.22.1", default-features = false, features = ["at", "av", "cat", "cf", "cm", "core_audio", "macos_14_4", "ns"] }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "libc"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "NSPasteboard", "NSPasteboardItem", "libc"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSArray", "NSData"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
 mach2 = "0.6"
 # Static sherpa-onnx on macOS so opt-in engine-sherpa builds produce apps/CLIs

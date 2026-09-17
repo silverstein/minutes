@@ -855,8 +855,9 @@ impl Runner {
                         ServerEvent::ToolCall(incoming_calls) => {
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                             for call in incoming_calls {
-                                self.emit(VoiceLiveEvent::ToolCall { name: call.name.clone(), args: call.args.clone() });
-                                self.log_line(format!("`{}({})`", call.name, call.args));
+                                let visible_args = super::text_transfer::visible_args(&call.name, &call.args);
+                                self.emit(VoiceLiveEvent::ToolCall { name: call.name.clone(), args: visible_args.clone() });
+                                self.log_line(format!("`{}({})`", call.name, visible_args));
                                 let id = call.id.clone();
                                 if id.starts_with("host:") || calls.lock().unwrap_or_else(|p| p.into_inner()).register(&id).is_err() {
                                     self.emit(VoiceLiveEvent::Status { text: "duplicate/invalid tool call rejected".into() });

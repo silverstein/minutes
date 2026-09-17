@@ -34,20 +34,25 @@ releases that do not publish the archive.
 (cd crates/sherpa-plugin && cargo build --release)
 cargo build --release -p minutes-cli --features engine-sherpa
 rm -f ~/.local/bin/minutes && cp target/release/minutes ~/.local/bin/minutes
-mkdir -p ~/.minutes/lib
 ```
 
-Installing the plugin differs by platform, because only macOS links sherpa-onnx
-statically into it:
+Install the plugin **beside the `minutes` binary**. That is where release
+archives and the macOS app carry it, and it is the path the loader checks
+before any other on-disk location. Substitute your own install directory if it
+is not `~/.local/bin` (a `cargo install` layout puts the binary in
+`~/.cargo/bin`).
+
+Installing differs by platform, because only macOS links sherpa-onnx
+statically into the plugin:
 
 ```bash
 # macOS: the plugin is self-contained.
-cp crates/sherpa-plugin/target/release/libminutes_sherpa.dylib ~/.minutes/lib/
+cp crates/sherpa-plugin/target/release/libminutes_sherpa.dylib ~/.local/bin/
 
 # Linux: the sherpa libraries must travel with it, since the plugin resolves
 # them through its own $ORIGIN. Copying the plugin alone installs one that
 # cannot load.
-cp crates/sherpa-plugin/target/release/*.so ~/.minutes/lib/
+cp crates/sherpa-plugin/target/release/*.so ~/.local/bin/
 ```
 
 ```bash
@@ -69,10 +74,17 @@ minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sher
 > through ORT 1.22 and transcribes through the plugin's ORT 1.17, in one
 > process.
 >
-> The plugin is found via `MINUTES_SHERPA_PLUGIN`, then beside the executable,
-> then in `~/.minutes/lib/`. If it is missing or reports a different ABI
-> version, transcription falls back to Whisper with a warning naming every path
-> tried, exactly like a missing model.
+> The plugin is found via `MINUTES_SHERPA_PLUGIN`, then beside the running
+> executable, then in `<transcription.model_path>/sherpa/lib/`, which with the
+> default model path is `~/.minutes/models/sherpa/lib/`. If it is missing or
+> reports a different ABI version, transcription falls back to Whisper with a
+> warning naming every path tried, exactly like a missing model.
+>
+> Note that `~/.minutes/lib/` is **not** one of these paths. It exists, but it
+> belongs to the Apple Foundation Models helper. Earlier revisions of this page
+> and of `docs/install.md` sent the plugin there, where nothing ever looks for
+> it, and `minutes health` then reports it as not installed. Reported by
+> @ReticentEclectic in #998.
 
 > **Platform note.** On macOS, the plugin links sherpa-onnx statically, so it is
 > self-contained and the copy above is all you need.
@@ -84,8 +96,7 @@ minutes setup --sherpa     # downloads the int8 ONNX model + sets engine = "sher
 > set, not just the plugin:
 >
 > ```bash
-> mkdir -p ~/.minutes/lib
-> cp crates/sherpa-plugin/target/release/*.so ~/.minutes/lib/
+> cp crates/sherpa-plugin/target/release/*.so ~/.local/bin/
 > ```
 >
 > The binary itself no longer links sherpa at all, so the plugin must remain

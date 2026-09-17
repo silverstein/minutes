@@ -42,6 +42,9 @@ impl Artifacts {
         json!({"artifacts":previews,"note":"These are this session's registered previews, not proof their tabs remain open. Use the exact prototype_id, never a job_id or call_id. Inspect before changing any value."})
     }
     pub fn open(&mut self, id: &str) -> Result<bool> {
+        if super::jobs::cancelled() {
+            return Err("agent_cancelled: preview opening suppressed after cancellation".into());
+        }
         if !self.previews.contains_key(id) {
             if self.previews.len() >= 8 {
                 return Err("Eight previews are active; start a new session to open more".into());
@@ -51,6 +54,13 @@ impl Artifacts {
                 id,
             )?;
             let preview = Preview::start(&record)?;
+            // Cancellation may arrive while loading the saved HTML or starting
+            // its local server. Drop the unopened preview in that case.
+            if super::jobs::cancelled() {
+                return Err(
+                    "agent_cancelled: preview opening suppressed after cancellation".into(),
+                );
+            }
             let opened = super::prototype::open_preview(Path::new(&format!(
                 "{}/#{}",
                 preview.origin, preview.token
@@ -220,6 +230,16 @@ fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_generation_cannot_open_or_register_a_preview() {
+        let mut artifacts = Artifacts::default();
+        super::super::jobs::with_cancellation(Some(Arc::new(AtomicBool::new(true))), || {
+            let error = artifacts.open("not-a-saved-artifact").unwrap_err();
+            assert!(error.starts_with("agent_cancelled:"));
+            assert!(artifacts.previews.is_empty());
+        });
+    }
+
     #[test]
     fn wrong_job_id_returns_artifact_identity_without_changing_it() {
         let preview =

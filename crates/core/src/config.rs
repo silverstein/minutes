@@ -1511,6 +1511,54 @@ fn config_base_dir() -> PathBuf {
     config_base_dir_from(std::env::var_os("XDG_CONFIG_HOME"), home_dir())
 }
 
+fn config_path_override(value: Option<OsString>, fallback: PathBuf) -> PathBuf {
+    value
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
+}
+
+// Compare against the fields this build understands, not the raw document:
+// unknown keys survive, while explicitly cleared known options are removed.
+fn merge_config_tables(
+    document: &mut dyn toml_edit::TableLike,
+    previous: &dyn toml_edit::TableLike,
+    updated: &dyn toml_edit::TableLike,
+) {
+    for (key, _) in previous.iter() {
+        if !updated.contains_key(key) {
+            document.remove(key);
+        }
+    }
+    for (key, next) in updated.iter() {
+        if let Some(existing) = document.get_mut(key) {
+            if let (Some(target), Some(old), Some(new)) = (
+                existing.as_table_like_mut(),
+                previous.get(key).and_then(toml_edit::Item::as_table_like),
+                next.as_table_like(),
+            ) {
+                merge_config_tables(target, old, new);
+                continue;
+            }
+            // Unchanged values (including arrays) retain original formatting
+            // and any forward-compatible fields inside their elements.
+            if previous
+                .get(key)
+                .is_some_and(|old| old.to_string() == next.to_string())
+            {
+                continue;
+            }
+            let decor = existing.as_value().map(|value| value.decor().clone());
+            *existing = next.clone();
+            if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+        } else {
+            document.insert(key, next.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 fn config_path_from(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
     config_base_dir_from(xdg_config_home, home)
@@ -1726,9 +1774,12 @@ impl Config {
         }
     }
 
-    /// Standard config file location.
+    /// Standard config file location, or a process-scoped dogfood override.
     pub fn config_path() -> PathBuf {
-        config_base_dir().join("minutes").join("config.toml")
+        config_path_override(
+            std::env::var_os("MINUTES_CONFIG_PATH"),
+            config_base_dir().join("minutes").join("config.toml"),
+        )
     }
 
     /// Load config from file, falling back to defaults.
@@ -1948,12 +1999,64 @@ impl Config {
 
     /// Save config to a specific path.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::other(format!("TOML serialize: {}", e)))?;
-        std::fs::write(path, contents)?;
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Minutes config could not be saved safely; existing file was left untouched.",
+            )
+        };
+        let original = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => Some(std::fs::read_to_string(path)?),
+            Ok(_) => return Err(invalid()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let contents = if let Some(raw) = &original {
+            let mut previous: Self = toml::from_str(raw).map_err(|_| invalid())?;
+            apply_raw_toml_compat(&mut previous, inspect_raw_toml_compat(raw));
+            let previous = toml::to_string_pretty(&previous)
+                .map_err(|_| invalid())?
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            let updated = contents
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            let mut document = raw
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            merge_config_tables(
+                document.as_table_mut(),
+                previous.as_table(),
+                updated.as_table(),
+            );
+            document.to_string()
+        } else {
+            contents
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut temporary, contents.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        // Detect another writer during preparation instead of knowingly
+        // replacing settings that arrived after our snapshot.
+        let current = match std::fs::read_to_string(path) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current != original {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Minutes config changed during save; reload before retrying.",
+            ));
+        }
+        temporary.persist(path).map_err(|error| error.error)?;
         tracing::info!(path = %path.display(), "config saved");
         Ok(())
     }
@@ -2494,6 +2597,117 @@ mod tests {
             Config::load_strict_from(&path).unwrap().transcription.model,
             "base"
         );
+    }
+
+    #[test]
+    fn full_save_preserves_future_tables_nested_fields_and_comments() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# A newer build wrote this.
+future_root = "keep"
+[transcription]
+model = "tiny" # Keep the explanation.
+future_decoder = { mode = "fast", version = 3 }
+[future_voice]
+voice = "Kore"
+[future_voice.reasoning]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_strict_from(&path).unwrap();
+        config.transcription.model = "base".into();
+        config.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(raw.contains("# A newer build wrote this."));
+        assert!(raw.contains("# Keep the explanation."));
+        assert_eq!(parsed["future_root"].as_str(), Some("keep"));
+        assert_eq!(parsed["future_voice"]["voice"].as_str(), Some("Kore"));
+        assert_eq!(
+            parsed["future_voice"]["reasoning"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            parsed["transcription"]["future_decoder"]["version"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(parsed["transcription"]["model"].as_str(), Some("base"));
+        config.save_to(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn full_save_clears_known_options_without_removing_unknown_inline_fields() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "transcription = { model = 'tiny', language = 'es', future = 42 }\n",
+        )
+        .unwrap();
+        let mut config = Config::load_strict_from(&path).unwrap();
+        config.transcription.language = None;
+        config.transcription.model = "base".into();
+        config.save_to(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(parsed["transcription"].get("language").is_none());
+        assert_eq!(parsed["transcription"]["future"].as_integer(), Some(42));
+        assert_eq!(
+            Config::load_strict_from(&path).unwrap().transcription.model,
+            "base"
+        );
+    }
+
+    #[test]
+    fn full_save_refuses_malformed_or_wrong_typed_existing_config() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        for original in [
+            "[broken\nPRIVATE-CANARY",
+            "[voice_live]\nenabled = 'PRIVATE-CANARY'\n",
+        ] {
+            std::fs::write(&path, original).unwrap();
+            let error = Config::default().save_to(&path).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(!error.to_string().contains("PRIVATE-CANARY"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn config_override_does_not_change_the_shared_default() {
+        let shared = PathBuf::from("shared/minutes/config.toml");
+        let voice = PathBuf::from("private/voice.toml");
+        assert_eq!(
+            config_path_override(Some(voice.clone().into_os_string()), shared.clone()),
+            voice
+        );
+        assert_eq!(
+            config_path_override(Some(OsString::new()), shared.clone()),
+            shared
+        );
+        assert_eq!(config_path_override(None, shared.clone()), shared);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_save_is_private_and_refuses_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("nested/config.toml");
+        Config::default().save_to(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = directory.path().join("linked.toml");
+        symlink(&path, &link).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(Config::default().save_to(&link).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

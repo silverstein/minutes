@@ -104,6 +104,7 @@ changed by this repair. Full audible conversation acceptance remains open.
 
 ### Shared-context source tranche, 2026-09-17
 
+Historical source-qualification snapshot, before activation below.
 Source: `5b5cb515e45a27a652943edc4893a8e8218e068c`, branch
 `codex/voice-operate-20260917`. These additions are source-qualified, not yet
 installed in the terminal binary above and not accepted on the native desktop.
@@ -142,6 +143,52 @@ Saved work is explicitly requested history, not automatic conversation recording
 The checkpoint listing budget is 128 revisions; a known checkpoint can still be
 resumed directly. No prior task is automatically restarted.
 
+### Native qualification and terminal activation, 2026-09-17 20:14 UTC
+
+The new tranche is now installed in the existing terminal dogfood worktree.
+Source at build: `70b69df3` (feature code `5b5cb515`). Installed CLI SHA256:
+`763a55c119416c077aba209d15ded0cd44dd52ce1ff9be5afe092ef70eae68be`.
+The wrapper still uses the isolated voice profile. Only `voice_live.work_memory`
+was added, set to true; parsed TOML equality verified all other settings unchanged.
+The original profile was backed up, replacement was guarded by its original
+SHA256, and permissions remain 0600. Zephyr, Morris and Extended Thinking low
+were confirmed by actual session startup. No production or Dev app was replaced.
+
+Native test executable SHA256:
+`2167321ab06845d7dc25c85c73f036ca34fa341754f9c658b9e555f4ef5a69bc`.
+This executable was built from publication commit `1beb3f04`, whose voice source
+was verified identical to the source-qualified tranche.
+
+- Shared-context test passed in 19.48 seconds from a new Apple Terminal window:
+  exact fixture selection, one-window PNG capture, AX notification delta from
+  Revenue 50 to 150, document-title change revocation, and stop refusal.
+- An initial SSH-launched attempt correctly refused Screen Recording. AX context
+  succeeded there. Launching through the actual Terminal permission identity
+  passed without any TCC toggle or reset. This is terminal evidence, not signed
+  Minutes Dev application acceptance.
+- Disposable TextEdit test passed in 0.37 seconds: real selected-text replacement,
+  exact content readback, missing/invented/stale reference refusal and caret
+  insertion. Both successful receipts had `submitted: false`. No clipboard path
+  was needed; no Send/Return/Submit was performed. Browser/editor diversity and
+  focus/document-switch write refusal still require broader qualification.
+- Two real Live sessions exercised the installed CLI with `--ptt --mute --json`.
+  The first created a synthetic goal, saved a budget correction (42, not 24), an
+  open maintenance question, and the next step, then parked successfully. After
+  process shutdown, a fresh session used list/resume and recovered all details.
+  No terminal approval was requested and no jobs were restarted. Both sessions
+  exited normally. These were typed requests, not acoustic voice acceptance.
+- Checkpoint operations took 12-36 ms; the restart's list/resume calls had zero
+  measured queue delay. Received acknowledgement audio began 881 ms after that
+  typed request. The run was muted, so this is provider-receipt timing, not audible
+  latency or proof of microphone end-of-speech responsiveness.
+
+Private local receipts: `voice-sessions/2026-09-17-16-09-52.md` and
+`voice-sessions/2026-09-17-16-11-31.md` under the Minutes data directory;
+`/tmp/minutes-shared-context-terminal-20260917.log` and
+`/tmp/minutes-selection-terminal-20260917.log`. Synthetic checkpoint revisions
+are archived outside the active voice-work namespace so they cannot be mistaken
+for Mat's real work. No raw microphone audio or captured screenshot was retained.
+
 ## Remaining acceptance sequence
 
 Beads remains the work-status authority. This sequence defines proof obligations,
@@ -149,14 +196,15 @@ not a second checklist whose rows can be declared complete from code presence.
 
 1. `minutes-vvf1.1.8`: Mat verifies the installed audio repair in a conversation;
    qualify audible playback, interruption and device-route changes separately.
-2. `minutes-vvf1.1.9`: run the 30-second disposable native context fixture with
-   foreground permission. Fix any observed failure before enabling the tranche.
+2. `minutes-vvf1.1.9`: disposable native context fixture passed and the tranche
+   is enabled. Still qualify conversational reference use in a real browser and
+   the separately signed desktop application; do not generalize this fixture.
 3. `minutes-vvf1.1.3` and `.4`: qualify exact selection, document/focus changes,
    stale-write refusal and structured edits with dependent output readback.
-4. `minutes-vvf1.1.5`: install the qualified CLI, opt in to voice work memory in
-   the isolated profile, then exercise spoken checkpoint restart/resume and
-   prototype redirect. Record the new exact source SHA and binary hash.
-5. `minutes-vvf1.1.6`: complete the no-Send cross-app scratch-draft rehearsal.
+4. `minutes-vvf1.1.5`: CLI installed and memory enabled; typed Live checkpoint
+   restart/resume passed. Spoken rehearsal and real prototype redirection remain.
+5. `minutes-vvf1.1.6`: native TextEdit no-Send fixture passed; complete the actual
+   browser scratch-draft and combined voice rehearsal.
    Outward recipient resolution and confirmation remain separate acceptance.
 6. `minutes-vvf1.1.7`: review timestamped conversation evidence, report actual
    slow stages and regressions, and run the combined final rehearsal above.

@@ -1983,6 +1983,15 @@ pub(crate) fn run_chat_invocation(
     cwd: Option<&std::path::Path>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
+    run_chat_invocation_cancellable(invocation, cwd, timeout, &|| false)
+}
+
+pub(crate) fn run_chat_invocation_cancellable(
+    invocation: ChatInvocation,
+    cwd: Option<&std::path::Path>,
+    timeout: std::time::Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
     use std::io::Write;
 
     let agent_cmd = &invocation.cmd;
@@ -1998,6 +2007,10 @@ pub(crate) fn run_chat_invocation(
     } else {
         std::process::Stdio::null()
     };
+    if cancelled() {
+        cleanup(&cleanup_path);
+        return Err("agent_cancelled: cancelled before launch; no process started".into());
+    }
     let mut command = crate::engine_process::command(&invocation.cmd);
     command
         .args(&invocation.args)
@@ -2074,7 +2087,7 @@ pub(crate) fn run_chat_invocation(
                 return Ok(text);
             }
             Ok(None) => {
-                if start.elapsed() > timeout {
+                if start.elapsed() > timeout || cancelled() {
                     // Kill the group first: descendants hold the pipes open.
                     kill_process_group(child.id());
                     child.kill().ok();
@@ -2082,6 +2095,9 @@ pub(crate) fn run_chat_invocation(
                     let out = take_agent_output(&stdout_buf, stdout_handle, "stdout");
                     let err = take_agent_output(&stderr_buf, stderr_handle, "stderr");
                     cleanup(&cleanup_path);
+                    if cancelled() {
+                        return Err("agent_cancelled: owned agent process stopped and reaped; prior external effects are not undone".into());
+                    }
                     return Err(format!(
                         "agent_timeout: agent '{agent_cmd}' did not complete within {}s; \
                          the process was stopped ({} stdout bytes, {} stderr bytes). \
@@ -3439,6 +3455,34 @@ fn parse_speaker_mapping(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_owned_chat_process_stops_descendants_before_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("should-not-exist");
+        let invocation = ChatInvocation {
+            cmd: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "(sleep 2; touch \"$1\") & wait".into(),
+                "fixture".into(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            stdin_payload: None,
+            cleanup_path: None,
+        };
+        let start = std::time::Instant::now();
+        let result = run_chat_invocation_cancellable(
+            invocation,
+            Some(root.path()),
+            std::time::Duration::from_secs(20),
+            &|| start.elapsed() > std::time::Duration::from_millis(300),
+        );
+        assert!(result.unwrap_err().starts_with("agent_cancelled:"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(!marker.exists(), "descendant survived cancellation");
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::Path;

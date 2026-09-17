@@ -20,6 +20,7 @@ use serde::Serialize;
 use super::continuity::HostResult;
 use crate::config::Config;
 use crate::interaction::authority::Proposal;
+#[cfg(test)]
 use crate::interaction::calls::Calls;
 use crate::interaction::live::{LiveActivity, ProviderActivity};
 use crate::streaming::{AudioChunk, AudioStream};
@@ -547,13 +548,17 @@ impl QueuedCall {
         match (&self.origin, self.call.name.as_str()) {
             (DispatchOrigin::Model, "build_prototype") => 1,
             (DispatchOrigin::Model, "make_music") => 2,
+            (DispatchOrigin::Model, "get_status" | "cancel_job") => 3,
+            (DispatchOrigin::Model, "research_public" | "think_deeply" | "review_pull_request") => {
+                4
+            }
             _ => 0,
         }
     }
 }
 
-fn tool_channels() -> [(Sender<QueuedCall>, Receiver<QueuedCall>); 3] {
-    [bounded(64), bounded(4), bounded(4)]
+fn tool_channels() -> [(Sender<QueuedCall>, Receiver<QueuedCall>); 5] {
+    [bounded(64), bounded(4), bounded(4), bounded(16), bounded(4)]
 }
 
 struct PttState {
@@ -613,7 +618,7 @@ impl Runner {
         // hold up another tool. Each generation kind still runs one at a time.
         let channels = tool_channels();
         let tool_txs = channels.each_ref().map(|(tx, _)| tx.clone());
-        let calls = Arc::new(Mutex::new(Calls::default()));
+        let calls = Arc::clone(&self.tools.calls);
         let mut activity =
             LiveActivity::new(self.setup.profile().expect("validated before connecting"));
         let (audio_out, audio_in) = unbounded::<Vec<u8>>();
@@ -634,7 +639,14 @@ impl Runner {
                     let mut announced_review = None;
                     for queued in tool_rx.iter() {
                         let call = queued.call;
-                        if !calls.lock().unwrap_or_else(|p| p.into_inner()).begin(&call.id) { continue; }
+                        calls.lock().unwrap_or_else(|p| p.into_inner()).name(&call.id, &call.name);
+                        if !calls.lock().unwrap_or_else(|p| p.into_inner()).begin(&call.id) {
+                            if !stop_flag.load(Ordering::SeqCst) && matches!(queued.origin, DispatchOrigin::Model) && calls.lock().unwrap_or_else(|p|p.into_inner()).needs_cancellation_receipt(&call.id) {
+                                let client=Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
+                                let _=client.send_tool_response(&call,r#"{"cancelled":true,"started":false,"note":"Cancelled before execution; no action taken."}"#,"SILENT");
+                            }
+                            continue;
+                        }
                         // Shutdown drops the sender, but whatever was already
                         // queued still arrives here. A send waiting behind a
                         // slow tool must not fire after the session is over.
@@ -649,41 +661,56 @@ impl Runner {
                         {
                             let running = Arc::clone(&running);
                             let on_event = Arc::clone(&on_event);
+                            let client_cell = Arc::clone(&client_cell);
+                            let stop_flag = Arc::clone(&stop_flag);
                             let name = call.name.clone();
+                            let id = call.id.clone();
                             std::thread::spawn(move || {
                                 let start = Instant::now();
-                                let mut next = TOOL_PROGRESS_EVERY;
                                 while running.load(Ordering::Relaxed) {
                                     std::thread::sleep(Duration::from_millis(250));
-                                    if !running.load(Ordering::Relaxed) {
+                                    if !running.load(Ordering::Relaxed) || stop_flag.load(Ordering::SeqCst) {
                                         break;
                                     }
-                                    if start.elapsed() >= next {
+                                    if start.elapsed() >= TOOL_PROGRESS_EVERY {
                                         on_event(VoiceLiveEvent::Status {
-                                            text: format!(
-                                                "{name} still running, {}s",
-                                                start.elapsed().as_secs()
-                                            ),
+                                            text: format!("{name} is running in the background. You can keep talking or ask to cancel it."),
                                         });
-                                        next += TOOL_PROGRESS_EVERY;
+                                        let client = Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
+                                        let _ = client.send_context_update(&format!("Host job state: {}. This is status only, not a new user request. No result exists yet. Do not claim completion or waiting for approval. Keep the current conversation going; get_status provides current state.", serde_json::json!({"job_id":id,"tool":name,"state":"running","observed_after_seconds":start.elapsed().as_secs()})));
+                                        break;
                                     }
                                 }
                             });
                         }
                         let host_origin = !matches!(queued.origin, DispatchOrigin::Model);
-                        let outcome = match queued.origin {
+                        let cancellation = calls.lock().unwrap_or_else(|p|p.into_inner()).cancellation(&call.id);
+                        let outcome = super::jobs::with_cancellation(cancellation, || match queued.origin {
                             DispatchOrigin::Approved(id) => tools.execute_approved(id),
                             DispatchOrigin::Selection(bundle) => tools.capture_selection_from_host(bundle.as_deref()),
                             DispatchOrigin::Model => tools.execute(&call.name, &call.args),
-                        };
+                        });
                         running.store(false, Ordering::Relaxed);
-                        let publish = calls.lock().unwrap_or_else(|p| p.into_inner()).finish(&call.id);
+                        let stopped = outcome.is_error && matches!(call.name.as_str(), "build_prototype" | "review_pull_request") && serde_json::from_str::<serde_json::Value>(&outcome.text).ok().and_then(|v|v["error"].as_str().map(|e|e.starts_with("agent_cancelled:"))).unwrap_or(false);
+                        let publish = calls.lock().unwrap_or_else(|p| p.into_inner()).finish_outcome(&call.id, outcome.is_error, stopped);
+                        if let Some(tx) = &log_tx {
+                            let _ = tx.send(tool_result_log(&call, &outcome));
+                            if !publish {
+                                let _ = tx.send(format!("  host delivery withheld: job={} stopped={} cancellation_requested=true",call.id,stopped));
+                            }
+                        }
                         if !publish || stop_flag.load(Ordering::SeqCst) {
+                            if !stop_flag.load(Ordering::SeqCst) && calls.lock().unwrap_or_else(|p|p.into_inner()).needs_cancellation_receipt(&call.id) {
+                                let client=Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
+                                let receipt=serde_json::json!({"job_id":call.id,"state":if stopped {"Cancelled"}else{"FinishedAfterCancellation"},"result_withheld":true,"effects_undone":false,"note":"Cancellation has settled. Do not claim prior external effects were undone."}).to_string();
+                                if host_origin { let _=client.send_context_update(&format!("Host job completion: {receipt}")); }
+                                else { let _=client.send_tool_response(&call,&receipt,"SILENT"); }
+                            }
                             if lane == 0 {
                                 if let Ok(mut host) = tools.continuity.lock() { host.reject(); }
                             }
-                            on_event(VoiceLiveEvent::Status { text: format!(
-                                "{} finished after cancellation was requested. Its external effects, if any, are not automatically undone; result withheld from the provider.", call.name) });
+                            on_event(VoiceLiveEvent::Status { text: if stopped { format!("{} stopped; owned agent process reaped. Earlier effects are not undone.",call.name) } else { format!(
+                                "{} finished after cancellation was requested. Its external effects, if any, are not automatically undone; result withheld from the provider.", call.name) } });
                             continue;
                         }
                         if lane == 0 {
@@ -706,7 +733,6 @@ impl Runner {
                                 outcome.text.chars().count(),
                                 outcome.elapsed.as_millis()
                             ));
-                            let _ = tx.send(tool_result_log(&call, &outcome));
                         }
                         // Read the socket only now, never before the tool ran.
                         // A tool can take a minute, and the session may have
@@ -863,6 +889,7 @@ impl Runner {
                                     self.emit(VoiceLiveEvent::Status { text: "duplicate/invalid tool call rejected".into() });
                                     continue;
                                 }
+                                calls.lock().unwrap_or_else(|p|p.into_inner()).name(&id,&call.name);
                                 activity.provider_status(ProviderActivity::InProgress);
                                 // Generated music belongs to this session, not Music.app.
                                 // Handle it here so a slow desktop/corpus job cannot delay Stop.
@@ -900,7 +927,7 @@ impl Runner {
                             let mut registry = calls.lock().unwrap_or_else(|p| p.into_inner());
                             for id in ids {
                                 if id.starts_with("host:") { continue; }
-                                let status = registry.cancel(&id);
+                                let status = registry.cancel_from_provider(&id);
                                 self.emit(VoiceLiveEvent::Status { text: format!("cancellation for {id}: {status:?}. Running external work requires a completion receipt.") });
                             }
                         }
@@ -1161,14 +1188,19 @@ fn tool_result_log(call: &FunctionCall, outcome: &super::tools::ToolOutcome) -> 
             .as_ref()
             .and_then(|v| v["error"].as_str())
             .unwrap_or("");
-        ["agent_timeout", "agent_auth_required", "agent_exit"]
-            .into_iter()
-            .find(|kind| {
-                error
-                    .strip_prefix(kind)
-                    .is_some_and(|rest| rest.starts_with(':'))
-            })
-            .unwrap_or("tool_error")
+        [
+            "agent_timeout",
+            "agent_auth_required",
+            "agent_exit",
+            "agent_cancelled",
+        ]
+        .into_iter()
+        .find(|kind| {
+            error
+                .strip_prefix(kind)
+                .is_some_and(|rest| rest.starts_with(':'))
+        })
+        .unwrap_or("tool_error")
     } else {
         "none"
     };
@@ -1299,8 +1331,11 @@ mod tests {
     fn only_independent_model_generation_uses_separate_lanes() {
         assert_eq!(queued("a", "build_prototype").lane(), 1);
         assert_eq!(queued("b", "make_music").lane(), 2);
+        assert_eq!(queued("status", "get_status").lane(), 3);
+        assert_eq!(queued("cancel", "cancel_job").lane(), 3);
+        assert_eq!(queued("research", "research_public").lane(), 4);
+        assert_eq!(queued("review", "review_pull_request").lane(), 4);
         for name in [
-            "get_status",
             "search_meetings",
             "get_meeting",
             "look_at_screen",

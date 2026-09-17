@@ -49,9 +49,10 @@ engine-sherpa = ["dep:libloading", "whisper"]
 # Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
 # Implies `streaming` for the 16 kHz mic stream. Blocking WebSocket (tungstenite +
 # rustls) so core stays tokio-free. Off by default: it is a cloud provider.
-voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox"]
+voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:tiny_http"]
 
 [dependencies]
+tiny_http = { version = "0.12", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -998,6 +998,10 @@ enum Commands {
         #[arg(long)]
         sherpa: bool,
 
+        /// Download and select the optional Orukeet INT8 model for the sherpa engine (~672 MB)
+        #[arg(long, conflicts_with_all = ["sherpa", "parakeet", "model", "vad", "list", "diarization", "demo"])]
+        orukeet: bool,
+
         /// Install the bundled 5-meeting fixture corpus for demoing search, graph, and MCP flows
         #[arg(long)]
         demo: bool,
@@ -2448,6 +2452,7 @@ fn main() -> Result<()> {
             parakeet,
             parakeet_model,
             sherpa,
+            orukeet,
             demo,
         } => {
             if vad {
@@ -2456,6 +2461,8 @@ fn main() -> Result<()> {
                 cmd_setup_demo()
             } else if parakeet {
                 cmd_setup_parakeet(&parakeet_model)
+            } else if orukeet {
+                cmd_setup_orukeet(&config)
             } else if sherpa {
                 cmd_setup_sherpa(&config, true)
             } else if list {
@@ -8298,6 +8305,23 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
 /// Download a file from a URL to a destination path, with progress reporting.
 /// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
 /// `engine-sherpa` transcription engine into the resolved model directory.
+fn cmd_setup_orukeet(config: &Config) -> Result<()> {
+    let dir = minutes_core::orukeet::install(&config.transcription.model_path)
+        .map_err(anyhow::Error::msg)?;
+    // Select only after the entire release has passed verification.
+    let mut selected = config.clone();
+    selected.transcription.engine = "sherpa".to_string();
+    selected.transcription.sherpa_model_dir = dir.to_string_lossy().into_owned();
+    selected.save()?;
+    eprintln!("Orukeet ready in {}", dir.display());
+    if !cfg!(feature = "engine-sherpa") {
+        eprintln!(
+            "This build needs --features engine-sherpa and the sherpa plugin to use Orukeet."
+        );
+    }
+    Ok(())
+}
+
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
     let dir = minutes_core::sherpa_engine::model_dir(config);
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
@@ -9972,6 +9996,31 @@ life (qmd://life/)
             assert!(!help.contains("temporarily unavailable"), "{help}");
             assert!(!help.contains("#513"), "{help}");
         }
+    }
+
+    #[test]
+    fn setup_orukeet_is_explicit_and_rejects_other_model_selectors() {
+        let parsed = parse_cli(["minutes", "setup", "--orukeet"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Setup { orukeet: true, .. }
+        ));
+        let parsed = parse_cli(["minutes", "setup"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Setup { orukeet: false, .. }
+        ));
+        for other in [
+            "--sherpa",
+            "--parakeet",
+            "--vad",
+            "--list",
+            "--diarization",
+            "--demo",
+        ] {
+            assert!(parse_cli(["minutes", "setup", "--orukeet", other]).is_err());
+        }
+        assert!(parse_cli(["minutes", "setup", "--orukeet", "--model", "small"]).is_err());
     }
 
     #[test]

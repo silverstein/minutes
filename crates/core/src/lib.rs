@@ -11,6 +11,7 @@ pub mod autoresearch;
 pub(crate) mod bounded_child;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_graph_xpc;
+pub mod orukeet;
 
 /// Activate a previously validated MCP process-audio outer process group.
 /// The CLI must also hold the helper's live supervisor capability; the core

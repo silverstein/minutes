@@ -93,3 +93,74 @@ An explicit local native test separately passed three capture/start/stop cycles
 in 5.09 seconds. Samples were checked in memory, not saved or sent to a provider.
 This establishes native capture and teardown, not an audible conversation or
 AirPods route-change acceptance. Those remain open under `minutes-vvf1.1.8`.
+
+Audio source: `f98c85bf2b84e970b19ac4df0fbee689df08f870`.
+Installed terminal binary SHA256:
+`8fa3a107201ca5923db995baa649055ca5f8acb9b0da732ee2472abca946de6c`.
+A second native three-cycle capture/start/stop run passed in 5.34 seconds.
+The terminal wrapper still launches this audio-only build. The production and
+Minutes Dev bundles, selected devices and isolated voice configuration were not
+changed by this repair. Full audible conversation acceptance remains open.
+
+### Shared-context source tranche, 2026-09-17
+
+Source: `5b5cb515e45a27a652943edc4893a8e8218e068c`, branch
+`codex/voice-operate-20260917`. These additions are source-qualified, not yet
+installed in the terminal binary above and not accepted on the native desktop.
+
+| Scope | Implemented and source-tested | Still required |
+| --- | --- | --- |
+| SC1, SC3 | Explicit frontmost app/window grant, 1-300 seconds; bounded AX selection/roles/labels/scalar values; notification-triggered recent deltas; exact single-window image on request; no desktop-image fallback. Stop is non-blocking and revokes in-flight release. | Run the disposable native fixture; qualify a real browser's AX tree and targeted image; verify permissions under the actual responsible application. |
+| SC2 | Sharing lifecycle invalidates old selection-write references. Existing field/value/range binding remains required for writes. Prompt prefers selection over guessed screen referents. | Native selected-paragraph conversation, target switch and stale-write refusal in the actual supported editor. |
+| SC4 | Existing first-party artifact controls and bounded native controls remain the preferred action route. Observations are expressly not write authority; fresh control/selection references are required. | Combined native inspect/act/readback rehearsal. Generic external DOM attachment, arbitrary coordinate clicking and custom/canvas controls are not implemented by this tranche. |
+| SC5 | Opt-in `voice_live.work_memory`; start/remember/show/park/list/resume in the existing private checkpoint store's `voice-shared` namespace. Revision checks; corrections, constraints, reported decisions, suggestions, source references and open questions retain provenance. Resume refuses to replace an active goal. Private host `/work` notes remain separate. | Enable only in the isolated voice profile after runtime qualification. Spoken save, restart and resume with correct goal/corrections and no action replay. |
+| SC6 | Prototype redirect stores a revised brief, cancels the exact old job and allows one replacement only after settlement on the same generation lane. Global cancel discards pending redirects. Park stores host task history without claiming to stop jobs. | Real prototype redirect/cancel and spoken park/resume rehearsal, including late-result suppression and clear completion speech. Broad agent jobs and outward actions cannot use this redirect path. |
+| SC7 | Existing read/local-edit opt-ins and exact outward-action authority remain intact. | Recipient resolution and trusted outward-confirmation UX are still open. No blanket spoken-yes bypass added and no external message sent as a test. |
+| SC8 | Existing timestamped tool/provider/render telemetry retained; new five-second microphone-stall diagnostic distinguishes audio starvation from model latency. Scope start/end is shown from host state without blocking the audio loop. | Measure a real conversation on the new installed build. Separate transcript, queue, tool, first-audio and actual callback-render timings. No latency improvement claim from unit tests. |
+
+Verification on the daily Mac with the pinned Rust toolchain and two build jobs:
+
+- Voice suite: 178 passed, zero failed, 29 ignored optional/live/native tests.
+- Configuration suite: 66 passed, zero failed.
+- Voice library Clippy with warnings denied: passed.
+- Repository formatting check, whitespace check and generated release statistics:
+  passed. Three existing no-default-feature test-only dead-code warnings in
+  `knowledge.rs` remain; the library Clippy gate is clean.
+- Disposable Swift fixture compiled, but was not launched because the foreground
+  test window had not yet been approved. No personal document was focused/read
+  and no existing draft was changed by this qualification.
+
+Native fixture and reproducible instructions:
+`tooling/voice-evals/shared-context-native.md`.
+
+Known limits: context is at most 24 accessible nodes, two recent change entries,
+and a bounded selection. Unsupported events may miss intermediate changes.
+Document switches are detected through frontmost window identity, title and
+exposed AXDocument; same-title hidden browser navigation is not universally
+detectable. An unknown/ambiguous window fails closed for targeted capture.
+Saved work is explicitly requested history, not automatic conversation recording.
+The checkpoint listing budget is 128 revisions; a known checkpoint can still be
+resumed directly. No prior task is automatically restarted.
+
+## Remaining acceptance sequence
+
+Beads remains the work-status authority. This sequence defines proof obligations,
+not a second checklist whose rows can be declared complete from code presence.
+
+1. `minutes-vvf1.1.8`: Mat verifies the installed audio repair in a conversation;
+   qualify audible playback, interruption and device-route changes separately.
+2. `minutes-vvf1.1.9`: run the 30-second disposable native context fixture with
+   foreground permission. Fix any observed failure before enabling the tranche.
+3. `minutes-vvf1.1.3` and `.4`: qualify exact selection, document/focus changes,
+   stale-write refusal and structured edits with dependent output readback.
+4. `minutes-vvf1.1.5`: install the qualified CLI, opt in to voice work memory in
+   the isolated profile, then exercise spoken checkpoint restart/resume and
+   prototype redirect. Record the new exact source SHA and binary hash.
+5. `minutes-vvf1.1.6`: complete the no-Send cross-app scratch-draft rehearsal.
+   Outward recipient resolution and confirmation remain separate acceptance.
+6. `minutes-vvf1.1.7`: review timestamped conversation evidence, report actual
+   slow stages and regressions, and run the combined final rehearsal above.
+7. Reconcile the publication branch and exact-SHA CI before landing. This source
+   tranche is not a main-branch merge, a desktop release or user acceptance.
+
+Do not mark the epic complete while any required behavior above lacks a receipt.

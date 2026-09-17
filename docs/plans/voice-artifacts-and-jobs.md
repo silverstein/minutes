@@ -36,6 +36,12 @@ IDs, elapsed time and state. Terminal timers are replaced by one delayed cue.
 Host context updates use `turnComplete:false`, not an artificial user turn that
 would interrupt current speech. The prompt requests an audible acknowledgment;
 this is model behavior, not a guarantee of a spoken event on a fixed timer.
+Slow model-origin jobs also send a real partial `FunctionResponse` with
+`willContinue:true` when their worker starts; completion closes it with false.
+Synthetic Live probing found that merely withholding all responses or supplying
+context text could leave a second acknowledged music request undispatched.
+The partial-response path allowed both requests while the first result remained
+pending. This is one bounded regression probe, not a guarantee on every turn.
 
 `cancel_job` cancels one returned ID. Queued jobs do not start. Supported isolated
 coding-agent invocations poll cancellation, terminate their owned process group

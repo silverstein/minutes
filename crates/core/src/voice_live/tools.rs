@@ -565,7 +565,8 @@ impl ToolContext {
             "cancel_job" => {
                 let id=args["job_id"].as_str().ok_or("job_id is required")?;
                 let state=self.calls.lock().map_err(|_|"Job state unavailable")?.cancel(id).ok_or("Unknown job; read get_status")?;
-                Ok(json!({"job_id":id,"state":format!("{state:?}"),"note":"Cancellation requested for this job only. CancelRequested is not stopped. External effects are not undone."}))
+                let active=matches!(state,crate::interaction::calls::CallState::CancelRequested|crate::interaction::calls::CallState::Cancelled);
+                Ok(json!({"job_id":id,"state":format!("{state:?}"),"cancellation_requested":active,"note":if active {"Cancellation requested for this job only. CancelRequested is not stopped. External effects are not undone."}else{"This job already finished; no cancellation was performed and its effects were not undone."}}))
             }
             "research_public" => {
                 let answer = super::research::research(cfg, args)?;

@@ -278,11 +278,19 @@ impl LiveClient {
         result: &str,
         scheduling: &str,
     ) -> Result<(), VoiceLiveError> {
-        let response = self
+        let mut response = self
             .profile
             .function_response(&call.id, &call.name, json!(result), scheduling)
             .map_err(VoiceLiveError::Connect)?;
+        response["willContinue"] = json!(false);
         self.send_json(json!({ "toolResponse": { "functionResponses": [response] }}))
+    }
+
+    /// A truthful partial receipt keeps a long NON_BLOCKING call open.
+    pub fn send_tool_progress(&self, call: &FunctionCall) -> Result<(), VoiceLiveError> {
+        let mut response=self.profile.function_response(&call.id,&call.name,json!({"job_id":call.id,"state":"running","completed":false,"note":"The independent worker is running. No artifact or implementation phase is known yet. Other tools may run concurrently. This is not a completion receipt."}),"SILENT").map_err(VoiceLiveError::Connect)?;
+        response["willContinue"] = json!(true);
+        self.send_json(json!({"toolResponse":{"functionResponses":[response]}}))
     }
 
     /// Ask the IO thread to close the socket and wait for it.
@@ -1045,7 +1053,7 @@ mod tests {
             resume_handle: None,
         };
         let client = LiveClient::connect(&setup).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        let deadline = std::time::Instant::now() + Duration::from_secs(65);
         let mut turn = 0;
         let mut called = [false; 2];
         let mut audio = [0usize; 2];
@@ -1068,6 +1076,9 @@ mod tests {
                             music_description = call.args["description"].as_str().unwrap_or("").to_owned();
                         }
                         called[turn] = true;
+                        if turn == 0 {
+                            client.send_tool_progress(&call).unwrap();
+                        }
                     }
                 }
                 Ok(ServerEvent::TurnComplete) if called[turn] => {
@@ -1082,6 +1093,13 @@ mod tests {
                 Ok(ServerEvent::Error(error)) => panic!("acknowledgment smoke: {error}"),
                 Ok(ServerEvent::Closed(reason)) => panic!("acknowledgment smoke closed: {reason}"),
                 _ => {}
+            }
+            if called.iter().all(|called| *called)
+                && audio.iter().all(|bytes| *bytes > 6_400)
+                && transcript.iter().all(|text| !text.trim().is_empty())
+            {
+                finished = true;
+                break;
             }
         }
         client.close();

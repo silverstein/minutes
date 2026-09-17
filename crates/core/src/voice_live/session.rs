@@ -418,6 +418,12 @@ where
     let prompt = system_prompt(config, &names, tools.brain_root.is_some());
     emit(VoiceLiveEvent::Status {
         text: format!(
+            "model: {}, voice: {}, persona: {}",
+            config.voice_live.model, config.voice_live.voice_name, config.voice_live.persona
+        ),
+    });
+    emit(VoiceLiveEvent::Status {
+        text: format!(
             "{} known people, {} tools{}",
             names.people.len(),
             declarations.len(),
@@ -653,6 +659,10 @@ impl Runner {
                         if stop_flag.load(Ordering::SeqCst) {
                             calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&call.id);
                             continue;
+                        }
+                        if matches!(queued.origin, DispatchOrigin::Model) && matches!(call.name.as_str(), "build_prototype" | "make_music" | "research_public" | "think_deeply" | "review_pull_request") {
+                            let client=Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
+                            let _=client.send_tool_progress(&call);
                         }
                         // A relayed agent can take half a minute. Without this
                         // the host shows the call going out and then nothing,

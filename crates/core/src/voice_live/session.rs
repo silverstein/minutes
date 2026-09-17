@@ -132,6 +132,28 @@ enum AudioIo {
 }
 
 impl AudioIo {
+    fn mark_response(&self) {
+        match self {
+            AudioIo::Split {
+                playback: Some(playback),
+                ..
+            } => playback.mark_response(),
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.mark_response(),
+            _ => {}
+        }
+    }
+    fn take_render_events(&self) -> Vec<(&'static str, Instant)> {
+        match self {
+            AudioIo::Split {
+                playback: Some(playback),
+                ..
+            } => playback.take_render_events(),
+            #[cfg(target_os = "macos")]
+            AudioIo::Processed(io) => io.take_render_events(),
+            _ => Vec::new(),
+        }
+    }
     fn receiver(&self) -> &Receiver<AudioChunk> {
         match self {
             AudioIo::Split { mic, .. } => &mic.receiver,
@@ -469,6 +491,9 @@ where
         None
     };
     let log_path = log.as_ref().map(|l| l.path.clone());
+    if let Some(log) = &log {
+        log.write(&serde_json::json!({"event":"session_configuration","diagnostics_schema":2,"model":config.voice_live.model,"thinking_level":config.voice_live.thinking_level,"voice":config.voice_live.voice_name,"mode":format!("{:?}",options.mode),"jev_evaluation":config.voice_live.jev_evaluation,"proactive_audio_effective":setup.profile().is_ok_and(|p|p.proactive_audio(config.voice_live.proactive_audio))}).to_string());
+    }
     if let Some(p) = &log_path {
         emit(VoiceLiveEvent::Status {
             text: format!("log: {}", p.display()),
@@ -627,7 +652,7 @@ impl Runner {
         let calls = Arc::clone(&self.tools.calls);
         let mut activity =
             LiveActivity::new(self.setup.profile().expect("validated before connecting"));
-        let (audio_out, audio_in) = unbounded::<Vec<u8>>();
+        let (audio_out, audio_in) = unbounded::<(String, Vec<u8>)>();
         let workers: Vec<_> = channels.into_iter().enumerate().map(|(lane, (_, tool_rx))| {
             let tools = Arc::clone(&self.tools);
             let calls = Arc::clone(&calls);
@@ -653,6 +678,9 @@ impl Runner {
                             }
                             continue;
                         }
+                        if let Some(tx) = &log_tx {
+                            let _ = tx.send(serde_json::json!({"event":"tool_started","call_id":call.id,"tool":call.name}).to_string());
+                        }
                         // Shutdown drops the sender, but whatever was already
                         // queued still arrives here. A send waiting behind a
                         // slow tool must not fire after the session is over.
@@ -671,10 +699,8 @@ impl Runner {
                         {
                             let running = Arc::clone(&running);
                             let on_event = Arc::clone(&on_event);
-                            let client_cell = Arc::clone(&client_cell);
                             let stop_flag = Arc::clone(&stop_flag);
                             let name = call.name.clone();
-                            let id = call.id.clone();
                             std::thread::spawn(move || {
                                 let start = Instant::now();
                                 while running.load(Ordering::Relaxed) {
@@ -686,8 +712,8 @@ impl Runner {
                                         on_event(VoiceLiveEvent::Status {
                                             text: format!("{name} is running in the background. You can keep talking or ask to cancel it."),
                                         });
-                                        let client = Arc::clone(&client_cell.lock().unwrap_or_else(|p|p.into_inner()));
-                                        let _ = client.send_context_update(&format!("Host job state: {}. This is status only, not a new user request. No result exists yet. Do not claim completion or waiting for approval. Keep the current conversation going; get_status provides current state.", serde_json::json!({"job_id":id,"tool":name,"state":"running","observed_after_seconds":start.elapsed().as_secs()})));
+                                        // Do not inject a synthetic conversational turn. It can
+                                        // race the completion and leave a stale running claim.
                                         break;
                                     }
                                 }
@@ -756,7 +782,7 @@ impl Runner {
                         // its own, then send the frame as the turn the model
                         // actually answers.
                         if let Some(pcm) = &outcome.audio {
-                            audio_out.send(pcm.clone()).ok();
+                            audio_out.send((call.id.clone(), pcm.clone())).ok();
                         }
                         let media = outcome.image.is_some();
                         let this_scheduling = if media { "SILENT" } else { &scheduling };
@@ -769,6 +795,9 @@ impl Runner {
                         } else {
                             client.send_tool_response(&call, &outcome.text, this_scheduling)
                         };
+                        if let Some(tx) = &log_tx {
+                            let _ = tx.send(serde_json::json!({"event":"tool_delivery_enqueued","call_id":call.id,"tool":call.name,"ok":delivery.is_ok(),"scope":"queued to provider socket, not proof of spoken acknowledgement"}).to_string());
+                        }
                         if delivery.is_err()
                         {
                             // The socket went while this ran. Losing one result
@@ -814,6 +843,8 @@ impl Runner {
         let mut you = String::new();
         let mut me = String::new();
         let mut last_audio = Instant::now();
+        let mut response_audio_started = false;
+        let mut playback_pending = false;
         let set_state = |runner: &Runner, current: &mut VoiceLiveState, next: VoiceLiveState| {
             if *current != next {
                 *current = next;
@@ -822,6 +853,11 @@ impl Runner {
         };
 
         loop {
+            for (event, at) in self.audio.take_render_events() {
+                if let Some(log) = &self.log {
+                    log.write(&serde_json::json!({"event":event,"render_session_elapsed_ms":at.saturating_duration_since(log.tx.started).as_millis(),"scope":"first sample consumed by device callback, not acoustic measurement"}).to_string());
+                }
+            }
             if self.stop_flag.load(Ordering::SeqCst) {
                 break;
             }
@@ -831,6 +867,12 @@ impl Runner {
                 && last_audio.elapsed() > Duration::from_millis(300)
                 && !ptt.held
             {
+                if playback_pending {
+                    self.log_line(
+                        serde_json::json!({"event":"playback_queue_drained"}).to_string(),
+                    );
+                    playback_pending = false;
+                }
                 activity.playback_stopped();
                 if activity.ready() && calls.lock().unwrap_or_else(|p| p.into_inner()).active() == 0
                 {
@@ -846,14 +888,24 @@ impl Runner {
                         ServerEvent::SetupComplete => {
                             if resumes == 0 { activity.provider_status(ProviderActivity::Idle); }
                         }
-                        ServerEvent::InteractionStatus(status) => activity.provider_status(status),
+                        ServerEvent::InteractionStatus(status) => {
+                            self.log_line(serde_json::json!({"event":"provider_activity","state":format!("{status:?}")}).to_string());
+                            activity.provider_status(status);
+                        }
                         ServerEvent::Audio(bytes) => {
+                            if !response_audio_started {
+                                self.audio.mark_response();
+                                self.log_line(serde_json::json!({"event":"first_response_audio_received","scope":"received and queued for local playback, not acoustic confirmation"}).to_string());
+                                response_audio_started = true;
+                            }
+                            playback_pending = true;
                             activity.playback_started();
                             self.audio.push_pcm16(&bytes);
                             last_audio = Instant::now();
                             set_state(&self, &mut state, VoiceLiveState::Speaking);
                         }
                         ServerEvent::InputTranscript(t) => {
+                            self.log_line(serde_json::json!({"event":"input_transcript_chunk","characters":t.chars().count(),"playback_pending":playback_pending}).to_string());
                             activity.provider_status(ProviderActivity::InProgress);
                             // The user's voice, as it arrives. The confirmation
                             // gate needs to know a person spoke and when, and a
@@ -878,12 +930,17 @@ impl Runner {
                             self.emit(VoiceLiveEvent::AssistantTranscript { text: t, partial: true });
                         }
                         ServerEvent::Interrupted => {
+                            self.log_line(serde_json::json!({"event":"provider_interruption","discarded_output_characters":me.chars().count(),"playback_pending":playback_pending}).to_string());
+                            response_audio_started = false;
+                            playback_pending = false;
                             self.audio.flush();
                             self.flush_transcripts(&mut you, &mut me);
                             activity.playback_stopped();
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         ServerEvent::TurnComplete => {
+                            self.log_line(serde_json::json!({"event":"provider_turn_complete"}).to_string());
+                            response_audio_started = false;
                             // The end of the assistant's turn is the earliest
                             // point an answer to its question can exist.
                             self.tools.desktop.finished_speaking();
@@ -902,10 +959,13 @@ impl Runner {
                                     continue;
                                 }
                                 calls.lock().unwrap_or_else(|p|p.into_inner()).name(&id,&call.name);
+                                self.log_line(serde_json::json!({"event":"tool_queued","call_id":id,"tool":call.name}).to_string());
                                 activity.provider_status(ProviderActivity::InProgress);
                                 // Generated music belongs to this session, not Music.app.
                                 // Handle it here so a slow desktop/corpus job cannot delay Stop.
                                 if call.name == "control_music" && self.tools.config.voice_live.music {
+                                    let started = Instant::now();
+                                    self.log_line(serde_json::json!({"event":"tool_started","call_id":id,"tool":call.name}).to_string());
                                     let action = call.args["action"].as_str().unwrap_or("");
                                     let result = self.audio.control_music(action).or_else(|| {
                                         (!self.tools.config.voice_live.desktop_control)
@@ -923,6 +983,7 @@ impl Runner {
                                         drop(registry);
                                         self.emit(VoiceLiveEvent::ToolResult { name: call.name.clone(), ms: 0, chars: receipt.len(), error });
                                         self.log_line(format!("  -> generated music control: {receipt}"));
+                                        self.log_line(tool_result_log(&call,&super::tools::ToolOutcome {text:receipt.clone(),is_error:error,elapsed:started.elapsed(),image:None,audio:None}));
                                         let _ = self.client().send_tool_response(&call, &receipt, "WHEN_IDLE");
                                         continue;
                                     }
@@ -1020,7 +1081,7 @@ impl Runner {
                 // Audio a tool produced, queued for the speaker on this thread
                 // because the playback handle lives here.
                 recv(audio_in) -> pcm => {
-                    if let Ok(pcm) = pcm {
+                    if let Ok((job_id, pcm)) = pcm {
                         // Checked again here, not only where it was generated:
                         // a piece can wait in this queue while a recording
                         // starts, and music in the transcript is the one thing
@@ -1031,6 +1092,8 @@ impl Runner {
                             });
                         } else {
                             self.audio.push_music(&pcm);
+                            self.log_line(serde_json::json!({"event":"music_playback_queued","call_id":job_id}).to_string());
+                            let _ = self.client().send_context_update(&format!("Host playback state: generated music for job {job_id} is now queued in Minutes' player. It can be paused or stopped with control_music; no approval is pending. Speech has priority over music. This is state, not a new user request."));
                         }
                     }
                 }
@@ -1212,6 +1275,11 @@ fn tool_result_log(call: &FunctionCall, outcome: &super::tools::ToolOutcome) -> 
             "artifact_control_refused",
             "artifact_control_unverified",
             "artifact_preview_unavailable",
+            "artifact_reference_unknown",
+            "evaluation_stale",
+            "evaluation_invalid",
+            "evaluation_unavailable",
+            "repository_query_mismatch",
             "app_target_changed",
             "app_target_stale",
             "cua_unverified",
@@ -1233,6 +1301,7 @@ fn tool_result_log(call: &FunctionCall, outcome: &super::tools::ToolOutcome) -> 
         "event": "tool_result", "call_id": call.id, "tool": call.name,
         "elapsed_ms": outcome.elapsed.as_millis(), "error": outcome.is_error,
         "failure_kind": failure_kind, "result_chars": outcome.text.chars().count()
+        ,"action_state":super::protocol::completed_tool_result(call,&outcome.text)["state"]
     })
     .to_string()
 }
@@ -1240,8 +1309,34 @@ fn tool_result_log(call: &FunctionCall, outcome: &super::tools::ToolOutcome) -> 
 /// Append-only markdown transcript of one session, `0600`.
 struct SessionLog {
     path: PathBuf,
-    tx: Sender<String>,
+    tx: LogSender,
     _writer: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct LogSender {
+    tx: Sender<String>,
+    started: Instant,
+}
+
+impl LogSender {
+    fn send(&self, line: String) -> Result<(), crossbeam_channel::SendError<String>> {
+        self.tx.send(stamp_log(
+            &line,
+            &Local::now().to_rfc3339(),
+            self.started.elapsed().as_millis(),
+        ))
+    }
+}
+
+fn stamp_log(line: &str, timestamp: &str, elapsed_ms: u128) -> String {
+    if let Ok(serde_json::Value::Object(mut event)) = serde_json::from_str(line) {
+        event.insert("timestamp".into(), serde_json::json!(timestamp));
+        event.insert("session_elapsed_ms".into(), serde_json::json!(elapsed_ms));
+        serde_json::Value::Object(event).to_string()
+    } else {
+        format!("<!-- {timestamp} +{elapsed_ms}ms -->\n{line}")
+    }
 }
 
 impl SessionLog {
@@ -1277,12 +1372,15 @@ impl SessionLog {
             })?;
         Ok(Self {
             path,
-            tx,
+            tx: LogSender {
+                tx,
+                started: Instant::now(),
+            },
             _writer: writer,
         })
     }
 
-    fn sender(&self) -> Sender<String> {
+    fn sender(&self) -> LogSender {
         self.tx.clone()
     }
 
@@ -1294,6 +1392,34 @@ impl SessionLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamped_events_preserve_duration_and_private_boundaries() {
+        let event = stamp_log(
+            r#"{"event":"tool_result","elapsed_ms":97}"#,
+            "2026-09-17T10:12:00-04:00",
+            250,
+        );
+        let value: serde_json::Value = serde_json::from_str(&event).unwrap();
+        assert_eq!(value["elapsed_ms"], 97);
+        assert_eq!(value["session_elapsed_ms"], 250);
+        assert_eq!(value["timestamp"], "2026-09-17T10:12:00-04:00");
+        assert!(stamp_log("**You:** hello", "local-time", 10).contains("<!-- local-time +10ms -->"));
+    }
+
+    #[test]
+    fn approval_is_logged_as_pending_not_executed() {
+        let call = FunctionCall {
+            id: "call-1".into(),
+            name: "add_note".into(),
+            args: serde_json::json!({}),
+        };
+        let result = super::super::protocol::completed_tool_result(
+            &call,
+            r#"{"proposal_id":1,"text":"private"}"#,
+        );
+        assert_eq!(result["state"], "AwaitingApproval");
+    }
 
     #[test]
     fn unrelated_completions_do_not_repeat_pending_approval() {

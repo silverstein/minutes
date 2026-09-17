@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -22,6 +23,10 @@ pub(super) struct OutputQueue {
     paused: bool,
     speech_tail: usize,
     tail_samples: usize,
+    speech_position: u64,
+    speech_markers: VecDeque<u64>,
+    music_start_pending: bool,
+    render_events: VecDeque<(&'static str, Instant)>,
 }
 
 impl OutputQueue {
@@ -32,6 +37,10 @@ impl OutputQueue {
             paused: false,
             speech_tail: 0,
             tail_samples: rate as usize / 4,
+            speech_position: 0,
+            speech_markers: VecDeque::new(),
+            music_start_pending: false,
+            render_events: VecDeque::with_capacity(64),
         }
     }
 
@@ -42,6 +51,25 @@ impl OutputQueue {
     pub fn replace_music(&mut self, samples: Vec<f32>) {
         self.music = Some(samples.into());
         self.paused = false;
+        self.music_start_pending = true;
+    }
+
+    pub fn mark_response(&mut self) {
+        if self.speech_markers.len() < 64 {
+            self.speech_markers
+                .push_back(self.speech_position + self.speech.len() as u64);
+        }
+    }
+
+    fn rendered(&mut self, kind: &'static str) {
+        if self.render_events.len() == 64 {
+            self.render_events.pop_front();
+        }
+        self.render_events.push_back((kind, Instant::now()));
+    }
+
+    pub fn take_render_events(&mut self) -> Vec<(&'static str, Instant)> {
+        self.render_events.drain(..).collect()
     }
 
     pub fn control_music(&mut self, action: &str) -> Option<Result<&'static str, &'static str>> {
@@ -69,6 +97,15 @@ impl OutputQueue {
 
     pub fn pop_front(&mut self) -> Option<f32> {
         if let Some(sample) = self.speech.pop_front() {
+            if self
+                .speech_markers
+                .front()
+                .is_some_and(|p| *p <= self.speech_position)
+            {
+                self.speech_markers.pop_front();
+                self.rendered("speech_render_started");
+            }
+            self.speech_position += 1;
             self.speech_tail = self.tail_samples;
             return Some(sample);
         }
@@ -79,12 +116,19 @@ impl OutputQueue {
         if self.paused {
             None
         } else {
-            self.music.as_mut().and_then(VecDeque::pop_front)
+            let sample = self.music.as_mut().and_then(VecDeque::pop_front);
+            if sample.is_some() && self.music_start_pending {
+                self.music_start_pending = false;
+                self.rendered("music_render_started");
+            }
+            sample
         }
     }
 
     /// Barge-in discards assistant speech, not the independently controlled song.
     pub fn clear(&mut self) {
+        self.speech_position += self.speech.len() as u64;
+        self.speech_markers.clear();
         self.speech.clear();
         self.speech_tail = 0;
     }
@@ -122,6 +166,18 @@ pub struct Playback {
 unsafe impl Send for Playback {}
 
 impl Playback {
+    pub(super) fn mark_response(&self) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mark_response();
+    }
+    pub(super) fn take_render_events(&self) -> Vec<(&'static str, Instant)> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take_render_events()
+    }
     /// Open the default output device.
     pub fn open() -> Result<Self, VoiceLiveError> {
         let host = crate::capture::cached_default_host();
@@ -320,6 +376,25 @@ pub fn resample_linear(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_timing_starts_at_consumption_not_enqueue_and_flush_drops_markers() {
+        let mut queue = OutputQueue::new(4);
+        queue.mark_response();
+        queue.extend([0.5]);
+        queue.replace_music(vec![0.25]);
+        assert!(queue.take_render_events().is_empty());
+        assert_eq!(queue.pop_front(), Some(0.5));
+        assert_eq!(queue.take_render_events()[0].0, "speech_render_started");
+        queue.pop_front();
+        assert_eq!(queue.pop_front(), Some(0.25));
+        assert_eq!(queue.take_render_events()[0].0, "music_render_started");
+        queue.mark_response();
+        queue.extend([0.75]);
+        queue.clear();
+        assert!(queue.pop_front().is_none());
+        assert!(queue.take_render_events().is_empty());
+    }
 
     #[test]
     fn speech_preempts_music_and_music_resumes_after_speech_tail() {

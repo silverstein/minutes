@@ -68,6 +68,18 @@ fn device_label(input: bool) -> String {
 }
 
 impl VoiceIo {
+    pub(super) fn mark_response(&self) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mark_response();
+    }
+    pub(super) fn take_render_events(&self) -> Vec<(&'static str, std::time::Instant)> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take_render_events()
+    }
     /// Open the unit on the default devices and start both directions.
     pub fn start() -> Result<Self, VoiceLiveError> {
         let mut unit =

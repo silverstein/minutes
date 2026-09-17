@@ -24,6 +24,7 @@ struct Pending {
     tx: mpsc::Sender<Value>,
 }
 struct Preview {
+    title: String,
     origin: String,
     token: String,
     pending: Arc<Mutex<Option<Pending>>>,
@@ -31,6 +32,15 @@ struct Preview {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Artifacts {
+    pub fn list(&self) -> Value {
+        let mut previews: Vec<_> = self
+            .previews
+            .iter()
+            .map(|(id, preview)| json!({"prototype_id":id,"title":preview.title}))
+            .collect();
+        previews.sort_by_key(|p| p["prototype_id"].as_str().unwrap().to_owned());
+        json!({"artifacts":previews,"note":"These are this session's registered previews, not proof their tabs remain open. Use the exact prototype_id, never a job_id or call_id. Inspect before changing any value."})
+    }
     pub fn open(&mut self, id: &str) -> Result<bool> {
         if !self.previews.contains_key(id) {
             if self.previews.len() >= 8 {
@@ -55,7 +65,9 @@ impl Artifacts {
             .as_str()
             .ok_or("prototype_id is required")?;
         if !self.previews.contains_key(id) {
-            return Err("This artifact has no live controlled preview in this session. Its saved HTML is unchanged. A new version would reset transient UI state; explain this before offering a revision.".into());
+            return Ok(
+                json!({"error":"artifact_reference_unknown: no matching preview; no command delivered", "recovery":self.list(),"next_step":"Choose the matching artifact from recovery.artifacts and inspect its exact prototype_id. Do not switch to app controls, regenerate, or infer the sliders are unsupported from a reference error. If no artifact matches, ask the user."}),
+            );
         }
         let operation = match name {
             "inspect_prototype" => "inspect",
@@ -98,6 +110,7 @@ impl Preview {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            title: record["title"].as_str().unwrap_or("Prototype").to_owned(),
             origin,
             token,
             pending,
@@ -208,6 +221,49 @@ fn serve(
 mod tests {
     use super::*;
     #[test]
+    fn wrong_job_id_returns_artifact_identity_without_changing_it() {
+        let preview =
+            Preview::start(&json!({"title":"Truffle Revenue Sim","html":"<input type=range>"}))
+                .unwrap();
+        let mut artifacts = Artifacts::default();
+        artifacts.previews.insert("artifact-exact".into(), preview);
+        let result = artifacts
+            .execute(
+                "inspect_prototype",
+                &json!({"prototype_id":"call_346434_fc_0_0"}),
+            )
+            .unwrap();
+        assert!(result["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("artifact_reference_unknown"));
+        assert_eq!(
+            result["recovery"]["artifacts"][0]["prototype_id"],
+            "artifact-exact"
+        );
+        assert_eq!(
+            result["recovery"]["artifacts"][0]["title"],
+            "Truffle Revenue Sim"
+        );
+        assert!(artifacts.previews["artifact-exact"]
+            .pending
+            .lock()
+            .unwrap()
+            .is_none());
+        let result = artifacts
+            .execute(
+                "set_prototype_control",
+                &json!({"prototype_id":"call_346434_fc_0_0","value":"100"}),
+            )
+            .unwrap();
+        assert!(result.get("error").is_some());
+        assert!(artifacts.previews["artifact-exact"]
+            .pending
+            .lock()
+            .unwrap()
+            .is_none());
+    }
+    #[test]
     fn preview_requires_token_and_exact_origin_and_bounds_wait() {
         let preview = Preview::start(&json!({"title":"Test","html":"<input type=range>"})).unwrap();
         let client = ureq::Agent::new_with_config(
@@ -282,5 +338,53 @@ mod tests {
         assert_eq!(undone["output"], "50");
         println!("CONTROL_ACCEPTANCE=passed");
         std::thread::sleep(Duration::from_secs(15));
+    }
+
+    #[test]
+    #[ignore = "explicit existing artifact fixture; opens no app; attach a test browser to the printed URL"]
+    fn existing_truffle_preview_read_write_undo() {
+        let id =
+            std::env::var("MINUTES_PROTOTYPE_FIXTURE_ID").expect("explicit artifact ID required");
+        let record = super::super::prototype::load(
+            &crate::config::Config::minutes_dir().join("prototypes"),
+            &id,
+        )
+        .unwrap();
+        assert_eq!(record["title"], "Truffle Revenue Simulator");
+        let preview = Preview::start(&record).unwrap();
+        println!("TRUFFLE_PREVIEW={}/#{}", preview.origin, preview.token);
+        let mut artifacts = Artifacts::default();
+        artifacts.previews.insert(id.clone(), preview);
+        let recovery = artifacts
+            .execute(
+                "inspect_prototype",
+                &json!({"prototype_id":"call_346434_fc_0_0"}),
+            )
+            .unwrap();
+        assert_eq!(recovery["recovery"]["artifacts"][0]["prototype_id"], id);
+        std::thread::sleep(Duration::from_secs(30));
+        let initial = artifacts
+            .execute("inspect_prototype", &json!({"prototype_id":id}))
+            .unwrap();
+        let price = initial["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["type"] == "range" && c["label"].as_str().unwrap_or("").contains("Price"))
+            .unwrap();
+        assert_eq!(price["value"], "45");
+        let changed=artifacts.execute("set_prototype_control",&json!({"prototype_id":id,"snapshot_id":initial["snapshot_id"],"control_id":price["control_id"],"value":"100"})).unwrap();
+        assert!(
+            changed["output"].as_str().unwrap().contains("25,000"),
+            "{changed}"
+        );
+        println!("TRUFFLE_CHANGED={changed}");
+        std::thread::sleep(Duration::from_secs(10));
+        let undone=artifacts.execute("undo_prototype_control",&json!({"prototype_id":id,"snapshot_id":changed["snapshot_id"],"undo_id":changed["undo_id"]})).unwrap();
+        assert!(
+            undone["output"].as_str().unwrap().contains("11,250"),
+            "{undone}"
+        );
+        println!("TRUFFLE_ACCEPTANCE=passed");
     }
 }

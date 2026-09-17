@@ -263,6 +263,14 @@ impl LiveClient {
         }}))
     }
 
+    /// Add host state without starting a new user turn or interrupting speech.
+    pub fn send_context_update(&self, text: &str) -> Result<(), VoiceLiveError> {
+        self.send_json(json!({ "clientContent": {
+            "turns": [{ "role": "user", "parts": [{ "text": text }] }],
+            "turnComplete": false,
+        }}))
+    }
+
     /// Answer a tool call. `scheduling` is WHEN_IDLE, INTERRUPT, or SILENT.
     pub fn send_tool_response(
         &self,
@@ -1017,8 +1025,9 @@ mod tests {
         config.voice_live.html_prototypes = true;
         config.voice_live.music = true;
         config.voice_live.persona = "morris".into();
+        config.voice_live.model = "gemini-3.8-live-extended-thinking".into();
         config.voice_live.voice_name =
-            std::env::var("MINUTES_TEST_VOICE").unwrap_or_else(|_| "Puck".into());
+            std::env::var("MINUTES_TEST_VOICE").unwrap_or_else(|_| "Kore".into());
         let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
         let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
         let setup = SessionSetup {
@@ -1048,7 +1057,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             match client.inbox.recv_timeout(Duration::from_millis(250)) {
                 Ok(ServerEvent::SetupComplete) => client.send_text_turn(
-                    "Build a small interactive board with Now, Next and Later columns. Use these three cards: Fewer meetings, Smaller teams, Shorter workdays. Let me move the cards between columns. This is the complete brief; build it now."
+                    "Build a custom interactive calculator showing how team cost changes with hours saved each week. Include editable team size, hourly cost and hours saved, and a live chart. This is the complete brief; build it now."
                 ).unwrap(),
                 Ok(ServerEvent::Audio(bytes)) => audio[turn] += bytes.len(),
                 Ok(ServerEvent::OutputTranscript(text)) => transcript[turn].push_str(&text),
@@ -1463,6 +1472,60 @@ mod tests {
         client.close();
         assert_eq!(phase, 3, "incomplete research/open/recovery flow: {speech}");
         println!("SOURCE_RECOVERY: {speech}");
+    }
+
+    #[test]
+    #[ignore = "requires GEMINI_API_KEY; synthetic board routing, no browser or private data"]
+    fn live_decision_board_revision_smoke() {
+        let mut config = crate::config::Config::default();
+        config.voice_live.enabled = true;
+        config.voice_live.allow_cloud = true;
+        config.voice_live.html_prototypes = true;
+        config.voice_live.model = "gemini-3.8-live-extended-thinking".into();
+        config.voice_live.thinking_level = "low".into();
+        config.voice_live.voice_name = "Kore".into();
+        let names = std::sync::Arc::new(crate::voice_live::NameIndex::default());
+        let tools = crate::voice_live::ToolContext::new(config.clone(), names.clone());
+        let setup = SessionSetup {
+            model: config.voice_live.model.clone(),
+            thinking_level: "low".into(),
+            api_key: crate::voice_live::api_key(&config).unwrap(),
+            system_instruction: crate::voice_live::system_prompt(&config, &names, false),
+            function_declarations: tools.declarations(),
+            language: "en-US".into(),
+            voice_name: "Kore".into(),
+            manual_activity: true,
+            proactive_audio: true,
+            start_sensitivity: String::new(),
+            end_sensitivity: String::new(),
+            resume_handle: None,
+        };
+        let client = LiveClient::connect(&setup).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut phase = 0;
+        let mut asked = false;
+        let mut speech = String::new();
+        let board = |revision| json!({"board_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","revision":revision,"title":"Future work","columns":[{"id":"column-1","title":"Now","cards":[{"id":"card-4","title":"Fewer meetings","body":"Manual edit: protect focus"}]},{"id":"column-2","title":"Next","cards":[]},{"id":"column-3","title":"Later","cards":[]}],"selected_card_id":"card-4"});
+        while std::time::Instant::now() < deadline && phase < 3 {
+            match client.inbox.recv_timeout(Duration::from_millis(250)) {
+                Ok(ServerEvent::SetupComplete)=>client.send_text_turn("Create a Now Next Later decision board with one idea: Fewer meetings. Do it now.").unwrap(),
+                Ok(ServerEvent::OutputTranscript(text))=>speech.push_str(&text),
+                Ok(ServerEvent::ToolCall(calls))=>for call in calls {
+                    match phase {
+                        0=>{assert_eq!(call.name,"create_decision_board","{speech}");client.send_tool_response(&call,&board(1).to_string(),"SILENT").unwrap();phase=1;},
+                        1=>{assert_eq!(call.name,"read_decision_board","{speech}");client.send_tool_response(&call,&board(7).to_string(),"SILENT").unwrap();phase=2;},
+                        2=>{assert_eq!(call.name,"edit_decision_board","{speech}");assert_eq!(call.args["revision"],7);assert_eq!(call.args["board_id"],"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");assert_eq!(call.args["change"]["operation"],"move_card");assert_eq!(call.args["change"]["card_id"],"card-4");assert_eq!(call.args["change"]["column_id"],"column-2");phase=3;},
+                        _=>{}
+                    }
+                },
+                Ok(ServerEvent::TurnComplete) if phase==1&&!asked=>{asked=true;client.send_text_turn("I selected this card and made a manual edit. Move this one to Next; keep its current writing.").unwrap();},
+                Ok(ServerEvent::Error(e)|ServerEvent::Closed(e))=>panic!("{e}"),
+                _=>{}
+            }
+        }
+        client.close();
+        assert_eq!(phase, 3, "Board flow incomplete: {speech}");
+        println!("BOARD_ROUTING: create, read current revision, move selected exact card passed");
     }
 
     #[test]

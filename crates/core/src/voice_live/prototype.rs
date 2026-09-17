@@ -66,6 +66,9 @@ fn build_at(config: &Config, args: &Value, root: &Path, open: bool) -> Result<Va
         Duration::from_secs(config.voice_live.delegate_timeout_secs.clamp(30, 180)),
     )?;
     let generated = parse_generated(&output)?;
+    if super::jobs::cancelled() {
+        return Err("agent_cancelled: generation stopped before publishing a preview".into());
+    }
     let record = json!({"title":generated["title"],"html":generated["html"],"brief":brief,
         "agent":label,"previous_id":args.get("previous_id"),"created_at":chrono::Utc::now().to_rfc3339()});
     let id = save(root, &record)?;
@@ -157,7 +160,11 @@ fn save(root: &Path, record: &Value) -> Result<String, String> {
     Ok(id)
 }
 
-fn publish(dir: &BoundRecoveryDirectory, name: &str, bytes: &[u8]) -> Result<(), String> {
+pub(super) fn publish(
+    dir: &BoundRecoveryDirectory,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| e.to_string())?;
     let temporary = format!(
@@ -204,7 +211,7 @@ fn viewer(title: &str, html: &str) -> String {
     format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{outer_csp}\"><title>{}</title><style>html,body{{margin:0;height:100%;background:#fff}}iframe{{display:block;width:100%;height:100%;border:0}}</style></head><body><iframe title=\"{}\" sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" srcdoc=\"{}\"></iframe></body></html>", escape(title), escape(title), escape(&child))
 }
 
-fn open_preview(path: &Path) -> bool {
+pub(super) fn open_preview(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         let Ok(mut child) = crate::engine_process::command("/usr/bin/open")

@@ -197,7 +197,12 @@ pub(super) fn isolated_answer(
     if let Some(i) = invocation.args.iter().position(|a| a == "--system-prompt") {
         invocation.args[i + 1] = system.into();
     }
-    let output = summarize::run_chat_invocation(invocation, Some(workspace.path()), timeout)?;
+    let output = summarize::run_chat_invocation_cancellable(
+        invocation,
+        Some(workspace.path()),
+        timeout,
+        &super::jobs::cancelled,
+    )?;
     if label == "codex" {
         codex_answer(&output)
     } else {

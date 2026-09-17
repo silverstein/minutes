@@ -11258,7 +11258,6 @@ life (qmd://life/)
         });
     }
 
-    #[test]
     /// #1001 fixed the Ctrl-C abort in #998 by skipping C++ static teardown on
     /// every interrupt path. #1008 then reverted all four call sites without
     /// mentioning it, because it was built on a stale copy of this file, and
@@ -11310,6 +11309,7 @@ life (qmd://life/)
         );
     }
 
+    #[test]
     fn graceful_interrupt_requests_shutdown_before_force_exit() {
         let stop = AtomicBool::new(false);
         let shutdowns = AtomicUsize::new(0);

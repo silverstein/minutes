@@ -998,9 +998,9 @@ enum Commands {
         #[arg(long)]
         sherpa: bool,
 
-        /// Download and select the optional Orukeet INT8 model for the sherpa engine (~672 MB)
-        #[arg(long, conflicts_with_all = ["sherpa", "parakeet", "model", "vad", "list", "diarization", "demo"])]
-        orukeet: bool,
+        /// Download and select a verified model for the sherpa engine (~672 MB)
+        #[arg(long, value_parser = ["orukeet"], conflicts_with_all = ["sherpa", "parakeet", "model", "vad", "list", "diarization", "demo"])]
+        sherpa_model: Option<String>,
 
         /// Install the bundled 5-meeting fixture corpus for demoing search, graph, and MCP flows
         #[arg(long)]
@@ -2452,7 +2452,7 @@ fn main() -> Result<()> {
             parakeet,
             parakeet_model,
             sherpa,
-            orukeet,
+            sherpa_model,
             demo,
         } => {
             if vad {
@@ -2461,7 +2461,7 @@ fn main() -> Result<()> {
                 cmd_setup_demo()
             } else if parakeet {
                 cmd_setup_parakeet(&parakeet_model)
-            } else if orukeet {
+            } else if sherpa_model.is_some() {
                 cmd_setup_orukeet(&config)
             } else if sherpa {
                 cmd_setup_sherpa(&config, true)
@@ -8302,17 +8302,27 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download a file from a URL to a destination path, with progress reporting.
-/// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
-/// `engine-sherpa` transcription engine into the resolved model directory.
+/// Install and select the verified Orukeet release for the sherpa engine.
 fn cmd_setup_orukeet(config: &Config) -> Result<()> {
-    let dir = minutes_core::orukeet::install(&config.transcription.model_path)
-        .map_err(anyhow::Error::msg)?;
-    // Select only after the entire release has passed verification.
-    let mut selected = config.clone();
+    cmd_setup_orukeet_with(
+        config,
+        &Config::config_path(),
+        minutes_core::orukeet::install,
+    )
+}
+
+fn cmd_setup_orukeet_with(
+    config: &Config,
+    config_path: &Path,
+    install: impl FnOnce(&Path) -> std::result::Result<PathBuf, String>,
+) -> Result<()> {
+    let dir = install(&config.transcription.model_path).map_err(anyhow::Error::msg)?;
+    // Reload after the long download, preserving edits made by the desktop app.
+    // A malformed config must remain untouched rather than be replaced by defaults.
+    let mut selected = Config::load_strict_from(config_path).map_err(anyhow::Error::msg)?;
     selected.transcription.engine = "sherpa".to_string();
     selected.transcription.sherpa_model_dir = dir.to_string_lossy().into_owned();
-    selected.save()?;
+    selected.save_to(config_path)?;
     eprintln!("Orukeet ready in {}", dir.display());
     if !cfg!(feature = "engine-sherpa") {
         eprintln!(
@@ -8322,8 +8332,42 @@ fn cmd_setup_orukeet(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn ensure_legacy_sherpa_target(dir: &Path) -> Result<()> {
+    let mut managed = dir
+        .file_name()
+        .is_some_and(|name| name == minutes_core::orukeet::MODEL_DIRECTORY);
+    match dir.canonicalize() {
+        Ok(resolved) => {
+            managed |= resolved
+                .file_name()
+                .is_some_and(|name| name == minutes_core::orukeet::MODEL_DIRECTORY);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for marker in ["manifest.json", ".install.lock"] {
+        match std::fs::symlink_metadata(dir.join(marker)) {
+            Ok(_) => managed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if managed {
+        anyhow::bail!(
+            "Refusing an unverified sherpa download into manifest-managed directory {}. \
+             Repair Orukeet with `minutes setup --sherpa-model orukeet`, or choose a separate \
+             transcription.sherpa_model_dir for the stock Parakeet model.",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
+/// `engine-sherpa` transcription engine into the resolved model directory.
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
     let dir = minutes_core::sherpa_engine::model_dir(config);
+    ensure_legacy_sherpa_target(&dir)?;
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
     eprintln!("  Dir: {}", dir.display());
     std::fs::create_dir_all(&dir)
@@ -8375,6 +8419,7 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
     Ok(())
 }
 
+/// Download a file from a URL to a destination path, with progress reporting.
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     eprintln!("  From: {}", url);
     eprintln!("  To:   {}", dest.display());
@@ -9999,16 +10044,19 @@ life (qmd://life/)
     }
 
     #[test]
-    fn setup_orukeet_is_explicit_and_rejects_other_model_selectors() {
-        let parsed = parse_cli(["minutes", "setup", "--orukeet"]).unwrap();
+    fn setup_sherpa_model_is_explicit_and_rejects_other_model_selectors() {
+        let parsed = parse_cli(["minutes", "setup", "--sherpa-model", "orukeet"]).unwrap();
         assert!(matches!(
             parsed.command,
-            Commands::Setup { orukeet: true, .. }
+            Commands::Setup { sherpa_model: Some(model), .. } if model == "orukeet"
         ));
         let parsed = parse_cli(["minutes", "setup"]).unwrap();
         assert!(matches!(
             parsed.command,
-            Commands::Setup { orukeet: false, .. }
+            Commands::Setup {
+                sherpa_model: None,
+                ..
+            }
         ));
         for other in [
             "--sherpa",
@@ -10018,9 +10066,118 @@ life (qmd://life/)
             "--diarization",
             "--demo",
         ] {
-            assert!(parse_cli(["minutes", "setup", "--orukeet", other]).is_err());
+            assert!(parse_cli(["minutes", "setup", "--sherpa-model", "orukeet", other]).is_err());
         }
-        assert!(parse_cli(["minutes", "setup", "--orukeet", "--model", "small"]).is_err());
+        assert!(parse_cli([
+            "minutes",
+            "setup",
+            "--sherpa-model",
+            "orukeet",
+            "--model",
+            "small"
+        ])
+        .is_err());
+        assert!(parse_cli(["minutes", "setup", "--sherpa-model", "unknown"]).is_err());
+        assert!(parse_cli(["minutes", "setup", "--sherpa-model"]).is_err());
+        assert!(parse_cli(["minutes", "setup", "--orukeet"]).is_err());
+    }
+
+    #[test]
+    fn setup_orukeet_preserves_config_edits_made_during_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let original = Config::default();
+        original.save_to(&path).unwrap();
+        let installed = temp.path().join("verified-model");
+
+        cmd_setup_orukeet_with(&original, &path, |_| {
+            let mut edited = Config::load_strict_from(&path).unwrap();
+            edited.transcription.language = Some("fr".into());
+            edited.transcription.model = "large-v3".into();
+            edited.save_to(&path).unwrap();
+            Ok(installed.clone())
+        })
+        .unwrap();
+
+        let saved = Config::load_strict_from(&path).unwrap();
+        assert_eq!(saved.transcription.language.as_deref(), Some("fr"));
+        assert_eq!(saved.transcription.model, "large-v3");
+        assert_eq!(saved.transcription.engine, "sherpa");
+        assert_eq!(Path::new(&saved.transcription.sherpa_model_dir), installed);
+    }
+
+    #[test]
+    fn setup_orukeet_does_not_overwrite_config_damaged_during_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let original = Config::default();
+        original.save_to(&path).unwrap();
+        let damaged = b"[transcription\n";
+
+        let result = cmd_setup_orukeet_with(&original, &path, |_| {
+            std::fs::write(&path, damaged).unwrap();
+            Ok(temp.path().join("verified-model"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), damaged);
+    }
+
+    #[test]
+    fn setup_sherpa_refuses_managed_custom_directory_without_changing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("my-selected-model");
+        std::fs::create_dir(&dir).unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        config.transcription.sherpa_model_dir = dir.to_string_lossy().into_owned();
+        // A damaged encoder would trigger the legacy download/repair path.
+        std::fs::write(dir.join("encoder.int8.onnx"), b"truncated").unwrap();
+        std::fs::write(dir.join("tokens.txt"), b"verified tokens").unwrap();
+
+        // The manifest protects a copied install; the lock alone also protects
+        // an interrupted installation before the manifest has been published.
+        for marker in ["manifest.json", ".install.lock"] {
+            std::fs::write(dir.join(marker), b"managed").unwrap();
+            let error = cmd_setup_sherpa(&config, true).unwrap_err().to_string();
+            assert!(error.contains("setup --sherpa-model orukeet"));
+            assert_eq!(std::fs::read(dir.join(marker)).unwrap(), b"managed");
+            assert_eq!(
+                std::fs::read(dir.join("encoder.int8.onnx")).unwrap(),
+                b"truncated"
+            );
+            assert_eq!(
+                std::fs::read(dir.join("tokens.txt")).unwrap(),
+                b"verified tokens"
+            );
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+            std::fs::remove_file(dir.join(marker)).unwrap();
+        }
+    }
+
+    #[test]
+    fn setup_sherpa_keeps_stock_targets_but_reserves_orukeet_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let stock = temp.path().join("custom-stock-model");
+        ensure_legacy_sherpa_target(&stock).unwrap();
+        std::fs::create_dir(&stock).unwrap();
+        ensure_legacy_sherpa_target(&stock).unwrap();
+        let reserved = temp.path().join(minutes_core::orukeet::MODEL_DIRECTORY);
+        assert!(ensure_legacy_sherpa_target(&reserved).is_err());
+        assert!(!reserved.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_sherpa_refuses_symlink_to_reserved_directory_without_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let reserved = temp.path().join(minutes_core::orukeet::MODEL_DIRECTORY);
+        std::fs::create_dir(&reserved).unwrap();
+        let alias = temp.path().join("selected-alias");
+        std::os::unix::fs::symlink(&reserved, &alias).unwrap();
+        let mut config = Config::default();
+        config.transcription.sherpa_model_dir = alias.to_string_lossy().into_owned();
+        assert!(cmd_setup_sherpa(&config, true).is_err());
+        assert_eq!(std::fs::read_dir(reserved).unwrap().count(), 0);
     }
 
     #[test]

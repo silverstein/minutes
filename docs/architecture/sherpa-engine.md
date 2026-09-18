@@ -13,7 +13,7 @@ sherpa requests still fall back to Whisper so a recording never breaks.
 
 ## Optional Orukeet model
 
-`minutes setup --orukeet` downloads and selects
+`minutes setup --sherpa-model orukeet` downloads and selects
 [Orukeet](https://huggingface.co/oruk/orukeet), a Parakeet TDT v3 fine-tune for
 25 European languages. It uses the existing sherpa plugin and requires the same
 `engine-sherpa` build support described below. Defaults remain unchanged until
@@ -21,7 +21,12 @@ you explicitly select this option.
 
 The installer downloads a pinned Hugging Face release (~672 MB), checks the
 release manifest and each file's size and SHA-256, and keeps the model in its
-own `sherpa/orukeet-v0.1.0-int8` directory. It selects the model only after all
+own `sherpa/orukeet-v0.1.0-int8` directory. The legacy `setup --sherpa` installer
+refuses to write into that directory or any directory with a release manifest or
+installation lock; use `setup --sherpa-model orukeet` to repair this model.
+Each download has a verified byte limit and a finite timeout. The saved config is
+reloaded after downloading so unrelated desktop edits are preserved.
+It selects the model only after all
 files pass verification. A repeated setup verifies cached files without network
 requests. The required integrity manifest participates in Hugging Face's normal
 download statistics; recognition stays local and sends no audio or telemetry.

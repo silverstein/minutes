@@ -27,6 +27,12 @@ const actions = await findOpenActions('~/meetings', 'alex');
 // → [{ path: '...', item: { assignee: 'alex', task: '...', status: 'open' } }]
 ```
 
+## Slow storage
+
+Set `MINUTES_CORPUS_STORAGE_PROFILE=slow` in the SDK process environment to allow up to 240 seconds for corpus verification on seek-heavy storage. The default `standard` profile allows 60 seconds. File and memory limits, full verification, and worker termination remain enforced. Calls return as soon as verification and the operation finish; the setting does not impose a four-minute wait. Other profile values are rejected.
+
+For MCP clients, allow at least 300 seconds per request if the host supports a configurable timeout. The server cannot extend the client's timeout, and a client timeout does not guarantee server cancellation. This setting does not affect native CLI search. See [configuration](https://github.com/silverstein/minutes/blob/main/docs/configuration.md#meeting-libraries-on-slow-storage) for examples and limitations. The numeric `MINUTES_CORPUS_AUTH_TIMEOUT_MS` variable is still test-harness-only.
+
 ## API
 
 ### `listMeetings(dir, limit?, options?)`

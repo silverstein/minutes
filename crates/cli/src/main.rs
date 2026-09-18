@@ -8424,6 +8424,9 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
 /// multi-gigabyte whisper model: the point is to bound a runaway response, not
 /// to second-guess a legitimate one.
 const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// clippy::assertions_on_constants fires on a runtime assert! comparing two
+// compile-time constants; a const-block check reads the same and quiets it.
+const _: () = assert!(MAX_DOWNLOAD_BYTES > 3 * 1024 * 1024 * 1024);
 
 /// How many bytes a download is allowed to write.
 ///
@@ -10114,9 +10117,6 @@ life (qmd://life/)
 
         // A zero-length body is legal and must not become the ceiling.
         assert_eq!(download_byte_cap(Some(0)), 0);
-
-        // The ceiling clears the largest model we actually fetch.
-        assert!(MAX_DOWNLOAD_BYTES > 3 * 1024 * 1024 * 1024);
     }
 
     #[test]

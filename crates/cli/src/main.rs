@@ -2750,6 +2750,10 @@ fn cmd_talk(
             mode,
             device,
             mute_playback: mute,
+            // The terminal has a key to hold, so if echo cancellation turns out
+            // to be unavailable the session may fall back to plain capture and
+            // say so, rather than refusing the way the tray does.
+            require_open_mic: false,
         },
         move |event| {
             // Level arrives many times a second. It is the only evidence the
@@ -3326,6 +3330,13 @@ fn cmd_record(
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
     if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
+    }
+    // Same reason for a voice session: it holds the microphone for a live
+    // conversation, and `minutes talk` can be running in another terminal or
+    // inside the menu-bar app.
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — close it before recording");
     }
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;

@@ -66,6 +66,11 @@ pub struct AppState {
     pub live_transcript_stop_flag: Arc<AtomicBool>,
     pub live_shortcut_enabled: Arc<AtomicBool>,
     pub live_shortcut: Arc<Mutex<String>>,
+    /// A voice session is open. Read lock-free from the shortcut event tap.
+    pub voice_active: Arc<AtomicBool>,
+    /// The running session, so a stop can end it. `None` when idle.
+    #[cfg(feature = "voice-live")]
+    pub voice_session: Arc<Mutex<Option<minutes_core::voice_live::VoiceLiveSession>>>,
     /// Desktop-owned lifecycle for the optional Coach HUD consumer. This is
     /// independent of recording/live capture: the copilot only reads the
     /// Agent Event Bus and must never own or stop capture.
@@ -4547,6 +4552,9 @@ fn validate_recording_launch_state(state: &AppState) -> Result<(), String> {
     }
     if state.live_transcript_active.load(Ordering::Relaxed) {
         return Err("Live transcript in progress — stop it first".into());
+    }
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it first".into());
     }
     // Check both the in-process atomic and the cross-process PID file,
     // mirroring the live transcript path. `cmd_install_update` and the
@@ -13011,6 +13019,63 @@ pub fn cmd_get_settings() -> serde_json::Value {
     })
 }
 
+/// Status of the voice key, hydrating the environment as a side effect so a
+/// key saved in a previous launch is usable in this one.
+///
+/// A misconfigured `api_key_env` surfaces as a status message rather than an
+/// error, because this is the call a settings pane makes on open and the user
+/// needs to be told what is wrong, not handed an empty pane.
+#[tauri::command]
+pub fn cmd_voice_secret_status() -> serde_json::Value {
+    match crate::secret_store::voice_api_key_env(&Config::load()) {
+        Ok(env_var) => {
+            serde_json::to_value(crate::secret_store::hydrate_voice_api_key_env(&env_var))
+                .unwrap_or_else(|_| serde_json::json!({ "keySet": false }))
+        }
+        Err(message) => serde_json::json!({
+            "supported": false,
+            "keySet": false,
+            "storedKeySet": false,
+            "message": message,
+        }),
+    }
+}
+
+/// Store the voice key in the Keychain and make it usable immediately, so the
+/// user does not have to restart the app after pasting it.
+#[tauri::command]
+pub fn cmd_set_voice_api_key(api_key: String) -> Result<serde_json::Value, String> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("Paste an API key first.".into());
+    }
+
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load())?;
+    crate::secret_store::save_voice_api_key(&env_var, &api_key)?;
+
+    Ok(
+        serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
+            .unwrap_or_else(|_| serde_json::json!({ "keySet": true })),
+    )
+}
+
+/// Forget the voice key. Clearing the environment as well as the Keychain item
+/// means the running app stops being able to open a session, rather than
+/// carrying the revoked key until the next launch.
+#[tauri::command]
+pub fn cmd_clear_voice_api_key() -> Result<serde_json::Value, String> {
+    // Fall back to the default name so a misconfigured `api_key_env` cannot
+    // block revocation. Revoking has to work even when the config is wrong.
+    let env_var = crate::secret_store::voice_api_key_env(&Config::load())
+        .unwrap_or_else(|_| crate::secret_store::VOICE_API_KEY_ENV_DEFAULT.to_string());
+    crate::secret_store::clear_voice_api_key(&env_var)?;
+
+    Ok(
+        serde_json::to_value(crate::secret_store::voice_secret_status(&env_var))
+            .unwrap_or_else(|_| serde_json::json!({ "keySet": false })),
+    )
+}
+
 #[tauri::command]
 pub fn cmd_openai_compatible_secret_status() -> serde_json::Value {
     serde_json::to_value(crate::secret_store::hydrate_openai_compatible_api_key_env())
@@ -14236,6 +14301,9 @@ mod tests {
 
     fn test_app_state() -> AppState {
         AppState {
+            voice_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "voice-live")]
+            voice_session: Arc::new(Mutex::new(None)),
             recording: Arc::new(AtomicBool::new(false)),
             starting: Arc::new(AtomicBool::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
@@ -19828,6 +19896,253 @@ mod tests {
 
 // ── Dictation commands ──────────────────────────────────────
 
+/// Open a voice session. Idempotent: starting while one runs is an error, not
+/// a second session.
+#[cfg(feature = "voice-live")]
+#[tauri::command]
+pub fn cmd_start_voice(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    use minutes_core::voice_live;
+
+    let config = Config::load();
+    // Before preflight, not after: preflight is what checks for the key, and
+    // an app launched from Finder has no shell environment to have inherited
+    // it from.
+    let _ = crate::secret_store::hydrate_voice_api_key_env(
+        &crate::secret_store::voice_api_key_env(&config)?,
+    );
+
+    // Retire a previous session before preflight, not after. A session that
+    // ended by itself clears `voice_active` the moment it emits Closed, but
+    // holds `voice.pid` until teardown finishes, and preflight checks that
+    // file. Retiring afterwards means the retirement can never run in the one
+    // case it exists for: preflight would reject the start first, and the tray
+    // would be stuck offering a Voice toggle that always fails.
+    if !retire_stale_voice_session(&state) {
+        // Do not queue or block: the old session still owns the microphone and
+        // `voice.pid`, and how long it needs depends on a tool call nobody here
+        // can bound. Say so and let the user press it again.
+        return Err("The previous voice session is still closing. Try again in a moment.".into());
+    }
+
+    voice_live::preflight(&config).map_err(|e| e.to_string())?;
+
+    // The tray has no talk control. In push-to-talk the session discards every
+    // microphone chunk until a PttStart it will never receive, so starting one
+    // here opens a session that cannot hear the user and holds the microphone
+    // while doing it. Refuse instead of pretending. A talk control arrives with
+    // the HUD; until then the desktop surface needs an open mic, and an open
+    // mic is only trustworthy with echo cancellation, or the assistant hears
+    // itself and interrupts itself forever.
+    let mode = voice_live::default_talk_mode(&config);
+    if mode != voice_live::TalkMode::OpenMic {
+        return Err(
+            "Voice needs echo cancellation to run from the menu bar. Set [voice_live] \
+             echo_cancellation = true, or use `minutes talk` in a terminal, which has \
+             push-to-talk."
+                .into(),
+        );
+    }
+
+    try_acquire_voice(&state)?;
+
+    let started = (|| -> Result<(), String> {
+        let emitter = app.clone();
+        // The session can end without anyone asking it to: the socket drops,
+        // the microphone stream ends, the provider closes the turn. Nothing
+        // else observes that, so without this the flag stays set forever, the
+        // tray keeps claiming a session that is gone, and recording, dictation
+        // and live transcript all stay locked out until the user happens to
+        // click Voice again.
+        let closed_active = Arc::clone(&state.voice_active);
+        let session = voice_live::start(
+            &config,
+            voice_live::SessionOptions {
+                mode,
+                // The tray has no key to hold, so a silent fall back to plain
+                // capture is not something this surface can ride out.
+                require_open_mic: true,
+                ..voice_live::SessionOptions::default()
+            },
+            move |event| {
+                // Two terminal signals, because the Closed *event* does not
+                // cover every way a session ends: several provider failures
+                // just break out of the loop without emitting it. Teardown
+                // always sets the Closed *state*, so that is the reliable one;
+                // the event is kept because it carries the reason and arrives
+                // first.
+                let ending = matches!(
+                    event,
+                    minutes_core::voice_live::VoiceLiveEvent::Closed { .. }
+                        | minutes_core::voice_live::VoiceLiveEvent::State {
+                            state: minutes_core::voice_live::VoiceLiveState::Closed
+                        }
+                );
+                // Emit first, so a HUD sees why it closed before it sees the
+                // tray go idle.
+                let _ = emitter.emit("voice:event", &event);
+                if ending {
+                    closed_active.store(false, Ordering::SeqCst);
+                    // Post the tray sync to the main thread rather than doing it
+                    // here. Tray menu setters dispatch to the main thread and
+                    // wait, and the main thread may be inside `session.stop()`
+                    // joining this very thread. Calling it inline deadlocks the
+                    // two against each other. `run_on_main_thread` returns
+                    // immediately, so this thread can always finish and be
+                    // joined; the sync runs when the main thread is free.
+                    let syncing = emitter.clone();
+                    let _ = emitter.run_on_main_thread(move || {
+                        crate::sync_tray_state(&syncing);
+                    });
+                    // Deliberately not touching `voice_session` here: the handle
+                    // it would take owns the join handle for this thread. The
+                    // next start retires it instead.
+                }
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Connecting and opening audio takes long enough for the user to hit
+        // Close in the meantime. A stop during that window finds no handle to
+        // take, clears the flag and returns, and without this check the start
+        // would then store a live session while the tray said idle and
+        // recording was allowed over the top of it. The flag is the record of
+        // who won: if it went false, the stop did, so honor it.
+        let mut slot = state
+            .voice_session
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !state.voice_active.load(Ordering::SeqCst) {
+            drop(slot);
+            end_voice_session_off_thread(session);
+            return Err("Voice was closed while it was starting.".into());
+        }
+        *slot = Some(session);
+        Ok(())
+    })();
+
+    match started {
+        Ok(()) => {
+            crate::sync_tray_state(&app);
+            Ok("Voice session started".into())
+        }
+        Err(e) => {
+            // Never leave the slot claimed by a session that failed to open.
+            state.voice_active.store(false, Ordering::SeqCst);
+            crate::sync_tray_state(&app);
+            Err(e)
+        }
+    }
+}
+
+/// Retire a session that ended by itself but has not been cleaned up.
+///
+/// Closed is emitted before audio stops, MCP shuts down and the tool worker is
+/// joined, so `voice_active` can already be false while the old session still
+/// holds `voice.pid` and the microphone. Anything that wants to start a new
+/// session has to get the old one out of the way first.
+/// Returns whether the old session is fully gone. A caller that needs the
+/// microphone and `voice.pid` must not proceed on `false`.
+#[cfg(feature = "voice-live")]
+#[must_use]
+fn retire_stale_voice_session(state: &AppState) -> bool {
+    let stale = state
+        .voice_session
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    let Some(stale) = stale else {
+        return true;
+    };
+
+    // Joining a thread that has already exited is instant; joining one that is
+    // still inside a tool call is not bounded by anything. Only the first is
+    // safe to do on the thread the menu bar runs on, so ask first.
+    if !stale.is_running() {
+        stale.stop();
+        return true;
+    }
+
+    end_voice_session_off_thread(stale);
+    false
+}
+
+/// Close the voice session. Safe to call when nothing is running.
+#[cfg(feature = "voice-live")]
+#[tauri::command]
+pub fn cmd_stop_voice(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    let session = state
+        .voice_session
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take();
+    // Flag first, so the tray is honest immediately and a concurrent start
+    // knows it lost, then hand the join to a background thread.
+    state.voice_active.store(false, Ordering::SeqCst);
+    if let Some(session) = session {
+        end_voice_session_off_thread(session);
+    }
+    crate::sync_tray_state(&app);
+    Ok("Voice session ended".into())
+}
+
+/// Stop a session without blocking the caller on its join.
+///
+/// `VoiceLiveSession::stop` joins the session thread, which in turn joins the
+/// tool worker, which may be inside a tool call that takes as long as it takes.
+/// Called from a Tauri command or a tray handler, that is the menu bar frozen
+/// for the duration. The user cannot tell a frozen menu bar from a crashed app.
+///
+/// The session still shuts down in order and still releases `voice.pid` when it
+/// finishes; only the waiting moves off the main thread.
+#[cfg(feature = "voice-live")]
+fn end_voice_session_off_thread(session: minutes_core::voice_live::VoiceLiveSession) {
+    if std::thread::Builder::new()
+        .name("voice-session-teardown".into())
+        .spawn(move || session.stop())
+        .is_err()
+    {
+        // Out of threads. Dropping still stops and joins, on this thread, which
+        // is worse than a background join and better than leaking the session.
+        tracing::warn!("could not spawn voice teardown thread; stopping inline");
+    }
+}
+
+/// Whether a voice session is open, and whether this build can open one.
+#[tauri::command]
+pub fn cmd_voice_status(state: tauri::State<AppState>) -> serde_json::Value {
+    serde_json::json!({
+        "available": cfg!(feature = "voice-live"),
+        "active": state.voice_active.load(Ordering::Relaxed),
+    })
+}
+
+/// Present in every build so the frontend can call it unconditionally and be
+/// told plainly that this build has no voice, rather than hitting a missing
+/// command and seeing an opaque IPC error.
+#[cfg(not(feature = "voice-live"))]
+#[tauri::command]
+pub fn cmd_start_voice(
+    _app: tauri::AppHandle,
+    _state: tauri::State<AppState>,
+) -> Result<String, String> {
+    Err("This build of Minutes was compiled without voice.".into())
+}
+
+#[cfg(not(feature = "voice-live"))]
+#[tauri::command]
+pub fn cmd_stop_voice(
+    _app: tauri::AppHandle,
+    _state: tauri::State<AppState>,
+) -> Result<String, String> {
+    Err("This build of Minutes was compiled without voice.".into())
+}
+
 #[tauri::command]
 pub fn cmd_start_dictation(
     app: tauri::AppHandle,
@@ -21212,14 +21527,46 @@ impl Drop for DictationActiveGuard {
     }
 }
 
+/// Claim the voice slot, refusing if anything else owns the microphone.
+///
+/// Voice is a fourth participant in a lattice the other three enumerate by
+/// hand. Adding it means every acquire learns about it, not just this one.
+#[cfg_attr(not(feature = "voice-live"), allow(dead_code))]
+fn try_acquire_voice(state: &AppState) -> Result<(), String> {
+    // `starting` as well as `recording`: a recording reserves `starting` first
+    // and does not create its PID file or set `recording` until its background
+    // thread gets there. Checking only `recording` leaves a window where voice
+    // opens the microphone underneath a recording that is on its way up.
+    if recording_active(&state.recording) || state.starting.load(Ordering::Relaxed) {
+        return Err("Recording in progress — stop recording before starting voice".into());
+    }
+    if state.live_transcript_active.load(Ordering::Relaxed) {
+        return Err("Live transcript in progress — stop it before starting voice".into());
+    }
+    if state.dictation_active.load(Ordering::Relaxed) {
+        return Err("Dictation in progress — finish it before starting voice".into());
+    }
+    if state
+        .voice_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Voice is already running.".into());
+    }
+    Ok(())
+}
+
 /// Try to acquire the dictation state. Mirrors `try_acquire_live`: gates
-/// against recording / live / dictation, uses `compare_exchange` to close
-/// the load→store TOCTOU window in the old code (`load` at the top of
+/// against recording / live / dictation / voice, uses `compare_exchange` to
+/// close the load→store TOCTOU window in the old code (`load` at the top of
 /// `start_dictation_session`, `store` after overlay setup), and rolls back
 /// the flag on subsequent failure cases.
 fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
     if recording_active(&state.recording) {
         return Err("Recording in progress — stop recording before dictating".into());
+    }
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it before dictating".into());
     }
     if state.live_transcript_active.load(Ordering::Relaxed) {
         return Err("Live transcript in progress — stop it before dictating".into());
@@ -21239,6 +21586,9 @@ fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
 }
 
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    if state.voice_active.load(Ordering::Relaxed) {
+        return Err("Voice is running — close it before starting a live transcript".into());
+    }
     if state
         .live_transcript_active
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

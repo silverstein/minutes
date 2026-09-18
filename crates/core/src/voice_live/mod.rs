@@ -64,6 +64,8 @@ pub enum VoiceLiveError {
     MissingApiKey(String),
     #[error("a recording is active; voice live will not share the microphone with capture")]
     RecordingActive,
+    #[error("{0} is active; voice live will not share the microphone with it")]
+    MicrophoneBusy(&'static str),
     #[error("connect: {0}")]
     Connect(String),
     #[error("audio: {0}")]
@@ -101,13 +103,31 @@ pub fn preflight(config: &Config) -> Result<(), VoiceLiveError> {
     crate::interaction::live::LiveProfile::gemini(&config.voice_live.model)
         .map_err(VoiceLiveError::Connect)?;
     api_key(config)?;
-    refuse_if_recording()
+    refuse_if_microphone_busy()
 }
 
 /// Voice never shares or steals the capture device.
-pub fn refuse_if_recording() -> Result<(), VoiceLiveError> {
+///
+/// Every mode that owns the microphone gets a check here, not just recording.
+/// The desktop app has its own in-process atomics for the same lattice, but
+/// this is the only gate the CLI has, and the two processes can be different
+/// processes: `minutes talk` in a terminal knows nothing about a dictation
+/// the menu-bar app is running. The PID files are what they share.
+pub fn refuse_if_microphone_busy() -> Result<(), VoiceLiveError> {
     if crate::pid::status().recording {
         return Err(VoiceLiveError::RecordingActive);
+    }
+    // `inspect_pid_file` rather than a plain existence check, so a session
+    // holding the PID under a mandatory Windows lock is still detected (#258),
+    // matching how dictation and live transcript check each other.
+    if crate::pid::inspect_pid_file(&crate::pid::live_transcript_pid_path()).is_active() {
+        return Err(VoiceLiveError::MicrophoneBusy("a live transcript"));
+    }
+    if crate::pid::inspect_pid_file(&crate::pid::dictation_pid_path()).is_active() {
+        return Err(VoiceLiveError::MicrophoneBusy("dictation"));
+    }
+    if crate::pid::inspect_pid_file(&crate::pid::voice_pid_path()).is_active() {
+        return Err(VoiceLiveError::MicrophoneBusy("another voice session"));
     }
     Ok(())
 }
@@ -285,6 +305,32 @@ pub fn system_prompt(config: &Config, names: &NameIndex, brain: bool) -> String 
 
 #[cfg(test)]
 mod tests {
+    /// A refusal has to tell the user which thing to go stop. These three are
+    /// the reasons voice will not take the microphone, and a user who reads
+    /// one must not have to guess whether to stop a recording, a live
+    /// transcript or a dictation.
+    ///
+    /// The PID-file behaviour of `refuse_if_microphone_busy` itself is not
+    /// unit-tested here: it reads `~/.minutes`, which is process-global and
+    /// shared with a real install, so a test that wrote those files would
+    /// race the developer's own session.
+    #[test]
+    fn each_microphone_refusal_names_the_mode_to_stop() {
+        use super::VoiceLiveError;
+
+        let recording = VoiceLiveError::RecordingActive.to_string();
+        let live = VoiceLiveError::MicrophoneBusy("a live transcript").to_string();
+        let dictation = VoiceLiveError::MicrophoneBusy("dictation").to_string();
+
+        assert!(recording.contains("recording"), "{}", recording);
+        assert!(live.contains("live transcript"), "{}", live);
+        assert!(dictation.contains("dictation"), "{}", dictation);
+
+        assert_ne!(recording, live);
+        assert_ne!(live, dictation);
+        assert_ne!(recording, dictation);
+    }
+
     #[test]
     fn disabling_cancellation_forces_push_to_talk() {
         let mut config = Config::default();

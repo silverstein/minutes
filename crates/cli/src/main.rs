@@ -8419,12 +8419,47 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
     Ok(())
 }
 
+/// Absolute ceiling for any model download, used when the server declares no
+/// length. Deliberately far above the largest thing we fetch, which is a
+/// multi-gigabyte whisper model: the point is to bound a runaway response, not
+/// to second-guess a legitimate one.
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// How many bytes a download is allowed to write.
+///
+/// A declared length is treated as a limit rather than a hint. Without one
+/// there is nothing to bound the body, so the ceiling applies. A declared
+/// length above the ceiling is not trusted either.
+///
+/// This exists because `std::io::copy`-shaped download loops read until EOF and
+/// only check the length afterwards, so a response that never ends writes until
+/// the disk is full. #1027 fixed the same shape in the Orukeet installer, which
+/// inherited it from here; that one bounds to the exact manifest-declared size,
+/// which this generic helper cannot do because it has no manifest.
+fn download_byte_cap(content_length: Option<u64>) -> u64 {
+    match content_length {
+        Some(declared) if declared <= MAX_DOWNLOAD_BYTES => declared,
+        _ => MAX_DOWNLOAD_BYTES,
+    }
+}
+
 /// Download a file from a URL to a destination path, with progress reporting.
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     eprintln!("  From: {}", url);
     eprintln!("  To:   {}", dest.display());
 
-    let response = ureq::get(url)
+    // Bound connecting and reading the response head, but not the body: a
+    // model download legitimately takes minutes on a slow link, and a global
+    // timeout would cancel it partway. The byte cap below is what bounds a
+    // body that never ends.
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .build(),
+    );
+    let response = agent
+        .get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("download failed: {}. Check your internet connection.", e))?;
 
@@ -8433,6 +8468,7 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    let cap = download_byte_cap(content_length);
 
     let mut reader = response.into_body().into_reader();
     let tmp_dest = dest.with_extension("partial");
@@ -8446,8 +8482,18 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
         if n == 0 {
             break;
         }
-        std::io::Write::write_all(&mut file, &buf[..n])?;
         downloaded += n as u64;
+        if downloaded > cap {
+            drop(file);
+            std::fs::remove_file(&tmp_dest).ok();
+            anyhow::bail!(
+                "download aborted: {} sent more than the {} bytes it declared. \
+                 Nothing was saved.",
+                url,
+                cap
+            );
+        }
+        std::io::Write::write_all(&mut file, &buf[..n])?;
 
         if last_report.elapsed().as_millis() > 500 {
             if let Some(total) = content_length {
@@ -10041,6 +10087,33 @@ life (qmd://life/)
             assert!(!help.contains("temporarily unavailable"), "{help}");
             assert!(!help.contains("#513"), "{help}");
         }
+    }
+
+    /// A declared length is a limit, not a hint, and its absence is not
+    /// permission to write forever. Without this, a response that never ends
+    /// writes until the disk is full, because the loop reads to EOF and checks
+    /// the length afterwards.
+    #[test]
+    fn a_download_is_bounded_whether_or_not_a_length_is_declared() {
+        // Declared and plausible: that is the limit.
+        assert_eq!(download_byte_cap(Some(1_867)), 1_867);
+        assert_eq!(download_byte_cap(Some(3 * 1024 * 1024 * 1024)), 3 * 1024 * 1024 * 1024);
+
+        // Nothing declared: the ceiling applies rather than no limit at all.
+        assert_eq!(download_byte_cap(None), MAX_DOWNLOAD_BYTES);
+
+        // Declared above the ceiling is not trusted either.
+        assert_eq!(download_byte_cap(Some(u64::MAX)), MAX_DOWNLOAD_BYTES);
+        assert_eq!(
+            download_byte_cap(Some(MAX_DOWNLOAD_BYTES + 1)),
+            MAX_DOWNLOAD_BYTES
+        );
+
+        // A zero-length body is legal and must not become the ceiling.
+        assert_eq!(download_byte_cap(Some(0)), 0);
+
+        // The ceiling clears the largest model we actually fetch.
+        assert!(MAX_DOWNLOAD_BYTES > 3 * 1024 * 1024 * 1024);
     }
 
     #[test]

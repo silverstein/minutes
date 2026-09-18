@@ -2796,7 +2796,11 @@ fn cmd_talk(
     let interrupted_in_handler = Arc::clone(&interrupted);
     ctrlc::set_handler(move || {
         if interrupted_in_handler.swap(true, Ordering::SeqCst) {
-            std::process::exit(130);
+            // Same rule as the other interrupt paths: leave C++ static
+            // teardown unrun (#998). Talk transcribes remotely today, so no
+            // whisper context is live here, but a force-quit is the wrong
+            // place to depend on that staying true.
+            minutes_core::exit_without_cxx_teardown(130);
         }
     })?;
 

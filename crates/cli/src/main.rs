@@ -10097,7 +10097,10 @@ life (qmd://life/)
     fn a_download_is_bounded_whether_or_not_a_length_is_declared() {
         // Declared and plausible: that is the limit.
         assert_eq!(download_byte_cap(Some(1_867)), 1_867);
-        assert_eq!(download_byte_cap(Some(3 * 1024 * 1024 * 1024)), 3 * 1024 * 1024 * 1024);
+        assert_eq!(
+            download_byte_cap(Some(3 * 1024 * 1024 * 1024)),
+            3 * 1024 * 1024 * 1024
+        );
 
         // Nothing declared: the ceiling applies rather than no limit at all.
         assert_eq!(download_byte_cap(None), MAX_DOWNLOAD_BYTES);

@@ -19,7 +19,7 @@ libc = "0.2"
 # inspection reads the same parsed document the extractor reads, not a second
 # parser's opinion of it.
 lopdf = "=0.42.0"
-pdf-extract = "=0.12.0"
+pdf-extract = "=0.12.1"
 quick-xml = "=0.42.0"
 serde = { workspace = true }
 serde_json = { workspace = true }

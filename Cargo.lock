@@ -928,9 +928,9 @@ checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cidre"
-version = "0.22.1"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31470ed932ba5f701eff2d33b972d93ff359d1e4b68b05e76144f5db371beecd"
+checksum = "8fde4542e9dfd21498f5366a5ad60963879fd1885743a18980f6dbb27f525895"
 dependencies = [
  "cc",
  "cidre-macros",
@@ -938,9 +938,9 @@ dependencies = [
 
 [[package]]
 name = "cidre-macros"
-version = "0.9.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d044c179ef39cc22233fc3f2f7e51021ee410c754e5c322049420f92898bcbea"
+checksum = "a85776177a885b3cd2cda74d634cabe7fa05fecfde8ded8779c0b34110a44dcb"
 
 [[package]]
 name = "cipher"

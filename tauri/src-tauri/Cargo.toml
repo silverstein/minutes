@@ -30,7 +30,7 @@ serde_json = "1"
 serde_yaml = { workspace = true }
 minutes-core = { path = "../../crates/core", features = ["streaming", "diarize"] }
 chrono = { version = "0.4", features = ["serde"] }
-dirs = "6"
+dirs = "7"
 libc = "0.2"
 which = { workspace = true }
 portable-pty = "0.9"

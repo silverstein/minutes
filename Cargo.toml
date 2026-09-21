@@ -65,7 +65,7 @@ thiserror = "2"
 anyhow = "1"
 
 # Filesystem
-dirs = "6"
+dirs = "7"
 walkdir = "2"
 which = "8"
 cap-std = "4.0.2"

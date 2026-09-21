@@ -116,7 +116,7 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "NSPasteboard", "NSPasteboardItem", "libc"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString", "NSArray", "NSData"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
-mach2 = "0.6"
+mach2 = "0.7"
 # Static sherpa-onnx on macOS so opt-in engine-sherpa builds produce apps/CLIs
 # with no dangling @rpath dylib refs (the #369 packaging blocker; verified by
 # real launch + transcription). `default-features = false` drops upstream `tts`.

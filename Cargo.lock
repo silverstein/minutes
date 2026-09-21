@@ -3652,6 +3652,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mach2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
 name = "markup5ever"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3852,7 +3858,7 @@ dependencies = [
  "flate2",
  "libc",
  "lopdf 0.42.0",
- "mach2 0.6.0",
+ "mach2 0.7.0",
  "minutes-archive-worker-control",
  "pdf-extract",
  "quick-xml 0.42.0",
@@ -3889,7 +3895,7 @@ name = "minutes-archive-ocr"
 version = "0.26.3"
 dependencies = [
  "libc",
- "mach2 0.6.0",
+ "mach2 0.7.0",
  "minutes-archive-worker-control",
  "objc2",
  "objc2-foundation",
@@ -3905,7 +3911,7 @@ name = "minutes-archive-semantic"
 version = "0.26.3"
 dependencies = [
  "libc",
- "mach2 0.6.0",
+ "mach2 0.7.0",
  "minutes-archive-worker-control",
  "objc2",
  "objc2-foundation",
@@ -3975,7 +3981,7 @@ dependencies = [
  "knf-rs",
  "libc",
  "libloading 0.9.0",
- "mach2 0.6.0",
+ "mach2 0.7.0",
  "ndarray",
  "nnnoiseless",
  "notify",

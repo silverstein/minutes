@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-agenda-confirmation-silence",
+  "content_origin": "synthetic",
+  "description": "A direct confirmation resolves the only ambiguity, so the strategist must remain quiet instead of asking for the agenda again.",
+  "domain": "operations",
+  "execution": {
+    "status": "executable",
+    "reason": null,
+    "required_capabilities": ["live_transcript", "proactive_abstention"]
+  },
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["FACILITATOR", "USER"]
+  },
+  "capture": {
+    "mode": "recording",
+    "screen_context": "unavailable",
+    "expected_speakers": 2
+  },
+  "prepared_context": {
+    "user_role": "Participant",
+    "posture": "Stay quiet unless a material decision, risk, or opening appears",
+    "goal": "Help the user discuss battery life without interrupting routine setup"
+  },
+  "context_evidence": [],
+  "transcript": [
+    {
+      "id": "utterance_one",
+      "sequence": 1,
+      "speaker": "FACILITATOR",
+      "text": "Before we begin, is battery life actually the topic for this review?"
+    },
+    {
+      "id": "utterance_two",
+      "sequence": 2,
+      "speaker": "USER",
+      "text": "Yes, battery life is the actual agenda."
+    },
+    {
+      "id": "utterance_three",
+      "sequence": 3,
+      "speaker": "FACILITATOR",
+      "text": "Great, let us start with the latest measurements."
+    }
+  ],
+  "turns": [
+    {
+      "id": "resolved_confirmation",
+      "mode": "background",
+      "typed_prompt": null,
+      "transcript_through_id": "utterance_three",
+      "expected_decision": "silent",
+      "required_evidence_ids": [],
+      "forbidden_evidence_ids": [],
+      "rubric": [
+        {
+          "id": "confirmation_resolves_ambiguity",
+          "description": "Treat the explicit confirmation as resolving the earlier question.",
+          "critical": true
+        },
+        {
+          "id": "routine_transition_is_not_material",
+          "description": "Recognize that moving into measurements creates no material reason to interrupt.",
+          "critical": true
+        }
+      ],
+      "forbidden_behaviors": [
+        "ask for the agenda again",
+        "call the confirmation a contradiction",
+        "narrate that monitoring has started"
+      ],
+      "max_words": 1
+    }
+  ],
+  "global_forbidden_behaviors": [
+    "invent a conflict",
+    "emit routine watching chatter"
+  ]
+}

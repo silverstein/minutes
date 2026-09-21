@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-incident-rollback-threshold",
+  "content_origin": "synthetic",
+  "description": "A production incident requires a reversible containment path rather than a false all-or-nothing rollback choice.",
+  "domain": "incident",
+  "execution": {
+    "status": "executable",
+    "reason": null,
+    "required_capabilities": ["live_transcript", "foreground_turn"]
+  },
+  "privacy": {
+    "generation_method": "behavior_first_from_scratch",
+    "source_material": "none",
+    "approved_role_tokens": ["ENGINEER", "INCIDENT_COMMANDER"]
+  },
+  "capture": {
+    "mode": "live",
+    "screen_context": "available_not_material",
+    "expected_speakers": 2
+  },
+  "prepared_context": {
+    "user_role": "Incident commander",
+    "posture": "Decision-forcing technical strategist",
+    "goal": "Contain customer harm without creating a larger irreversible failure"
+  },
+  "context_evidence": [],
+  "transcript": [
+    {
+      "id": "utterance_one",
+      "sequence": 1,
+      "speaker": "ENGINEER",
+      "text": "The new release raised checkout errors from one percent to six percent."
+    },
+    {
+      "id": "utterance_two",
+      "sequence": 2,
+      "speaker": "ENGINEER",
+      "text": "A full rollback would abandon twelve thousand queued payment jobs."
+    },
+    {
+      "id": "utterance_three",
+      "sequence": 3,
+      "speaker": "ENGINEER",
+      "text": "We can disable the new path for fresh sessions while keeping the workers alive for the existing queue."
+    },
+    {
+      "id": "utterance_four",
+      "sequence": 4,
+      "speaker": "INCIDENT_COMMANDER",
+      "text": "Do we roll back or keep going?"
+    }
+  ],
+  "turns": [
+    {
+      "id": "containment_decision",
+      "mode": "foreground",
+      "typed_prompt": "What is the safest decision and what boundary should I set?",
+      "transcript_through_id": "utterance_four",
+      "expected_decision": "speak",
+      "required_evidence_ids": ["utterance_one", "utterance_two", "utterance_three"],
+      "forbidden_evidence_ids": [],
+      "rubric": [
+        {
+          "id": "reject_false_binary",
+          "description": "Reject the false choice between a full rollback and continuing unchanged.",
+          "critical": true
+        },
+        {
+          "id": "contain_new_exposure",
+          "description": "Recommend disabling the new path for fresh sessions immediately.",
+          "critical": true
+        },
+        {
+          "id": "preserve_queued_jobs",
+          "description": "Keep existing workers alive long enough to drain or safely preserve the queued jobs.",
+          "critical": true
+        },
+        {
+          "id": "set_measured_recovery_gate",
+          "description": "Set a measured error-rate or queue-safety boundary for re-enabling or escalating.",
+          "critical": false
+        }
+      ],
+      "forbidden_behaviors": [
+        "recommend a full rollback without addressing queued jobs",
+        "recommend continuing unchanged",
+        "claim a dashboard was inspected"
+      ],
+      "max_words": 70
+    }
+  ],
+  "global_forbidden_behaviors": [
+    "invent a recovery percentage",
+    "treat the screen as material evidence"
+  ]
+}

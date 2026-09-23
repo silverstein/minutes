@@ -286,6 +286,43 @@ pub(crate) fn should_persist_repeat(count: u64) -> bool {
     matches!(count, 1 | 10 | 100) || (count >= 1000 && count.is_multiple_of(1000))
 }
 
+/// Explain a live model that resolved to a different file than the config asked
+/// for. `None` when the request was honored.
+///
+/// `resolve_model_path_by_name` falls back to the dictation model when the
+/// requested one is missing, and says so only through `tracing::warn!`. The
+/// desktop app installs no subscriber, so that vanishes there and the user gets
+/// a live transcript from a model they did not choose with nothing to read back
+/// afterwards. Same reasoning as #633, one layer down: the engine substitution
+/// was made visible, the model substitution underneath it was not.
+#[cfg(feature = "whisper")]
+fn live_model_downgrade_message(
+    requested: &str,
+    resolved: &std::path::Path,
+    fallback: &str,
+) -> Option<String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return None;
+    }
+    // An explicit path that resolved to itself was honored.
+    if resolved == std::path::Path::new(requested) {
+        return None;
+    }
+    // The resolver tries ggml-{name}.bin, whisper-{name}.bin and {name}.bin, so
+    // the requested name surviving in the filename means we got what we asked
+    // for.
+    let file = resolved.file_name()?.to_string_lossy().into_owned();
+    if file.contains(requested) {
+        return None;
+    }
+    Some(format!(
+        "live transcript model \"{requested}\" was not found, so live transcription used \
+         the dictation model \"{fallback}\" instead. Run `minutes setup --model {requested}` \
+         to install it, or set live_transcript.model to a model you already have."
+    ))
+}
+
 /// Explain a VAD engine that resolved to something other than what the config
 /// asked for. `None` when the request was honored.
 fn vad_downgrade_message(requested: &str, resolved: &str) -> Option<String> {
@@ -2464,10 +2501,29 @@ fn transcribe_utterance_for_sidecar(
 /// makes inheriting the natural assumption.
 fn resolve_live_model_path(config: &Config) -> Result<std::path::PathBuf, MinutesError> {
     if !config.live_transcript.model.is_empty() {
-        return Ok(crate::transcribe::resolve_model_path_by_name(
+        let resolved = crate::transcribe::resolve_model_path_by_name(
             &config.live_transcript.model,
             config,
-        )?);
+        )?;
+        if let Some(message) = live_model_downgrade_message(
+            &config.live_transcript.model,
+            &resolved,
+            &config.dictation.model,
+        ) {
+            eprintln!("[minutes] {message}");
+            tracing::warn!("{message}");
+            persist_sidecar_log(
+                "warn",
+                "live_model_downgrade",
+                &message,
+                serde_json::json!({
+                    "requested": config.live_transcript.model,
+                    "resolved": resolved.display().to_string(),
+                    "fallback": config.dictation.model,
+                }),
+            );
+        }
+        return Ok(resolved);
     }
     crate::transcribe::resolve_model_path_for_dictation(config).map_err(|error| match error {
         TranscribeError::ModelNotFound(detail) => TranscribeError::ModelNotFound(format!(
@@ -4173,6 +4229,50 @@ mod tests {
         let persisted: Vec<u64> = (1..=3000).filter(|n| should_persist_repeat(*n)).collect();
         assert_eq!(persisted, vec![1, 10, 100, 1000, 2000, 3000]);
         assert!(!should_persist_repeat(0));
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn live_model_downgrade_is_explained_only_when_the_request_was_not_honored() {
+        use std::path::Path;
+
+        // Honored: the requested name survives in the resolved filename, in any
+        // of the three spellings the resolver tries.
+        assert_eq!(
+            live_model_downgrade_message("small", Path::new("/m/ggml-small.bin"), "base"),
+            None
+        );
+        assert_eq!(
+            live_model_downgrade_message("small", Path::new("/m/whisper-small.bin"), "base"),
+            None
+        );
+        assert_eq!(
+            live_model_downgrade_message("small", Path::new("/m/small.bin"), "base"),
+            None
+        );
+        // Honored: an explicit path that resolved to itself.
+        assert_eq!(
+            live_model_downgrade_message("/m/custom.bin", Path::new("/m/custom.bin"), "base"),
+            None
+        );
+        // Nothing requested, nothing to explain.
+        assert_eq!(
+            live_model_downgrade_message("", Path::new("/m/ggml-base.bin"), "base"),
+            None
+        );
+
+        // Not honored: the requested model was missing and the dictation model
+        // ran instead. Silent before, because the only record was a
+        // `tracing::warn!` the desktop app drops.
+        let downgraded =
+            live_model_downgrade_message("large-v3", Path::new("/m/ggml-base.bin"), "base")
+                .expect("a substitution must be explained");
+        assert!(downgraded.contains("large-v3"), "names what was asked for: {downgraded}");
+        assert!(downgraded.contains("base"), "names what actually ran: {downgraded}");
+        assert!(
+            downgraded.contains("minutes setup --model large-v3"),
+            "gives a way out: {downgraded}"
+        );
     }
 
     #[test]

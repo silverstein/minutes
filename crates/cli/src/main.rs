@@ -10267,6 +10267,49 @@ life (qmd://life/)
         assert_eq!(std::fs::read_dir(reserved).unwrap().count(), 0);
     }
 
+    /// Enrollment must persist the name where `Config` will read it back.
+    ///
+    /// The old code resolved the file itself and only wrote when it already
+    /// existed, so on a fresh machine the user typed their name, saw nothing,
+    /// and was asked again on the next run.
+    #[test]
+    fn enrollment_creates_the_config_when_none_exists_yet() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested").join("config.toml");
+        assert!(!path.exists(), "precondition: no config file yet");
+
+        persist_identity_name("Mat", &path).unwrap();
+
+        assert!(path.exists(), "the name must be persisted, not dropped");
+        assert_eq!(
+            Config::load_from(&path).identity.name.as_deref(),
+            Some("Mat")
+        );
+    }
+
+    /// And it must not discard the rest of the file, including sections this
+    /// build does not know about.
+    #[test]
+    fn enrollment_preserves_the_existing_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let mut existing = Config::default();
+        existing.transcription.model = "large-v3".into();
+        existing.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{raw}\n[some_future_section]\nkept = true\n")).unwrap();
+
+        persist_identity_name("Mat", &path).unwrap();
+
+        let saved = Config::load_from(&path);
+        assert_eq!(saved.identity.name.as_deref(), Some("Mat"));
+        assert_eq!(saved.transcription.model, "large-v3", "unrelated settings survive");
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("some_future_section"),
+            "a section this build does not know must survive the write"
+        );
+    }
+
     #[test]
     fn setup_vad_flag_parses_with_default_and_explicit_models() {
         let parsed = parse_cli(["minutes", "setup", "--vad"]).expect("setup --vad must parse");
@@ -18101,6 +18144,23 @@ fn cmd_dictate(_stdout: bool, _note_only: bool, _config: &Config) -> Result<()> 
     ))
 }
 
+/// Write the user's name into the config file the rest of Minutes reads.
+///
+/// Takes the path rather than resolving it so the behavior is testable without
+/// mutating process-global environment.
+fn persist_identity_name(name: &str, config_path: &Path) -> Result<()> {
+    // `load_from` returns defaults for a missing file, which is what makes the
+    // first enrollment on a fresh machine persist instead of silently doing
+    // nothing, and it preserves unknown sections on the way back out.
+    let mut saved = Config::load_from(config_path);
+    saved.identity.name = Some(name.to_string());
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    saved.save_to(config_path)?;
+    Ok(())
+}
+
 fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
     use minutes_core::voice;
 
@@ -18122,22 +18182,24 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
             if name.is_empty() {
                 return Err(anyhow::anyhow!("Name is required for voice enrollment."));
             }
-            // Save to config file
-            let config_path = dirs::config_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-                .join("minutes/config.toml");
-            if config_path.exists() {
-                let mut content = std::fs::read_to_string(&config_path)?;
-                if content.contains("[identity]") {
-                    // Add name under existing [identity] section
-                    content =
-                        content.replace("[identity]", &format!("[identity]\nname = \"{}\"", name));
-                } else {
-                    content.push_str(&format!("\n[identity]\nname = \"{}\"\n", name));
-                }
-                std::fs::write(&config_path, content)?;
-                eprintln!("Saved to {}", config_path.display());
-            }
+            // Save through the same path and writer the rest of Minutes uses.
+            //
+            // This previously resolved the file with `dirs::config_dir()`, which
+            // is `~/Library/Application Support` on macOS while `Config` reads
+            // `~/.config`, so the name was written where nothing would read it.
+            // It also ignored `MINUTES_CONFIG_PATH`.
+            //
+            // It also only wrote when the file already existed, so on a machine
+            // with no config yet the name was silently dropped after being
+            // typed, and the next run asked again.
+            //
+            // And it edited the file as text, replacing the first `[identity]`
+            // it found anywhere, including inside a comment or a string value.
+            // Reloading and saving keeps unknown sections intact without
+            // guessing at the document's shape.
+            let config_path = Config::config_path();
+            persist_identity_name(&name, &config_path)?;
+            eprintln!("Saved your name to {}", config_path.display());
             name
         }
     };

@@ -416,7 +416,10 @@ mod tests {
         let jex: Vec<&PersonFacts> = results.iter().filter(|pf| pf.slug == "jex-musa").collect();
         assert_eq!(jex.len(), 1);
         assert_eq!(jex[0].facts.len(), 1);
-        assert!(jex[0].facts[0].text.contains("Attended meeting"));
+        // This test is about the dedup rule: one fact, only for people who
+        // picked up nothing richer. Jex is not in `attendees`, so since #245
+        // that one fact says he was named rather than that he was there.
+        assert!(jex[0].facts[0].text.contains("Mentioned in meeting"));
     }
 
     #[test]

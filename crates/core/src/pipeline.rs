@@ -10545,7 +10545,12 @@ mod tests {
         //
         // Needles are assembled at runtime so this test cannot match its own
         // source text.
-        let source = include_str!("pipeline.rs");
+        // rustfmt wraps these assignments, so match on whitespace-normalized
+        // source rather than on exact line shape.
+        let source: String = include_str!("pipeline.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let raw_refine = format!("{}{}", "frontmatter.attendees = ", "attendees;");
 
         assert!(

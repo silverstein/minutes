@@ -5466,7 +5466,8 @@ where
         Some(OutputStatus::TranscriptOnly)
     };
     frontmatter.processing_warnings = summarization_warnings;
-    frontmatter.attendees = attendees;
+    frontmatter.attendees =
+        confirmed_attendees(&artifact.frontmatter.attendees, &attendees, &speaker_map);
     frontmatter.people = people;
     frontmatter.entities = entities;
     frontmatter.action_items = structured_actions;
@@ -6029,6 +6030,9 @@ where
     let mut transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    // See `confirmed_attendees`: `attendees` stays the merged superset for
+    // entity links and name correction, and only the persisted field narrows.
+    let persisted_attendees = confirmed_attendees(&calendar_attendees, &attendees, &speaker_map);
     let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
         && content_type == ContentType::Meeting
     {
@@ -6204,7 +6208,7 @@ where
         status,
         processing_warnings: summarization_warnings,
         tags,
-        attendees,
+        attendees: persisted_attendees,
         attendees_raw: None,
         calendar_event: calendar_event_title,
         people,
@@ -6988,6 +6992,85 @@ fn select_calendar_event(
         })
         .min_by_key(|event| event.minutes_until.abs())
         .cloned()
+}
+
+/// Narrow a merged attendee list down to the people actually established as
+/// present, for the `attendees:` field that gets written to disk.
+///
+/// Issue #245. `attendees` is not a display field. `knowledge_extract.rs`
+/// walks `normalized_attendees()` and files every decision in the meeting
+/// under every name in it, so a name that lands here is recorded as a party
+/// to decisions made on that call.
+///
+/// The merged list cannot carry that weight, because part of it comes from
+/// `summary.participants`, and the prompt behind that field asks the model
+/// for people "present or mentioned in the conversation". A reporter with a
+/// two person Teams call got eight attendees: the two real ones, plus six
+/// people whose access permissions were being discussed. The model answered
+/// the question it was asked; the pipeline read "mentioned" as "attended".
+///
+/// So presence has to come from sources that can actually establish it:
+///
+/// - `trusted`, the calendar event's attendee list (L0, deterministic).
+/// - speakers the attribution pass resolved at `Confidence::High`, which is
+///   the same bar CLAUDE.md sets for rewriting user visible labels.
+///
+/// The merged list stays in use everywhere a superset is harmless or helpful:
+/// speaker mapping candidates, entity links, and the name correction pool.
+/// Only what gets persisted narrows. A meeting with no calendar event and no
+/// high confidence attribution now writes an empty `attendees:`, which is the
+/// intended answer under "a wrong rewrite is worse than none".
+fn confirmed_attendees(
+    trusted: &[String],
+    merged: &[String],
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Vec<String> {
+    let confirmed: Vec<String> = trusted
+        .iter()
+        .cloned()
+        .chain(
+            speaker_map
+                .iter()
+                .filter(|attribution| attribution.confidence == diarize::Confidence::High)
+                .map(|attribution| attribution.name.clone()),
+        )
+        .collect();
+
+    // Keep the merged list's spelling and ordering for anyone who survives the
+    // filter, so this narrows the list without also rewriting the names in it.
+    let mut keep = std::collections::HashSet::new();
+    for name in &confirmed {
+        if let Some(normalized) = normalize_attendee_candidate(name) {
+            keep.insert(normalized.to_lowercase());
+        }
+    }
+
+    let mut result: Vec<String> = merged
+        .iter()
+        .filter(|name| {
+            normalize_attendee_candidate(name)
+                .map(|normalized| keep.contains(&normalized.to_lowercase()))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
+    // A high confidence speaker who is not in the merged list still attended.
+    let mut seen: std::collections::HashSet<String> = result
+        .iter()
+        .filter_map(|name| normalize_attendee_candidate(name))
+        .map(|name| name.to_lowercase())
+        .collect();
+    for name in confirmed {
+        let Some(normalized) = normalize_attendee_candidate(&name) else {
+            continue;
+        };
+        if seen.insert(normalized.to_lowercase()) {
+            result.push(normalized);
+        }
+    }
+
+    result
 }
 
 fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
@@ -10427,6 +10510,104 @@ mod tests {
         assert!(health.capture_warnings[0]
             .message
             .contains("low confidence"));
+    }
+
+    fn attribution(
+        label: &str,
+        name: &str,
+        confidence: diarize::Confidence,
+    ) -> diarize::SpeakerAttribution {
+        diarize::SpeakerAttribution {
+            speaker_label: label.into(),
+            name: name.into(),
+            confidence,
+            source: diarize::AttributionSource::Llm,
+        }
+    }
+
+    #[test]
+    fn confirmed_attendees_drops_names_only_mentioned_in_the_transcript() {
+        // Issue #245. The reporter's two person Teams call produced eight
+        // attendees: the two who were there, plus six people whose access
+        // permissions were being discussed. The six reached `attendees` because
+        // the summarization prompt asks for people "present or mentioned" and
+        // `merge_attendees` appended the answer wholesale.
+        let trusted = vec!["Dana".to_string(), "Priya".to_string()];
+        let merged = vec![
+            "Dana".to_string(),
+            "Priya".to_string(),
+            "Marcus".to_string(),
+            "Ines".to_string(),
+        ];
+
+        let confirmed = confirmed_attendees(&trusted, &merged, &[]);
+
+        assert_eq!(confirmed, vec!["Dana", "Priya"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_keeps_high_confidence_speakers_and_drops_lower_ones() {
+        // High confidence is the bar CLAUDE.md sets for rewriting user visible
+        // labels, so it is the bar for claiming someone was in the room. A
+        // Medium attribution is a suggestion, and a suggestion must not become
+        // a party to every decision in the meeting.
+        let merged = vec!["Dana".to_string(), "Marcus".to_string(), "Ines".to_string()];
+        let speaker_map = vec![
+            attribution("SPEAKER_00", "Dana", diarize::Confidence::High),
+            attribution("SPEAKER_01", "Marcus", diarize::Confidence::Medium),
+            attribution("SPEAKER_02", "Ines", diarize::Confidence::Low),
+        ];
+
+        let confirmed = confirmed_attendees(&[], &merged, &speaker_map);
+
+        assert_eq!(confirmed, vec!["Dana"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_is_empty_when_nothing_establishes_presence() {
+        // No calendar event and no high confidence attribution means nothing
+        // proved anyone attended. Empty is the correct answer here, not the
+        // model's guess: a wrong rewrite is worse than none.
+        let merged = vec!["Marcus".to_string(), "Ines".to_string()];
+
+        let confirmed = confirmed_attendees(&[], &merged, &[]);
+
+        assert!(
+            confirmed.is_empty(),
+            "expected no attendees, got {confirmed:?}"
+        );
+    }
+
+    #[test]
+    fn confirmed_attendees_adds_a_high_confidence_speaker_missing_from_the_merged_list() {
+        // The merged list is not a superset in every case: a speaker the
+        // attribution pass resolved from voice enrollment need never have been
+        // named by the summarizer or the calendar.
+        let speaker_map = vec![attribution(
+            "SPEAKER_00",
+            "Priya",
+            diarize::Confidence::High,
+        )];
+
+        let confirmed =
+            confirmed_attendees(&["Dana".to_string()], &["Dana".to_string()], &speaker_map);
+
+        assert_eq!(confirmed, vec!["Dana", "Priya"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_matches_case_insensitively_without_rewriting_spelling() {
+        // Narrowing the list must not also renormalize the names in it, or this
+        // fix would quietly become the kind of rewrite it exists to prevent.
+        let speaker_map = vec![attribution("SPEAKER_00", "dana", diarize::Confidence::High)];
+
+        let confirmed = confirmed_attendees(
+            &[],
+            &["Dana Whitfield".to_string(), "Dana".to_string()],
+            &speaker_map,
+        );
+
+        assert_eq!(confirmed, vec!["Dana"]);
     }
 
     #[test]

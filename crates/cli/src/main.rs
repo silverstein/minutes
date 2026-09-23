@@ -10297,15 +10297,24 @@ life (qmd://life/)
         existing.transcription.model = "large-v3".into();
         existing.save_to(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        std::fs::write(&path, format!("{raw}\n[some_future_section]\nkept = true\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{raw}\n[some_future_section]\nkept = true\n"),
+        )
+        .unwrap();
 
         persist_identity_name("Mat", &path).unwrap();
 
         let saved = Config::load_from(&path);
         assert_eq!(saved.identity.name.as_deref(), Some("Mat"));
-        assert_eq!(saved.transcription.model, "large-v3", "unrelated settings survive");
+        assert_eq!(
+            saved.transcription.model, "large-v3",
+            "unrelated settings survive"
+        );
         assert!(
-            std::fs::read_to_string(&path).unwrap().contains("some_future_section"),
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("some_future_section"),
             "a section this build does not know must survive the write"
         );
     }

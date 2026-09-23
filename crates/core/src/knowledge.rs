@@ -74,8 +74,19 @@ const MAX_RETAINED_PUBLICATION_BYTES: u64 = 16 * 1024 * 1024;
 const QMD_POLICY_LOCK: &str = "qmd-policy-mirror.lock";
 const QMD_OWNED_TARGET: &str = "qmd-owned-target-v1.json";
 const QMD_RETIREMENT_PENDING: &str = "qmd-retirement-pending-v1";
+/// Remediation shown when the QMD retirement gate blocks agent memory.
+///
+/// Both commands it names come from the CLI, and the Windows installer ships
+/// only the desktop app, so the original wording handed desktop-only users two
+/// commands that did not exist on their machine and no route out (#1046). That
+/// reintroduced by wording the same dead end #788 closed in code.
+///
+/// It still names the CLI route, because that is the repair that exists. What it
+/// adds is that the desktop app cannot do this yet, and that seeing it on a
+/// machine which never had the CLI is itself a bug worth reporting rather than
+/// a state the user is expected to fix.
 pub const AGENT_TRUST_READINESS_REMEDIATION: &str =
-    "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed. Make sure `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes.";
+    "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed, so agent memory stays disabled until it can. With the Minutes CLI installed, check that `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes. The desktop app cannot perform this repair on its own yet, so on a desktop-only install this needs the CLI; if you are seeing this on a machine that never had it, please report it, because the check should not be firing there at all.";
 /// Privacy-safe reason returned when a caller requests persistent QMD state.
 pub const QMD_PERSISTENCE_DISABLED_REASON: &str = "Persistent QMD collections are disabled because QMD's global index cannot guarantee revocation after an external meeting-policy change";
 
@@ -11873,6 +11884,32 @@ fn hash_fact(text: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The two copies of the remediation must stay identical, and neither may
+    /// go back to naming only CLI commands.
+    ///
+    /// #1046: the Windows installer ships the desktop app alone, so a
+    /// remediation that offers nothing but `minutes qmd cleanup` leaves those
+    /// users with no route out, which is the dead end #788 closed in code and
+    /// this wording reopened.
+    #[test]
+    fn qmd_remediation_is_actionable_without_the_cli() {
+        let remediation = super::AGENT_TRUST_READINESS_REMEDIATION;
+        assert!(
+            remediation.contains("desktop"),
+            "must say what a desktop-only install can do: {remediation}"
+        );
+        assert!(
+            remediation.contains("report"),
+            "must give a route out when the CLI is absent: {remediation}"
+        );
+
+        let mcp = include_str!("../../mcp/src/index.ts");
+        assert!(
+            mcp.contains(remediation),
+            "the MCP server carries a second copy of this string and it has drifted"
+        );
+    }
+
     use super::*;
     use std::sync::{Arc, Condvar, Mutex};
     use tempfile::TempDir;

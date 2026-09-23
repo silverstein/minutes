@@ -3722,7 +3722,7 @@ export async function requireAgentTrustReadiness(
   if (!readiness.ready) {
     throw new Error(
       readiness.remediation ||
-        "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed. Make sure `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes."
+        "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed, so agent memory stays disabled until it can. With the Minutes CLI installed, check that `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes. The desktop app cannot perform this repair on its own yet, so on a desktop-only install this needs the CLI; if you are seeing this on a machine that never had it, please report it, because the check should not be firing there at all."
     );
   }
   return readiness;

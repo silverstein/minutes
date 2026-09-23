@@ -122,7 +122,8 @@ test("a general question still cannot bypass the privacy checks", async () => {
   const state = harness.state();
   assert.equal(commands(harness, "cmd_prepare_recall_terminal_meeting").length, 0);
   assert.equal(state.contextPending, true);
-  assert.match(state.notices.at(-1).message, /complete question or command/);
+  assert.match(state.notices.at(-1).message, /^Not sent\. Your text is still on the line\./);
+  assert.match(state.notices.at(-1).message, /did not see a complete question/);
 });
 
 test("startup terminal replies do not poison the first real question", async () => {
@@ -169,6 +170,8 @@ test("cursor editing holds Return until the line is cleanly retyped", async () =
   assert.equal(state.pending, "/meetings/private.md");
   assert.equal(commands(harness, "cmd_prepare_recall_terminal_meeting").length, 0);
   assert.notEqual(state.calls.at(-1).args.data, "\r");
+  assert.match(state.notices.at(-1).message, /^Not sent\. Your text is still on the line\./);
+  assert.match(state.notices.at(-1).message, /editing or control keys it cannot replay/);
 });
 
 test("an empty Return cannot bypass pending meeting preparation", async () => {
@@ -178,7 +181,8 @@ test("an empty Return cannot bypass pending meeting preparation", async () => {
   const state = harness.state();
   assert.equal(state.pending, "/meetings/private.md");
   assert.equal(state.calls.length, 0);
-  assert.match(state.notices.at(-1).message, /complete question or command/);
+  assert.match(state.notices.at(-1).message, /^Not sent\. Your text is still on the line\./);
+  assert.match(state.notices.at(-1).message, /did not see a complete question/);
 });
 
 test("a preparation failure keeps both the meeting and Return pending", async () => {

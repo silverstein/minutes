@@ -83,7 +83,26 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
         }
     }
 
-    // Extract from entities.people (presence facts — they were in this meeting)
+    // Extract from entities.people.
+    //
+    // Issue #245: this used to assert "Attended meeting" for every person
+    // entity, at Strong confidence. But `entities.people` is built from a
+    // deliberately broad list that includes people the summarizer only heard
+    // named, so a person discussed on a call they were not on was recorded as
+    // having attended it. Narrowing the `attendees:` field alone did not fix
+    // that, because this path never reads `attendees:`.
+    //
+    // Presence is a claim about the world and needs a source that can support
+    // it, so it now comes from the attendee list. Everyone else keeps a fact,
+    // because being named in a meeting is real and worth knowing, but it says
+    // what actually happened and carries the weaker confidence that matches.
+    let attending: std::collections::HashSet<String> = fm
+        .normalized_attendees()
+        .iter()
+        .filter_map(|attendee| resolve_person_identity(attendee, &canonical_people))
+        .map(|identity| identity.slug)
+        .collect();
+
     for entity in &fm.entities.people {
         let Some(identity) = canonical_people.resolve_entity(entity) else {
             continue;
@@ -91,15 +110,24 @@ pub fn extract_from_frontmatter(fm: &Frontmatter, meeting_path: &str) -> Vec<Per
         // Only create the entry if they don't already have facts from above.
         // Avoids cluttering with "was in meeting" for people we already have richer data on.
         if !person_map.contains_key(&identity.slug) {
+            let attended = attending.contains(&identity.slug);
             person_map.insert(
                 identity.slug.clone(),
                 PersonFacts {
                     slug: identity.slug.clone(),
                     name: identity.name.clone(),
                     facts: vec![Fact {
-                        text: format!("Attended meeting: {}", fm.title),
+                        text: if attended {
+                            format!("Attended meeting: {}", fm.title)
+                        } else {
+                            format!("Mentioned in meeting: {}", fm.title)
+                        },
                         category: "context".into(),
-                        confidence: Confidence::Strong,
+                        confidence: if attended {
+                            Confidence::Strong
+                        } else {
+                            Confidence::Inferred
+                        },
                         source_meeting: meeting_slug.clone(),
                         source_date: date.clone(),
                     }],
@@ -246,6 +274,82 @@ mod tests {
             template: None,
             filter_diagnosis: None,
         }
+    }
+
+    #[test]
+    fn a_person_only_mentioned_is_not_recorded_as_having_attended() {
+        // Issue #245, and the reason narrowing `attendees:` alone was not the
+        // whole fix. `entities.people` is built from a deliberately broad list,
+        // and this path never reads `attendees:`, so a person who was merely
+        // discussed still collected an "Attended meeting" fact at Strong
+        // confidence. The reporter's two person call named six absent people.
+        let mut fm = test_frontmatter();
+        // Marcus is discussed on the call. He is not on it, so he is not an
+        // attendee, and he has no action item or decision of his own.
+        fm.entities.people.push(EntityRef {
+            slug: "marcus".into(),
+            label: "Marcus".into(),
+            aliases: vec![],
+        });
+
+        let results = extract_from_frontmatter(&fm, "2026-04-03-strategy.md");
+
+        let marcus = results
+            .iter()
+            .find(|pf| pf.slug == "marcus")
+            .expect("a mentioned person should still be recorded, just not as present");
+        assert_eq!(marcus.facts.len(), 1);
+        assert!(
+            marcus.facts[0].text.starts_with("Mentioned in meeting"),
+            "expected a mention, got {:?}",
+            marcus.facts[0].text
+        );
+        assert_eq!(marcus.facts[0].confidence, Confidence::Inferred);
+
+        // And nothing about the call can be filed under him.
+        assert!(
+            !marcus
+                .facts
+                .iter()
+                .any(|fact| fact.category == "decision" || fact.category == "commitment"),
+            "a mentioned person must not be a party to the meeting's decisions"
+        );
+    }
+
+    #[test]
+    fn an_attendee_with_no_other_facts_still_reads_as_present() {
+        // The other half of the same rule: narrowing the claim must not erase
+        // it for people the attendee list does vouch for.
+        //
+        // The decisions pass files a fact under every attendee, and the
+        // entities pass only fills in people who picked up nothing there, so
+        // the fixture's decisions and action items are cleared to reach the
+        // branch under test.
+        let mut fm = test_frontmatter();
+        fm.decisions.clear();
+        fm.action_items.clear();
+        fm.attendees.push("Priya".into());
+        fm.entities.people.push(EntityRef {
+            slug: "priya".into(),
+            label: "Priya".into(),
+            aliases: vec![],
+        });
+
+        let results = extract_from_frontmatter(&fm, "2026-04-03-strategy.md");
+
+        let priya = results
+            .iter()
+            .find(|pf| pf.slug == "priya")
+            .expect("an attendee should be recorded");
+        assert!(
+            priya
+                .facts
+                .iter()
+                .any(|fact| fact.text.starts_with("Attended meeting")
+                    && fact.confidence == Confidence::Strong),
+            "expected an attendance fact, got {:?}",
+            priya.facts
+        );
     }
 
     #[test]

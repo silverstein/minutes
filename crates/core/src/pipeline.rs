@@ -7020,6 +7020,11 @@ fn select_calendar_event(
 /// Only what gets persisted narrows. A meeting with no calendar event and no
 /// high confidence attribution now writes an empty `attendees:`, which is the
 /// intended answer under "a wrong rewrite is worse than none".
+///
+/// Only two of the three places that persist `attendees` need this.
+/// `write_transcript_artifact_with_authority` takes its list straight from the
+/// matched calendar event and never merges `summary.participants` into it, so
+/// it was never the leak and is left alone.
 fn confirmed_attendees(
     trusted: &[String],
     merged: &[String],
@@ -7036,36 +7041,42 @@ fn confirmed_attendees(
         )
         .collect();
 
+    // #385 class 2 shapes reach this list too, so match on split references
+    // rather than whole strings: a trusted "Gert and Liam" has to be findable
+    // from a High attribution for either of them.
+    fn match_keys(raw: &str) -> Vec<String> {
+        crate::person_identity::split_person_references(raw)
+            .iter()
+            .filter_map(|reference| normalize_attendee_candidate(reference))
+            .map(|name| name.to_lowercase())
+            .collect()
+    }
+
     // Keep the merged list's spelling and ordering for anyone who survives the
     // filter, so this narrows the list without also rewriting the names in it.
     let mut keep = std::collections::HashSet::new();
     for name in &confirmed {
-        if let Some(normalized) = normalize_attendee_candidate(name) {
-            keep.insert(normalized.to_lowercase());
-        }
+        keep.extend(match_keys(name));
     }
 
     let mut result: Vec<String> = merged
         .iter()
         .filter(|name| {
-            normalize_attendee_candidate(name)
-                .map(|normalized| keep.contains(&normalized.to_lowercase()))
-                .unwrap_or(false)
+            let keys = match_keys(name);
+            !keys.is_empty() && keys.iter().all(|key| keep.contains(key))
         })
         .cloned()
         .collect();
 
     // A high confidence speaker who is not in the merged list still attended.
-    let mut seen: std::collections::HashSet<String> = result
-        .iter()
-        .filter_map(|name| normalize_attendee_candidate(name))
-        .map(|name| name.to_lowercase())
-        .collect();
+    let mut seen: std::collections::HashSet<String> =
+        result.iter().flat_map(|name| match_keys(name)).collect();
     for name in confirmed {
         let Some(normalized) = normalize_attendee_candidate(&name) else {
             continue;
         };
-        if seen.insert(normalized.to_lowercase()) {
+        let key = normalized.to_lowercase();
+        if seen.insert(key) {
             result.push(normalized);
         }
     }
@@ -10523,6 +10534,35 @@ mod tests {
             confidence,
             source: diarize::AttributionSource::Llm,
         }
+    }
+
+    #[test]
+    fn both_persist_points_narrow_attendees_before_writing() {
+        // Codex review of the #245 fix: every other test here calls
+        // `confirmed_attendees` directly, so all of them would still pass if
+        // someone reverted the two call sites and went back to persisting the
+        // merged list. The helper is not the fix. Calling it is.
+        //
+        // Needles are assembled at runtime so this test cannot match its own
+        // source text.
+        let source = include_str!("pipeline.rs");
+        let raw_refine = format!("{}{}", "frontmatter.attendees = ", "attendees;");
+
+        assert!(
+            !source.contains(&raw_refine),
+            "the refine path persists the merged attendee list again; it must go through confirmed_attendees"
+        );
+        assert!(
+            source.contains(&format!(
+                "{}{}",
+                "frontmatter.attendees = confirmed_", "attendees("
+            )),
+            "the refine path no longer narrows attendees before writing them"
+        );
+        assert!(
+            source.contains(&format!("{}{}", "attendees: persisted_", "attendees,")),
+            "the foreground path no longer narrows attendees before writing them"
+        );
     }
 
     #[test]

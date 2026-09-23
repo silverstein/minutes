@@ -221,7 +221,9 @@ fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> 
         // "it is unavailable in this build" asserted something untrue and
         // withheld the only thing the reader needs: why auto landed here. That
         // reason already exists and simply was not reaching the artifact.
-        auto_resolution_detail(crate::transcribe::auto_transcription_engine_resolution(config).reason)
+        auto_resolution_detail(
+            crate::transcribe::auto_transcription_engine_resolution(config).reason,
+        )
     } else {
         "it is unavailable in this build"
     };

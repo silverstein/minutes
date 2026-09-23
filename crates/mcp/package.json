@@ -45,7 +45,7 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "^1.6.0",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "minutes-sdk": "0.26.3",
     "yaml": "^2.8.3",

@@ -216,17 +216,50 @@ fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> 
         apple_speech_unavailable_reason()
     } else if requested.eq_ignore_ascii_case("sherpa") {
         crate::transcribe::sherpa_unavailable_reason(config)
+    } else if requested.eq_ignore_ascii_case("auto") {
+        // `auto` is a resolution strategy, not an engine that can be absent, so
+        // "it is unavailable in this build" asserted something untrue and
+        // withheld the only thing the reader needs: why auto landed here. That
+        // reason already exists and simply was not reaching the artifact.
+        auto_resolution_detail(crate::transcribe::auto_transcription_engine_resolution(config).reason)
     } else {
         "it is unavailable in this build"
+    };
+    // Name the model as well as the engine. The engine alone does not explain a
+    // transcript, and a reader comparing a poor desktop result against a clean
+    // CLI one on the same audio has no way to tell whether a different model
+    // ran (#940). Whisper is the only engine whose model is configured here, so
+    // it is the only one this can name honestly.
+    let model = if effective.eq_ignore_ascii_case("whisper") {
+        let name = config.transcription.model.trim();
+        if name.is_empty() {
+            String::new()
+        } else {
+            format!(" using model `{name}`")
+        }
+    } else {
+        String::new()
     };
     Some(ProcessingWarning {
         step: "transcribe".to_string(),
         reason: "engine_fallback".to_string(),
         timeout_secs: None,
         message: Some(format!(
-            "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`."
+            "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`{model}."
         )),
     })
+}
+
+/// Strip the leading `engine: ` from an auto-resolution reason.
+///
+/// Those reasons are spelled "whisper: sherpa not compiled" because they are
+/// also rendered on their own in health output. Here the engine is already
+/// named in the surrounding sentence, so repeating it reads as a stutter.
+fn auto_resolution_detail(reason: &'static str) -> &'static str {
+    reason
+        .split_once(": ")
+        .map(|(_, rest)| rest)
+        .unwrap_or(reason)
 }
 
 /// Records a [`ProcessingWarning`] when diarization ran but produced no
@@ -8744,6 +8777,56 @@ mod tests {
         assert!(
             message.contains("build") || message.contains("model") || message.contains("plugin"),
             "gives an actionable reason: {message}"
+        );
+    }
+
+    #[test]
+    fn engine_fallback_warning_names_the_whisper_model_that_ran() {
+        // Reported in #940: a desktop transcript was badly wrong while the CLI
+        // produced clean output from the same audio, and the warning named only
+        // the engine. Both runs used whisper, so the engine was never the
+        // variable; the model was, and nothing in the artifact recorded it.
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model = "large-v3".into();
+        let message = detect_engine_fallback_warning(&config)
+            .expect("a substitution must be recorded")
+            .message
+            .expect("the warning carries a message");
+        assert!(
+            message.contains("`large-v3`"),
+            "names the model that produced the transcript: {message}"
+        );
+    }
+
+    #[test]
+    fn engine_fallback_warning_explains_why_auto_chose_this_engine() {
+        // `auto` is a resolution strategy, not an engine that can be missing,
+        // but it fell through to a generic "it is unavailable in this build".
+        // That told the reader of #940 something untrue and withheld the only
+        // useful part, which is why auto landed on whisper here.
+        let mut config = Config::default();
+        config.transcription.engine = "auto".into();
+        let message = detect_engine_fallback_warning(&config)
+            .expect("an auto substitution must be recorded")
+            .message
+            .expect("the warning carries a message");
+        assert!(
+            !message.contains("it is unavailable in this build"),
+            "auto is not an engine that can be absent: {message}"
+        );
+        // The real reason names what was missing: the feature, the platform,
+        // the plugin, or the model.
+        assert!(
+            ["sherpa", "Apple Silicon", "plugin", "model"]
+                .iter()
+                .any(|needle| message.contains(needle)),
+            "gives the actual resolution reason: {message}"
+        );
+        // And it is not repeated as "whisper: whisper: ...".
+        assert!(
+            !message.contains("whisper: "),
+            "does not stutter the engine name: {message}"
         );
     }
 

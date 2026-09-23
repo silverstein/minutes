@@ -2501,10 +2501,8 @@ fn transcribe_utterance_for_sidecar(
 /// makes inheriting the natural assumption.
 fn resolve_live_model_path(config: &Config) -> Result<std::path::PathBuf, MinutesError> {
     if !config.live_transcript.model.is_empty() {
-        let resolved = crate::transcribe::resolve_model_path_by_name(
-            &config.live_transcript.model,
-            config,
-        )?;
+        let resolved =
+            crate::transcribe::resolve_model_path_by_name(&config.live_transcript.model, config)?;
         if let Some(message) = live_model_downgrade_message(
             &config.live_transcript.model,
             &resolved,
@@ -4267,8 +4265,14 @@ mod tests {
         let downgraded =
             live_model_downgrade_message("large-v3", Path::new("/m/ggml-base.bin"), "base")
                 .expect("a substitution must be explained");
-        assert!(downgraded.contains("large-v3"), "names what was asked for: {downgraded}");
-        assert!(downgraded.contains("base"), "names what actually ran: {downgraded}");
+        assert!(
+            downgraded.contains("large-v3"),
+            "names what was asked for: {downgraded}"
+        );
+        assert!(
+            downgraded.contains("base"),
+            "names what actually ran: {downgraded}"
+        );
         assert!(
             downgraded.contains("minutes setup --model large-v3"),
             "gives a way out: {downgraded}"

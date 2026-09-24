@@ -7818,10 +7818,26 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
         eprintln!();
-        eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
-        eprintln!(
-            "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
-        );
+        // #1000: this listing used to recommend sherpa unconditionally, including
+        // on builds that cannot run it, which is how a bilingual user on the
+        // Homebrew build was sent to `--sherpa`.
+        if cfg!(feature = "engine-sherpa") {
+            eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
+            );
+        } else {
+            eprintln!("Sherpa engine (not available in this build):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (needs a build with `--features engine-sherpa`;"
+            );
+            eprintln!(
+                "                                       `brew install` does not include it. For multilingual"
+            );
+            eprintln!(
+                "                                       audio on this build, use `--model large-v3`.)"
+            );
+        }
         eprintln!();
         eprintln!("Parakeet.cpp (currently unavailable in Minutes):");
         eprintln!("  --parakeet is retained for CLI compatibility but installs nothing until");
@@ -8381,6 +8397,34 @@ fn ensure_legacy_sherpa_target(dir: &Path) -> Result<()> {
 /// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
 /// `engine-sherpa` transcription engine into the resolved model directory.
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
+    // Issue #1000. `--sherpa` used to download the model and write
+    // `engine = "sherpa"` first, then print a note that this build cannot run
+    // sherpa. On the Homebrew install path that is the default outcome: the
+    // formula builds without `--features engine-sherpa`, `setup --list`
+    // recommends sherpa for multilingual work, and following that advice left a
+    // reporter with 639 MB of unusable model and a config value the binary
+    // silently ignores from then on.
+    //
+    // Refuse before spending either. Writing a config value the running binary
+    // knows it cannot honor is what turns a missing feature into a silent wrong
+    // result, and the only downstream trace was a `processing_warnings` entry
+    // in each meeting's frontmatter.
+    //
+    // This gates the explicit `--sherpa` request only. Plain `setup` reaches
+    // here through `setup_plan`, which already checks the same capability and
+    // sets `install_sherpa` accordingly.
+    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+        anyhow::bail!(
+            "This build of Minutes was compiled without the sherpa engine, so it cannot run \
+             Parakeet v3. Nothing was downloaded and your config was not changed.\n\n\
+             The Homebrew formula builds without it today, so `brew install` produces such a \
+             build. To use sherpa, install the signed desktop app or \
+             `minutes-macos-arm64-sherpa.tar.gz` from a release, or build from source with \
+             `cargo install --path crates/cli --features engine-sherpa`.\n\n\
+             Whisper handles multilingual audio in the meantime: `minutes setup --model large-v3`."
+        );
+    }
+
     let dir = minutes_core::sherpa_engine::model_dir(config);
     ensure_legacy_sherpa_target(&dir)?;
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
@@ -8425,10 +8469,15 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
             ),
         }
     }
-    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+    // Reaching here with `--sherpa` means the feature is compiled in, so the
+    // only remaining gap is the plugin dylib, which is installable without a
+    // rebuild. That case stays a note rather than a refusal.
+    #[cfg(feature = "engine-sherpa")]
+    if select_sherpa && !minutes_core::sherpa_plugin::plugin_available() {
         eprintln!(
-            "Note: this build lacks the sherpa engine, so transcription falls back to whisper \
-             until you build with `--features engine-sherpa`."
+            "Note: the sherpa plugin library is not installed, so transcription falls back to \
+             whisper until it is. Install `minutes-macos-arm64-sherpa.tar.gz` or the signed \
+             desktop app, or build `crates/sherpa-plugin`."
         );
     }
     Ok(())
@@ -9484,6 +9533,68 @@ mod input_meter_tests {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+
+    /// Issue #1000: `--sherpa` must not spend 639 MB and rewrite the engine on a
+    /// build that cannot run sherpa. This asserts the guard exists and refuses
+    /// before either side effect, rather than warning after both.
+    ///
+    /// The needle is assembled at runtime so this test cannot match itself.
+    #[test]
+    fn setup_sherpa_refuses_before_downloading_on_a_build_without_the_feature() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let guard = format!(
+            "{}{}",
+            "if select_sherpa && !cfg!(feature = ", "\"engine-sherpa\") {"
+        );
+        let position = source
+            .find(&guard)
+            .expect("the --sherpa build-capability guard is gone");
+
+        let download = source
+            .find("Installing sherpa-onnx parakeet-tdt-0.6b-v3")
+            .expect("the download banner moved; update this guard");
+        let write = source
+            .find(&format!(
+                "{}{}",
+                "cfg.transcription.engine = ", "\"sherpa\".to_string();"
+            ))
+            .expect("the engine write moved; update this guard");
+
+        assert!(
+            position < download,
+            "the guard must refuse before anything is downloaded"
+        );
+        assert!(
+            position < write,
+            "the guard must refuse before the engine is written to config"
+        );
+    }
+
+    /// The same listing that recommended sherpa is what sent the reporter to
+    /// `--sherpa` in the first place, so it has to be capability-aware too.
+    #[test]
+    fn setup_list_does_not_recommend_sherpa_on_a_build_without_it() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            source.contains("Sherpa engine (not available in this build):"),
+            "the listing no longer has a branch for builds that cannot run sherpa"
+        );
+        assert!(
+            source.contains(&format!(
+                "{}{}",
+                "if cfg!(feature = ", "\"engine-sherpa\") { eprintln!(\"Sherpa engine (recommended"
+            )) || source.contains("Sherpa engine (recommended for multilingual / SOTA, --sherpa):"),
+            "the recommended-sherpa line is missing entirely"
+        );
+    }
     /// Parse CLI args on a thread with a generous stack. `Commands` has
     /// ~70 variants and clap's derive parser builds large temporaries in
     /// debug builds; on Windows the default test-thread stack overflowed

@@ -8397,6 +8397,13 @@ fn ensure_legacy_sherpa_target(dir: &Path) -> Result<()> {
 /// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
 /// `engine-sherpa` transcription engine into the resolved model directory.
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
+    // Protecting a managed install comes first. It reads the target directory
+    // and writes nothing, so it is free to run even on a build that cannot use
+    // sherpa, and pointing `--sherpa` at an orukeet install must keep saying so
+    // rather than being swallowed by the capability refusal below.
+    let dir = minutes_core::sherpa_engine::model_dir(config);
+    ensure_legacy_sherpa_target(&dir)?;
+
     // Issue #1000. `--sherpa` used to download the model and write
     // `engine = "sherpa"` first, then print a note that this build cannot run
     // sherpa. On the Homebrew install path that is the default outcome: the
@@ -8425,8 +8432,6 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
         );
     }
 
-    let dir = minutes_core::sherpa_engine::model_dir(config);
-    ensure_legacy_sherpa_target(&dir)?;
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
     eprintln!("  Dir: {}", dir.display());
     std::fs::create_dir_all(&dir)

@@ -447,7 +447,10 @@ window.__MINUTES_I18N['zh-CN'] = {
     "Local First": "本地优先",
     "Desktop app": "桌面应用",
     "Created by Mat Silverstein": "由 Mat Silverstein 创建",
-    "Have questions about this ": "对此有疑问 ",
+    "Have questions about this meeting?": "对这场会议有疑问吗？",
+    "Have questions about this memo?": "对这份备忘录有疑问吗？",
+    "Have questions about this note?": "对这条笔记有疑问吗？",
+    "Have questions about this dictation?": "对这段听写有疑问吗？",
 
     // ── Status / misc transient ─────────────────────────────────────
     "Loading...": "正在加载…",

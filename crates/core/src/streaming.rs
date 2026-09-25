@@ -37,6 +37,55 @@ pub enum SourceRole {
     Default,
 }
 
+/// Source and timing provenance retained when a producer can provide it.
+///
+/// A Minutes chunk may aggregate several upstream frames. The identifier and
+/// epoch fields therefore describe the shared source interval, while the
+/// sequence fields bound every upstream frame represented by the chunk.
+/// Producers without measured provenance must use `None` on [`AudioChunk`]
+/// instead of manufacturing identifiers or timestamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioChunkLineage {
+    /// PocketStation session that produced the represented frames.
+    pub session_id: u64,
+    /// Physical or application source that produced the represented frames.
+    pub source_id: u64,
+    /// Independent audio stem carrying the represented frames.
+    pub stem_id: u64,
+    /// Clock domain used by the source timestamps.
+    pub clock_id: u32,
+    /// First upstream frame sequence included in this Minutes chunk.
+    pub first_sequence_number: u64,
+    /// Last upstream frame sequence included in this Minutes chunk.
+    pub last_sequence_number: u64,
+    /// Upstream sequence numbers absent inside this chunk's source interval.
+    pub missing_sequence_count: u64,
+    /// Silence inserted at 16 kHz to preserve absent source time.
+    pub inserted_silence_samples: u64,
+    /// Start of the represented source interval, in nanoseconds.
+    pub timestamp_start_ns: u64,
+    /// Length of the represented source interval, in nanoseconds.
+    pub duration_ns: u64,
+    /// Attachment generation for the physical source.
+    pub source_generation: u32,
+    /// Discontinuity epoch active for the represented frames.
+    pub discontinuity_epoch: u64,
+    /// Capture-permission epoch active for the represented frames.
+    pub permission_epoch: u64,
+    /// Earliest runtime observation timestamp represented by this chunk.
+    pub observed_at_ns: u64,
+    /// Latest endpoint poll timestamp represented by this chunk.
+    pub polled_at_ns: u64,
+}
+
+impl AudioChunkLineage {
+    /// End of the represented source interval, saturating only for malformed
+    /// external timing rather than wrapping into an earlier timestamp.
+    pub const fn timestamp_end_ns(self) -> u64 {
+        self.timestamp_start_ns.saturating_add(self.duration_ns)
+    }
+}
+
 /// A chunk of 16kHz mono f32 audio samples (~100ms each).
 #[derive(Clone)]
 pub struct AudioChunk {
@@ -44,7 +93,8 @@ pub struct AudioChunk {
     pub samples: Vec<f32>,
     /// RMS energy of this chunk (0.0–1.0 scale).
     pub rms: f32,
-    /// Wall-clock timestamp when this chunk was captured.
+    /// Process-local monotonic timestamp taken when this chunk was emitted.
+    /// Use `lineage` for measured source time when it is available.
     pub timestamp: Instant,
     /// Monotonic per-stream chunk index (0, 1, 2, ...). Each AudioStream
     /// increments independently. Useful for debugging chunk ordering and
@@ -52,6 +102,8 @@ pub struct AudioChunk {
     pub index: u64,
     /// Which source produced this chunk.
     pub source: SourceRole,
+    /// Measured source/timing provenance, when supplied by the capture path.
+    pub lineage: Option<AudioChunkLineage>,
 }
 
 /// Samples in one `AudioChunk`: 100 ms of 16 kHz mono audio.
@@ -119,6 +171,21 @@ impl ChunkAccumulator {
     /// Samples held back awaiting a full chunk.
     pub fn buffered(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Begin a new chunk-index epoch at a source-generation or discontinuity
+    /// boundary. Complete chunks already emitted are unchanged.
+    pub fn clear(&mut self) {
+        self.buf.clear();
+        self.next_index = 0;
+    }
+
+    /// Discard only the incomplete trailing samples after an upstream gap.
+    /// Complete chunk indexes remain monotonic because the source attachment
+    /// did not change; callers use [`Self::clear`] for a new generation or
+    /// discontinuity epoch.
+    pub fn discard_partial(&mut self) {
+        self.buf.clear();
     }
 }
 
@@ -286,6 +353,7 @@ impl AudioStream {
                         timestamp: Instant::now(),
                         index,
                         source: SourceRole::Default,
+                        lineage: None,
                     });
                 });
             },
@@ -420,6 +488,65 @@ impl Drop for MultiAudioStream {
         self.stop.store(true, Ordering::Relaxed);
         self.voice.stop();
         self.call.stop();
+    }
+}
+
+#[cfg(test)]
+mod audio_chunk_lineage_tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_lineage_keeps_source_interval_and_frame_bounds() {
+        let lineage = AudioChunkLineage {
+            session_id: 11,
+            source_id: 12,
+            stem_id: 13,
+            clock_id: 14,
+            first_sequence_number: 20,
+            last_sequence_number: 29,
+            missing_sequence_count: 0,
+            inserted_silence_samples: 0,
+            timestamp_start_ns: 1_000_000_000,
+            duration_ns: 100_000_000,
+            source_generation: 2,
+            discontinuity_epoch: 3,
+            permission_epoch: 4,
+            observed_at_ns: 1_100_000_001,
+            polled_at_ns: 1_100_000_002,
+        };
+
+        assert_eq!(lineage.first_sequence_number, 20);
+        assert_eq!(lineage.last_sequence_number, 29);
+        assert_eq!(lineage.timestamp_end_ns(), 1_100_000_000);
+        assert_eq!(lineage.source_generation, 2);
+        assert_eq!(lineage.discontinuity_epoch, 3);
+    }
+
+    #[test]
+    fn producers_without_measured_provenance_leave_lineage_absent() {
+        let chunk = AudioChunk {
+            samples: vec![0.0; CHUNK_SAMPLES],
+            rms: 0.0,
+            timestamp: Instant::now(),
+            index: 0,
+            source: SourceRole::Voice,
+            lineage: None,
+        };
+
+        assert!(chunk.lineage.is_none());
+    }
+
+    #[test]
+    fn discarding_partial_audio_preserves_the_next_chunk_index() {
+        let mut chunks = ChunkAccumulator::new();
+        let mut indexes = Vec::new();
+        chunks.push(&vec![0.0; CHUNK_SAMPLES + 10], |index, _| {
+            indexes.push(index)
+        });
+        chunks.discard_partial();
+        chunks.push(&vec![0.0; CHUNK_SAMPLES], |index, _| indexes.push(index));
+
+        assert_eq!(indexes, vec![0, 1]);
     }
 }
 

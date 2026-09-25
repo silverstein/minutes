@@ -171,17 +171,14 @@ jobs:
         # breakage here only surfaces when Prompter next runs cargo build.
         run: cargo build -p minutes-core --no-default-features --features streaming
 
-      - name: Build PocketStation capture (Windows and Linux)
-        if: runner.os == 'Windows' || runner.os == 'Linux'
+      - name: Build PocketStation capture (cross-platform)
         run: cargo build -p minutes-core --no-default-features --features pocketstation-capture
 
-      - name: Test PocketStation capture (Windows and Linux)
-        if: runner.os == 'Windows' || runner.os == 'Linux'
+      - name: Test PocketStation capture (cross-platform)
         run: cargo test -p minutes-core --no-default-features --features pocketstation-capture --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
 
-      - name: Clippy PocketStation capture (Windows and Linux)
-        if: runner.os == 'Windows' || runner.os == 'Linux'
+      - name: Clippy PocketStation capture (cross-platform)
         run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
 
       - name: Build core with parakeet (cross-platform)

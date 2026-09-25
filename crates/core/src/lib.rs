@@ -181,6 +181,8 @@ pub mod pipeline;
     any(target_os = "linux", target_os = "windows")
 ))]
 mod pocketstation_capture;
+#[cfg(all(feature = "pocketstation-capture", target_os = "macos"))]
+mod pocketstation_microphone;
 pub mod policy_fs;
 pub mod process_trace;
 pub mod resummarize;

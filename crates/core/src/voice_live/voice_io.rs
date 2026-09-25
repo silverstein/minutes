@@ -111,6 +111,7 @@ impl InputCallback {
                 timestamp: Instant::now(),
                 index: self.index,
                 source: SourceRole::Voice,
+                lineage: None,
             };
             self.index += 1;
             let _ = self.tx.try_send(chunk);

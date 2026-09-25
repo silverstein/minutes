@@ -449,8 +449,19 @@ fn dispatch_action(
             }
             // Palette launches with pipeline defaults — users who need flags
             // reach for the CLI or the existing tray menu.
-            match cmd_start_recording(app.clone(), state, None, None, None, None, None, None, None)?
-            {
+            match cmd_start_recording(
+                app.clone(),
+                state,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )? {
                 crate::commands::StartRecordingOutcome::Started => Ok(ActionResponse::Ok),
                 crate::commands::StartRecordingOutcome::ConsentRequired { disclosure } => {
                     // Require mode: route the palette start to the same

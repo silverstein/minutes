@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-convert"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "anydoc",
  "flate2",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-core"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "cap-std",
  "chrono",
@@ -3820,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-ocr"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "libc",
  "mach2 0.7.0",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-semantic"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "libc",
  "mach2 0.7.0",
@@ -3853,14 +3853,14 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-worker-control"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "minutes-cli"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -3950,7 +3950,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.26.3"
+version = "0.27.0"
 dependencies = [
  "chrono",
  "schemars 1.2.2",

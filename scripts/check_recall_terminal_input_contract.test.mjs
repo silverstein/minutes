@@ -174,6 +174,44 @@ test("cursor editing holds Return until the line is cleanly retyped", async () =
   assert.match(state.notices.at(-1).message, /editing or control keys it cannot replay/);
 });
 
+test("focus changes and mouse movement over the pane do not block a typed question", async () => {
+  // Codex enables focus reporting (?1004) and any-motion SGR mouse tracking
+  // (?1003 + ?1006), so xterm emits these while the person only types.
+  const harness = createHarness();
+  await harness.send("\x1b[I", true);
+  await harness.send("\x1b[<0;12;30M", true);
+  await harness.send("\x1b[<0;12;30m", true);
+  await harness.send("What did", true);
+  await harness.send("\x1b[<35;40;22M", true);
+  await harness.send("\x1b[<65;40;22M", true);
+  await harness.send("\x1b[O", true);
+  await harness.send("\x1b[I", true);
+  await harness.send(" we decide?", true);
+  assert.equal(harness.state().draft, "What did we decide?");
+  await harness.send("\r", true);
+
+  const state = harness.state();
+  assert.equal(state.pending, null);
+  assert.equal(commands(harness, "cmd_prepare_recall_terminal_meeting").length, 1);
+  assert.equal(state.calls.at(-1).args.data, "\r");
+  assert.ok(
+    state.calls.some((call) => call.args?.data === "\x1b[<35;40;22M"),
+    "mouse reports still reach the child unchanged",
+  );
+});
+
+test("a click inside a non-empty line still holds Return", async () => {
+  const harness = createHarness();
+  await harness.send("question", true);
+  await harness.send("\x1b[<0;3;30M", true);
+  await harness.send("\r", true);
+
+  const state = harness.state();
+  assert.equal(state.pending, "/meetings/private.md");
+  assert.equal(commands(harness, "cmd_prepare_recall_terminal_meeting").length, 0);
+  assert.match(state.notices.at(-1).message, /editing or control keys it cannot replay/);
+});
+
 test("an empty Return cannot bypass pending meeting preparation", async () => {
   const harness = createHarness();
   await harness.send("\r", true);

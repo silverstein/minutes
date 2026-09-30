@@ -14911,6 +14911,23 @@
       // Cursor movement or other terminal editing means we can no longer prove
       // whether the submitted line is an account command or a real question.
       // Bracketed-paste markers are safe because their payload stays linear.
+      //
+      // Agent TUIs (Codex enables focus reporting and any-motion SGR mouse
+      // tracking) make xterm emit reports the person never typed: one per
+      // focus change and one per mouse movement over the pane. None of them
+      // edit the line, so they must not cost it its reliability. A click can
+      // move the child's cursor, so a press or release still counts as
+      // editing, except on an empty line where there is nothing to reposition.
+      data = data
+        .replace(/\x1b\[[IO]/g, '')
+        .replace(/\x1b\[<(\d+);\d+;\d+[Mm]/g, (_report, code) => {
+          const button = Number(code);
+          const motionOrWheel = (button & 32) !== 0 || (button & 64) !== 0;
+          if (!motionOrWheel && recallTerminalInputDraft !== '') {
+            recallTerminalInputReliable = false;
+          }
+          return '';
+        });
       const csiSequences = data.match(/\x1b\[[0-9;?]*[ -/]*[@-~]/g) || [];
       if (csiSequences.some((sequence) => sequence !== '\x1b[200~' && sequence !== '\x1b[201~')) {
         recallTerminalInputReliable = false;

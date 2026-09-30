@@ -53,6 +53,39 @@ pub struct RetentionPlan {
     pub totals: RetentionTotals,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionRemovalError {
+    pub path: PathBuf,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RetentionRemoval {
+    pub removed: Vec<PathBuf>,
+    pub errors: Vec<RetentionRemovalError>,
+}
+
+/// Delete every `DeleteCandidate` in `plan`. Markdown and kept audio are never
+/// touched; this is the one destructive step shared by `minutes cleanup
+/// --apply` and the desktop startup runner.
+pub fn apply_audio_retention(plan: &RetentionPlan) -> RetentionRemoval {
+    let mut removal = RetentionRemoval::default();
+    for item in plan
+        .items
+        .iter()
+        .filter(|item| item.action == RetentionAction::DeleteCandidate)
+    {
+        match fs::remove_file(&item.path) {
+            Ok(()) => removal.removed.push(item.path.clone()),
+            Err(error) => removal.errors.push(RetentionRemovalError {
+                path: item.path.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
+    removal
+}
+
 pub fn preview_audio_retention(config: &Config, now: DateTime<Local>) -> RetentionPlan {
     let mut items = Vec::new();
     let mut seen_audio = HashSet::new();

@@ -2162,6 +2162,26 @@ fn main() {
             // Clean up stale terminal workspaces from previous sessions
             context::cleanup_stale_workspaces();
 
+            // Raw-audio retention runs only when the operator opted into both
+            // automatic apply and startup cleanup. Background thread: the scan
+            // reads every meeting's frontmatter, which can stall on slow disks.
+            if startup_config.retention.auto_cleanup && startup_config.retention.cleanup_on_startup
+            {
+                let retention_config = startup_config.clone();
+                std::thread::spawn(move || {
+                    let plan = minutes_core::retention::preview_audio_retention(
+                        &retention_config,
+                        chrono::Local::now(),
+                    );
+                    let removal = minutes_core::retention::apply_audio_retention(&plan);
+                    eprintln!(
+                        "[retention] startup cleanup removed {} file(s), {} error(s)",
+                        removal.removed.len(),
+                        removal.errors.len()
+                    );
+                });
+            }
+
             let debug_update_state =
                 std::env::var("MINUTES_DEBUG_UPDATE_STATE")
                     .ok()

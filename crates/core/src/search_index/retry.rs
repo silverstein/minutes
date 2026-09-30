@@ -5,8 +5,9 @@
 //! `SQLITE_BUSY` after `busy_timeout` expires. This helper retries up to 3
 //! times with linear backoff (50, 100, 150ms), then propagates the error.
 //!
-//! `cmd_search` is synchronous in the current codebase, so blocking sleep is
-//! safe. If search ever moves to an async context, switch to `tokio::time::sleep`.
+//! Desktop search runs on Tauri's blocking pool (`spawn_blocking`) and the CLI
+//! is synchronous, so a blocking sleep never stalls an async executor. Keep
+//! callers off async worker threads, or switch to `tokio::time::sleep`.
 
 use std::time::Duration;
 

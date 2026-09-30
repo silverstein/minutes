@@ -52,7 +52,7 @@ use minutes_core::Config;
 use crate::commands::{
     cmd_add_note, cmd_copy_last_dictation, cmd_create_artifact_from_meeting, cmd_open_meeting_url,
     cmd_paste_last_dictation, cmd_reprocess_last_dictation, cmd_restore_raw_last_dictation,
-    cmd_search, cmd_sensitive_start, cmd_sensitive_stop, cmd_start_dictation,
+    cmd_search_blocking, cmd_sensitive_start, cmd_sensitive_stop, cmd_start_dictation,
     cmd_start_live_transcript, cmd_start_recording, cmd_stop_dictation, cmd_stop_live_transcript,
     cmd_stop_recording, cmd_upcoming_meetings, copy_to_clipboard, dictation_pid_active,
     open_target, recording_active, AppState,
@@ -619,7 +619,7 @@ fn dispatch_action(
             // the palette dispatch path keeps the historical "errors collapse
             // to empty" behavior so a flaky index doesn't break the palette.
             let q = query.unwrap_or_default();
-            let results = match cmd_search(q) {
+            let results = match cmd_search_blocking(q) {
                 Ok(v) => serde_json::to_value(&v).unwrap_or(serde_json::json!([])),
                 Err(_) => serde_json::json!([]),
             };

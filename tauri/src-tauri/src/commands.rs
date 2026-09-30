@@ -7503,8 +7503,16 @@ pub fn cmd_retry_processing_job(
     Ok(())
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
+pub async fn cmd_weekly_summary() -> Result<WeeklySummaryView, String> {
+    tauri::async_runtime::spawn_blocking(cmd_weekly_summary_blocking)
+        .await
+        .map_err(|e| format!("cmd_weekly_summary worker failed: {e}"))?
+}
+
+fn cmd_weekly_summary_blocking() -> Result<WeeklySummaryView, String> {
     let config = Config::load();
     let since = (chrono::Local::now() - chrono::Duration::days(7)).to_rfc3339();
     let filters = minutes_core::search::SearchFilters {
@@ -7827,8 +7835,19 @@ fn compute_lifecycle_badges(
 /// `catch` block handles by rendering an error banner. Previously the command
 /// swallowed every error as `[]`, which made real failures look like "no
 /// matches" and was a debugging footgun.
+///
+/// Runs on the blocking pool: a sync Tauri command runs on the main thread
+/// and freezes the window until every corpus read finishes.
 #[tauri::command]
-pub fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
+pub async fn cmd_search(query: String) -> Result<Vec<minutes_core::search::SearchResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || cmd_search_blocking(query))
+        .await
+        .map_err(|e| format!("cmd_search worker failed: {e}"))?
+}
+
+pub fn cmd_search_blocking(
+    query: String,
+) -> Result<Vec<minutes_core::search::SearchResult>, String> {
     let config = Config::load();
     // Desktop search is the operator's own surface, not an agent surface:
     // restricted meetings stay visible to the human in their own app.
@@ -8808,8 +8827,16 @@ pub fn cmd_retry_recovery(
     Ok(())
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
+pub async fn cmd_get_meeting_detail(path: String) -> Result<MeetingDetail, String> {
+    tauri::async_runtime::spawn_blocking(move || cmd_get_meeting_detail_blocking(path))
+        .await
+        .map_err(|e| format!("cmd_get_meeting_detail worker failed: {e}"))?
+}
+
+pub fn cmd_get_meeting_detail_blocking(path: String) -> Result<MeetingDetail, String> {
     let config = Config::load();
     let meeting_path = std::path::PathBuf::from(&path);
     minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
@@ -13522,8 +13549,16 @@ pub fn cmd_set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), Str
     }
 }
 
+// Corpus-wide reads run on the blocking pool: a sync Tauri command runs on
+// the main thread and freezes the window until every file read finishes.
 #[tauri::command]
-pub fn cmd_get_storage_stats() -> serde_json::Value {
+pub async fn cmd_get_storage_stats() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(cmd_get_storage_stats_blocking)
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn cmd_get_storage_stats_blocking() -> serde_json::Value {
     let config = Config::load();
 
     fn walk_size(path: &std::path::Path) -> (u64, usize) {
@@ -19818,7 +19853,8 @@ mod tests {
             .unwrap();
 
             let detail =
-                cmd_get_meeting_detail(meeting_path.to_string_lossy().to_string()).unwrap();
+                cmd_get_meeting_detail_blocking(meeting_path.to_string_lossy().to_string())
+                    .unwrap();
 
             let alex = detail
                 .speaker_map

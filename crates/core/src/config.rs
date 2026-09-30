@@ -807,12 +807,11 @@ pub struct RetentionConfig {
     pub restricted_audio_days: u32,
     /// Honor `audio_retention: pinned` in meeting frontmatter.
     pub keep_pinned_audio: bool,
-    /// Whether future cleanup runners may apply the policy automatically.
-    ///
-    /// The current implementation only previews cleanup candidates; destructive
-    /// apply paths must opt in explicitly.
+    /// Whether automatic runners may apply the policy (delete candidates)
+    /// without an explicit `minutes cleanup --apply`.
     pub auto_cleanup: bool,
-    /// Whether startup is allowed to trigger automatic cleanup.
+    /// Whether the desktop app runs cleanup at launch. Requires
+    /// `auto_cleanup` too; either flag alone never deletes anything.
     pub cleanup_on_startup: bool,
     /// Surface a storage warning when raw audio exceeds this many GiB.
     pub warn_above_gb: u64,

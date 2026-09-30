@@ -4172,17 +4172,11 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
 }
 
 #[derive(Serialize)]
-struct CleanupError {
-    path: PathBuf,
-    error: String,
-}
-
-#[derive(Serialize)]
 struct CleanupReport {
     plan: minutes_core::retention::RetentionPlan,
     applied: bool,
     removed: Vec<PathBuf>,
-    errors: Vec<CleanupError>,
+    errors: Vec<minutes_core::retention::RetentionRemovalError>,
 }
 
 fn cmd_storage(json: bool, config: &Config) -> Result<()> {
@@ -4217,19 +4211,9 @@ fn cmd_cleanup(apply: bool, older_than: Option<&str>, json: bool, config: &Confi
     };
 
     if apply {
-        for item in
-            report.plan.items.iter().filter(|item| {
-                item.action == minutes_core::retention::RetentionAction::DeleteCandidate
-            })
-        {
-            match std::fs::remove_file(&item.path) {
-                Ok(()) => report.removed.push(item.path.clone()),
-                Err(error) => report.errors.push(CleanupError {
-                    path: item.path.clone(),
-                    error: error.to_string(),
-                }),
-            }
-        }
+        let removal = minutes_core::retention::apply_audio_retention(&report.plan);
+        report.removed = removal.removed;
+        report.errors = removal.errors;
     }
 
     if json {

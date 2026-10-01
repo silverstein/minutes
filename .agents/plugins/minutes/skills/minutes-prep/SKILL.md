@@ -3,6 +3,20 @@ name: minutes-prep
 description: Interactive meeting preparation — builds a relationship brief and talking points before a call. Use when the user says "prep me for my call with", "I'm meeting with X", "prepare me for", "what should I bring up with", "meeting prep", "get ready for my call", or wants to review history with someone before a meeting.
 ---
 
+## Local Minutes Host
+
+This plugin runs in ChatGPT Work or Codex with access to the local computer.
+Use the connected Minutes MCP tools when they cover the requested operation;
+resolve their exact registered names from the host's tool list. CLI commands
+and bundled helpers require a local shell on the same computer as Minutes.
+If that runtime is unavailable, report the missing capability instead of
+fabricating results or treating a command as executed. Keep capture, audio
+processing, dictation insertion, and OS permissions in the local Minutes engine.
+The plugin does not capture audio in ChatGPT's browser or upload a library.
+Tool results used as model context are shared with the AI host. Preserve the
+canonical skill's meeting-access, confirmation, and external-send rules.
+
+
 ## Skill Path
 
 Resolve this skill's installed SKILL.md path from the host's skill metadata.

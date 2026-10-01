@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { discoverCanonicalSkills } from "./discover.js";
-import { renderOpenAIPlugin, OPENAI_SKILLS, OPENAI_PLUGIN_ROOT } from "./openai-plugin.js";
+import { renderOpenAIPlugin, OPENAI_MCP_VERSION, OPENAI_PLUGIN_ROOT } from "./openai-plugin.js";
 import { findUnownedGeneratedArtifacts } from "./ownership.js";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -13,12 +13,18 @@ const root = fileURLToPath(new URL("../../", import.meta.url));
 test("packaged skills resolve installed helpers without depending on a checkout", async () => {
   const skills = await discoverCanonicalSkills(root);
   const artifacts = await renderOpenAIPlugin(root, skills);
-  for (const name of OPENAI_SKILLS) {
+  const packaged = [...artifacts.keys()].filter(target => target.endsWith("/SKILL.md"));
+  assert.equal(packaged.length, skills.length);
+  for (const skill of skills) {
+    const name = skill.frontmatter.name;
     const body = artifacts.get(`${OPENAI_PLUGIN_ROOT}/skills/${name}/SKILL.md`)!;
     assert.ok(body.startsWith(`---\nname: ${name}\n`));
-    assert.ok(!body.includes("git rev-parse"));
+    // Release-note authoring legitimately verifies Git refs. Installed helper
+    // paths, however, must never depend on finding a repository checkout.
+    assert.ok(!body.includes("$(git rev-parse --show-toplevel)"));
     assert.ok(!body.includes("${CLAUDE_PLUGIN_ROOT}"));
     assert.ok(!body.includes(".agents/skills/minutes"));
+    assert.ok(body.includes("## Local Minutes Host"));
     if (body.includes("$MINUTES_SKILLS_ROOT")) assert.ok(body.includes("installed SKILL.md"));
   }
 });
@@ -31,7 +37,7 @@ test("local marketplace stays contained and pins the published MCP package", asy
   assert.equal(marketplace.plugins[0].name, plugin.name);
   assert.equal(marketplace.plugins[0].source.path, `./${OPENAI_PLUGIN_ROOT}`);
   assert.equal(mcp.mcpServers.minutes.type, "stdio");
-  assert.deepEqual(mcp.mcpServers.minutes.args, ["-y", "minutes-mcp@0.27.0"]);
+  assert.deepEqual(mcp.mcpServers.minutes.args, ["-y", `minutes-mcp@${OPENAI_MCP_VERSION}`]);
   assert.ok([...artifacts.keys()].every(target => !path.isAbsolute(target) && !target.split("/").includes("..")));
   const runtime = artifacts.get(`${OPENAI_PLUGIN_ROOT}/skills/_runtime/hooks/lib/minutes-learn.mjs`);
   assert.ok(runtime?.includes("export"));

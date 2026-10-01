@@ -1,7 +1,7 @@
 // Real stdio qualification of the published package; no model calls or user corpus.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, cp, rm, realpath, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, cp, rm, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const require = createRequire(import.meta.url);
+const packageVersion = JSON.parse(await readFile(new URL('node_modules/minutes-mcp/package.json', import.meta.url), 'utf8')).version;
+const expectedTools = JSON.parse(await readFile(new URL('../../manifest.json', import.meta.url), 'utf8')).tools;
 const profile = await realpath(await mkdtemp(path.join(tmpdir(), 'minutes-openai-plugin-')));
 const corpus = path.join(profile, 'sample-meetings');
 const outside = path.join(profile, 'outside.md');
@@ -36,6 +38,10 @@ try {
   // supplies a named check; inspect stderr locally if qualification fails.
   transport.stderr?.on('data', () => {});
   await client.connect(transport);
+  const catalog = await client.listTools();
+  const names = catalog.tools.map(tool => tool.name);
+  assert.equal(new Set(names).size, names.length, 'duplicate tool names');
+  assert.deepEqual([...names].sort(), expectedTools.map(tool => typeof tool === 'string' ? tool : tool.name).sort(), 'published MCP and manifest tool surfaces differ');
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 70000 });
     assert.ok(!result.isError, `${name} failed: ${JSON.stringify(result.content)}`);
@@ -56,7 +62,8 @@ try {
   const denied = await client.callTool({ name: 'get_meeting', arguments: { path: outside } });
   assert.ok(denied.isError);
   assert.doesNotMatch(JSON.stringify(denied), /violet lantern/);
-  console.log(JSON.stringify({ status: 'passed', package: 'minutes-mcp@0.27.0', transport: 'stdio',
+  console.log(JSON.stringify({ status: 'passed', package: `minutes-mcp@${packageVersion}`, transport: 'stdio',
+    advertised_tools: names.sort(), advertised_tool_count: names.length, tool_surface_matches_manifest: true,
     sample_meetings: 5, pricing_sources: 2, decision_reversal: true, outside_corpus_denied: true,
     model_calls: 0, real_meeting_reads: 0 }));
 } finally {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes to X1 Meeting Send"
+  short_description: "Send a meeting's outcomes to your X1 review queue after you approve it in X1."
+  default_prompt: "Use Minutes to X1 Meeting Send for this task."

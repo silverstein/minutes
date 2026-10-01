@@ -1,7 +1,7 @@
 {
   "name": "minutes",
   "interface": {
-    "displayName": "Minutes · local conversation memory"
+    "displayName": "Minutes"
   },
   "plugins": [
     {

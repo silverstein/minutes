@@ -1,5 +1,9 @@
 # OpenAI distribution qualification — September 30, 2026
 
+This is the historical September 30 prototype record. The full 25-skill
+package and Silverbook installation are recorded separately in
+[full-plugin-qualification-2026-10-01.json](full-plugin-qualification-2026-10-01.json).
+
 Owner: Codex working for Mat. Beads epic: `minutes-rt6k`; prototype tasks
 `minutes-rt6k.1` and `.2`; live acceptance task `.3`.
 
@@ -9,7 +13,7 @@ Owned checkout: `/home/mat/Sites/minutes-worktrees/openai-distribution`, branch
 ChatGPT-plan/plugin distribution tranche. The checkout is retained for review
 and live qualification. The dirty canonical checkout was preserved.
 
-| Proof | Current evidence |
+| Proof | September 30 evidence |
 | --- | --- |
 | OAuth source/protocol | Standalone prototype; 29 tests pass on Linux and silverbook/macOS. Test fixtures resolve macOS temporary-directory symlinks; production symlink rejection is unchanged. Tokens, transport responses and signing keys in tests are synthetic. Missing MIME headers and empty terminal output still require valid SSE and confirmed completion; finished assistant messages are released only after `response.completed`; the success page removes callback query parameters with a CSP-authorized script. |
 | Skill source/compiler | Five canonical skills packaged; 36 compiler tests pass, with routing, resolver, ownership, generated-output and golden checks. |

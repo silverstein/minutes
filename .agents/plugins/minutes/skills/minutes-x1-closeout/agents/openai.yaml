@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes to X1 Closeout"
+  short_description: "Prepare a meeting-sourced closeout for governed review in X1."
+  default_prompt: "Use Minutes to X1 Closeout for this task."

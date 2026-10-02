@@ -506,9 +506,19 @@ return output"#
         _ => return Vec::new(),
     };
 
+    let mut events = parse_applescript_output(&output);
+
+    dedup_events(&mut events);
+    events
+}
+
+/// Parse the shared AppleScript fields: title, start, minutes, attendees, location.
+/// Both upcoming and overlapping queries must retain attendee data before filtering.
+#[cfg(any(test, target_os = "macos"))]
+fn parse_applescript_output(stdout: &str) -> Vec<CalendarEvent> {
     let unit_sep = '\x1F';
     let field_sep = '\x1E';
-    let mut events: Vec<CalendarEvent> = output
+    stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| {
@@ -535,10 +545,7 @@ return output"#
                 None
             }
         })
-        .collect();
-
-    dedup_events(&mut events);
-    events
+        .collect()
 }
 
 /// Parse EventKit helper JSON output, extracting meeting URLs from raw location strings.
@@ -706,6 +713,8 @@ set tomorrowEnd to todayStart + (2 * 24 * 60 * 60)
 set lookaheadSecs to {minutes} * 60
 set horizon to now + lookaheadSecs
 set output to ""
+set unitSep to (ASCII character 31)
+set fieldSep to (ASCII character 30)
 tell application "Calendar"
     repeat with cal in calendars
         try
@@ -715,12 +724,22 @@ tell application "Calendar"
                 if s >= now and s <= horizon then
                     set t to summary of evt
                     set mins to ((s - now) / 60) as integer
+                    set attendeeNames to ""
+                    try
+                        set theAttendees to attendees of evt
+                        repeat with anAttendee in theAttendees
+                            if attendeeNames is not "" then
+                                set attendeeNames to attendeeNames & fieldSep
+                            end if
+                            set attendeeNames to attendeeNames & (name of anAttendee)
+                        end repeat
+                    end try
                     set loc to ""
                     try
                         set loc to location of evt
                         if loc is missing value then set loc to ""
                     end try
-                    set output to output & t & (ASCII character 31) & (s as string) & (ASCII character 31) & mins & (ASCII character 31) & loc & linefeed
+                    set output to output & t & unitSep & (s as string) & unitSep & mins & unitSep & attendeeNames & unitSep & loc & linefeed
                 end if
             end repeat
         end try
@@ -745,26 +764,7 @@ return output"#,
         }
     };
 
-    let sep = '\x1F'; // ASCII unit separator
-    let mut events: Vec<CalendarEvent> = output
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(4, sep).collect();
-            if parts.len() >= 3 {
-                let url = parts.get(3).and_then(|loc| extract_meeting_url(loc.trim()));
-                Some(CalendarEvent {
-                    title: parts[0].trim().to_string(),
-                    start: parts[1].trim().to_string(),
-                    minutes_until: parts[2].trim().parse().unwrap_or(0),
-                    attendees: Vec::new(),
-                    url,
-                })
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut events = parse_applescript_output(&output);
 
     // Deduplicate by title (same event can appear in multiple calendars)
     events.sort_by_key(|e| (e.minutes_until, e.title.clone()));
@@ -788,6 +788,55 @@ mod tests {
 
     fn titles(events: &[CalendarEvent]) -> Vec<&str> {
         events.iter().map(|e| e.title.as_str()).collect()
+    }
+
+    #[test]
+    fn applescript_attendee_filter_keeps_invited_meetings_and_video_calls() {
+        // The wire format emitted by both AppleScript calendar queries.
+        // In-person invitations have attendees but no recognized meeting URL.
+        let output = concat!(
+            "Planning\x1F2026-10-02 10:00\x1F5\x1F Alice \x1E Bob \x1FConference Room B\n",
+            "Call\x1F2026-10-02 11:00\x1F65\x1F\x1Fhttps://zoom.us/j/1\n",
+            "Focus time\x1F2026-10-02 12:00\x1F125\x1F\x1FDesk\n",
+        );
+        let events = parse_applescript_output(output);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].attendees, vec!["Alice", "Bob"]);
+        assert_eq!(events[0].url, None);
+        assert!(events[1].attendees.is_empty());
+        assert_eq!(events[1].url.as_deref(), Some("https://zoom.us/j/1"));
+        let config = CalendarConfig {
+            require_attendees_or_url: true,
+            ..CalendarConfig::default()
+        };
+        assert_eq!(
+            titles(&filter_events(events, &config)),
+            vec!["Planning", "Call"]
+        );
+    }
+
+    #[test]
+    fn applescript_empty_attendees_and_non_meeting_url_do_not_count_as_invitation() {
+        let output = "Personal block\x1F2026-10-02 10:00\x1F5\x1F \x1E \x1Fhttps://example.com\n";
+        let events = parse_applescript_output(output);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].attendees.is_empty());
+        assert_eq!(events[0].url, None);
+        let config = CalendarConfig {
+            require_attendees_or_url: true,
+            ..CalendarConfig::default()
+        };
+        assert!(filter_events(events, &config).is_empty());
+    }
+
+    #[test]
+    fn older_calendar_config_keeps_ignore_filters_disabled() {
+        let config: CalendarConfig =
+            toml::from_str("enabled = true\nuse_event_title_for_meeting_title = true\n").unwrap();
+        assert!(config.enabled);
+        assert!(config.use_event_title_for_meeting_title);
+        assert!(config.ignore_title_contains.is_empty());
+        assert!(!config.require_attendees_or_url);
     }
 
     #[test]

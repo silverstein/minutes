@@ -515,6 +515,21 @@ For real desktop validation of the Windows and Linux collectors, use
 |---|---|---|
 | `enabled` | `true` | Read upcoming meetings from the system calendar |
 | `use_event_title_for_meeting_title` | `false` | When a recording overlaps a scheduled calendar event, use that event's title as the meeting title instead of the AI-generated one (skips the LLM title refine for that meeting) |
+| `ignore_title_contains` | `[]` | Exclude events whose titles contain any listed substring, ignoring case. Empty strings are ignored. |
+| `require_attendees_or_url` | `false` | Exclude events that have neither attendees nor a recognized meeting URL. Invited in-person meetings still qualify. |
+
+For example, skip focus blocks and personal reminders:
+
+```toml
+[calendar]
+ignore_title_contains = ["focus time", "lunch"]
+require_attendees_or_url = true
+```
+
+Both filters are opt-in. They apply to upcoming meeting reminders and calendar
+matching for recordings. Title exclusions take precedence even when an event
+has attendees or a meeting URL. Recognized URLs include Zoom, Google Meet,
+Teams and Webex; an arbitrary website link does not count as a meeting URL.
 
 ### `output_dir` — top-level
 

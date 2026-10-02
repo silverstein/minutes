@@ -100,6 +100,35 @@ pub struct CalendarEvent {
     pub url: Option<String>,
 }
 
+/// Apply the `[calendar]` ignore filters to a list of events.
+pub fn filter_events(
+    events: Vec<CalendarEvent>,
+    config: &crate::config::CalendarConfig,
+) -> Vec<CalendarEvent> {
+    let ignored: Vec<String> = config
+        .ignore_title_contains
+        .iter()
+        .filter(|pattern| !pattern.is_empty())
+        .map(|pattern| pattern.to_lowercase())
+        .collect();
+    events
+        .into_iter()
+        .filter(|event| {
+            let title = event.title.to_lowercase();
+            if ignored.iter().any(|pattern| title.contains(pattern)) {
+                return false;
+            }
+            !config.require_attendees_or_url || !event.attendees.is_empty() || event.url.is_some()
+        })
+        .collect()
+}
+
+/// Filter with the user's on-disk `[calendar]` settings.
+#[cfg(target_os = "macos")]
+fn apply_configured_filters(events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
+    filter_events(events, &crate::config::Config::load().calendar)
+}
+
 /// Extract a meeting URL (Zoom, Google Meet, Teams, Webex) from text.
 /// Searches for common video conferencing URL patterns and returns the first match.
 pub fn extract_meeting_url(text: &str) -> Option<String> {
@@ -298,10 +327,10 @@ pub fn upcoming_events(lookahead_minutes: u32) -> Vec<CalendarEvent> {
             // (empty means no events, not a failure). Don't fall through
             // to AppleScript, which would double the timeout if Calendar
             // is hung since both paths talk to the same backend.
-            return events;
+            return apply_configured_filters(events);
         }
         // AppleScript fallback: only reached when EventKit helper is missing
-        query_via_applescript(lookahead_minutes)
+        apply_configured_filters(query_via_applescript(lookahead_minutes))
     }
 }
 
@@ -327,10 +356,10 @@ pub fn events_overlapping(at: DateTime<Local>) -> Vec<CalendarEvent> {
         }
 
         if let Some(events) = query_overlap_via_eventkit(Some(at.timestamp())) {
-            return events;
+            return apply_configured_filters(events);
         }
 
-        query_events_with_attendees_at(at)
+        apply_configured_filters(query_events_with_attendees_at(at))
     }
 }
 
@@ -347,10 +376,10 @@ pub fn events_overlapping_now() -> Vec<CalendarEvent> {
         // Try EventKit helper first (sub-second, no CalDAV round-trips).
         // Pass lookahead=120, lookback=120 for a 4-hour window centered on now.
         if let Some(events) = query_overlap_via_eventkit(None) {
-            return events;
+            return apply_configured_filters(events);
         }
         // AppleScript fallback: only reached when EventKit helper is missing
-        query_events_with_attendees()
+        apply_configured_filters(query_events_with_attendees())
     }
 }
 
@@ -745,6 +774,85 @@ return output"#,
 
 #[cfg(test)]
 mod tests {
+    use crate::config::CalendarConfig;
+
+    fn event(title: &str, attendees: &[&str], url: Option<&str>) -> CalendarEvent {
+        CalendarEvent {
+            title: title.to_string(),
+            start: "2026-10-02 10:00".to_string(),
+            minutes_until: 5,
+            attendees: attendees.iter().map(|a| a.to_string()).collect(),
+            url: url.map(str::to_string),
+        }
+    }
+
+    fn titles(events: &[CalendarEvent]) -> Vec<&str> {
+        events.iter().map(|e| e.title.as_str()).collect()
+    }
+
+    #[test]
+    fn filter_is_noop_with_default_config() {
+        let events = vec![
+            event("Focus time", &[], None),
+            event("Standup", &["a"], None),
+        ];
+        let kept = filter_events(events, &CalendarConfig::default());
+        assert_eq!(titles(&kept), vec!["Focus time", "Standup"]);
+    }
+
+    #[test]
+    fn filter_drops_titles_containing_substring_case_insensitively() {
+        let config = CalendarConfig {
+            ignore_title_contains: vec!["focus".to_string(), "LUNCH".to_string()],
+            ..CalendarConfig::default()
+        };
+        let events = vec![
+            event("Deep FOCUS block", &["a"], None),
+            event("team lunch", &["a"], None),
+            event("Standup", &["a"], None),
+        ];
+        assert_eq!(titles(&filter_events(events, &config)), vec!["Standup"]);
+    }
+
+    #[test]
+    fn filter_ignores_empty_title_patterns() {
+        let config = CalendarConfig {
+            ignore_title_contains: vec![String::new()],
+            ..CalendarConfig::default()
+        };
+        let kept = filter_events(vec![event("Standup", &["a"], None)], &config);
+        assert_eq!(titles(&kept), vec!["Standup"]);
+    }
+
+    #[test]
+    fn filter_require_attendees_or_url_keeps_either() {
+        let config = CalendarConfig {
+            require_attendees_or_url: true,
+            ..CalendarConfig::default()
+        };
+        let events = vec![
+            event("Dentist", &[], None),
+            event("1:1", &["a@x.com"], None),
+            event("Call", &[], Some("https://zoom.us/j/1")),
+        ];
+        assert_eq!(titles(&filter_events(events, &config)), vec!["1:1", "Call"]);
+    }
+
+    #[test]
+    fn filter_applies_both_options_together() {
+        let config = CalendarConfig {
+            ignore_title_contains: vec!["optional".to_string()],
+            require_attendees_or_url: true,
+            ..CalendarConfig::default()
+        };
+        let events = vec![
+            event("Optional sync", &["a"], None),
+            event("Dentist", &[], None),
+            event("Planning", &["a"], None),
+        ];
+        assert_eq!(titles(&filter_events(events, &config)), vec!["Planning"]);
+    }
+
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;

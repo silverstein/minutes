@@ -832,6 +832,12 @@ pub struct CalendarConfig {
     /// event's title as the meeting title (overriding the AI-generated title).
     /// Opt-in; defaults to false to preserve existing behavior.
     pub use_event_title_for_meeting_title: bool,
+    /// Drop events whose title contains any of these substrings
+    /// (case-insensitive), e.g. "focus time" or "lunch". Empty by default.
+    pub ignore_title_contains: Vec<String>,
+    /// When true, drop events that have neither attendees nor a meeting URL,
+    /// such as personal blocks and reminders. Opt-in; defaults to false.
+    pub require_attendees_or_url: bool,
 }
 
 impl Default for CalendarConfig {
@@ -839,6 +845,8 @@ impl Default for CalendarConfig {
         Self {
             enabled: true,
             use_event_title_for_meeting_title: false,
+            ignore_title_contains: Vec::new(),
+            require_attendees_or_url: false,
         }
     }
 }

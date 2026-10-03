@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minutes — Remember when the decision changed</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#f6f4ef;color:#20322c;font:17px/1.6 system-ui,sans-serif}main{max-width:1000px;margin:0 auto;padding:44px 28px}nav{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #d4dad2;padding-bottom:20px}.wordmark{font-weight:750;font-size:25px;letter-spacing:-1px}.label{font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#54685c}h1{font-size:clamp(36px,5.5vw,62px);line-height:1.08;letter-spacing:-2px;max-width:780px;margin:46px 0 22px}h2{font-size:22px;line-height:1.3}.intro{max-width:730px;color:#506057}.question{font-size:24px;margin:32px 0 22px;font-weight:600}.answer{border:1px solid #b9cbbb;background:#fffefa;border-radius:16px;padding:28px}.answer h2{margin-top:10px}.answer p{margin:12px 0}.sources{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:24px 0}.source{padding:20px;background:#e9eee5;border-radius:12px}.source time{font-size:13px;font-weight:650;letter-spacing:.04em}.source h2{font-size:19px;margin:6px 0 12px}.source a{font-size:14px;color:#235a40;text-decoration-thickness:1px;text-underline-offset:4px}details{margin-top:16px}summary{cursor:pointer;font-size:14px;font-weight:650}blockquote{font-size:14px;border-left:2px solid #88a78e;padding-left:12px;margin:12px 0 0}.note{font-size:13px;color:#647167}footer{border-top:1px solid #d4dad2;padding-top:18px;margin-top:32px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}footer a{color:#235a40}code{font-size:12px;overflow-wrap:anywhere}@media(max-width:650px){main{padding:24px 18px}.sources{grid-template-columns:1fr}.answer{padding:20px}.label{font-size:10px}h1{margin-top:30px}.question{font-size:21px}}
+</style>
+<main>
+  <nav><span class="wordmark">minutes</span><span class="label">Public sample · local preview</span></nav>
+  <h1>Remember when<br>the decision changed.</h1>
+  <p class="intro">A useful answer needs the conversation that followed. Minutes gives your AI dated, sourced conversation memory from records you own.</p>
+  <p class="question">“What did we decide about monthly billing—and did that decision stick?”</p>
+  <section class="answer" aria-label="Illustrated sample answer">
+    <span class="label">Illustrated sample answer</span>
+    <h2>The monthly experiment was reversed.</h2>
+    <p>On <strong>February 28</strong>, the team approved monthly billing for the next three consultant signups, while annual stayed the enterprise default.</p>
+    <p>On <strong>March 25</strong>, the team explicitly reversed that decision and returned to annual-only. Four signups fell below the threshold of twelve, and churn looked worse.</p>
+    <p><strong>The February decision did not remain current.</strong> Both dated sources are below.</p>
+  </section>
+  <div class="sources">
+    <article class="source">
+      <time datetime="2026-02-28">FEBRUARY 28, 2026</time>
+      <h2>Monthly billing test</h2>
+      <a href="../../crates/mcp/fixtures/demo/2026-02-28-pricing-strategy.md">Open the original sample record ↗</a>
+      <details><summary>Read the decision</summary><blockquote>“Run it narrow. Next three consultant signups get monthly. Annual stays default for enterprise. Reassess Q2.”</blockquote><p class="note">2026-02-28-pricing-strategy.md</p></details>
+    </article>
+    <article class="source">
+      <time datetime="2026-03-25">MARCH 25, 2026</time>
+      <h2>Experiment reversed</h2>
+      <a href="../../crates/mcp/fixtures/demo/2026-03-25-pricing-reversal.md">Open the original sample record ↗</a>
+      <details><summary>Read the reversal</summary><blockquote>“To be clear: we are reversing the 2026-02-28 decision. Going annual-only, effective immediately.”</blockquote><p class="note">2026-03-25-pricing-reversal.md</p></details>
+    </article>
+  </div>
+  <p class="note">Prepared illustration using synthetic meetings bundled with Minutes. This page does not make an AI request. The local OpenAI plugin and ChatGPT-plan connection are qualification prototypes; this is not a public directory listing or a live model receipt.</p>
+  <footer><span>Free. Open source. Your records.</span><a href="https://github.com/silverstein/minutes">Explore Minutes on GitHub ↗</a></footer>
+</main>
+</html>

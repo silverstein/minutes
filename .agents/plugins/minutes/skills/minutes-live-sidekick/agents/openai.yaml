@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Live Sidekick"
+  short_description: "Use the current terminal agent as a safe live meeting strategist."
+  default_prompt: "Stay with me in this terminal during the meeting, prioritize my messages, and give me grounded live assistance."

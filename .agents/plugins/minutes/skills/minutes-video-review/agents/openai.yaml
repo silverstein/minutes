@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Video Review"
+  short_description: "Review a demo, walkthrough, or bug video into a durable brief."
+  default_prompt: "Use Minutes Video Review to analyze this recorded video and return a transcript plus actionable brief."

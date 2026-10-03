@@ -182,7 +182,7 @@ jobs:
 
       - name: Clippy PocketStation capture (Windows and Linux)
         if: runner.os == 'Windows' || runner.os == 'Linux'
-        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
+        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture ${{ runner.os == 'Linux' && '--all-targets' || '' }} -- -D warnings
 
       - name: Build core with parakeet (cross-platform)
         # Guards against Linux-parakeet breakage that today only surfaces
@@ -340,8 +340,8 @@ jobs:
       - name: Clippy (macOS only — full workspace)
         if: runner.os == 'macOS'
         run: |
-          cargo clippy --all --no-default-features -- -D warnings
-          cargo clippy -p minutes-core --no-default-features --features parakeet -- -D warnings
+          cargo clippy --all --no-default-features --all-targets -- -D warnings
+          cargo clippy -p minutes-core --no-default-features --features parakeet --all-targets -- -D warnings
 
       - name: Format check (macOS only)
         if: runner.os == 'macOS'

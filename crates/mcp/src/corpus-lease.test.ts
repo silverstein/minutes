@@ -171,7 +171,7 @@ describe("stable corpus lease", () => {
     });
   });
 
-  it("derives the production deadline from the complete read envelope", () => {
+  it("derives the standard deadline from the byte read envelope", () => {
     const envelope = authorizationWorkEnvelopeForTest();
     const physicalBytes =
       envelope.maxCorpusBytes *
@@ -205,6 +205,75 @@ describe("stable corpus lease", () => {
         MINUTES_CORPUS_AUTH_TIMEOUT_MS: "120000",
       })
     ).toBe(60_000);
+  });
+
+  it("supports bounded production storage profiles without test markers", () => {
+    const slow = { MINUTES_CORPUS_STORAGE_PROFILE: "slow" };
+    expect(resolveAuthorizationTimeoutMsForTest(undefined, slow)).toBe(240_000);
+    expect(resolveAuthorizationTimeoutMsForTest(Number.MAX_SAFE_INTEGER, slow)).toBe(240_000);
+    expect(resolveAuthorizationTimeoutMsForTest(5_000, slow)).toBe(5_000);
+    expect(resolveAuthorizationTimeoutMsForTest(undefined, {
+      MINUTES_CORPUS_STORAGE_PROFILE: "standard",
+    })).toBe(60_000);
+    expect(resolveAuthorizationTimeoutMsForTest(undefined, {
+      ...slow,
+      MINUTES_CORPUS_AUTH_TIMEOUT_MS: "999999",
+    })).toBe(240_000);
+    expect(resolveAuthorizationTimeoutMsForTest(undefined, {
+      ...slow,
+      NODE_ENV: "test",
+      MINUTES_TEST_HARNESS: "1",
+      MINUTES_CORPUS_AUTH_TIMEOUT_MS: "999999",
+    })).toBe(120_000);
+  });
+
+  it.each(["", "SLOW", "unlimited", "240000", "slow\n"])(
+    "rejects invalid storage profile %j without falling back",
+    (profile) => {
+      expect(() => resolveAuthorizationTimeoutMsForTest(undefined, {
+        MINUTES_CORPUS_STORAGE_PROFILE: profile,
+      })).toThrow("invalid meeting corpus storage profile");
+    }
+  );
+
+  it("keeps resource admission and operation cancellation in the production slow profile", async () => {
+    const keys = ["MINUTES_CORPUS_STORAGE_PROFILE", "NODE_ENV", "MINUTES_TEST_HARNESS", "MINUTES_CORPUS_AUTH_TIMEOUT_MS"];
+    const saved = keys.map((key) => [key, process.env[key]] as const);
+    try {
+      for (const key of keys) delete process.env[key];
+      process.env.MINUTES_CORPUS_STORAGE_PROFILE = "slow";
+      await withCorpus(async (root) => {
+        writeFileSync(join(root, "one.md"), "one");
+        writeFileSync(join(root, "two.md"), "two");
+        let operationRan = false;
+        await expect(withStableCorpusLease(root, () => {
+          operationRan = true;
+        }, { budgets: { maxFileCount: 1 } })).rejects.toThrow("authorization failed");
+        expect(operationRan).toBe(false);
+
+        let forceDeadline!: () => void;
+        const deadline = new Promise<void>((resolve) => { forceDeadline = resolve; });
+        let aborted = false;
+        await expect(withStableCorpusLease(root, (_snapshot, _attempt, signal) => {
+          operationRan = true;
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              aborted = true;
+              reject(signal.reason);
+            }, { once: true });
+            forceDeadline();
+          });
+        }, { operationDeadlineForTest: deadline })).rejects.toThrow("authorization failed");
+        expect(operationRan).toBe(true);
+        expect(aborted).toBe(true);
+        await expect(withStableCorpusLease(root, () => "recovered")).resolves.toBe("recovered");
+      });
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("applies and clamps the explicitly gated test-harness authorization override", () => {

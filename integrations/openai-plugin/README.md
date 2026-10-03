@@ -4,7 +4,7 @@ This local plugin packages all 25 canonical Minutes skills and connects the
 existing 34-tool Minutes MCP server. It includes recording, live transcripts,
 copilot, dictation, conversation search, meeting preparation, notes, summaries,
 commitments, and follow-up. The generated package is at
-`.agents/plugins/minutes`; its version is 0.2.0 and its MCP runtime is pinned to
+`.agents/plugins/minutes`; its version is 0.2.2 and its MCP runtime is pinned to
 `minutes-mcp@0.27.1`.
 
 ChatGPT Work on desktop can load a local marketplace and run a stdio MCP server.
@@ -43,6 +43,19 @@ or grant OS permissions. Runtime auto-setup is disabled. Keep the installation
 directory: its absolute paths are used by the plugin. Failed installations are
 preserved for inspection.
 
+The portable source package contains `plugin.json` and `mcp.json`. ChatGPT
+26.928.31416 with bundled Codex 0.159.2 displays its skills but ignores the
+portable MCP component. For desktop installation, the installer selects the
+generated `.codex-plugin/plugin.json` compatibility entrypoint and preserves
+the portable manifest as `portable-plugin.json` outside the installed plugin
+root. Both layouts use the same MCP file. The source package remains portable.
+
+An upgrade replaces only the registration of a previous private Minutes
+installation created by this installer under the same parent. It retains the
+old directory and restores its registration if the new registration fails.
+An unrelated or linked marketplace is preserved and the installer stops with
+an explanation. Other marketplaces and active sessions are preserved.
+
 Restart ChatGPT desktop after installation. In its plugin directory, select the
 Minutes marketplace and install or enable Minutes if the app prompts for it.
 Start with: **“Check the Minutes connection and status.”** Confirm the result
@@ -68,6 +81,20 @@ packaged skill.
 
 ## Qualification
 
+First check discovery through the actual desktop runtime:
+
+```bash
+node integrations/openai-plugin/qualify-host.mjs --codex /absolute/path/to/codex
+```
+
+On macOS, use ChatGPT's bundled executable when qualifying ChatGPT itself:
+`/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`.
+This check requires exactly one `minutes@minutes` server with all 34 canonical
+tools. It makes no model calls and invokes no meeting or capture tools. A
+direct MCP handshake can pass while the desktop runtime ignores the server;
+this check catches that failure. In-app execution still needs a separate
+ChatGPT conversation test after the plugin has reloaded.
+
 ```bash
 cd integrations/openai-plugin
 npm ci --ignore-scripts
@@ -86,6 +113,9 @@ replace the host's existing Minutes profile.
 The [October 1 qualification record](full-plugin-qualification-2026-10-01.json)
 distinguishes compiler parity, sample retrieval, Silverbook installation and
 live MCP status from the pending ChatGPT UI and hardware tests. The
+[October 3 discovery record](desktop-discovery-qualification-2026-10-03.json)
+records the failed in-app test, isolated manifest comparison, repair and
+successful desktop runtime discovery. The
 [September 30 record](qualification.md) covers the earlier five-skill prototype
 and the separate ChatGPT-plan sign-in/sample-inference experiment.
 

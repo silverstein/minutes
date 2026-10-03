@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "qualify": "node qualify-mcp.mjs"
+    "qualify": "node qualify-mcp.mjs",
+    "qualify:host": "node qualify-host.mjs",
+    "test": "node --test installation-owner.test.mjs"
   },
   "engines": {
     "node": ">=22"

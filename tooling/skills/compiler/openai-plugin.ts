@@ -7,18 +7,29 @@ import { resolveSkillAssetSourcePath } from "./validate.js";
 
 export const OPENAI_PLUGIN_ROOT = ".agents/plugins/minutes";
 export const OPENAI_MCP_VERSION = "0.27.1";
+export const OPENAI_PLUGIN_VERSION = "0.2.2";
 
 export async function renderOpenAIPlugin(rootDir: string, skills: CanonicalSkillSource[]): Promise<Map<string, string>> {
   const artifacts = new Map<string, string>();
   const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
-  artifacts.set(`${OPENAI_PLUGIN_ROOT}/plugin.json`, json({
-    $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-    name: "minutes", version: "0.2.0",
+  const identity = {
+    name: "minutes", version: OPENAI_PLUGIN_VERSION,
     description: "Record conversations, search your local Minutes library, prepare meetings, and follow up. Includes the full Minutes skill set and MCP tools; local capabilities require the Minutes engine and OS permissions.",
     author: { name: "Mat Silverstein", url: "https://github.com/silverstein" },
     homepage: "https://useminutes.app", repository: "https://github.com/silverstein/minutes", license: "MIT",
     keywords: ["meetings", "conversation-memory", "local-first", "minutes"],
-    extensions: { "com.openai": { interface: { displayName: "Minutes", shortDescription: "Recording, conversation search, meeting prep, and follow-up with local Minutes." } } },
+  };
+  const presentation = { displayName: "Minutes", shortDescription: "Recording, conversation search, meeting prep, and follow-up with local Minutes." };
+  artifacts.set(`${OPENAI_PLUGIN_ROOT}/plugin.json`, json({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+    ...identity,
+    extensions: { "com.openai": { interface: presentation } },
+  }));
+  // The local installer selects this compatibility entrypoint for desktop
+  // builds that display portable skills but ignore portable MCP components.
+  // Both layouts reference the file rewritten to absolute runtime paths.
+  artifacts.set(`${OPENAI_PLUGIN_ROOT}/.codex-plugin/plugin.json`, json({
+    ...identity, skills: "./skills/", mcpServers: "./mcp.json", interface: presentation,
   }));
   artifacts.set(`${OPENAI_PLUGIN_ROOT}/mcp.json`, json({
     $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",

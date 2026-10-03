@@ -34,3 +34,6 @@ jobs:
       - name: Check generated plugin and existing skill surfaces
         working-directory: tooling/skills
         run: npm ci --ignore-scripts && npm run ci
+      - name: Check local plugin installation ownership
+        working-directory: integrations/openai-plugin
+        run: npm test

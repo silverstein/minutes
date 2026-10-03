@@ -43,6 +43,22 @@ test("local marketplace stays contained and pins the published MCP package", asy
   assert.ok(runtime?.includes("export"));
 });
 
+test("desktop compatibility entrypoint declares the installed MCP file", async () => {
+  const artifacts = await renderOpenAIPlugin(root, await discoverCanonicalSkills(root));
+  const portable = JSON.parse(artifacts.get(`${OPENAI_PLUGIN_ROOT}/plugin.json`)!);
+  const compatibility = JSON.parse(artifacts.get(`${OPENAI_PLUGIN_ROOT}/.codex-plugin/plugin.json`)!);
+  assert.equal(compatibility.name, portable.name);
+  assert.equal(compatibility.version, portable.version);
+  assert.equal(compatibility.skills, "./skills/");
+  // The desktop runtime must load the very file rewritten by install-local,
+  // rather than an unpatched duplicate that would launch npx through GUI PATH.
+  assert.equal(compatibility.mcpServers, "./mcp.json");
+  const referenced = path.posix.join(OPENAI_PLUGIN_ROOT, compatibility.mcpServers);
+  const mcp = JSON.parse(artifacts.get(referenced)!);
+  assert.deepEqual(Object.keys(mcp.mcpServers), ["minutes"]);
+  assert.equal(mcp.mcpServers.minutes.type, "stdio");
+});
+
 test("retired or stray plugin skills cannot survive the ownership check", async t => {
   const repo = await mkdtemp(path.join(tmpdir(), "minutes-plugin-ownership-"));
   t.after(() => rm(repo, { recursive: true, force: true }));

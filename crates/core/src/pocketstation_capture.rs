@@ -367,6 +367,7 @@ impl CallAudioChunkWriter {
                 timestamp: Instant::now(),
                 index,
                 source: SourceRole::Call,
+                lineage: None,
             };
             match sink.try_send(chunk) {
                 Ok(()) => {}

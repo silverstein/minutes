@@ -1,0 +1,79 @@
+/* Dictation extends Minutes' paper/ink system. Rows, not nested cards. */
+.dictation-page { --dictation-muted: var(--text-secondary); padding: 8px 0 4px; }
+.dictation-page h2 { font: 400 26px/1.2 'Instrument Serif', serif; margin: 0 0 8px; }
+.dictation-page h3 { font: 600 14px/1.4 'Geist', sans-serif; margin: 0 0 8px; }
+.dictation-page p { margin: 0; line-height: 1.6; }
+.dictation-intro { color: var(--text-secondary); max-width: 65ch; font-size: 13px; }
+.dictation-nav { display: flex; gap: 4px; margin: 20px 0 0; border-bottom: 1px solid var(--border-mid); overflow-x: auto; }
+.dictation-nav button { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-secondary); padding: 10px 12px; font: 500 12px 'Geist', sans-serif; white-space: nowrap; cursor: pointer; }
+.dictation-nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--text); }
+.dictation-nav button:hover { color: var(--text); background: var(--bg-hover); }
+.dictation-page :focus-visible { outline: 2px solid var(--focus-ring, var(--capture)); outline-offset: 3px; }
+.dictation-page input, .dictation-page textarea { caret-color: var(--text); }
+.dictation-page ::selection { background: var(--bg-hover); color: var(--text); }
+.dictation-pane { padding-top: 20px; }
+.dictation-pane[hidden], .dictation-page [hidden] { display: none !important; }
+.dictation-block { padding: 0 0 20px; margin: 0 0 20px; border-bottom: 1px solid var(--border-mid); }
+.dictation-block:last-child { margin-bottom: 0; border-bottom: 0; }
+.dictation-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 12px 0; }
+.dictation-line .settings-field { width: auto; max-width: 55%; margin: 0; }
+.dictation-note { font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin-top: 6px !important; }
+.dictation-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; margin-top: 12px; }
+.dictation-form label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text); min-width: 0; }
+.dictation-form .settings-field { margin: 0; width: 100%; min-width: 0; }
+.dictation-form.snippet-form { grid-template-columns: 1fr auto; }
+.dictation-form.snippet-form label:nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+.dictation-form textarea { resize: vertical; min-height: 88px; font: 13px/1.5 'Geist', sans-serif; }
+.dictation-list { margin-top: 12px; }
+.dictation-list-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 12px 0; border-top: 1px solid var(--border-mid); }
+.dictation-list-row:first-child { border-top: 0; }
+.dictation-list-copy { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.dictation-list-copy strong { font-weight: 500; font-size: 13px; }
+.dictation-list-copy small { display: block; font-size: 12px; color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; }
+.dictation-actions { display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+.dictation-save-status { min-height: 20px; padding-top: 8px; font-size: 12px; color: var(--text-secondary); }
+.dictation-save-status[data-error="true"] { color: var(--red); }
+.dictation-mic-meter { display: block; width: 100%; height: 8px; accent-color: var(--capture); margin: 12px 0; }
+.dictation-key { font: 12px 'Geist Mono', monospace; }
+.dictation-page details > summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); padding: 8px 0; }
+.dictation-page .dictation-recents { gap: 0; }
+.dictation-page .dictation-recent-item { border: 0; border-bottom: 1px solid var(--border-mid); background: transparent; border-radius: 0; padding: 16px 0; }
+.dictation-page .dictation-recent-text { -webkit-line-clamp: 4; font-size: 13px; line-height: 1.6; }
+.dictation-page .dictation-recent-meta { margin-top: 6px; font-size: 11px; }
+.dictation-page .dictation-recent-actions { margin-top: 10px; }
+.dictation-editor { width: 100%; min-height: 100px; resize: vertical; font: 13px/1.6 'Geist', sans-serif; }
+.dictation-preview { white-space: pre-wrap; font: 13px/1.6 'Geist', sans-serif; padding: 12px 0; overflow-wrap: anywhere; }
+.dictation-page .about-controls { border: 0; padding: 8px 0; }
+.dictation-page .about-item-title { display: none; }
+.settings-tabs { overflow-x: auto; scrollbar-width: thin; }
+@media (max-width: 620px) {
+ .dictation-form { grid-template-columns: 1fr; }
+ .dictation-form.snippet-form { grid-template-columns: 1fr; }
+ .dictation-form.snippet-form label:nth-child(2) { grid-column: auto; grid-row: auto; }
+ .dictation-line { align-items: flex-start; flex-direction: column; gap: 8px; }
+ .dictation-line .settings-field { max-width: 100%; width: 100%; }
+ .dictation-list-row { align-items: flex-start; }
+ .dictation-actions { justify-content: flex-end; }
+}
+@media (prefers-reduced-motion: no-preference) {
+ .dictation-nav button { transition: background-color 120ms ease, color 120ms ease; }
+}
+
+.dictation-page { --text-secondary: #625d55; }
+.dictation-page .btn { font: 500 12px 'Geist', sans-serif; text-transform: none; letter-spacing: 0; min-height: 30px; border-radius: 6px; }
+.dictation-page .settings-field { color: var(--text); }
+.dictation-page .settings-field::placeholder { color: var(--text-secondary); opacity: 1; }
+.dictation-page .dictation-line:has(#dictation-edit-instruction) .settings-field { flex: 1; width: 100%; max-width: none; }
+@media (prefers-color-scheme: dark) { .dictation-page { --text-secondary: #b5b0a6; } }
+
+.dictation-history-more { font-size: 12px; color: var(--text-secondary); }
+.dictation-history-more summary { cursor: pointer; padding: 7px 4px; }
+.dictation-history-more[open] { flex-basis: 100%; }
+.dictation-history-more .dictation-actions { margin-top: 6px; }
+.dictation-page details summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.dictation-page .about-controls-meta, .dictation-page .dictation-recent-meta { color: var(--text-secondary); }
+.dictation-page .dictation-line > label { flex-shrink: 0; font-size: 13px; }
+.settings-tabs .settings-tab:not(.is-active) { color: var(--text-secondary); }
+
+.dictation-save-status { position: sticky; top: 0; z-index: 2; background: var(--bg-elevated); padding: 8px 0; }

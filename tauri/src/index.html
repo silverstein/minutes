@@ -15,6 +15,7 @@
   <script src="locales/pt-BR.js"></script>
   <script src="scripts/i18n.js"></script>
   <link rel="stylesheet" href="styles/ui-zoom-tokens.css">
+  <link rel="stylesheet" href="styles/dictation-experience.css">
   <style>
     @font-face {
       font-family: 'Instrument Serif';
@@ -6407,6 +6408,7 @@
       <nav class="settings-tabs" role="tablist" aria-label="Settings sections">
         <button class="settings-tab is-active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" tabindex="0" data-tab="general">General</button>
         <button class="settings-tab" role="tab" id="tab-capture" aria-selected="false" aria-controls="panel-capture" tabindex="-1" data-tab="capture">Capture</button>
+        <button class="settings-tab" role="tab" id="tab-dictation" aria-selected="false" aria-controls="panel-dictation" tabindex="-1" data-tab="dictation">Dictation</button>
         <button class="settings-tab" role="tab" id="tab-transcription" aria-selected="false" aria-controls="panel-transcription" tabindex="-1" data-tab="transcription">Transcription</button>
         <button class="settings-tab" role="tab" id="tab-ai" aria-selected="false" aria-controls="panel-ai" tabindex="-1" data-tab="ai">AI &amp; Privacy</button>
         <button class="settings-tab" role="tab" id="tab-advanced" aria-selected="false" aria-controls="panel-advanced" tabindex="-1" data-tab="advanced">Advanced</button>
@@ -6491,109 +6493,6 @@
       </div><!-- /panel-general -->
 
       <div class="settings-tab-panel" role="tabpanel" id="panel-capture" data-panel="capture" aria-labelledby="tab-capture">
-      <!-- Dictation -->
-      <div class="settings-section">
-        <div class="about-item-title">DICTATION</div>
-        <!-- Dictation shortcut (unified recorder) -->
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Dictation shortcut</div>
-            <div class="settings-section-inline">
-              <button id="shortcut-recorder-dictation"
-                class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key"
-                data-slot="dictation">&#8984; Shift Space</button>
-              <span class="special-key-link settings-hint-link" data-slot="dictation">or <u>Caps Lock</u> /
-                <u>fn</u></span>
-            </div>
-            <div class="about-controls-meta" id="shortcut-status-dictation">Hold to dictate, or tap to lock and tap
-              again to stop.</div>
-          </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Where dictated text goes</div>
-            <select id="settings-dictation-destination" class="settings-field">
-              <option id="settings-dictation-destination-insert" value="insert">Type at cursor — inserts into the app you're in</option>
-              <option value="clipboard">Copy to clipboard — paste it yourself</option>
-            </select>
-            <div class="about-controls-meta" id="settings-dictation-destination-detail">Minutes verifies the target before inserting. If typing is unavailable or the app changes, your transcript stays on the clipboard.</div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Writing style</div>
-            <select id="settings-dictation-writing-style" class="settings-field">
-              <option value="natural">Natural — light formatting and filler cleanup</option>
-              <option value="literal">Literal — keep the transcript as spoken</option>
-            </select>
-            <div class="about-controls-meta">Natural formatting is deterministic and stays on this device. It does not rewrite meaning.</div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Microphone</div>
-            <select id="settings-dictation-microphone" class="settings-field" title="Select dictation microphone">
-              <option value="">System Default</option>
-            </select>
-            <div class="about-controls-meta">Uses the same microphone as recordings. The list refreshes when opened.</div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">History</div>
-            <select id="settings-dictation-history-policy" class="settings-field">
-              <option value="recent">Keep recent transcripts</option>
-              <option value="off">Off — keep only recoverable failures</option>
-            </select>
-            <div class="about-controls-meta">Turning history off never discards audio from a failed or interrupted capture.</div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Recent dictations</div>
-            <div class="dictation-recents" id="settings-dictation-recents">
-              <div class="about-controls-meta">Loading...</div>
-            </div>
-            <div class="about-controls-meta" id="settings-dictation-recents-status"></div>
-          </div>
-        </div>
-        <details class="settings-advanced">
-          <summary>Advanced</summary>
-          <div class="about-controls">
-            <div class="about-controls-group">
-              <div class="about-controls-copy">Dictation whisper model</div>
-              <select id="settings-dictation-model" class="settings-field">
-                <option value="tiny">tiny — fastest, lower quality</option>
-                <option value="base">base — fast, decent quality (default)</option>
-                <option value="small">small — good quality, slower</option>
-              </select>
-              <div class="about-controls-meta">Smaller models are faster. Base is recommended.</div>
-            </div>
-          </div>
-          <div class="about-controls">
-            <div class="about-controls-copy">Exact voice-edit commands</div>
-            <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-voice-commands">On</button>
-          </div>
-          <div class="about-controls">
-            <div class="about-controls-copy">Log dictations to daily note</div>
-            <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-daily-note">On</button>
-          </div>
-          <div class="about-controls">
-            <div class="about-controls-group">
-              <div class="about-controls-copy">Silence timeout</div>
-              <div class="about-controls-meta">Used only for dictation started inside Minutes. Shortcut gestures finish shortcut dictation.</div>
-              <select id="settings-dictation-silence" class="settings-field">
-                <option value="1000">1 second</option>
-                <option value="2000">2 seconds (default)</option>
-                <option value="3000">3 seconds</option>
-                <option value="5000">5 seconds</option>
-              </select>
-            </div>
-          </div>
-        </details>
-      </div>
-
       <!-- Live Transcript -->
       <div class="settings-section">
         <div class="about-item-title">LIVE TRANSCRIPT</div>
@@ -6806,6 +6705,145 @@
 
       </div><!-- /panel-transcription -->
 
+<div class="settings-tab-panel" role="tabpanel" id="panel-dictation" data-panel="dictation" aria-labelledby="tab-dictation"><div class="dictation-page"><h2>Dictation</h2><p class="dictation-intro">Your words, in the app you’re using. Hold to speak, or tap to keep listening.</p><nav class="dictation-nav" role="tablist" aria-label="Dictation preferences"><button role="tab" id="dictation-nav-writing" aria-controls="dictation-pane-writing" aria-selected="true" data-dictation-pane="writing">Writing</button><button role="tab" id="dictation-nav-words" aria-controls="dictation-pane-words" aria-selected="false" tabindex="-1" data-dictation-pane="words">Words &amp; snippets</button><button role="tab" id="dictation-nav-mic" aria-controls="dictation-pane-mic" aria-selected="false" tabindex="-1" data-dictation-pane="mic">Microphone</button><button role="tab" id="dictation-nav-recent" aria-controls="dictation-pane-recent" aria-selected="false" tabindex="-1" data-dictation-pane="recent">Recent text</button></nav><div id="dictation-save-status" class="dictation-save-status" role="status" aria-live="polite"></div><div id="dictation-pane-writing" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-writing">      <!-- Dictation -->
+      <div class="settings-section">
+        <h3>Capture and writing</h3>
+        <!-- Dictation shortcut (unified recorder) -->
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Dictation shortcut</div>
+            <div class="settings-section-inline">
+              <button id="shortcut-recorder-dictation"
+                class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key"
+                data-slot="dictation">&#8984; Shift Space</button>
+              <span class="special-key-link settings-hint-link" data-slot="dictation">or <u>Caps Lock</u> /
+                <u>fn</u></span>
+            </div>
+            <div class="about-controls-meta" id="shortcut-status-dictation">Hold to dictate, or tap to lock and tap
+              again to stop.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Where dictated text goes</div>
+            <select id="settings-dictation-destination" class="settings-field">
+              <option id="settings-dictation-destination-insert" value="insert">Type at cursor — inserts into the app you're in</option>
+              <option value="clipboard">Copy to clipboard — paste it yourself</option>
+            </select>
+            <div class="about-controls-meta" id="settings-dictation-destination-detail">Minutes verifies the target before inserting. If typing is unavailable or the app changes, your transcript stays on the clipboard.</div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Writing style</div>
+            <select id="settings-dictation-writing-style" class="settings-field">
+              <option value="natural">Natural — light formatting and filler cleanup</option>
+              <option value="casual">Casual — natural text without a final period</option>
+              <option value="literal">Literal — keep the transcript as spoken</option>
+            </select>
+            <div class="about-controls-meta">Natural formatting is deterministic and stays on this device. It does not rewrite meaning.</div>
+          </div>
+        </div>
+        <details class="settings-advanced">
+          <summary>Advanced</summary>
+          <div class="about-controls">
+            <div class="about-controls-group">
+              <div class="about-controls-copy">Dictation whisper model</div>
+              <select id="settings-dictation-model" class="settings-field">
+                <option value="tiny">tiny — fastest, lower quality</option>
+                <option value="base">base — fast, decent quality (default)</option>
+                <option value="small">small — good quality, slower</option>
+              </select>
+              <div class="about-controls-meta">Smaller models are faster. Base is recommended.</div>
+            </div>
+          </div>
+          <div class="about-controls">
+            <div class="about-controls-copy">Exact voice-edit commands</div>
+            <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-voice-commands">On</button>
+          </div>
+          <div class="about-controls">
+            <div class="about-controls-copy">Log dictations to daily note</div>
+            <button class="btn btn-secondary btn-sm toggle-btn" id="settings-dictation-daily-note">On</button>
+          </div>
+          <div class="about-controls">
+            <div class="about-controls-group">
+              <div class="about-controls-copy">Silence timeout</div>
+              <div class="about-controls-meta">Used only for dictation started inside Minutes. Shortcut gestures finish shortcut dictation.</div>
+              <select id="settings-dictation-silence" class="settings-field">
+                <option value="1000">1 second</option>
+                <option value="2000">2 seconds (default)</option>
+                <option value="3000">3 seconds</option>
+                <option value="5000">5 seconds</option>
+              </select>
+            </div>
+          </div>
+        </details>
+      </div>
+
+
+        <section class="dictation-block">
+          <div class="dictation-line"><div><h3>Fit the cursor</h3><p class="dictation-note">Match spaces and capitalization to nearby text. Optional, on this Mac only.</p></div><label><input id="dictation-context-enabled" type="checkbox"> Enable cursor context</label></div>
+          <p class="dictation-note">Uses up to 256 characters on each side and a short selection in supported fields. It stays in memory and is never sent to a model. Secure fields, terminal buffers, and recognized financial sites are excluded. Browser context is limited to multiline fields; unsupported fields keep ordinary formatting.</p>
+        </section>
+        <section class="dictation-block"><h3>App and website preferences</h3><p class="dictation-note">Choose agent prose for Claude or Codex in Ghostty; keep literal writing for shell commands. Website preferences require cursor context.</p>
+          <form id="dictation-rule-form" class="dictation-form">
+            <label>App or website<input id="dictation-rule-target" class="settings-field" placeholder="app:Ghostty or site:mail.google.com" required maxlength="164"></label>
+            <label>Writing mode<select id="dictation-rule-mode" class="settings-field"><option value="agent_prompt">Agent prompt</option><option value="terminal_code">Literal terminal / code</option><option value="chat">Message</option><option value="email_document">Email / document</option></select></label>
+            <button type="submit" class="btn btn-secondary btn-sm">Add preference</button>
+            <label>Style<select id="dictation-rule-style" class="settings-field"><option value="natural">Natural</option><option value="casual">Casual</option><option value="literal">Literal</option></select></label>
+          </form><div id="dictation-rules" class="dictation-list"></div>
+        </section>
+        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Clipboard contents up to 16 MB are preserved when all formats can be read; a newer copy always takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
+          <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><input id="dictation-paste-shortcut" class="settings-field dictation-key" aria-label="Paste Last shortcut" value="CmdOrCtrl+Alt+V"></div>
+          <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><input id="dictation-history-shortcut" class="settings-field dictation-key" aria-label="Recent Dictations shortcut" value="CmdOrCtrl+Alt+D"></div>
+        </section>
+</div><div id="dictation-pane-words" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-words" hidden>
+        <section class="dictation-block"><h3>Personal dictionary</h3><p class="dictation-note">Names and terms you use often. Each saved phrase is an explicit spelling rule; words are never learned silently.</p>
+          <form id="dictation-word-form" class="dictation-form"><label>Spoken phrase<input id="dictation-word-spoken" class="settings-field" placeholder="clean shot" required maxlength="80"></label><label>Write it as<input id="dictation-word-written" class="settings-field" placeholder="CleanShot" required maxlength="80"></label><button class="btn btn-secondary btn-sm" type="submit">Remember spelling</button></form><div id="dictation-dictionary" class="dictation-list"></div>
+        </section>
+        <section class="dictation-block"><h3>Snippets</h3><p class="dictation-note">Say “insert snippet” followed by its name as a separate utterance. Text stays literal, including line breaks.</p>
+          <form id="dictation-snippet-form" class="dictation-form snippet-form"><label>Name<input id="dictation-snippet-name" class="settings-field" placeholder="sign off" required maxlength="80"></label><label>Text<textarea id="dictation-snippet-text" class="settings-field" placeholder="Best,
+Mat" required maxlength="8192"></textarea></label><button class="btn btn-secondary btn-sm" type="submit">Save snippet</button></form><div id="dictation-snippets" class="dictation-list"></div>
+        </section>
+</div><div id="dictation-pane-mic" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-mic" hidden><section class="dictation-block"><h3>Microphone</h3><label for="dictation-mic-mode" class="dictation-note">Choose how dictation selects its input</label><select id="dictation-mic-mode" class="settings-field"><option value="shared">Use the recording microphone</option><option value="system">Follow the system default</option><option value="preferred">Use preferred microphones</option></select>        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Microphone</div>
+            <select id="settings-dictation-microphone" disabled class="settings-field" title="Select dictation microphone">
+              <option value="">System Default</option>
+            </select>
+            <div class="about-controls-meta">Preferred inputs apply only to dictation. Recording settings stay as they are.</div>
+          </div>
+        </div>
+
+          <div class="dictation-line"><button id="dictation-mic-add" class="btn btn-secondary btn-sm" type="button">Add to preferred inputs</button><label><input id="dictation-virtual-mics" type="checkbox"> Allow virtual inputs</label></div>
+          <div id="dictation-microphones" class="dictation-list"></div><p id="dictation-lid-warning" class="dictation-note" hidden>Your laptop lid is closed. Choose an external microphone.</p>
+          <div class="dictation-line"><button id="dictation-mic-test" class="btn btn-secondary btn-sm" type="button">Test microphone</button><span id="dictation-mic-status" class="dictation-note" role="status">A 15-second level check. Nothing is saved.</span></div><meter id="dictation-mic-level" class="dictation-mic-meter" min="0" max="100" value="0" aria-label="Microphone input level"></meter>
+        </section></div><div id="dictation-pane-recent" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-recent" hidden><p id="dictation-destination-status" class="dictation-note">Copy works anywhere. To paste, open Recent Dictations with its shortcut from your destination app.</p><div class="dictation-line"><h3>Recent dictations</h3><button id="dictation-undo" class="btn btn-secondary btn-sm" type="button">Undo last insertion</button><button id="dictation-refresh" class="btn btn-secondary btn-sm" type="button">Refresh</button></div>        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">History</div>
+            <select id="settings-dictation-history-policy" class="settings-field">
+              <option value="recent">Keep recent transcripts</option>
+              <option value="off">Off — keep only recoverable failures</option>
+            </select>
+            <div class="about-controls-meta">Turning history off never discards audio from a failed or interrupted capture.</div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+
+            <div class="dictation-recents" id="settings-dictation-recents">
+              <div class="about-controls-meta">Loading recent dictations…</div>
+            </div>
+            <div class="about-controls-meta" id="settings-dictation-recents-status"></div>
+          </div>
+        </div>
+
+        <section class="dictation-block"><h3>Review an edit</h3><p class="dictation-note">Edit a recent dictation or a short selection captured by the Recent Dictations shortcut. Optional rewriting uses your local Ollama model. Nothing is inserted until you choose Paste.</p>
+          <label for="dictation-edit-original" class="dictation-note">Original text</label><textarea id="dictation-edit-original" class="settings-field dictation-editor" maxlength="8192" placeholder="Choose Edit on a recent dictation, or enter text here."></textarea>
+          <div class="dictation-actions"><button id="dictation-correction" type="button" class="btn btn-secondary btn-sm">Remember a spelling correction</button><button id="dictation-original-copy" type="button" class="btn btn-secondary btn-sm">Copy this text</button></div><div class="dictation-line"><input id="dictation-edit-instruction" class="settings-field" aria-label="Editing instruction" placeholder="Make this clearer; keep every fact" maxlength="500"><button id="dictation-rewrite" type="button" class="btn btn-secondary btn-sm">Preview local edit</button></div>
+          <div id="dictation-edit-preview" hidden><h3>Suggested text</h3><textarea id="dictation-edit-result" class="settings-field dictation-editor" aria-label="Suggested text"></textarea><p class="dictation-note">Check names, numbers, and meaning before using this edit.</p><div class="dictation-actions"><button id="dictation-edit-copy" class="btn btn-secondary btn-sm" type="button">Copy edit</button><button id="dictation-edit-paste" class="btn btn-secondary btn-sm" type="button">Paste to destination</button><button id="dictation-edit-discard" class="btn btn-secondary btn-sm" type="button">Discard edit</button></div></div><p id="dictation-edit-status" class="dictation-note" role="status"></p>
+        </section></div></div></div>
       <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
       <!-- Coach settings start -->
       <div class="settings-section coach-settings-section" id="settings-coach-section">
@@ -9578,7 +9616,7 @@
         // Prefer structured entries so we persist canonical CPAL names. Both
         // pickers share one setting and therefore always render the same value.
         populateDevicePicker(devicePicker, result);
-        populateDevicePicker(dictationMicrophonePicker, result);
+
       } catch (e) {
         console.error('Load devices:', e);
       }
@@ -9586,7 +9624,7 @@
     loadDevices();
     // Re-scan devices when the picker is focused (handles hotplug)
     devicePicker.addEventListener('focus', loadDevices);
-    dictationMicrophonePicker?.addEventListener('focus', loadDevices);
+
 
     // Persist device choice to config — recording reads config.recording.device at capture time
     devicePicker.addEventListener('change', async () => {
@@ -9600,19 +9638,6 @@
         console.error('Set device:', e);
       }
     });
-    dictationMicrophonePicker?.addEventListener('change', async () => {
-      try {
-        await invoke('cmd_set_setting', {
-          section: 'recording',
-          key: 'device',
-          value: dictationMicrophonePicker.value || '',
-        });
-        devicePicker.value = dictationMicrophonePicker.value;
-      } catch (e) {
-        console.error('Set dictation device:', e);
-      }
-    });
-
     // ── Recording controls ──
     function recordingStartArgsForCurrentUi() {
       if (activeCallSession && !activeCallSession.dismissed && callBanner.classList.contains('active')) {
@@ -12013,13 +12038,14 @@
     let coachSettingsState = null;
     let coachSetupRunning = false;
 
-    function openSettings() {
+    function openSettings(options) {
+      if (options?.keepDictationTarget !== true) invoke('cmd_clear_dictation_history_target').catch(() => {});
       settingsOverlay.classList.add('active');
       // Reset to General tab on every open
       settingsTabs[0].click();
       loadSettings();
     }
-    function closeSettings() { settingsOverlay.classList.remove('active'); }
+    function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }
 
     function selectedCoachModelChoice() {
       return document.querySelector('input[name="settings-coach-model"]:checked')?.value || 'on-device';
@@ -12540,6 +12566,7 @@
         }
       } catch (e) { console.error('loadSettings:', e); }
       // Always load these, even if other settings fail
+      window.MinutesDictation?.load();
       loadRecentDictations();
       loadStorageStats();
       loadVaultStatus();
@@ -12561,7 +12588,7 @@
           parts.push(date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
         }
       }
-      if (record.engineId) parts.push(record.engineId);
+
       if (record.insertion?.outcome) parts.push(record.insertion.outcome.replaceAll('_', ' '));
       if (record.targetContext?.appName) parts.push(record.targetContext.appName);
       if (record.commandsApplied?.length) {
@@ -12584,7 +12611,7 @@
           : '';
       }
       try {
-        const records = await invoke('cmd_recent_dictations', { limit: 5 });
+        const records = await invoke('cmd_recent_dictations', { limit: 25 });
         renderRecentDictations(records || []);
       } catch (error) {
         root.innerHTML = '<div class="about-controls-meta error">Could not load recent dictations.</div>';
@@ -12611,17 +12638,14 @@
         const hasRaw = Boolean((record.rawText || '').trim());
         const textButtons = hasText
           ? `<button class="btn btn-secondary btn-sm" data-dictation-action="copy" data-dictation-id="${escapeHtml(record.id)}">Copy</button>
-             <button class="btn btn-secondary btn-sm" data-dictation-action="paste" data-dictation-id="${escapeHtml(record.id)}">Paste</button>`
+             <button class="btn btn-secondary btn-sm" data-dictation-action="edit" data-dictation-id="${escapeHtml(record.id)}">Edit</button>
+             <button class="btn btn-secondary btn-sm" data-dictation-action="paste" data-dictation-id="${escapeHtml(record.id)}" disabled>Paste</button>`
           : '';
         const rawButton = hasRaw
           ? `<button class="btn btn-secondary btn-sm" data-dictation-action="raw" data-dictation-id="${escapeHtml(record.id)}">Copy raw</button>`
           : '';
         const undoVoiceEditButton = record.preCommandText && record.commandsApplied?.length
           ? `<button class="btn btn-secondary btn-sm" data-dictation-action="before-edits" data-dictation-id="${escapeHtml(record.id)}">Copy before edits</button>`
-          : '';
-        const recoveryButtons = record.recoveryAudioPath
-          ? `<button class="btn btn-secondary btn-sm" data-dictation-action="reprocess" data-dictation-id="${escapeHtml(record.id)}">Reprocess</button>
-             <button class="btn btn-secondary btn-sm" data-dictation-action="delete-audio" data-dictation-id="${escapeHtml(record.id)}">Delete audio</button>`
           : '';
         return `
           <div class="dictation-recent-item" data-dictation-id="${escapeHtml(record.id)}">
@@ -12631,15 +12655,18 @@
             </div>
             <div class="dictation-recent-actions">
               ${textButtons}
-              ${rawButton}
-              ${undoVoiceEditButton}
-              ${recoveryButtons}
-              ${openButton}
+              ${record.recoveryAudioPath ? `<button class="btn btn-secondary btn-sm" data-dictation-action="reprocess" data-dictation-id="${escapeHtml(record.id)}">Recover text</button>` : ''}
+              <details class="dictation-history-more"><summary>More</summary><div class="dictation-actions">
+                ${hasText ? `<button class="btn btn-secondary btn-sm" data-dictation-action="snippet" data-dictation-id="${escapeHtml(record.id)}">Save snippet</button>` : ''}
+                ${rawButton}${undoVoiceEditButton}${openButton}
+                ${record.recoveryAudioPath ? `<button class="btn btn-secondary btn-sm" data-dictation-action="delete-audio" data-dictation-id="${escapeHtml(record.id)}">Delete audio</button>` : ''}
+              </div></details>
             </div>
           </div>
         `;
       }).join('');
       root._dictationRecords = records;
+      window.MinutesDictation?.updateDestinationControls();
     }
 
     document.getElementById('settings-dictation-recents')?.addEventListener('click', async (event) => {
@@ -12659,8 +12686,12 @@
           const result = await invoke('cmd_copy_dictation', { id });
           if (status) status.textContent = result?.message || 'Copied.';
         } else if (action === 'paste') {
-          const result = await invoke('cmd_repaste_dictation', { id });
+          const result = await invoke('cmd_paste_dictation_from_history', { text: record.cleanedText });
           if (status) status.textContent = result?.message || 'Pasted.';
+        } else if (action === 'edit') {
+          window.MinutesDictation?.edit(record.cleanedText || record.rawText);
+        } else if (action === 'snippet') {
+          window.MinutesDictation?.snippet(record.cleanedText || record.rawText);
         } else if (action === 'raw') {
           const result = await invoke('cmd_copy_raw_dictation', { id });
           if (status) status.textContent = result?.message || 'Copied raw dictation.';
@@ -12683,6 +12714,8 @@
         if (status) status.textContent = String(error);
       } finally {
         button.disabled = false;
+        if (status?.textContent) window.MinutesDictation?.notify(status.textContent);
+        window.MinutesDictation?.updateDestinationControls();
       }
     });
 
@@ -13506,11 +13539,6 @@
       } catch (err) { console.error('set ui language:', err); }
     });
     document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: e.target.value }));
-    document.getElementById('settings-dictation-writing-style').addEventListener('change', (e) => invoke('cmd_set_setting', {
-      section: 'dictation',
-      key: 'cleanup_engine',
-      value: e.target.value === 'literal' ? 'none' : 'rules',
-    }));
     document.getElementById('settings-dictation-history-policy').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'dictation', key: 'history_policy', value: e.target.value });
       if (latestSettings?.dictation) latestSettings.dictation.history_policy = e.target.value;
@@ -18305,6 +18333,7 @@
       }
     })();
   </script>
+  <script src="scripts/dictation-experience.js"></script>
 </body>
 
 </html>

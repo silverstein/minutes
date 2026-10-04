@@ -6207,6 +6207,7 @@ pub fn start_recording(
     requested_title: Option<String>,
     language_override: Option<String>,
 ) {
+    crate::dictation_experience::stop_mic_test();
     // Drop on any exit path (early returns, panic, normal exit) clears the
     // session flags so a subsequent manual recording isn't auto-stopped.
     let _session_guard = CallDetectSessionGuard::new(call_detect_session);
@@ -20322,10 +20323,15 @@ pub fn cmd_paste_last_dictation() -> Result<crate::text_insertion::TextInsertion
     cmd_repaste_dictation(latest_dictation_record()?.id)
 }
 
+#[derive(serde::Serialize)]
+pub struct DictationRecoveryResult {
+    pub recovered: bool,
+    pub text: String,
+    pub message: String,
+}
+
 #[tauri::command]
-pub fn cmd_reprocess_dictation(
-    id: String,
-) -> Result<crate::text_insertion::TextInsertionResult, String> {
+pub fn cmd_reprocess_dictation(id: String) -> Result<DictationRecoveryResult, String> {
     let mut record = minutes_core::dictation_memory::find_record(&id)
         .map_err(|error| format!("Could not load dictation history: {error}"))?
         .ok_or_else(|| "Dictation was not found in local history.".to_string())?;
@@ -20333,9 +20339,9 @@ pub fn cmd_reprocess_dictation(
         .recovery_audio_path
         .clone()
         .ok_or_else(|| "This dictation has no saved recovery audio.".to_string())?;
-    let config = Config::load();
-    let expected_target = crate::text_insertion::capture_active_target_context();
-    let text_mode = minutes_core::dictation_context::infer_target_text_mode(
+    let mut config = Config::load();
+    crate::dictation_experience::honor_legacy_cleanup(&mut config);
+    let inferred_mode = minutes_core::dictation_context::infer_target_text_mode(
         record
             .target_context
             .as_ref()
@@ -20343,55 +20349,64 @@ pub fn cmd_reprocess_dictation(
         None,
         None,
     );
+    let target = record.target_context.as_ref();
+    let (text_mode, style) = config.dictation.experience.resolve(
+        target.and_then(|target| target.app_name.as_deref()),
+        None, // History intentionally retains the app name only, never a URL or field.
+        None,
+        inferred_mode,
+    );
+    let style = style.to_string();
+    config.dictation.cleanup_engine = if style == "literal"
+        || text_mode == minutes_core::dictation_context::DictationTextMode::TerminalCode
+    {
+        "none".into()
+    } else {
+        "rules".into()
+    };
     let result = minutes_core::dictation::reprocess_recovery_audio_with_mode(
         &recovery_path,
         &config,
         text_mode,
     )
     .map_err(|error| format!("Could not reprocess saved dictation audio: {error}"))?;
-    let insert_requested = dictation_should_insert(&config);
-    let clipboard_snapshot = if insert_requested && config.dictation.auto_paste_restore {
-        crate::text_insertion::read_clipboard().ok()
-    } else {
-        None
-    };
-    let insertion =
-        crate::text_insertion::insert_text(crate::text_insertion::TextInsertionRequest {
-            text: result.text.clone(),
-            mode: if insert_requested {
-                crate::text_insertion::TextInsertionMode::BestEffortVerified
-            } else {
-                crate::text_insertion::TextInsertionMode::CopyOnly
-            },
-            restore_clipboard: insert_requested && config.dictation.auto_paste_restore,
-            clipboard_snapshot,
-            expected_target: if insert_requested {
-                expected_target
-            } else {
-                None
-            },
-        });
-    let retained =
-        (!dictation_delivery_succeeded(&insertion, insert_requested)).then_some(recovery_path);
+    // Recovery regenerates local history only. Pasting is a separate action.
+    let retained = Some(recovery_path);
     record.raw_text = result.raw_text;
-    record.cleaned_text = result.text;
+    record.cleaned_text = minutes_core::dictation_experience::format_for_cursor(
+        &result.text,
+        None,
+        &style,
+        text_mode,
+        &config.dictation.experience.dictionary,
+    );
     record.pre_command_text = result.pre_command_text;
     record.commands_applied = result.commands_applied;
     record.duration_secs = result.duration_secs;
     record.engine_id = result.engine_id;
     record.engine_descriptor_version = result.engine_descriptor_version;
     record.destination = result.destination;
-    record.insertion = dictation_insertion_memory(&insertion);
-    record.target_context = dictation_target_context(&insertion);
+    record.insertion = minutes_core::dictation_memory::DictationInsertionMemory {
+        outcome: "recovered".into(),
+        method: "retranscribe".into(),
+        verified: false,
+        clipboard_restored: false,
+        message: "Recovered text in Recent Dictations. Copy it or choose where to paste.".into(),
+    };
+    let recovered_text = record.cleaned_text.clone();
+    // Keep the original destination context and private audio until explicitly deleted.
     record.recovery_audio_path = retained;
     minutes_core::dictation_memory::append_record(record)
         .map_err(|error| format!("Could not update dictation history: {error}"))?;
-    Ok(insertion)
+    Ok(DictationRecoveryResult {
+        recovered: true,
+        text: recovered_text,
+        message: "Recovered text in Recent Dictations. Copy it or choose where to paste.".into(),
+    })
 }
 
 #[tauri::command]
-pub fn cmd_reprocess_last_dictation() -> Result<crate::text_insertion::TextInsertionResult, String>
-{
+pub fn cmd_reprocess_last_dictation() -> Result<DictationRecoveryResult, String> {
     cmd_reprocess_dictation(latest_dictation_record()?.id)
 }
 
@@ -21573,6 +21588,7 @@ impl Drop for DictationActiveGuard {
 /// hand. Adding it means every acquire learns about it, not just this one.
 #[cfg_attr(not(feature = "voice-live"), allow(dead_code))]
 fn try_acquire_voice(state: &AppState) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     // `starting` as well as `recording`: a recording reserves `starting` first
     // and does not create its PID file or set `recording` until its background
     // thread gets there. Checking only `recording` leaves a window where voice
@@ -21626,6 +21642,7 @@ fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
 }
 
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     if state.voice_active.load(Ordering::Relaxed) {
         return Err("Voice is running — close it before starting a live transcript".into());
     }
@@ -21652,6 +21669,7 @@ pub fn cmd_start_live_transcript(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
+    crate::dictation_experience::stop_mic_test();
     try_acquire_live(&state)?;
 
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
@@ -22832,6 +22850,8 @@ fn start_dictation_session(
     app: &tauri::AppHandle,
     capture_style: Option<HotkeyCaptureStyle>,
 ) -> Result<String, String> {
+    crate::dictation_experience::stop_mic_test();
+    crate::dictation_experience::clear_undo();
     let dictation_pressed_at = Instant::now();
     let state = app.state::<AppState>();
 
@@ -22925,10 +22945,35 @@ fn start_dictation_session(
         // gesture. Buffer utterances so Escape can still discard the whole
         // session even after an ordinary thinking pause finalized one segment.
         config.dictation.accumulate = true;
+        crate::dictation_experience::honor_legacy_cleanup(&mut config);
         // Re-validate the pinned input device for mid-session
         // disconnects (#189). In-memory only; startup-side persistence
         // is in main.rs.
         minutes_core::capture::auto_heal_missing_recording_device(&mut config);
+        let field = if config.dictation.experience.context_enabled {
+            crate::dictation_field::capture(dictation_target_context_for_thread.as_ref())
+        } else {
+            None
+        };
+        let (dictation_text_mode, writing_style) = config.dictation.experience.resolve(
+            dictation_target_context_for_thread
+                .as_ref()
+                .and_then(|target| target.app_name.as_deref()),
+            dictation_target_context_for_thread
+                .as_ref()
+                .and_then(|target| target.bundle_id.as_deref()),
+            field.as_ref().and_then(|field| field.site.as_deref()),
+            dictation_text_mode,
+        );
+        let writing_style = writing_style.to_string();
+        config.dictation.cleanup_engine = if writing_style == "literal"
+            || dictation_text_mode
+                == minutes_core::dictation_context::DictationTextMode::TerminalCode
+        {
+            "none".into()
+        } else {
+            "rules".into()
+        };
         let insert_available_at_start = dictation_insert_fallback_message(&config).is_none();
         let insert_fallback_message_for_events =
             dictation_insert_fallback_message(&config).map(str::to_string);
@@ -23041,7 +23086,14 @@ fn start_dictation_session(
                         .ok();
                 }
             },
-            move |result| {
+            move |mut result| {
+                result.text = minutes_core::dictation_experience::format_for_cursor(
+                    &result.text,
+                    field.as_ref().map(|field| &field.context),
+                    &writing_style,
+                    dictation_text_mode,
+                    &config_for_results.dictation.experience.dictionary,
+                );
                 final_output_for_results.store(true, Ordering::Relaxed);
                 app_for_results.emit("dictation:result", &result.text).ok();
                 let insert_started_at = Instant::now();
@@ -23060,11 +23112,28 @@ fn start_dictation_session(
                         &app_for_results,
                         &dictation_target_context_for_results,
                     );
-                    let insertion =
-                        crate::text_insertion::insert_text(routine_dictation_insertion_request(
-                            result.text.clone(),
-                            dictation_target_context_for_results.clone(),
-                        ));
+                    let mut request = routine_dictation_insertion_request(
+                        result.text.clone(),
+                        dictation_target_context_for_results.clone(),
+                    );
+                    let field_changed = field.as_ref().is_some_and(|field| !field.unchanged());
+                    if field_changed {
+                        request.mode = crate::text_insertion::TextInsertionMode::CopyOnly;
+                    }
+                    let mut insertion = crate::text_insertion::insert_text(request);
+                    if field_changed {
+                        insertion.message = "The text field or cursor changed. Your dictation is copied; choose where to paste it.".into();
+                    }
+                    if matches!(
+                        insertion.outcome,
+                        crate::text_insertion::InsertOutcome::Typed
+                            | crate::text_insertion::InsertOutcome::Pasted
+                    ) {
+                        crate::dictation_experience::remember_delivery(
+                            field.as_ref(),
+                            &result.text,
+                        );
+                    }
                     app_for_results.emit("dictation:insertion", &insertion).ok();
                     publish_dictation_overlay_state(&app_for_results, insertion.overlay_state());
                     log_dictation_insert(

@@ -962,6 +962,7 @@ impl IdentityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictationConfig {
+    pub experience: crate::dictation_experience::DictationExperience,
     pub backend: String,
     pub destination: String,
     pub accumulate: bool,
@@ -1010,6 +1011,7 @@ pub struct VaultConfig {
 impl Default for DictationConfig {
     fn default() -> Self {
         Self {
+            experience: Default::default(),
             backend: "whisper".into(),
             destination: "insert".into(),
             accumulate: true,
@@ -1546,7 +1548,16 @@ fn home_dir() -> PathBuf {
 }
 
 fn minutes_dir() -> PathBuf {
-    home_dir().join(".minutes")
+    minutes_dir_from(std::env::var_os("MINUTES_DATA_DIR"), home_dir())
+}
+
+// A process-scoped native dogfood root keeps history, recovery audio and state
+// away from the user's production data. Empty/relative paths cannot redirect it.
+fn minutes_dir_from(override_dir: Option<OsString>, home: PathBuf) -> PathBuf {
+    override_dir
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".minutes"))
 }
 
 fn config_base_dir_from(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
@@ -2724,6 +2735,24 @@ enabled = true
             assert!(!error.to_string().contains("PRIVATE-CANARY"));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn dogfood_data_root_requires_an_absolute_path_and_preserves_the_default() {
+        let directory = TempDir::new().unwrap();
+        let home = directory.path().join("home");
+        let isolated = directory.path().join("isolated");
+        assert_eq!(minutes_dir_from(None, home.clone()), home.join(".minutes"));
+        for invalid in [OsString::new(), OsString::from("relative/state")] {
+            assert_eq!(
+                minutes_dir_from(Some(invalid), home.clone()),
+                home.join(".minutes")
+            );
+        }
+        assert_eq!(
+            minutes_dir_from(Some(isolated.clone().into_os_string()), home),
+            isolated
+        );
     }
 
     #[test]

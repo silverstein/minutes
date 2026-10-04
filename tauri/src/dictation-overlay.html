@@ -408,7 +408,7 @@
       <div class="dot" id="indicator"></div>
       <span class="label" id="label">Starting…</span>
       <button class="recovery-button hidden" id="download-button" type="button">Download</button>
-      <button class="recovery-button hidden" id="reprocess-button" type="button">Reprocess</button>
+      <button class="recovery-button hidden" id="reprocess-button" type="button">Recover text</button>
       <button class="recovery-button hidden" id="permission-button" type="button">Open Settings</button>
       <div class="waveform" id="waveform" style="display:none">
         <div class="bar" style="height:4px"></div>
@@ -862,9 +862,9 @@
           waveform.style.display = 'none';
           timer.style.display = 'none';
           showExpanded(true);
-          setTextContent('Your words are safe. Reprocess when you’re ready.', false);
+          setTextContent('Your words are safe. Recover text when you’re ready.', false);
           reprocessButton.disabled = false;
-          reprocessButton.textContent = 'Reprocess';
+          reprocessButton.textContent = 'Recover text';
           reprocessButton.classList.remove('hidden');
           break;
 
@@ -1004,7 +1004,7 @@
       e.stopPropagation();
       cancelDismissTimer();
       reprocessButton.disabled = true;
-      reprocessButton.textContent = 'Reprocessing…';
+      reprocessButton.textContent = 'Recovering…';
       label.textContent = 'Recovering dictation';
       setIndicator('spinner');
       try {
@@ -1012,10 +1012,10 @@
           ? await window.__TAURI__.core.invoke('cmd_reprocess_dictation', { id: recoveryId })
           : await window.__TAURI__.core.invoke('cmd_reprocess_last_dictation');
         setIndicator('success');
-        label.textContent = result?.outcome === 'copied' ? 'Recovered · copied' : 'Recovered';
+        label.textContent = 'Text recovered';
         setTextContent(result?.message || 'Recovered dictation from saved audio.', false);
         reprocessButton.classList.add('hidden');
-        scheduleDismiss(1800);
+        scheduleDismiss(4500);
       } catch (error) {
         pill.classList.add('error');
         setIndicator('error');

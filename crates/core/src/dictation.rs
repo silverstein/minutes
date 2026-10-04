@@ -528,7 +528,7 @@ where
             Some(run_start.elapsed().as_millis()),
             device_override,
         );
-        let mut stream = AudioStream::start(device_override)?;
+        let mut stream = start_audio_stream(config)?;
         startup_debug(
             "audio_stream_done",
             Some(&model_name),
@@ -554,7 +554,9 @@ where
 
         // Device change monitor for auto-reconnection. Pinned when the user
         // supplied an explicit device override.
-        let mut device_monitor = if device_override.is_some() {
+        let mut device_monitor = if device_override.is_some()
+            || config.dictation.experience.microphone_mode != "shared"
+        {
             crate::device_monitor::DeviceMonitor::pinned(&stream.device_name)
         } else {
             crate::device_monitor::DeviceMonitor::new(&stream.device_name)
@@ -564,6 +566,15 @@ where
         let mut streaming = StreamingWhisper::with_partial_max_secs(
             config.transcription.language.clone(),
             config.transcription.partial_max_secs,
+        )
+        .with_recognition_hint(
+            if config.dictation.cleanup_engine == "none"
+                || options.text_mode == DictationTextMode::TerminalCode
+            {
+                String::new()
+            } else {
+                config.dictation.experience.recognition_hint()
+            },
         );
         let mut final_utterance_samples: Vec<f32> = Vec::new();
         let mut accumulated_results: Vec<DictationResult> = Vec::new();
@@ -676,7 +687,7 @@ where
                 let old_name = stream.device_name.clone();
                 tracing::info!(device = %old_name, "dictation stream error or device change — reconnecting");
                 drop(stream);
-                match AudioStream::start(device_override) {
+                match start_audio_stream(config) {
                     Ok(new_stream) => {
                         tracing::info!(
                             old = %old_name, new = %new_stream.device_name,
@@ -704,7 +715,7 @@ where
                     // Stream died — try to reconnect
                     let old_name = stream.device_name.clone();
                     tracing::warn!("dictation audio stream disconnected — attempting reconnect");
-                    match AudioStream::start(device_override) {
+                    match start_audio_stream(config) {
                         Ok(new_stream) => {
                             tracing::info!(
                                 old = %old_name, new = %new_stream.device_name,
@@ -864,6 +875,33 @@ where
 
         Ok(())
     }
+}
+
+/// Dictation-only device preferences never change recording.device.
+#[cfg(feature = "whisper")]
+pub fn start_audio_stream(config: &Config) -> Result<AudioStream, crate::error::CaptureError> {
+    let prefs = &config.dictation.experience;
+    if prefs.microphone_mode == "shared" {
+        return AudioStream::start(config.recording.device.as_deref());
+    }
+    let available: Vec<String> = crate::capture::list_input_devices_detailed()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    let candidates = crate::dictation_experience::microphone_candidates(
+        prefs,
+        &available,
+        config.recording.device.as_deref(),
+        crate::dictation_experience::laptop_lid_closed(),
+    );
+    let mut error = None;
+    for candidate in candidates {
+        match AudioStream::start(candidate.as_deref()) {
+            Ok(stream) => return Ok(stream),
+            Err(failure) => error = Some(failure),
+        }
+    }
+    Err(error.unwrap_or_else(|| crate::error::CaptureError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "No usable dictation microphone. Open Dictation settings and choose a connected microphone."))))
 }
 
 #[cfg(feature = "whisper")]
@@ -1073,7 +1111,11 @@ fn transcribe_utterance_with_parakeet(
 
     let mut parakeet_config = config.clone();
     parakeet_config.transcription.engine = "parakeet".into();
-    match crate::transcribe::transcribe(&processing_path, &parakeet_config) {
+    match crate::transcribe::transcribe_with_hints(
+        &processing_path,
+        &parakeet_config,
+        &dictation_decode_hints(config),
+    ) {
         Ok(result) => {
             let Some(text) = normalize_final_dictation_text(&result.text) else {
                 return Ok(None);
@@ -1087,6 +1129,20 @@ fn transcribe_utterance_with_parakeet(
         Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn dictation_decode_hints(config: &Config) -> crate::transcribe::DecodeHints {
+    if config.dictation.cleanup_engine == "none" {
+        return Default::default();
+    }
+    let terms: Vec<String> = config
+        .dictation
+        .experience
+        .dictionary
+        .values()
+        .cloned()
+        .collect();
+    crate::transcribe::DecodeHints::from_candidates(&terms, &[])
 }
 
 fn normalize_final_dictation_text(text: &str) -> Option<String> {
@@ -1148,7 +1204,11 @@ pub fn reprocess_recovery_audio_with_mode(
             transcription_config.transcription.model = config.dictation.model.clone();
         }
     }
-    let transcript = crate::transcribe::transcribe(&audio_path, &transcription_config)?;
+    let transcript = crate::transcribe::transcribe_with_hints(
+        &audio_path,
+        &transcription_config,
+        &dictation_decode_hints(config),
+    )?;
     let text = normalize_final_dictation_text(&transcript.text).ok_or_else(|| {
         MinutesError::from(TranscribeError::EmptyTranscript(
             transcription_config.transcription.min_words,
@@ -1281,11 +1341,17 @@ fn prepare_result(
 fn build_cleanup_options(config: &Config, text_mode: DictationTextMode) -> CleanupOptions {
     let d = &config.dictation;
     let engine = CleanupEngine::parse(&d.cleanup_engine);
-    let replacements = if d.cleanup_apply_vocabulary && engine != CleanupEngine::None {
+    let mut replacements = if d.cleanup_apply_vocabulary && engine != CleanupEngine::None {
         load_vocab_replacements()
     } else {
         Vec::new()
     };
+    replacements.extend(
+        d.experience
+            .dictionary
+            .iter()
+            .map(|(a, b)| (a.clone(), b.clone())),
+    );
     CleanupOptions {
         engine,
         remove_fillers: d.cleanup_remove_fillers,

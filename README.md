@@ -91,11 +91,17 @@ quality. See the full [persona notes](docs/personas.md).
 
 | Surface | What it provides | Docs |
 |---|---|---|
-| Desktop app | Menu bar capture, Recall, documents, and Coach. | [Install](docs/install.md#desktop-app) |
+| Desktop app | Menu bar capture, dictation, Recall, documents, and Coach. | [Install](docs/install.md#desktop-app) |
 | CLI (58 commands) | Local recording, processing, search, import, and automation. | [Commands](docs/features.md) |
 | MCP server (34 tools) | Local meeting tools and resources for any MCP client. | [MCP reference](docs/integration/agent-integrations.md) |
 | Claude Code plugin (23 skills) | Prep, capture, live help, debrief, and memory workflows. | [Client setup](docs/integration/clients.md#claude-code-plugin) |
 | SDK | TypeScript access to meeting files without MCP. | [Agent architecture](docs/architecture/README.md#building-your-own-agent-on-minutes) |
+
+## Dictation
+
+The desktop Dictation settings bring writing preferences, personal spellings and snippets, microphone selection, and recent text together. Cursor context is optional and stays on the Mac. Recovery restores text for review; local edits use an explicit Ollama preview, and spelling corrections require confirmation.
+
+See [dictation behavior and evaluation boundaries](docs/design/dictation-experience.md) for supported fields, safe insertion and undo, clipboard restoration, and the synthetic benchmark.
 
 ## Output format
 

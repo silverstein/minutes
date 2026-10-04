@@ -23,6 +23,8 @@ mod call_detect;
 mod cli_setup;
 mod commands;
 mod context;
+mod dictation_experience;
+mod dictation_field;
 mod palette_dispatch;
 mod pty;
 mod secret_store;
@@ -2147,6 +2149,7 @@ fn main() {
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
 
+            dictation_experience::install_shortcuts(app.handle());
             let recovered_dictations = commands::adopt_orphaned_dictation_audio();
             if recovered_dictations > 0 {
                 eprintln!(
@@ -3213,6 +3216,20 @@ fn main() {
             commands::cmd_dismiss_dictation_overlay,
             commands::cmd_dictation_overlay_ready,
             commands::cmd_recent_dictations,
+            dictation_experience::cmd_dictation_preferences,
+            dictation_experience::cmd_dictation_history_destination,
+            dictation_experience::cmd_dictation_correction,
+            dictation_experience::cmd_copy_dictation_text,
+            dictation_experience::cmd_save_dictation_preferences,
+            dictation_experience::cmd_test_dictation_microphone,
+            dictation_experience::cmd_stop_dictation_mic_test,
+            dictation_experience::cmd_dictation_devices,
+            dictation_experience::cmd_undo_last_dictation,
+            dictation_experience::cmd_show_dictation_history,
+            dictation_experience::cmd_dictation_selection,
+            dictation_experience::cmd_clear_dictation_history_target,
+            dictation_experience::cmd_paste_dictation_from_history,
+            dictation_experience::cmd_dictation_rewrite,
             commands::cmd_copy_dictation,
             commands::cmd_copy_pre_command_dictation,
             commands::cmd_copy_raw_dictation,
@@ -3856,11 +3873,15 @@ mod tray_activity_tests {
         let dictation = index
             .split("<!-- Dictation -->")
             .nth(1)
-            .and_then(|tail| tail.split("<!-- Live Transcript -->").next())
+            .and_then(|tail| tail.split("id=\"panel-ai\"").next())
             .expect("dictation settings section should be extractable");
-        let (routine, advanced) = dictation
+        let (before_advanced, rest) = dictation
             .split_once("<details class=\"settings-advanced\">")
             .expect("dictation settings should have an Advanced disclosure");
+        let (advanced, after_advanced) = rest
+            .split_once("</details>")
+            .expect("Advanced disclosure should be bounded");
+        let routine = format!("{before_advanced}{after_advanced}");
 
         for id in [
             "settings-dictation-destination",
@@ -3870,6 +3891,10 @@ mod tray_activity_tests {
             "settings-dictation-recents",
         ] {
             assert!(routine.contains(id), "routine settings should contain {id}");
+            assert!(
+                !advanced.contains(id),
+                "routine settings must stay outside Advanced: {id}"
+            );
         }
         for id in [
             "settings-dictation-model",

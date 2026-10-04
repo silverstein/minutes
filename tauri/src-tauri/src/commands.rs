@@ -13425,7 +13425,6 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         ("dictation", "auto_paste") => {
             config.dictation.auto_paste = value == "true";
         }
-        ("dictation", "cleanup_engine") => config.dictation.cleanup_engine = value.clone(),
         ("dictation", "voice_commands_enabled") => {
             config.dictation.voice_commands_enabled = value == "true";
         }

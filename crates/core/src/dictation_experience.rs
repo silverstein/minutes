@@ -391,6 +391,25 @@ pub fn correction_candidate(original: &str, corrected: &str) -> Option<(String, 
     }
     Some((spoken, written))
 }
+/// No transcript, URL, or window contents are read by this hardware query.
+pub fn laptop_lid_closed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::engine_process::command("ioreg")
+            .args(["-r", "-k", "AppleClamshellState", "-d", "4"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .is_some_and(|out| {
+                String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+                    line.contains("AppleClamshellState") && line.trim_end().ends_with("Yes")
+                })
+            })
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,19 +641,21 @@ mod tests {
     }
     #[test]
     fn site_override_beats_app_and_terminal_prose_is_explicit() {
-        let mut p = DictationExperience::default();
-        p.target_rules = vec![
-            TargetRule {
-                target: "app:Ghostty".into(),
-                mode: "agent_prompt".into(),
-                style: "natural".into(),
-            },
-            TargetRule {
-                target: "site:mail.google.com".into(),
-                mode: "email_document".into(),
-                style: "natural".into(),
-            },
-        ];
+        let p = DictationExperience {
+            target_rules: vec![
+                TargetRule {
+                    target: "app:Ghostty".into(),
+                    mode: "agent_prompt".into(),
+                    style: "natural".into(),
+                },
+                TargetRule {
+                    target: "site:mail.google.com".into(),
+                    mode: "email_document".into(),
+                    style: "natural".into(),
+                },
+            ],
+            ..Default::default()
+        };
         assert!(p.validate().is_ok());
         assert_eq!(
             p.resolve(Some("Ghostty"), None, None, DictationTextMode::TerminalCode)
@@ -664,9 +685,13 @@ mod tests {
     }
     #[test]
     fn invalid_rules_and_conflicting_spelling_are_rejected() {
-        let mut p = DictationExperience::default();
-        p.dictionary =
-            BTreeMap::from([("mat".into(), "Mat".into()), ("MAT".into(), "Matt".into())]);
+        let mut p = DictationExperience {
+            dictionary: BTreeMap::from([
+                ("mat".into(), "Mat".into()),
+                ("MAT".into(), "Matt".into()),
+            ]),
+            ..Default::default()
+        };
         assert!(p.validate().is_err());
         p.dictionary.clear();
         p.target_rules.push(TargetRule {
@@ -678,9 +703,11 @@ mod tests {
     }
     #[test]
     fn missing_preferred_mic_avoids_virtual_and_closed_lid_inputs() {
-        let mut p = DictationExperience::default();
-        p.microphone_mode = "preferred".into();
-        p.microphones = vec!["Disconnected USB".into()];
+        let mut p = DictationExperience {
+            microphone_mode: "preferred".into(),
+            microphones: vec!["Disconnected USB".into()],
+            ..Default::default()
+        };
         let available = vec![
             "BlackHole 2ch".into(),
             "MacBook Pro Microphone".into(),
@@ -697,23 +724,4 @@ mod tests {
             vec![Some("BlackHole 2ch".into())]
         );
     }
-}
-
-/// No transcript, URL, or window contents are read by this hardware query.
-pub fn laptop_lid_closed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        crate::engine_process::command("ioreg")
-            .args(["-r", "-k", "AppleClamshellState", "-d", "4"])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .is_some_and(|out| {
-                String::from_utf8_lossy(&out.stdout).lines().any(|line| {
-                    line.contains("AppleClamshellState") && line.trim_end().ends_with("Yes")
-                })
-            })
-    }
-    #[cfg(not(target_os = "macos"))]
-    false
 }

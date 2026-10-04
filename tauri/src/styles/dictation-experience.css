@@ -59,12 +59,14 @@
  .dictation-nav button { transition: background-color 120ms ease, color 120ms ease; }
 }
 
-.dictation-page { --text-secondary: #625d55; }
+.dictation-page { --text-secondary: var(--text); }
 .dictation-page .btn { font: 500 12px 'Geist', sans-serif; text-transform: none; letter-spacing: 0; min-height: 30px; border-radius: 6px; }
 .dictation-page .settings-field { color: var(--text); }
 .dictation-page .settings-field::placeholder { color: var(--text-secondary); opacity: 1; }
 .dictation-page .dictation-line:has(#dictation-edit-instruction) .settings-field { flex: 1; width: 100%; max-width: none; }
-@media (prefers-color-scheme: dark) { .dictation-page { --text-secondary: #b5b0a6; } }
+@supports (color: color-mix(in srgb, currentColor, transparent)) {
+ .dictation-page { --text-secondary: color-mix(in srgb, var(--text) 75%, var(--bg-elevated)); }
+}
 
 .dictation-history-more { font-size: 12px; color: var(--text-secondary); }
 .dictation-history-more summary { cursor: pointer; padding: 7px 4px; }

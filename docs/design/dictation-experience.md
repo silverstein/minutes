@@ -70,7 +70,7 @@ Capture state text, the duplicate dot and elapsed time are hidden while listenin
 An early clipboard-only destination remains explicitly labeled. The surface uses
 a fine static dither texture, warm solid meter tones and high-contrast controls
 in light and dark appearances, without metallic bar gradients.
-Successful delivery remains visible for 1.2 seconds instead of 0.4 seconds. Missing
+The same warm shell now carries startup and final processing. Missing
 model completion refers to the user's dictation shortcut, rather than assuming fn.
 These controls do not change capture engine defaults or rewriting policy.
 
@@ -87,8 +87,9 @@ transcription, cancellation or insertion authority.
 The input meter uses seven 16px bars with a measured 4–16px range. A stable
 silhouette varies with actual input level, not a time-based decorative wave.
 Non-finite levels are ignored and out-of-range levels are clamped. The
-meter carries the capture state without a duplicate dot; finishing uses a spinner
-rather than recording-like waveform motion. Reduced motion remains supported.
+meter carries the capture state without a duplicate dot. Startup, final decoding
+and insertion share three softly pulsing dots in the same 192px shell; processing
+does not restart that animation or cycle through implementation labels. Reduced motion remains supported.
 
 Start and delivery have brief, quiet sound acknowledgements; finishing is shown
 visually. Segment success is silent; blocked delivery and retained-audio recovery use the trouble cue.
@@ -97,9 +98,15 @@ stops playback quietly. Muting immediately stops a playing cue and prevents
 future cues. The Writing panel exposes the shared recording/dictation sound
 preference directly.
 
-Routine typed/pasted success stays compact for 1.2 seconds. Copied text and
-actionable recovery retain the expanded detail. The actual destination field
-is the routine text preview; the HUD need not repeat it above the user's work.
+Verified typed/pasted insertion dismisses with the existing 150ms fade, without
+a success label. Explicit clipboard delivery shows a clipboard icon for 2.4
+seconds. Hover or focus keeps it available; clicking the icon expands the saved
+text and cancels dismissal. Failed insertion and actionable recovery explain the
+problem and retain their help controls in the warm expanded shell. Accessible
+announcements still distinguish capture, processing, insertion and clipboard
+delivery. A new session cancels a pending fade so an old success cannot close
+the fresh recording. The actual destination field is the routine text preview;
+the HUD need not repeat it above the user's work.
 
 `node --test scripts/test_dictation_overlay.mjs` executes the shipped controller
 with deterministic DOM/audio/Tauri doubles. The small `dictation_feedback.rs`

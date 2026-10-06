@@ -3499,7 +3499,8 @@ mod tray_activity_tests {
             "routine startup must not imply a warm model is loading"
         );
         assert!(
-            overlay.contains(">Starting…</span>")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("id=\"label\"></span>")
                 && !overlay.contains("Preparing dictation")
                 && !overlay.contains("preparationTimer"),
             "the first frame may be neutral, but routine startup must not expose internal preparation phases"
@@ -3607,7 +3608,8 @@ mod tray_activity_tests {
             "routine dictation activity should use capture blue, not error red"
         );
         assert!(
-            overlay.contains("setIndicator('dot-neutral')")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("class=\"busy-mark\" aria-hidden=\"true\"")
                 && overlay.contains("indicator.className = 'dot capture blink'")
                 && overlay.contains("indicator.className = 'dot capture'"),
             "dictation startup should remain neutral until active capture is confirmed"

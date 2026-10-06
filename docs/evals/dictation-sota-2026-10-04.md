@@ -413,3 +413,41 @@ The new installed executable SHA-256 is
 `3c91c93f192db58aeb3902e98a176979148eed94a3093bc78695b80cb5d2792b`.
 This replaces the earlier warmer-surface build for Mat's development test; human
 speech, sound and latency acceptance remain separate.
+
+
+### October 6 lifecycle follow-up
+
+Mat requested the warm pill throughout dictation, without cycling through startup,
+finishing, typing and pasted labels. The initial HTML frame now uses the same
+192px warm shell. Startup and final decode/insertion share three quiet dots;
+actual microphone levels continue to drive the recording waveform. Verified
+typed/pasted outcomes dismiss with the existing 150ms fade. Clipboard-only
+delivery shows a clipboard icon; hover/focus pauses dismissal and clicking the
+icon opens the text. Failed insertion, setup and recovery keep useful explanations
+and actions. Accessible announcements retain the outcome distinction.
+
+The canonical signed Minutes Dev installer completed with strict bundle verification
+and the existing Apple Development identity, Team63TMLKT8HN. Its executable SHA-256
+is `ce65b47f6c627da1a08a48d49d40d83d8bb6bcbada965cc60f4301e043562b38`.
+In the isolated QA profile, real microphone capture, Finish, a compact clipboard
+icon and clicking it to keep the expanded text visible were inspected natively.
+Three synthetic spoken utterances produced clipboard-only outcomes; persisted
+history and the actual clipboard matched the latest text. All 73 QA records
+remain; no active capture PID remained. Output mute/volume and the QA configuration
+were restored, then the normal Fn/Whisper Small app was relaunched.
+
+All 49 controller tests and 422 desktop tests on each architecture pass. The
+shrink-only design baseline, formatting and Apple Speech packaging guard pass.
+Two obsolete startup assertions were updated after the signed installer; only
+test code and the corresponding source seal changed afterward. Production main
+code remains identical to the previous committed candidate. The first Intel retry
+used the system SDK and failed to link Speech symbols; using the existing owned
+Swift 6.3.3/macOS26.5 SDK environment passed without changing source or system tools.
+
+Light browser fixtures verify startup, busy activity, clipboard and expanded text;
+real native dark capture/clipboard views verify the installed surface. Browser
+fixture audio/transport failures were not treated as native feature evidence.
+Processing can be too brief to appear in native screenshots; its controller and
+rendered fixture were checked separately. Fresh successful external insertion,
+physical Fn, perceived sound, recognition quality and comparative latency remain
+the previously documented acceptance gates.

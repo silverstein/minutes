@@ -92,7 +92,7 @@ test('finishing acknowledges once; verified delivery stays compact and does not 
   assert.deepEqual(h.played, ['start', 'complete']);
   assert.deepEqual([...h.playing], ['complete']);
   assert.equal(h.elements.get('pill').classList.contains('expanded'), false);
-  assert.equal(h.elements.get('label').textContent, 'Typed');
+  assert.equal(h.elements.get('label').textContent, '');
 });
 
 test('copy fallback exposes recovery and uses a failure cue rather than claiming insertion', () => {
@@ -134,7 +134,7 @@ test('stale snapshots cannot replay cues or regress the current state', () => {
   const h = harness(); h.state('listening', 'locked', 10); h.state('typed', 'locked', 11);
   h.state('listening', 'locked', 10); h.state('blocked', 'locked', 11);
   assert.deepEqual(h.played, ['start', 'complete']);
-  assert.equal(h.elements.get('label').textContent, 'Typed');
+  assert.equal(h.elements.get('label').textContent, '');
 });
 
 test('waveform has a 16px basis, measured dynamic range, finite bounds and no fake idle motion', () => {
@@ -183,4 +183,47 @@ test('held capture keeps release guidance; buttons use the existing native finis
   assert.equal(h.elements.get('pill').classList.contains('capturing'), true);
   h.state('accumulating', 'locked'); h.click('finish-button'); h.click('cancel-button');
   assert.ok(h.commands.includes('cmd_stop_dictation')); assert.ok(h.commands.includes('cmd_cancel_dictation'));
+});
+
+
+test('startup and insertion share a quiet compact shell without internal phase labels', () => {
+  assert.match(html, /class="pill compact busy"/);
+  assert.match(html, /id="label"><\/span>/);
+  const h = harness();
+  for (const state of ['starting', 'loading', 'processing', 'inserting']) {
+    h.state(state);
+    assert.equal(h.elements.get('pill').classList.contains('compact'), true);
+    assert.equal(h.elements.get('pill').classList.contains('busy'), true);
+    assert.equal(h.elements.get('label').textContent, '');
+    assert.equal(h.elements.get('waveform').style.display, 'none');
+    assert.equal(h.elements.get('timer').style.display, 'none');
+  }
+  assert.equal(h.elements.get('announcement').textContent, 'Dictation processing.');
+});
+
+test('clipboard-only outcome offers text on demand without claiming insertion', () => {
+  const h = harness(); h.state('starting'); h.state('listening');
+  h.emit('dictation:result', 'The blue bicycle arrives Thursday.');
+  h.state('copied');
+  assert.equal(h.elements.get('pill').classList.contains('clipboard'), true);
+  assert.equal(h.elements.get('pill').classList.contains('compact'), true);
+  assert.equal(h.elements.get('pill').classList.contains('expanded'), false);
+  assert.equal(h.elements.get('announcement').textContent, 'Dictation copied to clipboard.');
+  h.click('clipboard-button');
+  assert.equal(h.elements.get('pill').classList.contains('expanded'), true);
+  assert.equal(h.elements.get('pill').classList.contains('compact'), false);
+  assert.equal(h.elements.get('text-content').textContent, 'The blue bicycle arrives Thursday.');
+  assert.equal([...h.timers.values()].some((timer) => timer.ms === 2400), false);
+});
+
+test('verified insertion dismisses once; a fresh session cancels the pending close', () => {
+  for (const outcome of ['typed', 'pasted']) {
+    const h = harness(); h.state('listening'); h.state('processing'); h.state('inserting');
+    h.state(outcome); h.state(outcome);
+    assert.equal(h.elements.get('pill').classList.contains('dismissing'), true);
+    assert.equal([...h.timers.values()].filter((timer) => timer.ms === 150).length, 1);
+    h.state('starting');
+    assert.equal(h.elements.get('pill').classList.contains('dismissing'), false);
+    assert.equal([...h.timers.values()].filter((timer) => timer.ms === 150).length, 0);
+  }
 });

@@ -533,3 +533,19 @@ final native prose-cleanup acceptance. Clipboard and output-volume state were
 preserved/restored, no active capture remained, and the user's normal app is back
 running. The exact Notes sentence and clear correction still need a fresh native
 prose-target test. No comparative accuracy, sound or latency score is increased.
+
+
+### October 6 human cleanup acceptance and release triage
+
+Mat subsequently reported that the installed cleanup update worked. This is human
+acceptance of the tested development candidate; the message does not restate the
+exact phrases or destination, so it does not establish a broader accuracy or
+cross-application result. The earlier automated fixture limitations remain recorded.
+
+Release triage found that Voice continuity CI also checks a build with dictation
+disabled. Its changed-code lint rejected the accumulation helper as unused in that
+configuration. The helper now uses the same streaming-plus-Whisper feature gate as
+its sole caller. The gate preserves the installed dictation build's runtime behavior.
+The 27 pure regressions and the voice-live library Clippy configuration pass.
+The feature-enabled native dictation suite is being repeated before packaging;
+exact-head CI and PR review remain release gates.

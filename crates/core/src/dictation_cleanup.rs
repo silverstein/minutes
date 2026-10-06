@@ -147,6 +147,7 @@ pub fn clean_dictation_text(raw: &str, opts: &CleanupOptions) -> String {
 
 /// Accumulating capture keeps repair markers until the complete session is
 /// available. Ordinary spelling, filler and punctuation cleanup still runs.
+#[cfg(all(feature = "streaming", feature = "whisper"))]
 pub(crate) fn clean_without_repairs(raw: &str, opts: &CleanupOptions) -> String {
     clean(raw, opts, false)
 }

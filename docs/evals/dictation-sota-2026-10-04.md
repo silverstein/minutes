@@ -505,7 +505,7 @@ not applied twice. Recent Text retains the original recognition output. This is
 bounded pattern cleanup, not general semantic rewriting, multilingual backtracking
 or selected-text Command Mode; broader evaluation is tracked in `minutes-97bp`.
 
-Final source checks: 94 feature-enabled dictation tests on Intel with streaming,
+Final source checks: 94 feature-enabled dictation tests on Apple Silicon with streaming,
 Whisper and Metal, 27 pure cleanup regressions, 50 unchanged controller tests,
 strict workspace Clippy with the pinned Rust toolchain, formatting and packaging
 checks pass. The broader no-default core suite passed 1,921 tests with one ignored

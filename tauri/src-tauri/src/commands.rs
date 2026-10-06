@@ -1,3 +1,6 @@
+#[path = "dictation_feedback.rs"]
+mod dictation_feedback;
+
 use crate::call_capture;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
@@ -20208,8 +20211,12 @@ pub fn cmd_show_dictation_permission_help(app: tauri::AppHandle) -> Result<(), S
 pub fn cmd_recent_dictations(
     limit: Option<usize>,
 ) -> Result<Vec<minutes_core::dictation_memory::DictationMemoryRecord>, String> {
-    minutes_core::dictation_memory::load_recent(limit.unwrap_or(6).clamp(1, 25))
-        .map_err(|error| format!("Could not load recent dictations: {error}"))
+    minutes_core::dictation_memory::load_recent(
+        limit
+            .unwrap_or(6)
+            .clamp(1, minutes_core::dictation_memory::MAX_HISTORY_RECORDS),
+    )
+    .map_err(|error| format!("Could not load recent dictations: {error}"))
 }
 
 #[tauri::command]
@@ -20324,16 +20331,24 @@ pub fn cmd_paste_last_dictation() -> Result<crate::text_insertion::TextInsertion
 
 #[derive(serde::Serialize)]
 pub struct DictationRecoveryResult {
+    #[serde(rename = "candidateId", skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(rename = "rawText", skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
     pub recovered: bool,
     pub text: String,
     pub message: String,
 }
 
 #[tauri::command]
-pub fn cmd_reprocess_dictation(id: String) -> Result<DictationRecoveryResult, String> {
+pub fn cmd_reprocess_dictation(
+    id: String,
+    preview_only: Option<bool>,
+) -> Result<DictationRecoveryResult, String> {
     let mut record = minutes_core::dictation_memory::find_record(&id)
         .map_err(|error| format!("Could not load dictation history: {error}"))?
         .ok_or_else(|| "Dictation was not found in local history.".to_string())?;
+    let before = record.clone();
     let recovery_path = record
         .recovery_audio_path
         .clone()
@@ -20395,9 +20410,23 @@ pub fn cmd_reprocess_dictation(id: String) -> Result<DictationRecoveryResult, St
     let recovered_text = record.cleaned_text.clone();
     // Keep the original destination context and private audio until explicitly deleted.
     record.recovery_audio_path = retained;
-    minutes_core::dictation_memory::append_record(record)
+    if preview_only.unwrap_or(false) {
+        let raw_text = record.raw_text.clone();
+        let candidate_id = crate::dictation_experience::stage_recovery(before, record)?;
+        return Ok(DictationRecoveryResult {
+            candidate_id: Some(candidate_id),
+            raw_text: Some(raw_text),
+            recovered: false,
+            text: recovered_text,
+            message: "Preview ready. Review the text before replacing the saved transcript.".into(),
+        });
+    }
+    crate::dictation_experience::preserve_original_transcript(&before, &mut record);
+    minutes_core::dictation_memory::replace_record_if_unchanged(&before, record)
         .map_err(|error| format!("Could not update dictation history: {error}"))?;
     Ok(DictationRecoveryResult {
+        candidate_id: None,
+        raw_text: None,
         recovered: true,
         text: recovered_text,
         message: "Recovered text in Recent Dictations. Copy it or choose where to paste.".into(),
@@ -20406,7 +20435,7 @@ pub fn cmd_reprocess_dictation(id: String) -> Result<DictationRecoveryResult, St
 
 #[tauri::command]
 pub fn cmd_reprocess_last_dictation() -> Result<DictationRecoveryResult, String> {
-    cmd_reprocess_dictation(latest_dictation_record()?.id)
+    cmd_reprocess_dictation(latest_dictation_record()?.id, None)
 }
 
 #[tauri::command]
@@ -20414,11 +20443,12 @@ pub fn cmd_delete_dictation_audio(id: String) -> Result<String, String> {
     let mut record = minutes_core::dictation_memory::find_record(&id)
         .map_err(|error| format!("Could not load dictation history: {error}"))?
         .ok_or_else(|| "Dictation was not found in local history.".to_string())?;
+    let before = record.clone();
     let path = record
         .recovery_audio_path
         .take()
         .ok_or_else(|| "This dictation has no saved recovery audio.".to_string())?;
-    minutes_core::dictation_memory::append_record(record)
+    minutes_core::dictation_memory::replace_record_if_unchanged(&before, record)
         .map_err(|error| format!("Could not update dictation history: {error}"))?;
     if path.exists() {
         return Err(
@@ -22987,6 +23017,7 @@ fn start_dictation_session(
         let latency_trace_for_results = Arc::clone(&latency_trace_for_thread);
         let recovery_audio_for_run = Arc::clone(&recovery_audio_path);
         let recovery_audio_for_results = Arc::clone(&recovery_audio_path);
+        let stop_requested_for_events = Arc::clone(&stop_flag);
 
         let result = minutes_core::dictation::run_with_options(
             stop_flag,
@@ -23037,7 +23068,10 @@ fn start_dictation_session(
                         )
                         .ok();
                 }
-                if !state_str.is_empty() {
+                if let Some(state_str) = dictation_feedback::overlay_state_for_event(
+                    state_str,
+                    stop_requested_for_events.load(Ordering::Relaxed),
+                ) {
                     if matches!(&event, DictationEvent::Listening)
                         && insert_fallback_message_for_events.is_some()
                         && !insert_fallback_emitted.swap(true, Ordering::Relaxed)
@@ -23303,6 +23337,12 @@ pub fn cmd_set_shortcut(
 ) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
 
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::set_recovery_shortcut(
+            &app, &slot, enabled, shortcut, keycode,
+        );
+    }
+
     let slot = ShortcutSlot::from_str(&slot)?;
 
     // Validate shortcut string
@@ -23414,6 +23454,10 @@ pub fn cmd_shortcut_status(
 ) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
 
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::recovery_shortcut_status(&app, &slot);
+    }
+
     let slot = ShortcutSlot::from_str(&slot)?;
     let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
     let mgr = mgr_state
@@ -23425,6 +23469,9 @@ pub fn cmd_shortcut_status(
 #[tauri::command]
 pub fn cmd_suspend_shortcut(app: tauri::AppHandle, slot: String) -> Result<(), String> {
     use crate::shortcut_manager::{ShortcutManager, ShortcutSlot};
+    if crate::dictation_experience::is_recovery_slot(&slot) {
+        return crate::dictation_experience::suspend_recovery_shortcut(&app, &slot);
+    }
     let slot = ShortcutSlot::from_str(&slot)?;
     let mgr_state = app.state::<std::sync::Arc<std::sync::Mutex<ShortcutManager>>>();
     let mut mgr = mgr_state

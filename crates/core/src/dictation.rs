@@ -1,3 +1,6 @@
+#[path = "dictation_cancellation.rs"]
+mod cancellation;
+
 use crate::apple_speech_session::AppleSpeechSession;
 use crate::config::Config;
 use crate::dictation_cleanup::{clean_dictation_text, CleanupEngine, CleanupOptions};
@@ -594,12 +597,10 @@ where
 
         loop {
             // Check stop flag (Esc / Ctrl-C / MCP stop)
-            if stop_flag.load(Ordering::Relaxed) {
-                if options
-                    .cancel_flag
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                {
+            if stop_flag.load(Ordering::Relaxed)
+                || cancellation::requested(options.cancel_flag.as_deref())
+            {
+                if cancellation::requested(options.cancel_flag.as_deref()) {
                     // Cancellation is a true discard boundary. In particular,
                     // do not flush accumulated results: that path writes the
                     // dictation file and daily note before delivering text.
@@ -616,24 +617,27 @@ where
                 // Finalize any in-progress transcription before exiting
                 if utterance_samples > 0 {
                     on_event(DictationEvent::Processing);
-                    if let Some(finalized) = finalize_dictation_transcription(
+                    if decode_and_handle_utterance(
                         config,
-                        final_backend,
-                        &apple_session,
-                        &final_utterance_samples,
-                        &mut streaming,
-                        whisper_ctx.as_ref(),
+                        options,
+                        &mut accumulated_results,
+                        on_result,
+                        || {
+                            finalize_dictation_transcription(
+                                config,
+                                final_backend,
+                                &apple_session,
+                                &final_utterance_samples,
+                                &mut streaming,
+                                whisper_ctx.as_ref(),
+                            )
+                        },
                     ) {
-                        handle_utterance(
-                            &finalized.transcript.text,
-                            finalized.transcript.duration_secs,
-                            finalized.backend,
-                            config,
-                            options.text_mode,
-                            &mut accumulated_results,
-                            on_result,
-                        );
                         on_event(DictationEvent::Success);
+                    }
+                    if cancellation::requested(options.cancel_flag.as_deref()) {
+                        // Return to the shared discard path before settling audio or outputs.
+                        continue;
                     }
                     final_utterance_samples.clear();
                 }
@@ -642,7 +646,13 @@ where
                     options.recovery_audio_path.as_ref(),
                     has_spoken,
                 )?;
-                flush_accumulated_results(config, &mut accumulated_results, on_event, on_result);
+                flush_accumulated_results(
+                    config,
+                    options,
+                    &mut accumulated_results,
+                    on_event,
+                    on_result,
+                );
                 break;
             }
 
@@ -651,24 +661,27 @@ where
                 tracing::info!("recording started — yielding dictation");
                 if utterance_samples > 0 {
                     on_event(DictationEvent::Processing);
-                    if let Some(finalized) = finalize_dictation_transcription(
+                    if decode_and_handle_utterance(
                         config,
-                        final_backend,
-                        &apple_session,
-                        &final_utterance_samples,
-                        &mut streaming,
-                        whisper_ctx.as_ref(),
+                        options,
+                        &mut accumulated_results,
+                        on_result,
+                        || {
+                            finalize_dictation_transcription(
+                                config,
+                                final_backend,
+                                &apple_session,
+                                &final_utterance_samples,
+                                &mut streaming,
+                                whisper_ctx.as_ref(),
+                            )
+                        },
                     ) {
-                        handle_utterance(
-                            &finalized.transcript.text,
-                            finalized.transcript.duration_secs,
-                            finalized.backend,
-                            config,
-                            options.text_mode,
-                            &mut accumulated_results,
-                            on_result,
-                        );
                         on_event(DictationEvent::Success);
+                    }
+                    if cancellation::requested(options.cancel_flag.as_deref()) {
+                        // Return to the shared discard path before settling audio or outputs.
+                        continue;
                     }
                     final_utterance_samples.clear();
                 }
@@ -677,7 +690,13 @@ where
                     options.recovery_audio_path.as_ref(),
                     has_spoken,
                 )?;
-                flush_accumulated_results(config, &mut accumulated_results, on_event, on_result);
+                flush_accumulated_results(
+                    config,
+                    options,
+                    &mut accumulated_results,
+                    on_event,
+                    on_result,
+                );
                 on_event(DictationEvent::Yielded);
                 break;
             }
@@ -762,24 +781,27 @@ where
                 if utterance_samples >= max_utterance_samples {
                     tracing::info!("max utterance duration reached, force-processing");
                     on_event(DictationEvent::Processing);
-                    if let Some(finalized) = finalize_dictation_transcription(
+                    if decode_and_handle_utterance(
                         config,
-                        final_backend,
-                        &apple_session,
-                        &final_utterance_samples,
-                        &mut streaming,
-                        whisper_ctx.as_ref(),
+                        options,
+                        &mut accumulated_results,
+                        on_result,
+                        || {
+                            finalize_dictation_transcription(
+                                config,
+                                final_backend,
+                                &apple_session,
+                                &final_utterance_samples,
+                                &mut streaming,
+                                whisper_ctx.as_ref(),
+                            )
+                        },
                     ) {
-                        handle_utterance(
-                            &finalized.transcript.text,
-                            finalized.transcript.duration_secs,
-                            finalized.backend,
-                            config,
-                            options.text_mode,
-                            &mut accumulated_results,
-                            on_result,
-                        );
                         on_event(DictationEvent::Success);
+                    }
+                    if cancellation::requested(options.cancel_flag.as_deref()) {
+                        // Return to the shared discard path before settling audio or outputs.
+                        continue;
                     }
                     final_utterance_samples.clear();
                     streaming.reset();
@@ -792,24 +814,27 @@ where
                 if was_speaking && utterance_samples > 0 {
                     // Speech just ended — finalize the streaming transcription
                     on_event(DictationEvent::Processing);
-                    if let Some(finalized) = finalize_dictation_transcription(
+                    if decode_and_handle_utterance(
                         config,
-                        final_backend,
-                        &apple_session,
-                        &final_utterance_samples,
-                        &mut streaming,
-                        whisper_ctx.as_ref(),
+                        options,
+                        &mut accumulated_results,
+                        on_result,
+                        || {
+                            finalize_dictation_transcription(
+                                config,
+                                final_backend,
+                                &apple_session,
+                                &final_utterance_samples,
+                                &mut streaming,
+                                whisper_ctx.as_ref(),
+                            )
+                        },
                     ) {
-                        handle_utterance(
-                            &finalized.transcript.text,
-                            finalized.transcript.duration_secs,
-                            finalized.backend,
-                            config,
-                            options.text_mode,
-                            &mut accumulated_results,
-                            on_result,
-                        );
                         on_event(DictationEvent::Success);
+                    }
+                    if cancellation::requested(options.cancel_flag.as_deref()) {
+                        // Return to the shared discard path before settling audio or outputs.
+                        continue;
                     }
                     final_utterance_samples.clear();
                     streaming.reset();
@@ -851,6 +876,7 @@ where
                     )?;
                     flush_accumulated_results(
                         config,
+                        options,
                         &mut accumulated_results,
                         on_event,
                         on_result,
@@ -1222,6 +1248,37 @@ pub fn reprocess_recovery_audio_with_mode(
     })
 }
 
+/// Decode is blocking. Escape during that work must win before any per-phrase
+/// output or combined-session output can be written. All live decode paths use
+/// this helper; no microphone or model is needed to test the output boundary.
+fn decode_and_handle_utterance<D, G>(
+    config: &Config,
+    options: &DictationRunOptions,
+    accumulated_results: &mut Vec<DictationResult>,
+    on_result: &mut G,
+    decode: D,
+) -> bool
+where
+    D: FnOnce() -> Option<FinalizedDictation>,
+    G: FnMut(DictationResult),
+{
+    let Some(finalized) =
+        cancellation::decode_unless_cancelled(options.cancel_flag.as_deref(), decode).flatten()
+    else {
+        return false;
+    };
+    handle_utterance(
+        &finalized.transcript.text,
+        finalized.transcript.duration_secs,
+        finalized.backend,
+        config,
+        options.text_mode,
+        accumulated_results,
+        on_result,
+    );
+    true
+}
+
 fn handle_utterance<G>(
     text: &str,
     duration_secs: f64,
@@ -1259,6 +1316,7 @@ fn handle_utterance<G>(
 
 fn flush_accumulated_results<F, G>(
     config: &Config,
+    options: &DictationRunOptions,
     accumulated_results: &mut Vec<DictationResult>,
     on_event: &mut F,
     on_result: &mut G,
@@ -1266,6 +1324,10 @@ fn flush_accumulated_results<F, G>(
     F: FnMut(DictationEvent),
     G: FnMut(DictationResult),
 {
+    if cancellation::requested(options.cancel_flag.as_deref()) {
+        discard_accumulated_results(accumulated_results);
+        return;
+    }
     if !config.dictation.accumulate || accumulated_results.is_empty() {
         return;
     }
@@ -1887,6 +1949,112 @@ mod tests {
         assert!(accumulated.is_empty());
         assert!(!config.daily_notes.path.exists());
         assert!(!config.output_dir.exists());
+    }
+
+    fn finalized_for_cancellation_test() -> FinalizedDictation {
+        FinalizedDictation {
+            transcript: StreamingResult {
+                text: "this must not arrive after cancellation".into(),
+                is_final: true,
+                duration_secs: 1.0,
+            },
+            backend: DictationFinalBackend::Whisper,
+        }
+    }
+
+    #[test]
+    fn late_cancellation_blocks_per_phrase_and_combined_outputs() {
+        // Exercise the actual output helper in both CLI per-phrase mode and
+        // desktop accumulated mode. The separate threaded gate test holds the
+        // decoder open until another thread has cancelled it.
+        for accumulate in [false, true] {
+            for destination in ["file", "daily_note", "stdout"] {
+                let dir = TempDir::new().unwrap();
+                let mut config = test_config(dir.path());
+                config.dictation.accumulate = accumulate;
+                config.dictation.destination = destination.into();
+                config.dictation.daily_note_log = true;
+                let cancel = Arc::new(AtomicBool::new(false));
+                let options = DictationRunOptions {
+                    cancel_flag: Some(Arc::clone(&cancel)),
+                    ..DictationRunOptions::default()
+                };
+                let mut accumulated = Vec::new();
+                if accumulate {
+                    // Earlier pauses may already have accumulated text. That
+                    // text must also be discarded at the final output gate.
+                    accumulated.push(
+                        prepare_result(
+                            "an earlier phrase",
+                            1.0,
+                            DictationFinalBackend::Whisper,
+                            &config,
+                            DictationTextMode::Unknown,
+                        )
+                        .unwrap(),
+                    );
+                }
+                let mut deliveries = 0;
+                let mut events = 0;
+                assert!(!decode_and_handle_utterance(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |_| deliveries += 1,
+                    || {
+                        cancel.store(true, Ordering::Release);
+                        Some(finalized_for_cancellation_test())
+                    },
+                ));
+                flush_accumulated_results(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |_| events += 1,
+                    &mut |_| deliveries += 1,
+                );
+                assert_eq!(deliveries, 0, "{destination}, accumulate={accumulate}");
+                assert_eq!(events, 0);
+                assert!(accumulated.is_empty());
+                assert!(!config.output_dir.exists());
+                assert!(!config.daily_notes.path.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn uncancelled_decode_still_writes_and_delivers_once() {
+        for accumulate in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let mut config = test_config(dir.path());
+            config.dictation.destination = "file".into();
+            config.dictation.accumulate = accumulate;
+            config.dictation.daily_note_log = true;
+            let options = DictationRunOptions::default();
+            let mut accumulated = Vec::new();
+            let mut delivered = Vec::new();
+            assert!(decode_and_handle_utterance(
+                &config,
+                &options,
+                &mut accumulated,
+                &mut |result| delivered.push(result),
+                || Some(finalized_for_cancellation_test()),
+            ));
+            flush_accumulated_results(
+                &config,
+                &options,
+                &mut accumulated,
+                &mut |_| {},
+                &mut |result| delivered.push(result),
+            );
+            assert_eq!(delivered.len(), 1);
+            let path = delivered[0].file_path.as_ref().unwrap();
+            let written = std::fs::read_to_string(path).unwrap();
+            assert!(written.contains(&delivered[0].text));
+            assert!(delivered[0].daily_note_appended);
+            assert!(config.daily_notes.path.exists());
+            assert!(accumulated.is_empty());
+        }
     }
 
     #[test]

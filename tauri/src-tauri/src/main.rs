@@ -3216,6 +3216,8 @@ fn main() {
             commands::cmd_dismiss_dictation_overlay,
             commands::cmd_dictation_overlay_ready,
             commands::cmd_recent_dictations,
+            dictation_experience::cmd_accept_dictation_recovery,
+            dictation_experience::cmd_dictation_audio,
             dictation_experience::cmd_dictation_preferences,
             dictation_experience::cmd_dictation_history_destination,
             dictation_experience::cmd_dictation_correction,
@@ -3635,8 +3637,8 @@ mod tray_activity_tests {
 
         assert!(commands_rs.contains("\"activeLabel\": \"copy only\""));
         assert!(
-            overlay.contains("const destinationHint = earlyInsertionFallback")
-                && overlay.contains("insertionActiveLabel || 'copy only'")
+            overlay.contains("return earlyInsertionFallback ? 'Copy only' : ''")
+                && overlay.contains("pill.classList.add('capture-warning')")
                 && overlay.contains("'Copied · typing needs setup'")
                 && overlay.contains("permissionButton.classList.remove('hidden')")
                 && overlay.contains("cmd_show_dictation_permission_help"),
@@ -3733,19 +3735,24 @@ mod tray_activity_tests {
         let overlay =
             std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
                 .expect("failed to read dictation overlay");
-        let success_case = overlay
-            .split("case 'success':")
+        let checkpoint_guard = overlay
+            .split("function renderOverlaySnapshot(snapshot) {")
             .nth(1)
-            .and_then(|tail| tail.split("case 'copied':").next())
-            .expect("success case should be extractable");
+            .and_then(|tail| {
+                tail.split("const stateChanged = state !== lastState;")
+                    .next()
+            })
+            .expect("snapshot checkpoint guard should be extractable");
 
         assert!(
-            success_case.contains("label.textContent = 'Captured'"),
-            "per-utterance success should be presented as an in-session capture checkpoint"
+            checkpoint_guard.contains("if (state === 'success') return;"),
+            "per-utterance success must preserve the current listening presentation"
         );
         assert!(
-            !success_case.contains("scheduleDismiss") && !success_case.contains("dismiss()"),
-            "per-utterance success must not schedule dismissal while dictation can continue"
+            !checkpoint_guard.contains("scheduleDismiss")
+                && !checkpoint_guard.contains("dismiss()")
+                && !checkpoint_guard.contains("playCue("),
+            "per-utterance success must not dismiss or play completion feedback"
         );
         assert!(
             overlay.contains("if (!isTerminalState(state))")

@@ -25,18 +25,42 @@ pub struct Preferences {
     pub experience: DictationExperience,
     pub snippets: std::collections::BTreeMap<String, String>,
 }
+#[derive(Serialize)]
+pub struct PreferencesView {
+    #[serde(flatten)]
+    preferences: Preferences,
+    model: ModelReadiness,
+}
+#[derive(Serialize)]
+struct ModelReadiness {
+    name: String,
+    ready: bool,
+}
 pub fn honor_legacy_cleanup(config: &mut Config) {
     if ["none", "off"].contains(&config.dictation.cleanup_engine.as_str()) {
         config.dictation.experience.writing_style = "literal".into();
     }
 }
 #[tauri::command]
-pub fn cmd_dictation_preferences() -> Preferences {
+pub fn cmd_dictation_preferences() -> PreferencesView {
     let mut config = Config::load();
     honor_legacy_cleanup(&mut config);
-    Preferences {
-        experience: config.dictation.experience,
-        snippets: config.dictation.voice_snippets,
+    // Use the same filesystem-only preflight as capture. Checking readiness
+    // neither loads a model nor opens an input device.
+    let model = ModelReadiness {
+        name: if config.dictation.backend == "parakeet" {
+            config.transcription.parakeet_model.clone()
+        } else {
+            config.dictation.model.clone()
+        },
+        ready: minutes_core::dictation::preflight_model(&config).is_ok(),
+    };
+    PreferencesView {
+        preferences: Preferences {
+            experience: config.dictation.experience,
+            snippets: config.dictation.voice_snippets,
+        },
+        model,
     }
 }
 fn bindings(prefs: &DictationExperience) -> Result<Vec<(Shortcut, bool)>, String> {
@@ -111,7 +135,9 @@ fn apply_bindings(
     // IDs have been acquired; restore the complete old set on failure.
     let additions: Vec<_> = new
         .iter()
-        .filter(|(shortcut, _)| !old.iter().any(|(s, _)| s.id() == shortcut.id()))
+        .filter(|(shortcut, _)| {
+            !old.iter().any(|(s, _)| s.id() == shortcut.id()) || !manager.is_registered(*shortcut)
+        })
         .collect();
     let mut acquired = Vec::new();
     for (shortcut, _) in additions {
@@ -169,6 +195,10 @@ pub fn cmd_save_dictation_preferences(
     let _lock = SETTINGS_WRITE
         .lock()
         .map_err(|_| "Settings are busy. Try again.".to_string())?;
+    save_preferences_locked(&app, preferences)
+}
+
+fn save_preferences_locked(app: &tauri::AppHandle, preferences: Preferences) -> Result<(), String> {
     preferences.experience.validate()?;
     if preferences.snippets.len() > 128
         || preferences.snippets.iter().any(|(name, text)| {
@@ -196,7 +226,7 @@ pub fn cmd_save_dictation_preferences(
     }) {
         return Err("Disable the shortcut before assigning it to a different action.".into());
     }
-    apply_bindings(&app, &old, &preferences.experience)?;
+    apply_bindings(app, &old, &preferences.experience)?;
     config.dictation.cleanup_engine = if preferences.experience.writing_style == "literal" {
         "none".into()
     } else {
@@ -205,13 +235,114 @@ pub fn cmd_save_dictation_preferences(
     config.dictation.experience = preferences.experience.clone();
     config.dictation.voice_snippets = preferences.snippets;
     if let Err(error) = config.save() {
-        let rollback = apply_bindings(&app, &preferences.experience, &old);
+        let rollback = apply_bindings(app, &preferences.experience, &old);
         return Err(format!(
             "Could not save dictation preferences: {error}. Shortcut rollback: {}",
             rollback.err().unwrap_or_else(|| "restored".into())
         ));
     }
     app.emit("dictation:preferences-changed", ()).ok();
+    Ok(())
+}
+
+/// Recovery uses the standard shortcut recorder and its existing commands,
+/// while keeping the two recovery actions in the preferences transaction.
+pub fn is_recovery_slot(slot: &str) -> bool {
+    matches!(slot, "dictation_paste_last" | "dictation_history")
+}
+
+pub fn recovery_shortcut_status(
+    app: &tauri::AppHandle,
+    slot: &str,
+) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
+    let config = Config::load();
+    let prefs = &config.dictation.experience;
+    let (enabled, shortcut) = match slot {
+        "dictation_paste_last" => (prefs.paste_last_enabled, &prefs.paste_last_shortcut),
+        "dictation_history" => (prefs.history_shortcut_enabled, &prefs.history_shortcut),
+        _ => return Err("Unknown recovery shortcut.".into()),
+    };
+    let parsed = shortcut.parse::<Shortcut>().map_err(|e| e.to_string())?;
+    let registered = enabled && app.global_shortcut().is_registered(parsed);
+    Ok(crate::shortcut_manager::ShortcutStatus {
+        slot: slot.into(),
+        enabled: registered,
+        pending: false,
+        shortcut: shortcut.clone(),
+        keycode: -1,
+        backend: "standard".into(),
+        needs_permission: false,
+        message: if registered {
+            "Available in your destination app.".into()
+        } else if enabled {
+            "Shortcut could not be registered. Enable it to try again.".into()
+        } else {
+            "Off. Click the shortcut to choose your keys.".into()
+        },
+    })
+}
+
+pub fn set_recovery_shortcut(
+    app: &tauri::AppHandle,
+    slot: &str,
+    enabled: bool,
+    shortcut: String,
+    keycode: i64,
+) -> Result<crate::shortcut_manager::ShortcutStatus, String> {
+    if matches!(keycode, 57 | 63) {
+        return Err(
+            "Recovery shortcuts need a key combination with Command, Control or Option.".into(),
+        );
+    }
+    if shortcut.len() > 50 {
+        return Err("Choose a shorter key combination.".into());
+    }
+    let parsed = shortcut
+        .parse::<Shortcut>()
+        .map_err(|_| "Choose a key combination such as Command Option V.".to_string())?;
+    if !parsed
+        .mods
+        .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
+    {
+        return Err("Include Command, Control or Option in a recovery shortcut.".into());
+    }
+    let _lock = SETTINGS_WRITE
+        .lock()
+        .map_err(|_| "Settings are busy. Try again.".to_string())?;
+    let config = Config::load();
+    let mut preferences = Preferences {
+        experience: config.dictation.experience,
+        snippets: config.dictation.voice_snippets,
+    };
+    match slot {
+        "dictation_paste_last" => {
+            preferences.experience.paste_last_enabled = enabled;
+            preferences.experience.paste_last_shortcut = shortcut;
+        }
+        "dictation_history" => {
+            preferences.experience.history_shortcut_enabled = enabled;
+            preferences.experience.history_shortcut = shortcut;
+        }
+        _ => return Err("Unknown recovery shortcut.".into()),
+    }
+    save_preferences_locked(app, preferences)?;
+    recovery_shortcut_status(app, slot)
+}
+
+pub fn suspend_recovery_shortcut(app: &tauri::AppHandle, slot: &str) -> Result<(), String> {
+    let _lock = SETTINGS_WRITE
+        .lock()
+        .map_err(|_| "Settings are busy. Try again.".to_string())?;
+    let status = recovery_shortcut_status(app, slot)?;
+    if status.enabled {
+        let shortcut = status
+            .shortcut
+            .parse::<Shortcut>()
+            .map_err(|e| e.to_string())?;
+        app.global_shortcut()
+            .unregister(shortcut)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 pub fn capture_busy(app: &tauri::AppHandle) -> bool {
@@ -298,7 +429,19 @@ pub fn cmd_test_dictation_microphone(app: tauri::AppHandle) -> Result<(), String
 #[tauri::command]
 pub fn cmd_dictation_devices() -> serde_json::Value {
     let entries = minutes_core::capture::list_input_devices_detailed();
-    serde_json::json!({"entries":entries, "lidClosed":minutes_core::dictation_experience::laptop_lid_closed()})
+    let config = Config::load();
+    let lid_closed = minutes_core::dictation_experience::laptop_lid_closed();
+    let names = entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    let candidates = minutes_core::dictation_experience::microphone_candidates(
+        &config.dictation.experience,
+        &names,
+        config.recording.device.as_deref(),
+        lid_closed,
+    );
+    serde_json::json!({"entries":entries, "lidClosed":lid_closed, "candidates":candidates})
 }
 pub fn remember_delivery(field: Option<&FieldSnapshot>, inserted: &str) {
     if let Ok(mut slot) = LAST_UNDO.lock() {
@@ -525,4 +668,63 @@ pub fn cmd_dictation_history_destination(app: tauri::AppHandle) -> serde_json::V
             && target.platform == "macos"
     });
     serde_json::json!({"ready":target.is_some(), "appName":target.and_then(|target| target.app_name)})
+}
+
+#[path = "dictation_recovery_preview.rs"]
+mod recovery_preview;
+#[derive(Clone)]
+struct RecoveryPreview {
+    before: minutes_core::dictation_memory::DictationMemoryRecord,
+    after: minutes_core::dictation_memory::DictationMemoryRecord,
+}
+static RECOVERY_PREVIEWS: LazyLock<recovery_preview::PreviewStore<RecoveryPreview>> =
+    LazyLock::new(recovery_preview::PreviewStore::new);
+
+pub(crate) fn preserve_original_transcript(
+    before: &minutes_core::dictation_memory::DictationMemoryRecord,
+    after: &mut minutes_core::dictation_memory::DictationMemoryRecord,
+) {
+    after.preserve_original_from(before);
+}
+pub(crate) fn stage_recovery(
+    before: minutes_core::dictation_memory::DictationMemoryRecord,
+    after: minutes_core::dictation_memory::DictationMemoryRecord,
+) -> Result<String, String> {
+    RECOVERY_PREVIEWS.stage(RecoveryPreview { before, after })
+}
+
+#[tauri::command]
+pub fn cmd_accept_dictation_recovery(
+    window: tauri::WebviewWindow,
+    candidate_id: String,
+) -> Result<String, String> {
+    if window.label() != "main" {
+        return Err("Review recovery in the main Minutes window.".into());
+    }
+    let mut preview = RECOVERY_PREVIEWS.get(&candidate_id)?;
+    preserve_original_transcript(&preview.before, &mut preview.after);
+    minutes_core::dictation_memory::replace_record_if_unchanged(&preview.before, preview.after)
+        .map_err(|error| format!("Could not save recovered text: {error}"))?;
+    RECOVERY_PREVIEWS.remove(&candidate_id);
+    Ok("Saved the recovered transcript. The original text and audio are still available. Nothing was pasted.".into())
+}
+
+#[tauri::command]
+pub fn cmd_dictation_audio(window: tauri::WebviewWindow, id: String) -> Result<String, String> {
+    use base64::Engine;
+    if window.label() != "main" {
+        return Err("Listen to recovery audio in the main Minutes window.".into());
+    }
+    let record = minutes_core::dictation_memory::find_record(&id)
+        .map_err(|error| format!("Could not load history: {error}"))?
+        .ok_or("This dictation is no longer in history.")?;
+    let path = record
+        .recovery_audio_path
+        .ok_or("This dictation has no saved audio.")?;
+    let bytes = minutes_core::dictation_memory::read_recovery_audio_preview(&path)
+        .map_err(|error| format!("Could not play saved audio: {error}"))?;
+    Ok(format!(
+        "data:audio/wav;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }

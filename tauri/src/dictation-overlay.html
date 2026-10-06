@@ -41,6 +41,10 @@
       --text-tertiary:  #3D3B38;
       --accent:     #30D158;
       --capture:    #62BCE9;
+      --capture-surface: #28231F;
+      --capture-edge: rgba(229, 201, 174, 0.14);
+      --capture-control: #C1AC96;
+      --capture-meter: #E5BC98;
       --capture-ring: rgba(98, 188, 233, 0.16);
       --red:        #FF453A;
       --green:      #30D158;
@@ -68,6 +72,10 @@
         --text-tertiary:  #BDB9B0;
         --accent:         #C96B4E;
         --capture:        #2F6F8F;
+        --capture-surface: #EFE6D8;
+        --capture-edge: rgba(113, 79, 52, 0.16);
+        --capture-control: #756351;
+        --capture-meter: #9A6240;
         --capture-ring:   rgba(47, 111, 143, 0.13);
         --red:            #C0392B;
         --green:          #2E7D46;
@@ -223,7 +231,7 @@
     .timer {
       font-size: var(--text-sm);
       font-weight: 600;
-      color: var(--text-secondary);
+      color: var(--text);
       font-variant-numeric: tabular-nums;
       flex-shrink: 0;
       letter-spacing: 0;
@@ -309,7 +317,7 @@
     .text-content {
       font-size: var(--text-body);
       font-weight: 400;
-      color: var(--text-secondary);
+      color: var(--text);
       line-height: 1.35;
       max-height: 2.7em;
       overflow: hidden;
@@ -400,6 +408,35 @@
         transform: scaleY(0.35) !important;
       }
     }
+    .capture-controls { display: flex; gap: 4px; margin-left: auto; flex-shrink: 0; }
+    .capture-controls.hidden, .capture-controls button.hidden { display: none; }
+    .pill.capturing {
+      width: 12rem;
+      height: 2.5rem;
+      margin: 0 auto;
+      border-radius: 1.25rem;
+      background-color: var(--capture-surface);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cg fill='%23B99776' fill-opacity='.10'%3E%3Cpath d='M0 0h1v1H0zM4 2h1v1H4zM2 4h1v1H2zM6 6h1v1H6z'/%3E%3C/g%3E%3C/svg%3E");
+      border-color: var(--capture-edge);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+    }
+    .pill.capturing .status-row { padding: 0.375rem 0.625rem; min-height: 2.5rem; gap: 0.5rem; }
+    .pill.capturing #indicator, .pill.capturing .timer, .pill.capturing .label { display: none !important; }
+    .pill.capturing.capture-warning { width: 100%; }
+    .pill.capturing.capture-warning .label { display: block !important; font-size: var(--text-body); }
+    .pill.capturing .waveform { flex: 1; justify-content: center; }
+    .pill.capturing .waveform .bar { background: var(--capture-meter); border-radius: 1px; opacity: 1; }
+    .pill.capturing .waveform .bar:nth-child(3n + 1) { opacity: 0.72; }
+    .pill.capturing .waveform .bar:nth-child(3n + 2) { opacity: 0.88; }
+    .capture-controls .recovery-button {
+      width: 1.75rem; height: 1.75rem; padding: 0; display: grid; place-items: center;
+      border: 0; background: transparent; color: var(--capture-control);
+    }
+    .capture-controls .recovery-button:hover { background: var(--border); color: var(--text); }
+    .capture-controls svg { width: 1rem; height: 1rem; pointer-events: none; }
+    .capture-controls button:focus-visible { outline: 2px solid var(--capture); outline-offset: 2px; }
+    .status-row:has(.capture-controls:not(.hidden)) { gap: 6px; }
+    .status-row:has(.capture-controls:not(.hidden)) .waveform { gap: 2px; }
   </style>
 </head>
 <body>
@@ -411,15 +448,16 @@
       <button class="recovery-button hidden" id="reprocess-button" type="button">Recover text</button>
       <button class="recovery-button hidden" id="permission-button" type="button">Open Settings</button>
       <div class="waveform" id="waveform" style="display:none">
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
-        <div class="bar" style="height:4px"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
+        <div class="bar"></div>
       </div>
       <span class="timer" id="timer" style="display:none">0:00</span>
+      <div class="capture-controls hidden" id="capture-controls"><button id="finish-button" class="recovery-button" type="button" aria-label="Finish dictation" title="Finish dictation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 8 3 3 7-7"/></svg></button><button id="cancel-button" class="recovery-button" type="button" aria-label="Cancel dictation without inserting" title="Cancel dictation"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></div>
     </div>
     <div class="text-row" id="text-row">
       <div class="text-content placeholder" id="text-content">...</div>
@@ -439,16 +477,19 @@
     const permissionButton = document.getElementById('permission-button');
     const waveform = document.getElementById('waveform');
     const timer = document.getElementById('timer');
+    const captureControls = document.getElementById('capture-controls');
+    const finishButton = document.getElementById('finish-button');
+    const cancelButton = document.getElementById('cancel-button');
     const textRow = document.getElementById('text-row');
     const textContent = document.getElementById('text-content');
     const silenceBar = document.getElementById('silence-bar');
     const announcement = document.getElementById('announcement');
     const bars = waveform.querySelectorAll('.bar');
     const cues = {
-      start: new Audio('audio/cue-start.wav'),
+      start: new Audio('audio/dictation-cue-start.wav'),
       stop: new Audio('audio/cue-stop.wav'),
-      complete: new Audio('audio/cue-complete.wav'),
-      error: new Audio('audio/cue-error.wav'),
+      complete: new Audio('audio/dictation-cue-complete.wav'),
+      error: new Audio('audio/dictation-cue-error.wav'),
     };
 
     let startTime = null;
@@ -456,6 +497,7 @@
     let lastState = null;
     let sessionStarted = false;
     let terminalCuePlayed = false;
+    let stopCuePlayed = false;
     let partialText = '';
     let partialDebounce = null;
     let silenceTimeout = null;
@@ -503,13 +545,18 @@
       const cue = cues[name];
       if (!cue) return;
       try {
+        // A fast delivery can follow the finishing cue immediately. Keep
+        // acknowledgements distinct rather than layering sounds together.
+        Object.values(cues).forEach((other) => other.pause());
         cue.currentTime = 0;
         cue.play().catch(() => {});
       } catch (_) {}
     }
 
     window.addEventListener('storage', (event) => {
-      if (event.key === 'minutes.playCaptureCues') cuesEnabled = event.newValue !== 'false';
+      if (event.key !== 'minutes.playCaptureCues') return;
+      cuesEnabled = event.newValue !== 'false';
+      if (!cuesEnabled) Object.values(cues).forEach((cue) => cue.pause());
     });
 
     function announceState(state) {
@@ -684,42 +731,61 @@
       overlayRevision = snapshot.revision;
       activeCaptureStyle = snapshot.captureStyle || null;
       const state = snapshot.state;
+      // Older backends can publish segment success while still listening.
+      // Only an explicit delivery outcome earns completion feedback.
+      if (state === 'success') return;
+      if (!['listening', 'accumulating'].includes(state)) { label.title = ''; pill.title = ''; }
+      const stateChanged = state !== lastState;
+      if (stateChanged && state === 'starting') {
+        sessionStarted = false;
+        stopCuePlayed = false;
+        terminalCuePlayed = false;
+        lastAnnouncement = '';
+      }
       if (!isTerminalState(state)) {
         cancelDismissTimer();
       }
 
-      if (state !== lastState) {
+      if (stateChanged) {
         if ((state === 'listening' || state === 'accumulating') && !sessionStarted) {
           playCue('start');
           sessionStarted = true;
           terminalCuePlayed = false;
+          stopCuePlayed = false;
         }
-        if (state === 'success' && !terminalCuePlayed) {
-          playCue('complete');
+        if ((state === 'processing' || state === 'inserting') && sessionStarted && !stopCuePlayed) {
+          stopCuePlayed = true;
+        }
+        if ((state === 'typed' || state === 'pasted' || state === 'copied') && !terminalCuePlayed) {
+          playCue(state === 'copied' && insertionNeedsHelp ? 'error' : 'complete');
           terminalCuePlayed = true;
         }
-        if ((state === 'typed' || state === 'pasted' || state === 'copied' || state === 'blocked') && !terminalCuePlayed) {
-          playCue('complete');
-          terminalCuePlayed = true;
-        }
-        if ((state === 'error' || state === 'model-missing') && !terminalCuePlayed) {
+        if ((state === 'error' || state === 'model-missing' || state === 'blocked' || state === 'recoverable') && !terminalCuePlayed) {
           playCue('error');
           terminalCuePlayed = true;
+        }
+        if (state === 'cancelled' || state === 'yielded') {
+          Object.values(cues).forEach((cue) => cue.pause());
         }
         announceState(state);
         lastState = state;
       }
 
       pill.classList.remove('error');
+      pill.classList.toggle('capturing', ['listening', 'accumulating'].includes(state));
+      pill.classList.toggle('capture-warning', earlyInsertionFallback && ['listening', 'accumulating'].includes(state));
       stopTimer();
       hideSilenceBar();
-      soften(label);
+      if (stateChanged) soften(label);
       setWaveformProcessing(false);
       if (state !== 'model-missing') {
         downloadButton.classList.add('hidden');
       }
       reprocessButton.classList.add('hidden');
       permissionButton.classList.add('hidden');
+      captureControls.classList.toggle('hidden', !['listening', 'accumulating'].includes(state));
+      finishButton.classList.toggle('hidden', activeCaptureStyle === 'held');
+      finishButton.disabled = false; cancelButton.disabled = false;
 
       switch (state) {
         case 'starting':
@@ -740,7 +806,7 @@
           break;
 
         case 'listening':
-          setIndicator('dot-blink');
+          setIndicator('dot-solid');
           label.textContent = captureLabel('Listening');
           waveform.style.display = 'flex';
           timer.style.display = '';
@@ -761,10 +827,9 @@
           break;
 
         case 'processing':
-          setIndicator('none');
-          label.textContent = 'Processing';
-          waveform.style.display = 'flex';
-          setWaveformProcessing(true);
+          setIndicator('spinner');
+          label.textContent = 'Finishing…';
+          waveform.style.display = 'none';
           // timer stays frozen (don't hide it)
           // Stay compact — will expand when success shows final text
           showExpanded(false);
@@ -779,15 +844,7 @@
           label.textContent = 'Typing\u2026';
           waveform.style.display = 'none';
           timer.style.display = 'none';
-          showExpanded(true);
-          break;
-
-        case 'success':
-          setIndicator('success');
-          label.textContent = 'Captured';
-          waveform.style.display = 'none';
-          timer.style.display = 'none';
-          showExpanded(true);
+          showExpanded(false);
           break;
 
         case 'copied':
@@ -802,7 +859,7 @@
             permissionButton.classList.remove('hidden');
             scheduleDismiss(7000);
           } else {
-            scheduleDismiss(400);
+            scheduleDismiss(1200);
           }
           break;
 
@@ -811,8 +868,8 @@
           label.textContent = 'Typed';
           waveform.style.display = 'none';
           timer.style.display = 'none';
-          showExpanded(true);
-          scheduleDismiss(400);
+          showExpanded(false);
+          scheduleDismiss(1200);
           break;
 
         case 'pasted':
@@ -820,8 +877,8 @@
           label.textContent = 'Pasted';
           waveform.style.display = 'none';
           timer.style.display = 'none';
-          showExpanded(true);
-          scheduleDismiss(400);
+          showExpanded(false);
+          scheduleDismiss(1200);
           break;
 
         case 'blocked':
@@ -876,16 +933,18 @@
     }
 
     function captureLabel(activity) {
-      const finishHint = activeCaptureStyle === 'hold'
-        ? 'Release to finish'
-        : activeCaptureStyle === 'locked'
-          ? 'Tap again to finish'
-          : '';
-      const destinationHint = earlyInsertionFallback
-        ? insertionActiveLabel || 'copy only'
-        : '';
-      return [activity, finishHint, destinationHint].filter(Boolean).join(' · ');
+      pill.title = activeCaptureStyle === 'held' ? 'Release to finish. Escape cancels.' : 'Tap again to finish, or choose Finish. Escape cancels.';
+      label.title = pill.title;
+      return earlyInsertionFallback ? 'Copy only' : '';
     }
+
+    async function finishCapture(command) {
+      finishButton.disabled = true; cancelButton.disabled = true;
+      try { await window.__TAURI__.core.invoke(command); }
+      catch (error) { finishButton.disabled = false; cancelButton.disabled = false; announcement.textContent = String(error); }
+    }
+    finishButton.addEventListener('click', (event) => { event.stopPropagation(); finishCapture('cmd_stop_dictation'); });
+    cancelButton.addEventListener('click', (event) => { event.stopPropagation(); finishCapture('cmd_cancel_dictation'); });
 
     pill.addEventListener('mousedown', async (event) => {
       if (event.button !== 0 || event.target.closest('button')) return;
@@ -922,7 +981,7 @@
       } else if (progress.status === 'complete') {
         modelDownloadInProgress = false;
         setIndicator('success');
-        label.textContent = 'Model ready — press fn to dictate';
+        label.textContent = 'Model ready — use your dictation shortcut';
         setTextContent(`${modelMissingDetails.model} installed successfully.`, false);
         downloadButton.classList.add('hidden');
         scheduleDismiss(4500);
@@ -954,7 +1013,7 @@
         });
         modelDownloadInProgress = false;
         setIndicator('success');
-        label.textContent = 'Model ready — press fn to dictate';
+        label.textContent = 'Model ready — use your dictation shortcut';
         setTextContent(`${modelMissingDetails.model} installed successfully.`, false);
         downloadButton.classList.add('hidden');
         scheduleDismiss(4500);
@@ -1050,10 +1109,14 @@
 
     // Listen for audio level updates (waveform animation)
     listen('dictation:level', (e) => {
-      const level = e.payload; // 0-100
-      const normalized = level / 100;
+      if (!['listening', 'accumulating'].includes(lastState)) return;
+      const level = Number(e.payload); // 0-100
+      if (!Number.isFinite(level)) return;
+      const normalized = Math.max(0, Math.min(100, level)) / 100;
       bars.forEach((bar, i) => {
-        const variance = Math.sin((i / bars.length) * Math.PI + Date.now() / 200) * 0.3 + 0.7;
+        // A stable silhouette, driven by measured input rather than a fake
+        // time-based wave. The 16px CSS height is the transform's basis.
+        const variance = Math.sin(((i + 1) / (bars.length + 1)) * Math.PI) * 0.3 + 0.7;
         const h = 4 + normalized * 12 * variance;
         bar.style.transform = `scaleY(${Math.max(4, Math.min(16, h)) / 16})`;
       });
@@ -1071,6 +1134,7 @@
         && payload.method === 'clipboard_only'
         && String(payload.message || '').startsWith('Could not type into the active app.');
       if (earlyInsertionFallback && (lastState === 'listening' || lastState === 'accumulating')) {
+        pill.classList.add('capture-warning');
         label.textContent = captureLabel(lastState === 'accumulating' ? 'Dictating' : 'Listening');
       }
     });

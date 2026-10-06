@@ -73,6 +73,8 @@
     }
 
     :root {
+      --dictation-action-bg: #2F6F8F;
+      --dictation-action-text: #F8F4ED;
       color-scheme: light dark;
       --bg: #0D0D0B;
       --bg-elevated: #141412;
@@ -5816,6 +5818,7 @@
         </div>
       </div>
       <div class="header-actions">
+        <button class="header-chip" id="btn-dictation" type="button">Dictation</button>
         <button class="btn btn-icon" id="btn-settings">⚙</button>
         <button class="header-chip readiness" id="btn-readiness">Readiness</button>
         <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
@@ -6705,9 +6708,14 @@
 
       </div><!-- /panel-transcription -->
 
-<div class="settings-tab-panel" role="tabpanel" id="panel-dictation" data-panel="dictation" aria-labelledby="tab-dictation"><div class="dictation-page"><h2>Dictation</h2><p class="dictation-intro">Your words, in the app you’re using. Hold to speak, or tap to keep listening.</p><nav class="dictation-nav" role="tablist" aria-label="Dictation preferences"><button role="tab" id="dictation-nav-writing" aria-controls="dictation-pane-writing" aria-selected="true" data-dictation-pane="writing">Writing</button><button role="tab" id="dictation-nav-words" aria-controls="dictation-pane-words" aria-selected="false" tabindex="-1" data-dictation-pane="words">Words &amp; snippets</button><button role="tab" id="dictation-nav-mic" aria-controls="dictation-pane-mic" aria-selected="false" tabindex="-1" data-dictation-pane="mic">Microphone</button><button role="tab" id="dictation-nav-recent" aria-controls="dictation-pane-recent" aria-selected="false" tabindex="-1" data-dictation-pane="recent">Recent text</button></nav><div id="dictation-save-status" class="dictation-save-status" role="status" aria-live="polite"></div><div id="dictation-pane-writing" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-writing">      <!-- Dictation -->
+<div class="settings-tab-panel" role="tabpanel" id="panel-dictation" data-panel="dictation" aria-labelledby="tab-dictation"><div class="dictation-page"><h2>Dictation</h2><p class="dictation-intro">Speak in any app. Your words stay on this device.</p><nav class="dictation-nav" role="tablist" aria-label="Dictation preferences"><button role="tab" id="dictation-nav-writing" aria-controls="dictation-pane-writing" aria-selected="true" data-dictation-pane="writing">Writing</button><button role="tab" id="dictation-nav-words" aria-controls="dictation-pane-words" aria-selected="false" tabindex="-1" data-dictation-pane="words">Words &amp; snippets</button><button role="tab" id="dictation-nav-mic" aria-controls="dictation-pane-mic" aria-selected="false" tabindex="-1" data-dictation-pane="mic">Microphone</button><button role="tab" id="dictation-nav-recent" aria-controls="dictation-pane-recent" aria-selected="false" tabindex="-1" data-dictation-pane="recent">Recent text</button></nav><div id="dictation-save-status" class="dictation-save-status" role="status" aria-live="polite"></div><div id="dictation-pane-writing" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-writing">      <!-- Dictation -->
+      <section class="dictation-readiness" aria-labelledby="dictation-ready-title">
+        <div class="dictation-ready-heading"><div><h3 id="dictation-ready-title">Checking dictation…</h3><p id="dictation-ready-summary" class="dictation-note" role="status" aria-live="polite">Checking your shortcut, microphone and model on this device.</p></div><div class="dictation-ready-controls"><button id="dictation-ready-toggle" type="button" class="btn btn-secondary btn-sm" aria-controls="dictation-ready-body" aria-expanded="true">Hide checks</button><button id="dictation-ready-refresh" type="button" class="btn btn-secondary btn-sm">Check again</button></div></div>
+        <div id="dictation-ready-body"><div id="dictation-ready-rows" class="dictation-ready-rows" aria-busy="true"></div></div>
+        <div class="dictation-ready-footer"><button id="dictation-ready-practice" type="button" class="btn btn-primary" disabled>Try dictation here</button><p class="dictation-note">A real dictation using your normal history settings.</p></div>
+      </section>
       <div class="settings-section">
-        <h3>Capture and writing</h3>
+        <h3>Speak with your shortcut</h3>
         <!-- Dictation shortcut (unified recorder) -->
         <div class="about-controls">
           <div class="about-controls-group">
@@ -6716,14 +6724,16 @@
               <button id="shortcut-recorder-dictation"
                 class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key"
                 data-slot="dictation">&#8984; Shift Space</button>
-              <span class="special-key-link settings-hint-link" data-slot="dictation">or <u>Caps Lock</u> /
-                <u>fn</u></span>
+              <span class="special-key-link settings-hint-link" data-slot="dictation">or <button type="button" class="dictation-key-choice">Caps Lock</button> /
+                <button type="button" class="dictation-key-choice">fn</button></span>
             </div>
             <div class="about-controls-meta" id="shortcut-status-dictation">Hold to dictate, or tap to lock and tap
               again to stop.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
         </div>
+        <div class="dictation-gestures" aria-label="How to dictate"><p><strong>Hold</strong> to speak. Release to finish.</p><p><strong>Tap</strong> to keep listening. Tap again or choose Finish.</p><p><strong>Escape</strong> cancels without inserting.</p></div>
+        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Try: Let’s meet on Thursday at ten." spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Where dictated text goes</div>
@@ -6736,13 +6746,20 @@
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Sound cues</div>
+            <div class="about-controls-meta" id="dictation-cues-description">Quiet cues when listening starts, you finish, and text is ready. Turn off for shared spaces. Also applies to recording.</div>
+          </div>
+          <button id="dictation-cues" type="button" class="btn btn-secondary btn-sm toggle-btn" aria-label="Sound cues" aria-describedby="dictation-cues-description" aria-pressed="true">On</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Writing style</div>
             <select id="settings-dictation-writing-style" class="settings-field">
               <option value="natural">Natural — light formatting and filler cleanup</option>
               <option value="casual">Casual — natural text without a final period</option>
               <option value="literal">Literal — keep the transcript as spoken</option>
             </select>
-            <div class="about-controls-meta">Natural formatting is deterministic and stays on this device. It does not rewrite meaning.</div>
+            <div class="about-controls-meta">Lightly cleans fillers and punctuation. Your meaning stays yours.</div>
           </div>
         </div>
         <details class="settings-advanced">
@@ -6754,8 +6771,10 @@
                 <option value="tiny">tiny — fastest, lower quality</option>
                 <option value="base">base — fast, decent quality (default)</option>
                 <option value="small">small — good quality, slower</option>
+                <option value="medium">medium — more accurate, slower</option>
+                <option value="large-v3">large-v3 — highest Whisper quality, most memory</option>
               </select>
-              <div class="about-controls-meta">Smaller models are faster. Base is recommended.</div>
+              <div class="about-controls-meta">Larger Whisper models use more memory and take longer. Install a missing model above, or manage models in Transcription settings.</div>
             </div>
           </div>
           <div class="about-controls">
@@ -6782,29 +6801,31 @@
       </div>
 
 
-        <section class="dictation-block">
-          <div class="dictation-line"><div><h3>Fit the cursor</h3><p class="dictation-note">Match spaces and capitalization to nearby text. Optional, on this Mac only.</p></div><label><input id="dictation-context-enabled" type="checkbox"> Enable cursor context</label></div>
-          <p class="dictation-note">Uses up to 256 characters on each side and a short selection in supported fields. It stays in memory and is never sent to a model. Secure fields, terminal buffers, and recognized financial sites are excluded. Browser context is limited to multiline fields; unsupported fields keep ordinary formatting.</p>
+<details class="dictation-disclosure"><summary>Writing for specific apps</summary>        <section class="dictation-block">
+          <div class="dictation-line"><div><h3>Fit nearby text</h3><p class="dictation-note">Match spaces and capitalization to nearby text. Optional, on this Mac only.</p></div><label><input id="dictation-context-enabled" type="checkbox"> Enable cursor context</label></div>
+          <details class="dictation-privacy-details"><summary>What cursor context reads</summary><p class="dictation-note">Uses up to 256 characters on each side and a short selection in supported fields. It stays in memory and is never sent to a model. Secure fields, terminal buffers, and recognized financial sites are excluded. Browser context is limited to multiline fields; unsupported fields keep ordinary formatting.</p></details>
         </section>
-        <section class="dictation-block"><h3>App and website preferences</h3><p class="dictation-note">Choose agent prose for Claude or Codex in Ghostty; keep literal writing for shell commands. Website preferences require cursor context.</p>
+        <section class="dictation-block"><h3>App and website preferences</h3><p class="dictation-note">Use a different style for a particular app or website. For coding assistants in terminals, choose Agent prompt; for shell commands, choose Literal terminal / code.</p>
           <form id="dictation-rule-form" class="dictation-form">
-            <label>App or website<input id="dictation-rule-target" class="settings-field" placeholder="app:Ghostty or site:mail.google.com" required maxlength="164"></label>
+            <label>Apply to<select id="dictation-rule-kind" class="settings-field"><option value="app">An app</option><option value="site">A website</option></select></label><label id="dictation-rule-target-label">App name<input id="dictation-rule-target" class="settings-field" placeholder="Ghostty" required maxlength="160"></label>
             <label>Writing mode<select id="dictation-rule-mode" class="settings-field"><option value="agent_prompt">Agent prompt</option><option value="terminal_code">Literal terminal / code</option><option value="chat">Message</option><option value="email_document">Email / document</option></select></label>
-            <button type="submit" class="btn btn-secondary btn-sm">Add preference</button>
+
             <label>Style<select id="dictation-rule-style" class="settings-field"><option value="natural">Natural</option><option value="casual">Casual</option><option value="literal">Literal</option></select></label>
-          </form><div id="dictation-rules" class="dictation-list"></div>
+          <div class="dictation-form-actions"><button type="submit" class="btn btn-secondary btn-sm">Add preference</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="rule" hidden>Cancel</button></div><p id="dictation-rule-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-rules" class="dictation-list"></div>
         </section>
-        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Clipboard contents up to 16 MB are preserved when all formats can be read; a newer copy always takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
-          <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><input id="dictation-paste-shortcut" class="settings-field dictation-key" aria-label="Paste Last shortcut" value="CmdOrCtrl+Alt+V"></div>
-          <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><input id="dictation-history-shortcut" class="settings-field dictation-key" aria-label="Recent Dictations shortcut" value="CmdOrCtrl+Alt+D"></div>
+</details>
+<details class="dictation-disclosure" id="dictation-recovery-settings"><summary>Delivery and recovery shortcuts</summary>        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Anything you copy after a paste takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
+          <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
+          <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
         </section>
+</details>
 </div><div id="dictation-pane-words" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-words" hidden>
         <section class="dictation-block"><h3>Personal dictionary</h3><p class="dictation-note">Names and terms you use often. Each saved phrase is an explicit spelling rule; words are never learned silently.</p>
-          <form id="dictation-word-form" class="dictation-form"><label>Spoken phrase<input id="dictation-word-spoken" class="settings-field" placeholder="clean shot" required maxlength="80"></label><label>Write it as<input id="dictation-word-written" class="settings-field" placeholder="CleanShot" required maxlength="80"></label><button class="btn btn-secondary btn-sm" type="submit">Remember spelling</button></form><div id="dictation-dictionary" class="dictation-list"></div>
+          <form id="dictation-word-form" class="dictation-form"><label>Spoken phrase<input id="dictation-word-spoken" class="settings-field" placeholder="clean shot" required maxlength="80"></label><label>Write it as<input id="dictation-word-written" class="settings-field" placeholder="CleanShot" required maxlength="80"></label><div class="dictation-form-actions"><button class="btn btn-secondary btn-sm" type="submit">Remember spelling</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="word" hidden>Cancel</button></div><p id="dictation-word-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-dictionary" class="dictation-list"></div>
         </section>
         <section class="dictation-block"><h3>Snippets</h3><p class="dictation-note">Say “insert snippet” followed by its name as a separate utterance. Text stays literal, including line breaks.</p>
           <form id="dictation-snippet-form" class="dictation-form snippet-form"><label>Name<input id="dictation-snippet-name" class="settings-field" placeholder="sign off" required maxlength="80"></label><label>Text<textarea id="dictation-snippet-text" class="settings-field" placeholder="Best,
-Mat" required maxlength="8192"></textarea></label><button class="btn btn-secondary btn-sm" type="submit">Save snippet</button></form><div id="dictation-snippets" class="dictation-list"></div>
+Mat" required maxlength="8192"></textarea></label><div class="dictation-form-actions"><button class="btn btn-secondary btn-sm" type="submit">Save snippet</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="snippet" hidden>Cancel</button></div><p id="dictation-snippet-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-snippets" class="dictation-list"></div>
         </section>
 </div><div id="dictation-pane-mic" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-mic" hidden><section class="dictation-block"><h3>Microphone</h3><label for="dictation-mic-mode" class="dictation-note">Choose how dictation selects its input</label><select id="dictation-mic-mode" class="settings-field"><option value="shared">Use the recording microphone</option><option value="system">Follow the system default</option><option value="preferred">Use preferred microphones</option></select>        <div class="about-controls">
           <div class="about-controls-group">
@@ -6819,7 +6840,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
           <div class="dictation-line"><button id="dictation-mic-add" class="btn btn-secondary btn-sm" type="button">Add to preferred inputs</button><label><input id="dictation-virtual-mics" type="checkbox"> Allow virtual inputs</label></div>
           <div id="dictation-microphones" class="dictation-list"></div><p id="dictation-lid-warning" class="dictation-note" hidden>Your laptop lid is closed. Choose an external microphone.</p>
           <div class="dictation-line"><button id="dictation-mic-test" class="btn btn-secondary btn-sm" type="button">Test microphone</button><span id="dictation-mic-status" class="dictation-note" role="status">A 15-second level check. Nothing is saved.</span></div><meter id="dictation-mic-level" class="dictation-mic-meter" min="0" max="100" value="0" aria-label="Microphone input level"></meter>
-        </section></div><div id="dictation-pane-recent" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-recent" hidden><p id="dictation-destination-status" class="dictation-note">Copy works anywhere. To paste, open Recent Dictations with its shortcut from your destination app.</p><div class="dictation-line"><h3>Recent dictations</h3><button id="dictation-undo" class="btn btn-secondary btn-sm" type="button">Undo last insertion</button><button id="dictation-refresh" class="btn btn-secondary btn-sm" type="button">Refresh</button></div>        <div class="about-controls">
+        </section></div><div id="dictation-pane-recent" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-recent" hidden><p id="dictation-destination-status" class="dictation-note">Copy works anywhere. To paste, open Recent Dictations with its shortcut from your destination app.</p><div class="dictation-line"><h3>Recent dictations</h3><button id="dictation-undo" class="btn btn-secondary btn-sm" type="button">Undo last insertion</button><button id="dictation-refresh" class="btn btn-secondary btn-sm" type="button">Refresh</button></div><details class="dictation-disclosure"><summary>History storage</summary>        <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">History</div>
             <select id="settings-dictation-history-policy" class="settings-field">
@@ -6829,6 +6850,23 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
             <div class="about-controls-meta">Turning history off never discards audio from a failed or interrupted capture.</div>
           </div>
         </div>
+</details><div class="dictation-history-tools"><label for="dictation-history-search" class="sr-only">Search recent dictations</label><input id="dictation-history-search" class="settings-field" type="search" placeholder="Search words or app names"><label><input id="dictation-history-recovery" type="checkbox"> Needs recovery</label></div><p id="dictation-history-count" class="dictation-note" role="status" aria-live="polite"></p>        <section class="dictation-block dictation-review" id="dictation-review" hidden aria-labelledby="dictation-review-title"><div class="dictation-line"><div><h3 id="dictation-review-title">Review text</h3><p id="dictation-review-source" class="dictation-note"></p></div><button id="dictation-review-close" class="btn btn-secondary btn-sm" type="button">Close review</button></div>
+          <div id="dictation-review-switch" hidden><p class="dictation-note">You have changes here. Keep editing, or load the other dictation.</p><div class="dictation-actions"><button id="dictation-review-keep" class="btn btn-secondary btn-sm" type="button">Keep editing</button><button id="dictation-review-load" class="btn btn-secondary btn-sm" type="button">Load other text</button></div></div>
+          <section id="dictation-audio-review" class="dictation-audio-review" hidden aria-labelledby="dictation-audio-title">
+            <div class="dictation-line"><h3 id="dictation-audio-title">Saved recovery audio</h3><div class="dictation-actions"><button id="dictation-audio-listen" type="button" class="btn btn-secondary btn-sm">Listen</button><button id="dictation-audio-retranscribe" type="button" class="btn btn-secondary btn-sm">Preview transcription</button></div></div>
+            <p class="dictation-note">Listen and retry on this computer. Previewing keeps the saved transcript unchanged.</p>
+            <audio id="dictation-audio-player" controls preload="none" hidden aria-label="Saved dictation audio"></audio>
+            <div id="dictation-recovery-preview" hidden><div class="dictation-recovery-compare"><div><p class="dictation-note">Saved transcript</p><pre id="dictation-recovery-saved" class="dictation-preview"></pre></div><div><label for="dictation-recovery-text" class="dictation-note">New transcript — review names, numbers and meaning</label><textarea id="dictation-recovery-text" class="settings-field dictation-editor" readonly></textarea></div></div><div class="dictation-actions"><button id="dictation-recovery-accept" type="button" class="btn btn-primary btn-sm">Use this transcript</button><button id="dictation-recovery-discard" type="button" class="btn btn-secondary btn-sm">Keep saved text</button></div><p class="dictation-note">Accepting keeps the original text and audio. Copying or pasting is a separate action.</p></div>
+            <div id="dictation-audio-delete-confirm" hidden><p class="dictation-note">Delete the saved audio? You will no longer be able to listen or retranscribe it. Text history is kept.</p><div class="dictation-actions"><button id="dictation-audio-delete" type="button" class="btn btn-secondary btn-sm">Delete saved audio</button><button id="dictation-audio-keep" type="button" class="btn btn-secondary btn-sm">Keep audio</button></div></div>
+            <p id="dictation-audio-status" class="dictation-note" role="status" aria-live="polite"></p>
+          </section>
+          <label for="dictation-edit-original" class="dictation-note">Your text</label><textarea id="dictation-edit-original" class="settings-field dictation-editor" maxlength="65536" spellcheck="true"></textarea>
+          <div class="dictation-actions"><button id="dictation-original-copy" type="button" class="btn btn-secondary btn-sm">Copy text</button><button id="dictation-original-paste" type="button" class="btn btn-secondary btn-sm" disabled>Paste to destination</button><button id="dictation-original-reset" type="button" class="btn btn-secondary btn-sm" disabled>Restore original</button></div>
+          <details class="dictation-disclosure"><summary>Original text</summary><pre id="dictation-source-text" class="dictation-preview"></pre><div id="dictation-source-raw-section" hidden><p class="dictation-note">Original recognition</p><pre id="dictation-source-raw" class="dictation-preview"></pre></div><p class="dictation-note">Review changes against the original before using them.</p></details>
+          <button id="dictation-correction" type="button" class="btn btn-secondary btn-sm">Remember a spelling correction</button>
+          <details class="dictation-disclosure" id="dictation-local-edit"><summary>Optional local AI edit</summary><p class="dictation-note">Uses your configured Ollama model on this computer. Check names, numbers, and meaning before using a suggestion.</p><div class="dictation-edit-presets" aria-label="Editing instructions"><button class="btn btn-secondary btn-sm" type="button" data-dictation-instruction="Make this shorter. Keep every name, number, fact, and negation unchanged.">Shorter</button><button class="btn btn-secondary btn-sm" type="button" data-dictation-instruction="Make this clearer. Keep every name, number, fact, and negation unchanged.">Clearer</button><button class="btn btn-secondary btn-sm" type="button" data-dictation-instruction="Fix grammar and punctuation only. Keep every name, number, fact, and negation unchanged.">Fix grammar</button></div><div class="dictation-line"><input id="dictation-edit-instruction" class="settings-field" aria-label="Editing instruction" placeholder="Describe the edit you want" maxlength="500"><button id="dictation-rewrite" type="button" class="btn btn-secondary btn-sm">Preview local edit</button></div>
+          <div id="dictation-edit-preview" hidden><h3>Suggested text</h3><textarea id="dictation-edit-result" class="settings-field dictation-editor" aria-label="Suggested text" maxlength="8192" spellcheck="true"></textarea><div class="dictation-actions"><button id="dictation-edit-copy" class="btn btn-secondary btn-sm" type="button">Copy suggestion</button><button id="dictation-edit-paste" class="btn btn-secondary btn-sm" type="button">Paste suggestion</button><button id="dictation-edit-discard" class="btn btn-secondary btn-sm" type="button">Discard suggestion</button></div></div></details><p id="dictation-edit-status" class="dictation-note" role="status"></p>
+        </section>
         <div class="about-controls">
           <div class="about-controls-group">
 
@@ -6839,11 +6877,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
           </div>
         </div>
 
-        <section class="dictation-block"><h3>Review an edit</h3><p class="dictation-note">Edit a recent dictation or a short selection captured by the Recent Dictations shortcut. Optional rewriting uses your local Ollama model. Nothing is inserted until you choose Paste.</p>
-          <label for="dictation-edit-original" class="dictation-note">Original text</label><textarea id="dictation-edit-original" class="settings-field dictation-editor" maxlength="8192" placeholder="Choose Edit on a recent dictation, or enter text here."></textarea>
-          <div class="dictation-actions"><button id="dictation-correction" type="button" class="btn btn-secondary btn-sm">Remember a spelling correction</button><button id="dictation-original-copy" type="button" class="btn btn-secondary btn-sm">Copy this text</button></div><div class="dictation-line"><input id="dictation-edit-instruction" class="settings-field" aria-label="Editing instruction" placeholder="Make this clearer; keep every fact" maxlength="500"><button id="dictation-rewrite" type="button" class="btn btn-secondary btn-sm">Preview local edit</button></div>
-          <div id="dictation-edit-preview" hidden><h3>Suggested text</h3><textarea id="dictation-edit-result" class="settings-field dictation-editor" aria-label="Suggested text"></textarea><p class="dictation-note">Check names, numbers, and meaning before using this edit.</p><div class="dictation-actions"><button id="dictation-edit-copy" class="btn btn-secondary btn-sm" type="button">Copy edit</button><button id="dictation-edit-paste" class="btn btn-secondary btn-sm" type="button">Paste to destination</button><button id="dictation-edit-discard" class="btn btn-secondary btn-sm" type="button">Discard edit</button></div></div><p id="dictation-edit-status" class="dictation-note" role="status"></p>
-        </section></div></div></div>
+</div></div></div>
       <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
       <!-- Coach settings start -->
       <div class="settings-section coach-settings-section" id="settings-coach-section">
@@ -7477,6 +7511,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
   <script src="vendor/xterm/minutes-theme.js"></script>
   <script src="vendor/marked.min.js"></script>
 
+  <script src="scripts/shortcut-recorder.js"></script>
   <script>
     const { invoke } = window.__TAURI__.core;
 
@@ -8806,6 +8841,9 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         cueToggle.classList.toggle('btn-secondary', !enabled);
       }
       localStorage.setItem('minutes.playCaptureCues', enabled ? 'true' : 'false');
+      setSettingsToggle('settings-cues', enabled);
+      setSettingsToggle('dictation-cues', enabled);
+      document.getElementById('dictation-cues')?.setAttribute('aria-pressed', String(enabled));
     }
 
     function setFooterCaptureMode(active, reason = null) {
@@ -9260,6 +9298,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       readinessOverlay.classList.add('active');
       await loadReadinessItems();
     }
+
+    window.openDictationPermissionHelp = () => { closeSettings(); openReadiness('dictation'); };
 
     async function loadReadinessItems() {
       readinessScroll.replaceChildren();
@@ -12223,6 +12263,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
     document.getElementById('btn-about-close').addEventListener('click', closeAbout);
     aboutOverlay.addEventListener('click', (e) => { if (e.target === aboutOverlay) closeAbout(); });
     document.getElementById('btn-settings').addEventListener('click', openSettings);
+    document.getElementById('btn-dictation').addEventListener('click', () => { openSettings(); document.getElementById('tab-dictation').click(); window.MinutesDictation?.show('writing'); });
     document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
     settingsOverlay.addEventListener('click', (e) => { if (e.target === settingsOverlay) closeSettings(); });
     document.getElementById('settings-coach-info').addEventListener('click', openCoachOnboarding);
@@ -12329,6 +12370,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         if (uiLangSelect && s?.ui?.language) uiLangSelect.value = s.ui.language;
         // Cues are localStorage-only (no config section).
         setSettingsToggle('settings-cues', playCaptureCues);
+        setSettingsToggle('dictation-cues', playCaptureCues);
+        document.getElementById('dictation-cues')?.setAttribute('aria-pressed', String(playCaptureCues));
         // Autostart
         try { const autoOn = await invoke('cmd_get_autostart'); setSettingsToggle('settings-autostart', autoOn); } catch (e) { console.error('autostart check:', e); }
         // Legacy hotkey settings -- guarded for removed HTML elements
@@ -12589,7 +12632,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         }
       }
 
-      if (record.insertion?.outcome) parts.push(record.insertion.outcome.replaceAll('_', ' '));
+      parts.push(window.MinutesDictationHistory?.deliveryLabel(record) || record.insertion?.outcome?.replaceAll('_', ' ') || 'Saved locally');
       if (record.targetContext?.appName) parts.push(record.targetContext.appName);
       if (record.commandsApplied?.length) {
         const edits = record.commandsApplied
@@ -12600,7 +12643,9 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       return parts.join(' · ');
     }
 
+    let recentLoadRevision = 0;
     async function loadRecentDictations() {
+      const version = ++recentLoadRevision;
       const root = document.getElementById('settings-dictation-recents');
       const status = document.getElementById('settings-dictation-recents-status');
       if (!root) return;
@@ -12611,24 +12656,33 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
           : '';
       }
       try {
-        const records = await invoke('cmd_recent_dictations', { limit: 25 });
-        renderRecentDictations(records || []);
+        const records = await invoke('cmd_recent_dictations', { limit: 100 });
+        if (version !== recentLoadRevision) return;
+        root._dictationRecords = records || [];
+        renderRecentDictations();
       } catch (error) {
+        if (version !== recentLoadRevision) return;
         root.innerHTML = '<div class="about-controls-meta error">Could not load recent dictations.</div>';
         if (status) status.textContent = String(error);
       }
     }
 
-    function renderRecentDictations(records) {
+    function renderRecentDictations() {
       const root = document.getElementById('settings-dictation-recents');
       if (!root) return;
+      const all = root._dictationRecords || [];
+      const query = (document.getElementById('dictation-history-search').value || '').trim().toLocaleLowerCase();
+      const recoveryOnly = document.getElementById('dictation-history-recovery').checked;
+      const records = all.filter(record => (!recoveryOnly || (window.MinutesDictationHistory?.needsRecovery(record))) && (!query || [record.cleanedText, record.rawText, record.originalTranscript?.rawText, record.originalTranscript?.cleanedText, record.targetContext?.appName].filter(Boolean).join(' ').toLocaleLowerCase().includes(query)));
+      document.getElementById('dictation-history-count').textContent = `${records.length} of ${all.length} saved dictations · searches all retained history (up to 100)`;
       if (!records.length) {
-        root._dictationRecords = [];
-        root.innerHTML = '<div class="about-controls-meta">No dictations yet.</div>';
+        root.innerHTML = all.length ? '<div class="dictation-empty"><p>No matching dictations.</p><button id="dictation-clear-history-filter" type="button" class="btn btn-secondary btn-sm">Clear filters</button></div>' : '<div class="dictation-empty"><p>Your next dictation will appear here.</p><p class="dictation-note">Use your dictation shortcut in any app. Interrupted captures remain available for recovery, even with routine history off.</p></div>';
+        document.getElementById('dictation-clear-history-filter')?.addEventListener('click', () => { document.getElementById('dictation-history-search').value = ''; document.getElementById('dictation-history-recovery').checked = false; renderRecentDictations(); document.getElementById('dictation-history-search').focus(); });
         return;
       }
 
-      root.innerHTML = records.map((record) => {
+      const pageSize = root._dictationVisible || 25;
+      root.innerHTML = records.slice(0, pageSize).map((record) => {
         const text = escapeHtml(dictationRecentPreview(record));
         const meta = escapeHtml(dictationRecentMeta(record));
         const openButton = record.filePath
@@ -12638,7 +12692,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         const hasRaw = Boolean((record.rawText || '').trim());
         const textButtons = hasText
           ? `<button class="btn btn-secondary btn-sm" data-dictation-action="copy" data-dictation-id="${escapeHtml(record.id)}">Copy</button>
-             <button class="btn btn-secondary btn-sm" data-dictation-action="edit" data-dictation-id="${escapeHtml(record.id)}">Edit</button>
+             <button class="btn btn-secondary btn-sm" data-dictation-action="edit" data-dictation-id="${escapeHtml(record.id)}">Review</button>
              <button class="btn btn-secondary btn-sm" data-dictation-action="paste" data-dictation-id="${escapeHtml(record.id)}" disabled>Paste</button>`
           : '';
         const rawButton = hasRaw
@@ -12655,7 +12709,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
             </div>
             <div class="dictation-recent-actions">
               ${textButtons}
-              ${record.recoveryAudioPath ? `<button class="btn btn-secondary btn-sm" data-dictation-action="reprocess" data-dictation-id="${escapeHtml(record.id)}">Recover text</button>` : ''}
+              ${record.recoveryAudioPath ? `<button class="btn btn-secondary btn-sm" data-dictation-action="listen" data-dictation-id="${escapeHtml(record.id)}">Listen</button>` : ''}
+              ${record.recoveryAudioPath ? `<button class="btn btn-secondary btn-sm" data-dictation-action="reprocess" data-dictation-id="${escapeHtml(record.id)}">Preview transcription</button>` : ''}
               <details class="dictation-history-more"><summary>More</summary><div class="dictation-actions">
                 ${hasText ? `<button class="btn btn-secondary btn-sm" data-dictation-action="snippet" data-dictation-id="${escapeHtml(record.id)}">Save snippet</button>` : ''}
                 ${rawButton}${undoVoiceEditButton}${openButton}
@@ -12665,7 +12720,15 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
           </div>
         `;
       }).join('');
-      root._dictationRecords = records;
+      for (const button of root.querySelectorAll('[data-dictation-action]')) {
+        const record = all.find(item => item.id === button.dataset.dictationId);
+        const detail = dictationRecentMeta(record || {}) || 'recent dictation';
+        button.setAttribute('aria-label', `${button.textContent}: ${detail}`);
+      }
+      if (records.length > pageSize) {
+        const more = document.createElement('button'); more.type = 'button'; more.className = 'btn btn-secondary btn-sm'; more.textContent = `Show ${Math.min(25, records.length - pageSize)} more`; more.id = 'dictation-history-more';
+        more.addEventListener('click', () => { root._dictationVisible = pageSize + 25; renderRecentDictations(); }); root.append(more);
+      }
       window.MinutesDictation?.updateDestinationControls();
     }
 
@@ -12689,7 +12752,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
           const result = await invoke('cmd_paste_dictation_from_history', { text: record.cleanedText });
           if (status) status.textContent = result?.message || 'Pasted.';
         } else if (action === 'edit') {
-          window.MinutesDictation?.edit(record.cleanedText || record.rawText);
+          window.MinutesDictation?.edit(record.cleanedText || record.rawText, record);
         } else if (action === 'snippet') {
           window.MinutesDictation?.snippet(record.cleanedText || record.rawText);
         } else if (action === 'raw') {
@@ -12698,14 +12761,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         } else if (action === 'before-edits') {
           const result = await invoke('cmd_copy_pre_command_dictation', { id });
           if (status) status.textContent = result?.message || 'Copied the text from before voice edits.';
-        } else if (action === 'reprocess') {
-          const result = await invoke('cmd_reprocess_dictation', { id });
-          await loadRecentDictations();
-          if (status) status.textContent = result?.message || 'Recovered dictation.';
-        } else if (action === 'delete-audio') {
-          const result = await invoke('cmd_delete_dictation_audio', { id });
-          await loadRecentDictations();
-          if (status) status.textContent = result || 'Deleted saved audio.';
+        } else if (['listen', 'reprocess', 'delete-audio'].includes(action)) {
+          await window.MinutesDictationHistory?.act(action, record);
         } else if (action === 'open' && record.filePath) {
           await invoke('cmd_open_file', { path: record.filePath });
           if (status) status.textContent = 'Opened dictation file.';
@@ -13043,6 +13100,9 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
     document.getElementById('settings-cues').addEventListener('click', () => {
       setCueToggle(!playCaptureCues);
       setSettingsToggle('settings-cues', playCaptureCues);
+    });
+    document.getElementById('dictation-cues').addEventListener('click', () => {
+      setCueToggle(!playCaptureCues);
     });
     document.getElementById('settings-autostart').addEventListener('click', async () => {
       const isOn = await invoke('cmd_get_autostart').catch(() => false);
@@ -13523,12 +13583,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       const destination = e.target.value;
       await invoke('cmd_set_setting', { section: 'dictation', key: 'destination', value: destination });
       if (latestSettings?.dictation) latestSettings.dictation.destination = destination;
-      if (destination === 'insert') {
-        closeSettings();
-        await openReadiness('dictation');
-      } else {
-        refreshDictationPermissionNudge();
-      }
+      refreshDictationPermissionNudge();
+      window.MinutesDictationReadiness?.refresh();
     });
     // UI language: persist via config + rebuild native shell, then apply to the
     // frontend in place (cmd returns the resolved locale, "en" | "zh-CN" | "pt-BR").
@@ -13538,27 +13594,42 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         if (window.MinutesI18n) window.MinutesI18n.setLocale(resolved);
       } catch (err) { console.error('set ui language:', err); }
     });
-    document.getElementById('settings-dictation-model').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: e.target.value }));
+    async function saveDictationSetting(key, value, control) {
+      control.disabled = true;
+      const previous = latestSettings?.dictation?.[key];
+      window.MinutesDictation?.notify('Saving…');
+      try {
+        const writers = {
+          model: () => invoke('cmd_set_setting', { section: 'dictation', key: 'model', value: String(value) }),
+          history_policy: () => invoke('cmd_set_setting', { section: 'dictation', key: 'history_policy', value: String(value) }),
+          silence_timeout_ms: () => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: String(value) }),
+          voice_commands_enabled: () => invoke('cmd_set_setting', { section: 'dictation', key: 'voice_commands_enabled', value: String(value) }),
+          daily_note_log: () => invoke('cmd_set_setting', { section: 'dictation', key: 'daily_note_log', value: String(value) }),
+        };
+        await writers[key]();
+        if (latestSettings?.dictation) latestSettings.dictation[key] = value;
+        window.MinutesDictation?.notify('Saved on this device.');
+        if (key === 'model') window.MinutesDictationReadiness?.refresh();
+        return true;
+      } catch (error) {
+        if (previous !== undefined && control.tagName === 'SELECT') control.value = String(previous);
+        window.MinutesDictation?.notify(String(error), true);
+        return false;
+      } finally { control.disabled = false; }
+    }
+    document.getElementById('settings-dictation-model').addEventListener('change', (e) => saveDictationSetting('model', e.target.value, e.target));
     document.getElementById('settings-dictation-history-policy').addEventListener('change', async (e) => {
-      await invoke('cmd_set_setting', { section: 'dictation', key: 'history_policy', value: e.target.value });
-      if (latestSettings?.dictation) latestSettings.dictation.history_policy = e.target.value;
-      document.getElementById('settings-dictation-recents-status').textContent = e.target.value === 'off'
-        ? 'Routine history is off. Recoverable captures will still appear here.'
-        : '';
+      if (await saveDictationSetting('history_policy', e.target.value, e.target)) {
+        document.getElementById('settings-dictation-recents-status').textContent = e.target.value === 'off' ? 'Routine history is off. Recoverable captures will still appear here.' : '';
+      }
     });
-    document.getElementById('settings-dictation-silence').addEventListener('change', (e) => invoke('cmd_set_setting', { section: 'dictation', key: 'silence_timeout_ms', value: e.target.value }));
-    document.getElementById('settings-dictation-voice-commands').addEventListener('click', async () => {
-      const btn = document.getElementById('settings-dictation-voice-commands');
-      const next = btn.textContent !== 'On';
-      await invoke('cmd_set_setting', { section: 'dictation', key: 'voice_commands_enabled', value: String(next) });
-      setSettingsToggle('settings-dictation-voice-commands', next);
-    });
-    document.getElementById('settings-dictation-daily-note').addEventListener('click', async () => {
-      const btn = document.getElementById('settings-dictation-daily-note');
-      const next = btn.textContent !== 'On';
-      await invoke('cmd_set_setting', { section: 'dictation', key: 'daily_note_log', value: String(next) });
-      setSettingsToggle('settings-dictation-daily-note', next);
-    });
+    document.getElementById('settings-dictation-silence').addEventListener('change', (e) => saveDictationSetting('silence_timeout_ms', Number(e.target.value), e.target));
+    for (const [id, key] of [['settings-dictation-voice-commands', 'voice_commands_enabled'], ['settings-dictation-daily-note', 'daily_note_log']]) {
+      document.getElementById(id).addEventListener('click', async () => {
+        const button = document.getElementById(id); const next = button.textContent !== 'On';
+        if (await saveDictationSetting(key, next, button)) setSettingsToggle(id, next);
+      });
+    }
 
     // ── Live transcript shortcut settings ──
     document.getElementById('settings-live-shortcut').addEventListener('click', async () => {
@@ -13661,10 +13732,14 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
     // Replaces the old 3-system approach (dropdown, dropdown, raw-key capture)
     // with a single "click to record" button per slot.
 
-    const UNIFIED_SLOTS = ['quick_thought', 'dictation'];
+    const UNIFIED_SLOTS = ['quick_thought', 'dictation', 'dictation_paste_last', 'dictation_history'];
+    const RECOVERY_SLOTS = ['dictation_paste_last', 'dictation_history'];
+    const recoveryToggleIds = { dictation_paste_last: 'dictation-paste-enabled', dictation_history: 'dictation-history-enabled' };
     const SLOT_DEFAULTS = {
       quick_thought: { shortcut: 'CmdOrCtrl+Shift+M', keycode: -1 },
       dictation: { shortcut: 'CmdOrCtrl+Shift+Space', keycode: -1 },
+      dictation_paste_last: { shortcut: 'CmdOrCtrl+Alt+V', keycode: -1 },
+      dictation_history: { shortcut: 'CmdOrCtrl+Alt+D', keycode: -1 },
     };
     const unifiedSlotState = {};
 
@@ -13696,7 +13771,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       }
       const recorder = document.getElementById('shortcut-recorder-' + slot);
       const statusEl = document.getElementById('shortcut-status-' + slot);
-      const toggle = document.getElementById('shortcut-toggle-' + slot);
+      const toggle = document.getElementById(recoveryToggleIds[slot] || 'shortcut-toggle-' + slot);
       if (!recorder || !statusEl || !toggle) return;
 
       recorder.textContent = shortcutDisplayLabel(status.shortcut, status.keycode);
@@ -13704,9 +13779,13 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       recorder.style.color = '';
 
       const isOn = status.enabled;
-      toggle.textContent = isOn ? 'On' : 'Off';
-      toggle.classList.toggle('btn-primary', isOn);
-      toggle.classList.toggle('btn-secondary', !isOn);
+      window.dispatchEvent(new CustomEvent('minutes:shortcut-changed', { detail: status }));
+      if (toggle.type === 'checkbox') toggle.checked = isOn;
+      else {
+        toggle.textContent = isOn ? 'On' : 'Off';
+        toggle.classList.toggle('btn-primary', isOn);
+        toggle.classList.toggle('btn-secondary', !isOn);
+      }
 
       if (status.pending) {
         statusEl.textContent = 'Starting ' + shortcutDisplayLabel(status.shortcut, status.keycode) + '...';
@@ -13715,7 +13794,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         statusEl.textContent = 'Requires Input Monitoring permission. Open System Settings to grant it.';
         statusEl.classList.add('error');
       } else if (isOn) {
-        statusEl.textContent = status.message;
+        statusEl.textContent = slot === 'dictation' ? `Hold ${shortcutDisplayLabel(status.shortcut, status.keycode)} to speak, or tap for hands-free. Escape cancels.` : status.message;
         statusEl.classList.remove('error');
       } else {
         const defaultMsg = slot === 'dictation'
@@ -13749,6 +13828,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
         });
         updateSlotUI(slot, status);
       } catch (e) {
+        updateSlotUI(slot, current || { ...SLOT_DEFAULTS[slot], enabled: false });
         const statusEl = document.getElementById('shortcut-status-' + slot);
         if (statusEl) {
           statusEl.textContent = String(e);
@@ -13797,110 +13877,22 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
       return { shortcut: parts.join('+'), keycode: macKeycode };
     }
 
-    // Shortcut recorder: click button to start recording, press keys to capture
+    // Shared recorder controller handles restoration on every exit path.
     function initRecorder(slot) {
       const btn = document.getElementById('shortcut-recorder-' + slot);
       if (!btn) return;
-      let recording = false;
-      let handler = null;
-
-      btn.addEventListener('click', async () => {
-        if (recording) return;
-        recording = true;
-        btn.textContent = 'Press your shortcut...';
-        btn.style.borderColor = 'var(--accent)';
-
-        // Temporarily unregister the slot's shortcut so key events reach the webview
-        try { await invoke('cmd_suspend_shortcut', { slot }); } catch (e) { /* ok if not registered */ }
-        btn.style.color = 'var(--accent)';
-
-        async function restoreButton() {
-          recording = false;
-          const current = unifiedSlotState[slot];
-          btn.textContent = shortcutDisplayLabel(
-            (current && current.shortcut) || SLOT_DEFAULTS[slot].shortcut,
-            (current && current.keycode) || SLOT_DEFAULTS[slot].keycode
-          );
-          btn.style.borderColor = '';
-          btn.style.color = '';
-          // Re-register the previous shortcut if it was enabled
-          if (current && current.enabled) {
-            try {
-              await invoke('cmd_set_shortcut', {
-                slot,
-                enabled: true,
-                shortcut: current.shortcut,
-                keycode: current.keycode,
-              });
-            } catch (e) { console.error('Re-register shortcut after cancel:', e); }
-          }
-        }
-
-        handler = async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-
-          // Escape cancels recording
-          if (e.key === 'Escape' || e.code === 'Escape') {
-            document.removeEventListener('keydown', handler, true);
-            restoreButton();
-            return;
-          }
-
-          const result = buildShortcutString(e);
-          if (!result) return; // Modifier-only press, keep waiting
-
-          document.removeEventListener('keydown', handler, true);
-          recording = false;
-
-          const current = unifiedSlotState[slot];
-          const wasEnabled = current && current.enabled;
-
-          try {
-            const probe = await invoke('cmd_probe_shortcut', { keycode: result.keycode });
-            let effectiveEnabled = wasEnabled;
-            if (probe.needs_permission) {
-              const statusEl = document.getElementById('shortcut-status-' + slot);
-              if (statusEl) {
-                statusEl.textContent = shortcutDisplayLabel(result.shortcut, result.keycode) + ' requires Input Monitoring permission.';
-                statusEl.classList.add('error');
-              }
-              // Save choice but don't try to enable until permission is granted
-              effectiveEnabled = false;
-            }
-            if (!probe.supported) {
-              const statusEl = document.getElementById('shortcut-status-' + slot);
-              if (statusEl) {
-                statusEl.textContent = shortcutDisplayLabel(result.shortcut, result.keycode) + ' is not available on this platform.';
-                statusEl.classList.add('error');
-              }
-              btn.textContent = shortcutDisplayLabel(result.shortcut, result.keycode);
-              btn.style.borderColor = '';
-              btn.style.color = '';
-              return;
-            }
-
-            // Register the shortcut (save even if disabled)
-            const status = await invoke('cmd_set_shortcut', {
-              slot,
-              enabled: effectiveEnabled,
-              shortcut: result.shortcut,
-              keycode: result.keycode,
-            });
-            updateSlotUI(slot, status);
-          } catch (e2) {
-            btn.textContent = shortcutDisplayLabel(result.shortcut, result.keycode);
-            btn.style.borderColor = '';
-            btn.style.color = '';
-            const statusEl = document.getElementById('shortcut-status-' + slot);
-            if (statusEl) {
-              statusEl.textContent = String(e2);
-              statusEl.classList.add('error');
-            }
-          }
-        };
-
-        document.addEventListener('keydown', handler, true);
+      window.MinutesShortcutRecorder.attach({
+        button: btn, slot,
+        read: () => unifiedSlotState[slot] || { ...SLOT_DEFAULTS[slot], enabled: false },
+        build: buildShortcutString,
+        label: shortcutDisplayLabel,
+        invoke,
+        update: status => updateSlotUI(slot, status),
+        standardOnly: RECOVERY_SLOTS.includes(slot),
+        status: message => {
+          const node = document.getElementById('shortcut-status-' + slot);
+          if (node) { node.textContent = message; node.classList.add('error'); }
+        },
       });
     }
 
@@ -13908,7 +13900,7 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
     function initSpecialKeyPicker(slot) {
       const links = document.querySelectorAll(`.special-key-link[data-slot="${slot}"]`);
       links.forEach(link => {
-        link.querySelectorAll('u').forEach(u => {
+        link.querySelectorAll('u, .dictation-key-choice').forEach(u => {
           u.style.cursor = 'pointer';
           u.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -13960,14 +13952,15 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
 
     // Wire toggle buttons
     for (const slot of UNIFIED_SLOTS) {
-      const toggle = document.getElementById('shortcut-toggle-' + slot);
+      const toggle = document.getElementById(recoveryToggleIds[slot] || 'shortcut-toggle-' + slot);
       if (toggle) {
-        toggle.addEventListener('click', () => toggleSlot(slot));
+        toggle.addEventListener(toggle.type === 'checkbox' ? 'change' : 'click', () => toggleSlot(slot));
       }
       initRecorder(slot);
       initSpecialKeyPicker(slot);
     }
 
+    window.MinutesShortcuts = { refreshRecovery: () => Promise.all(RECOVERY_SLOTS.map(loadSlotStatus)) };
     // Listen for status updates from the backend (native monitor lifecycle)
     window.__TAURI__.event.listen('shortcut:status', (event) => {
       const status = event.payload;
@@ -18334,6 +18327,8 @@ Mat" required maxlength="8192"></textarea></label><button class="btn btn-seconda
     })();
   </script>
   <script src="scripts/dictation-experience.js"></script>
+  <script src="scripts/dictation-readiness.js"></script>
+  <script src="scripts/dictation-history.js"></script>
 </body>
 
 </html>

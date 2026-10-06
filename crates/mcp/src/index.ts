@@ -4186,7 +4186,10 @@ async function liveCopilotFingerprint(): Promise<string> {
 async function spawnCopilotCli(
   goal: string,
   surface: "stdout" | "tui"
-): Promise<CopilotObserverSession> {
+): Promise<{
+  session: CopilotObserverSession;
+  exitedSuccessfully: () => boolean;
+}> {
   const paths = copilotObserverPaths();
   await mkdir(paths.root, { recursive: true });
   await Promise.all([
@@ -4197,6 +4200,7 @@ async function spawnCopilotCli(
   const stdoutFd = openSync(paths.nudges, "a");
   const stderrFd = openSync(paths.stderr, "a");
   let child: ReturnType<typeof spawn>;
+  let exitCode: number | null | undefined;
   try {
     child = spawn(
       MINUTES_BIN,
@@ -4207,6 +4211,7 @@ async function spawnCopilotCli(
         env: mcpCliChildEnv({ RUST_LOG: "info" }),
       }
     );
+    child.once("exit", (code) => { exitCode = code; });
   } finally {
     closeSync(stdoutFd);
     closeSync(stderrFd);
@@ -4238,7 +4243,7 @@ async function spawnCopilotCli(
     }
     throw error;
   }
-  return session;
+  return { session, exitedSuccessfully: () => exitCode === 0 };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -8728,7 +8733,7 @@ if (COPILOT_SUPPORTED) {
       }
 
       try {
-        const observerSession = await spawnCopilotCli(goal, surface);
+        const { session: observerSession, exitedSuccessfully } = await spawnCopilotCli(goal, surface);
         const status = await waitForCopilotStatus(
           (candidate) => candidate.active || !processIsAlive(observerSession.pid),
           5000
@@ -8772,7 +8777,7 @@ if (COPILOT_SUPPORTED) {
           };
         }
 
-        if (status.available && status.setup_needed) {
+        if (status.available && status.setup_needed && exitedSuccessfully()) {
           return {
             content: [{
               type: "text" as const,

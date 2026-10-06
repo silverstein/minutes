@@ -1370,7 +1370,12 @@ fn prepare_result(
     // before it reaches the clipboard/file/daily-note. `raw_text` keeps the original.
     // If cleanup empties the text (e.g. an all-filler utterance), fall back to the raw
     // text rather than silently dropping content the user actually spoke.
-    let cleaned = clean_dictation_text(&raw_text, &build_cleanup_options(config, text_mode));
+    let cleanup_options = build_cleanup_options(config, text_mode);
+    let cleaned = if config.dictation.accumulate {
+        crate::dictation_cleanup::clean_without_repairs(&raw_text, &cleanup_options)
+    } else {
+        clean_dictation_text(&raw_text, &cleanup_options)
+    };
     let text = if cleaned.is_empty() {
         raw_text.clone()
     } else {
@@ -1539,9 +1544,22 @@ fn combine_results(results: &[DictationResult], config: &Config) -> Option<Dicta
         &config.dictation.voice_snippets,
     );
 
+    let contains_snippet = command_output
+        .commands_applied
+        .iter()
+        .any(|command| command.kind == "snippet");
+    let text = if contains_snippet {
+        // Saved snippet text is deliberate user content, not a spoken repair.
+        command_output.text.clone()
+    } else {
+        crate::dictation_cleanup::clean_contextual_repairs(
+            &command_output.text,
+            &build_cleanup_options(config, mode),
+        )
+    };
     Some(DictationResult {
         raw_text: raw_parts.join(" "),
-        text: command_output.text,
+        text,
         pre_command_text: command_output.pre_command_text,
         commands_applied: command_output.commands_applied,
         text_mode: mode,
@@ -2251,6 +2269,79 @@ mod tests {
         assert!((combined.duration_secs - 4.0).abs() < f64::EPSILON);
         assert_eq!(combined.destination, "clipboard");
         assert!(combined.file_path.is_none());
+    }
+
+    #[test]
+    fn accumulated_repairs_span_thinking_pauses_and_keep_original() {
+        let mut config = Config::default();
+        config.dictation.accumulate = true;
+        config.dictation.destination = "clipboard".into();
+        let raw = [
+            "All right, let's try that again.",
+            "I mean, um, well, let's try that again",
+        ];
+        let results: Vec<_> = raw
+            .iter()
+            .map(|text| {
+                prepare_result(
+                    text,
+                    2.0,
+                    DictationFinalBackend::Whisper,
+                    &config,
+                    DictationTextMode::EmailDocument,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(
+            results[1].text.starts_with("I mean"),
+            "repair markers survive thinking pauses"
+        );
+        let combined = combine_results(&results, &config).unwrap();
+        assert_eq!(combined.text, "All right, let's try that again");
+        assert_eq!(combined.raw_text, raw.join(" "));
+        config.dictation.cleanup_engine = "none".into();
+        let results: Vec<_> = raw
+            .iter()
+            .map(|text| {
+                prepare_result(
+                    text,
+                    2.0,
+                    DictationFinalBackend::Whisper,
+                    &config,
+                    DictationTextMode::EmailDocument,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            combine_results(&results, &config).unwrap().text,
+            raw.join(" ")
+        );
+    }
+
+    #[test]
+    fn contextual_repairs_preserve_saved_snippet_text() {
+        let mut config = Config::default();
+        config.dictation.accumulate = true;
+        config.dictation.destination = "clipboard".into();
+        config.dictation.voice_commands_enabled = true;
+        let snippet = "Well, I mean, yeah, this wording is intentional.";
+        config
+            .dictation
+            .voice_snippets
+            .insert("greeting".into(), snippet.into());
+        let result = prepare_result(
+            "insert snippet greeting",
+            2.0,
+            DictationFinalBackend::Whisper,
+            &config,
+            DictationTextMode::EmailDocument,
+        )
+        .unwrap();
+        let combined = combine_results(&[result], &config).unwrap();
+        assert_eq!(combined.text, snippet);
+        assert_eq!(combined.commands_applied[0].kind, "snippet");
     }
 
     #[test]

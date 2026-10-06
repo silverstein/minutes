@@ -485,3 +485,51 @@ This fixes the app's own startup audio entering dictation. It does not establish
 recognition quality in music/noise or remove genuine background audio. Mat's
 reported successful insertion is human evidence for their test; the destination
 was not specified, so the remaining cross-application pilot stays bounded.
+
+
+### October 6 contextual cleanup candidate
+
+Natural prose cleanup now recognizes bounded local English hesitation clusters
+and explicit repairs. Mat's Notes example is covered by the exact-input regression:
+`Alright, this is a dictation app test. Well, I mean, yeah, let's try that again.`
+becomes `Alright, this is a dictation app test. Let's try that again.` Clear repeated
+wording such as `Let's meet on Tuesday, actually. Let's meet on Thursday.` keeps
+the Thursday phrase. Supported direct day/integer replacements require a narrow
+replacement context. Ordinary discourse words, ambiguous additions, names,
+negative/decimal quantities, quoted/structured text and saved snippets are guarded.
+Literal/code mode and disabled cleanup retain their existing behavior.
+
+Repairs run after accumulated speech is joined, so a thinking pause does not erase
+the repair marker before the next segment arrives. Vocabulary substitutions are
+not applied twice. Recent Text retains the original recognition output. This is
+bounded pattern cleanup, not general semantic rewriting, multilingual backtracking
+or selected-text Command Mode; broader evaluation is tracked in `minutes-97bp`.
+
+Final source checks: 94 feature-enabled dictation tests on Intel with streaming,
+Whisper and Metal, 27 pure cleanup regressions, 50 unchanged controller tests,
+strict workspace Clippy with the pinned Rust toolchain, formatting and packaging
+checks pass. The broader no-default core suite passed 1,921 tests with one ignored
+before the final preservation and punctuation guards; the final focused suite
+covers those guards. The generated site test count is refreshed; agent-doc consistency and the site
+production build pass.
+
+The canonical signed installer completed. Installed executable SHA-256 is
+`26c141d84612e44faec990f634a9eabbacf494aa005352b74530275650d6a096`;
+strict bundle verification passes for `com.useminutes.desktop.dev`, the existing
+Apple Development identity and Team63TMLKT8HN. Normal Fn/Whisper Small settings
+were preserved, QA settings restored, and a new normal-profile process launched.
+The installed native CGEventTap diagnostic passes for keycode63. This proves
+Input Monitoring registration, not fresh physical-Fn or Notes insertion acceptance.
+
+Native microphone qualification remains incomplete in `minutes-juih`. An earlier
+candidate removed `I mean, yeah,` and delivered matching clipboard text, but an
+ASR period after `actually` prevented the correction; that punctuation case is now
+fixed and regression-covered. Final-build retries with Base and Small captured
+only the first sentence of the longer synthetic hesitation fixture. A shorter
+fixture captured the whole hesitation phrase but targeted Ghostty, where literal
+preservation correctly left it unchanged. Later retries were withheld when the
+foreground process did not match the QA app. These attempts do not establish
+final native prose-cleanup acceptance. Clipboard and output-volume state were
+preserved/restored, no active capture remained, and the user's normal app is back
+running. The exact Notes sentence and clear correction still need a fresh native
+prose-target test. No comparative accuracy, sound or latency score is increased.

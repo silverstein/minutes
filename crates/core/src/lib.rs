@@ -133,6 +133,7 @@ pub mod diarize;
 pub mod dictation_cleanup;
 pub mod dictation_commands;
 pub mod dictation_context;
+mod dictation_disfluency;
 pub mod dictation_experience;
 pub mod dictation_memory;
 pub(crate) mod engine_process;

@@ -5748,6 +5748,19 @@ describe("agent trust readiness bridge", () => {
     expect((error as Error).message).not.toContain("PRIVATE");
   });
 
+  it.each([
+    ["/PRIVATE-PATH/minutes: error while loading shared libraries: libpipewire-0.3.so.0: cannot open shared object file: No such file or directory", "audio runtime library"],
+    ["/PRIVATE-PATH/minutes: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by /PRIVATE-PATH/minutes)", "glibc 2.39"],
+  ])("explains Linux loader failures without exposing stderr: %s", async (stderr, expected) => {
+    const failure = Object.assign(new Error("PRIVATE-CONFIG-CANARY"), { stderr });
+    const runner = async () => { throw failure; };
+    const error = await readAgentTrustReadiness(runner, "linux").catch((error: Error) => error);
+    expect((error as Error).message).toContain(expected);
+    expect((error as Error).message).not.toContain("PRIVATE");
+    const otherPlatform = await readAgentTrustReadiness(runner, "darwin").catch((error: Error) => error);
+    expect((otherPlatform as Error).message).toBe("Minutes agent readiness could not be verified safely.");
+  });
+
   it("keeps unexpected readiness failures opaque even when version probing would be possible", async () => {
     const calls: string[][] = [];
     const error = await readAgentTrustReadiness(async (args) => {

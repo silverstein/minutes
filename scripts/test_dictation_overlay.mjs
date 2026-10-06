@@ -78,7 +78,7 @@ function harness({ muted = false } = {}) {
 
 test('phrase success cannot flash delivery or play completion while recording', () => {
   const h = harness(); h.state('listening'); h.state('success');
-  assert.deepEqual(h.played, ['start']);
+  assert.deepEqual(h.played, []);
   assert.equal(h.elements.get('label').textContent, '');
   assert.equal(h.elements.get('capture-controls').classList.contains('hidden'), false);
 });
@@ -89,7 +89,7 @@ test('finishing acknowledges once; verified delivery stays compact and does not 
   assert.equal(h.elements.get('pill').classList.contains('expanded'), false);
   assert.equal(h.elements.get('label').title, '');
   h.state('typed'); h.state('typed');
-  assert.deepEqual(h.played, ['start', 'complete']);
+  assert.deepEqual(h.played, ['complete']);
   assert.deepEqual([...h.playing], ['complete']);
   assert.equal(h.elements.get('pill').classList.contains('expanded'), false);
   assert.equal(h.elements.get('label').textContent, '');
@@ -99,7 +99,7 @@ test('copy fallback exposes recovery and uses a failure cue rather than claiming
   const h = harness(); h.state('listening');
   h.emit('dictation:insertion', { outcome: 'copied', method: 'clipboard_only', message: 'Could not type into the active app. Copied dictation instead.' });
   h.state('copied');
-  assert.deepEqual(h.played, ['start', 'error']);
+  assert.deepEqual(h.played, ['error']);
   assert.equal(h.elements.get('pill').classList.contains('expanded'), true);
   assert.equal(h.elements.get('permission-button').classList.contains('hidden'), false);
 });
@@ -107,33 +107,33 @@ test('copy fallback exposes recovery and uses a failure cue rather than claiming
 test('blocked delivery and recoverable audio never sound like successful delivery', () => {
   for (const state of ['blocked', 'recoverable']) {
     const h = harness(); h.state('listening'); h.state(state);
-    assert.deepEqual(h.played, ['start', 'error']);
+    assert.deepEqual(h.played, ['error']);
   }
 });
 
 test('cancel is quiet and stops any cue still playing', () => {
   const h = harness(); h.state('listening'); h.state('cancelled');
-  assert.deepEqual(h.played, ['start']); assert.equal(h.playing.size, 0);
+  assert.deepEqual(h.played, []); assert.equal(h.playing.size, 0);
 });
 
 test('muted preference prevents all cues, including live preference changes', () => {
   const muted = harness({ muted: true }); muted.state('listening'); muted.state('processing'); muted.state('typed');
   assert.deepEqual(muted.played, []);
   const live = harness(); live.state('listening'); live.mute(); live.state('processing'); live.state('typed');
-  assert.deepEqual(live.played, ['start']);
+  assert.deepEqual(live.played, []);
   assert.equal(live.playing.size, 0);
 });
 
 test('an explicit new session resets cue latches without replaying on capture-style changes', () => {
   const h = harness(); h.state('starting'); h.state('listening'); h.state('accumulating', 'held');
   h.state('accumulating', 'locked'); h.state('typed'); h.state('starting'); h.state('listening');
-  assert.deepEqual(h.played, ['start', 'complete', 'start']);
+  assert.deepEqual(h.played, ['complete']);
 });
 
 test('stale snapshots cannot replay cues or regress the current state', () => {
   const h = harness(); h.state('listening', 'locked', 10); h.state('typed', 'locked', 11);
   h.state('listening', 'locked', 10); h.state('blocked', 'locked', 11);
-  assert.deepEqual(h.played, ['start', 'complete']);
+  assert.deepEqual(h.played, ['complete']);
   assert.equal(h.elements.get('label').textContent, '');
 });
 
@@ -226,4 +226,22 @@ test('verified insertion dismisses once; a fresh session cancels the pending clo
     assert.equal(h.elements.get('pill').classList.contains('dismissing'), false);
     assert.equal([...h.timers.values()].filter((timer) => timer.ms === 150).length, 0);
   }
+});
+
+
+test('capture remains silent with sounds enabled, including rapid restart after delivery', () => {
+  const h = harness();
+  h.state('starting'); h.state('loading'); h.state('listening');
+  h.state('accumulating', 'held'); h.state('accumulating', 'locked');
+  h.state('success'); h.state('processing'); h.state('inserting');
+  assert.deepEqual(h.played, []);
+  h.state('pasted');
+  assert.deepEqual([...h.playing], ['complete']);
+  h.state('starting');
+  assert.equal(h.playing.size, 0, 'a prior delivery tone cannot enter the next capture');
+  h.state('listening');
+  assert.deepEqual(h.played, ['complete']);
+  // Older backends can resume directly with Listening rather than Starting.
+  h.state('typed'); h.state('listening');
+  assert.equal(h.playing.size, 0);
 });

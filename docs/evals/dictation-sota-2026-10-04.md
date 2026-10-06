@@ -451,3 +451,37 @@ Processing can be too brief to appear in native screenshots; its controller and
 rendered fixture were checked separately. Fresh successful external insertion,
 physical Fn, perceived sound, recognition quality and comparative latency remain
 the previously documented acceptance gates.
+
+
+### October 6 start-cue contamination fix
+
+Mat reported that physical Fn dictation and insertion worked in their test, but
+the delivered text began with `[MUSIC PLAYING]`. The recent Whisper Small record
+contained the annotation in both raw and delivered text. The HUD played its
+start sound on Listening, which arrives after the microphone stream opens.
+
+Dictation startup now stays silent. New Starting and capture states stop any
+remaining delivery cue; completion and trouble acknowledgements remain. Capture
+onset, samples, decoding, cleanup and retained records are unchanged. The shared
+sound toggle still controls recording sounds and dictation delivery/trouble cues;
+its Writing-panel explanation reflects that behavior.
+
+The canonical signed installer completed with the existing Apple Development
+identity and strict seal. Executable SHA-256:
+`df8b309e4bd7efad1d7886463e38ebfc58ca5e96c2eceb07caf56dbdeac433e0`.
+A fresh isolated QA run used Whisper Small, Sound cues On and unmuted speakers
+at output volume35. Actual microphone capture and Finish produced a new record
+whose raw/delivered text contained the fixture words without a music annotation.
+The clipboard matched the saved text; all74 QA records remained, with no active
+capture PID. The user's prior output volume31/unmuted state and the exact QA
+configuration were restored before relaunching the normal Fn/Whisper Small app.
+The Writing-panel sound description and enabled toggle were read in the installed
+native UI.
+
+All50 controller tests and422 desktop tests on each architecture pass; packaging
+and the496-entry design baseline pass. Regression coverage includes capture with
+sound enabled, phrase checkpoints, terminal cues, mute changes and rapid restart.
+This fixes the app's own startup audio entering dictation. It does not establish
+recognition quality in music/noise or remove genuine background audio. Mat's
+reported successful insertion is human evidence for their test; the destination
+was not specified, so the remaining cross-application pilot stays bounded.

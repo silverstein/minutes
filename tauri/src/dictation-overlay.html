@@ -504,8 +504,6 @@
     const announcement = document.getElementById('announcement');
     const bars = waveform.querySelectorAll('.bar');
     const cues = {
-      start: new Audio('audio/dictation-cue-start.wav'),
-      stop: new Audio('audio/cue-stop.wav'),
       complete: new Audio('audio/dictation-cue-complete.wav'),
       error: new Audio('audio/dictation-cue-error.wav'),
     };
@@ -535,8 +533,6 @@
     let lastAnnouncement = '';
     let cuesEnabled = localStorage.getItem('minutes.playCaptureCues') !== 'false';
 
-    Object.assign(cues.start, { volume: 0.18 });
-    Object.assign(cues.stop, { volume: 0.16 });
     Object.assign(cues.complete, { volume: 0.18 });
     Object.assign(cues.error, { volume: 0.15 });
 
@@ -763,6 +759,7 @@
         stopCuePlayed = false;
         terminalCuePlayed = false;
         lastAnnouncement = '';
+        Object.values(cues).forEach((cue) => cue.pause());
       }
       if (!isTerminalState(state)) {
         cancelDismissTimer();
@@ -772,11 +769,16 @@
       }
 
       if (stateChanged) {
-        if ((state === 'listening' || state === 'accumulating') && !sessionStarted) {
-          playCue('start');
-          sessionStarted = true;
-          terminalCuePlayed = false;
-          stopCuePlayed = false;
+        if (state === 'listening' || state === 'accumulating') {
+          // Listening is emitted after the microphone opens. A start sound
+          // would enter the same capture and can become [MUSIC PLAYING].
+          // Stay silent; stop a previous delivery cue on a rapid new capture.
+          Object.values(cues).forEach((cue) => cue.pause());
+          if (!sessionStarted || isTerminalState(lastState)) {
+            sessionStarted = true;
+            terminalCuePlayed = false;
+            stopCuePlayed = false;
+          }
         }
         if ((state === 'processing' || state === 'inserting') && sessionStarted && !stopCuePlayed) {
           stopCuePlayed = true;

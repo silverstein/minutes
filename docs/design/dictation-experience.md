@@ -91,8 +91,10 @@ meter carries the capture state without a duplicate dot. Startup, final decoding
 and insertion share three softly pulsing dots in the same 192px shell; processing
 does not restart that animation or cycle through implementation labels. Reduced motion remains supported.
 
-Start and delivery have brief, quiet sound acknowledgements; finishing is shown
-visually. Segment success is silent; blocked delivery and retained-audio recovery use the trouble cue.
+Dictation startup stays silent: the microphone is already open when Listening
+arrives, so a start cue can be transcribed as music. Delivery has a brief, quiet
+sound acknowledgement after finalization; finishing is shown visually. A rapid
+new capture interrupts any remaining delivery cue. Segment success is silent; blocked delivery and retained-audio recovery use the trouble cue.
 Fast transitions interrupt the prior cue rather than layering sounds. Cancel
 stops playback quietly. Muting immediately stops a playing cue and prevents
 future cues. The Writing panel exposes the shared recording/dictation sound

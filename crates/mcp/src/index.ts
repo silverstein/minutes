@@ -8772,6 +8772,18 @@ if (COPILOT_SUPPORTED) {
           };
         }
 
+        if (status.available && status.setup_needed) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                "Coach needs a local AI model before it can start. " +
+                "Run `minutes coach setup`, then start Coach again. No recording was opened.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
         const stderr = await readCopilotStderrTail();
         return {
           content: [{

@@ -399,3 +399,17 @@ or a new SOTA score. Physical Fn, real speakers, noisy rooms, end-to-end latency
 screen-reader behavior and slow-destination trials remain tracked in
 `minutes-ub6x`; fresh successful destination readback remains in `minutes-5do6`.
 Stonebook source qualification does not qualify a signed Intel installation.
+
+
+### October 6 texture follow-up
+
+Mat approved softening the perforation-like surface. Dot opacity changed from
+10 percent to 3.5 percent, with half the dot density in an irregular 16-point
+tile. Warm colors, pill dimensions, waveform and controls are unchanged. The
+canonical signed installer rebuilt the app; the real microphone capture surface
+was inspected and Cancel preserved all 70 QA history records and the full history
+hash. All 46 controller tests and the design-token baseline pass.
+The new installed executable SHA-256 is
+`3c91c93f192db58aeb3902e98a176979148eed94a3093bc78695b80cb5d2792b`.
+This replaces the earlier warmer-surface build for Mat's development test; human
+speech, sound and latency acceptance remain separate.

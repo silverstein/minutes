@@ -7342,6 +7342,16 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
         "updateState": update_state,
         "latestOutput": latest_output,
         "callCaptureHealth": call_capture_health,
+        "configWarning": Config::load_strict().err().map(|error| {
+            let defaults = Config::default();
+            serde_json::json!({
+                "path": Config::config_path(),
+                "error": error,
+                "engine": defaults.transcription.engine,
+                "model": defaults.transcription.model,
+                "outputDir": defaults.output_dir,
+            })
+        }),
         "pid": status.pid,
         "elapsed": elapsed,
         "sensitive": sensitive_session.as_ref().map(|session| serde_json::json!({

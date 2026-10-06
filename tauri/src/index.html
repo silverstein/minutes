@@ -4617,6 +4617,19 @@
       flex: 1;
     }
 
+    .config-warning {
+      padding: 12px 16px;
+      background: var(--red-bg);
+      border-bottom: 1px solid var(--red-border-strong);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .config-warning[hidden], .config-warning [hidden] { display: none !important; }
+    .config-warning strong { display: block; margin-bottom: 4px; }
+    .config-warning p { margin: 4px 0; }
+    .config-warning code { overflow-wrap: anywhere; font-size: 11px; }
+    .config-warning-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
     /* ── Update available banner ── */
     .update-banner {
       display: none;
@@ -5923,6 +5936,20 @@
       <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
       <div class="search-error" id="search-error" hidden></div>
     </div>
+
+    <section class="config-warning" id="config-warning" role="alert" hidden>
+      <strong id="config-warning-title">Your settings could not be loaded</strong>
+      <p id="config-warning-message"></p>
+      <p><code id="config-warning-path"></code></p>
+      <p id="config-warning-defaults"></p>
+      <p id="config-warning-action-error" hidden></p>
+      <div class="config-warning-actions">
+        <button class="btn btn-secondary btn-sm" id="config-warning-open">Open settings file</button>
+        <button class="btn btn-secondary btn-sm" id="config-warning-check">Check again</button>
+        <button class="btn btn-secondary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
+        <button class="btn btn-secondary btn-sm" id="config-warning-help">Get help</button>
+      </div>
+    </section>
 
     <!-- Upcoming meeting suggestion -->
     <div class="upcoming" id="upcoming">
@@ -8483,6 +8510,49 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return `Last transcript update ${Math.round(finalAge)}s ago · ${lineLabel}`;
     }
 
+    let lastConfigWarning = null;
+    let configWarningFingerprint;
+    function renderConfigWarning(warning) {
+      const fingerprint = JSON.stringify(warning ?? null);
+      if (fingerprint === configWarningFingerprint) return;
+      configWarningFingerprint = fingerprint;
+      const banner = document.getElementById('config-warning');
+      if (warning) lastConfigWarning = warning;
+      if (!lastConfigWarning) { banner.hidden = true; return; }
+      banner.hidden = false;
+      document.getElementById('config-warning-title').textContent = warning
+        ? 'Your settings could not be loaded' : 'Your settings file is readable again';
+      document.getElementById('config-warning-message').textContent = warning
+        ? `${warning.error} Minutes is using default settings. Your file has been left untouched.`
+        : 'Restart Minutes to reload all settings, including shortcuts. Your file has been left untouched.';
+      document.getElementById('config-warning-path').textContent = lastConfigWarning.path;
+      document.getElementById('config-warning-defaults').textContent = warning
+        ? `Fallback transcription: ${warning.engine} · ${warning.model}. Recordings folder: ${warning.outputDir}`
+        : '';
+      document.getElementById('config-warning-restart').hidden = !!warning;
+    }
+    async function configWarningAction(action) {
+      const errorEl = document.getElementById('config-warning-action-error');
+      errorEl.hidden = true;
+      try { await action(); }
+      catch (error) { errorEl.textContent = String(error); errorEl.hidden = false; }
+    }
+    document.getElementById('config-warning-open').addEventListener('click', () =>
+      configWarningAction(() => invoke('cmd_open_file', { path: lastConfigWarning.path })));
+    document.getElementById('config-warning-check').addEventListener('click', () =>
+      configWarningAction(async () => {
+        const status = await invoke('cmd_capture_status');
+        renderConfigWarning(status.configWarning);
+      }));
+    document.getElementById('config-warning-restart').addEventListener('click', (event) =>
+      configWarningAction(() => {
+        const statusEl = document.getElementById('config-warning-action-error');
+        statusEl.hidden = false;
+        return restartForPermission(statusEl, event.currentTarget);
+      }));
+    document.getElementById('config-warning-help').addEventListener('click', () =>
+      configWarningAction(() => invoke('cmd_open_file', { path: 'https://github.com/silverstein/minutes/discussions' })));
+
     // ── Status polling ──
     let statusCheckInFlight = false;
 
@@ -8491,6 +8561,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       statusCheckInFlight = true;
       try {
         const status = await invoke('cmd_capture_status');
+        renderConfigWarning(status.configWarning);
         const wasRecording = isRecording;
         const wasStarting = isStarting;
         const wasProcessing = isProcessing;
@@ -9161,7 +9232,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
         let confirmAssistant = false;
         if (safety.requiresConfirmation) {
-          const confirmed = window.confirm(`${message}\n\nRestart Minutes now?`);
+          const { ask } = window.__TAURI__.dialog;
+          const confirmed = await ask(`${message}\n\nRestart Minutes now?`, {
+            title: 'Restart Minutes',
+            kind: 'warning',
+            okLabel: 'Restart',
+            cancelLabel: 'Cancel',
+          });
           if (!confirmed) {
             statusEl.textContent = 'Restart cancelled.';
             button.textContent = originalText;

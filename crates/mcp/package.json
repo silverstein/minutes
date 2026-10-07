@@ -1,6 +1,6 @@
 {
   "name": "minutes-mcp",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "mcpName": "io.github.silverstein/minutes",
   "description": "MCP server for minutes \u2014 conversation memory for AI assistants. Works with Claude Desktop, Mistral Vibe, Cursor, Windsurf, and any MCP client.",
   "main": "dist/index.js",
@@ -47,7 +47,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "minutes-sdk": "0.28.0",
+    "minutes-sdk": "0.28.1",
     "yaml": "^2.8.3",
     "zod": "^3.25 || ^4.0"
   },

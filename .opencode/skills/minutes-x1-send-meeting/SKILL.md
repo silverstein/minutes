@@ -20,6 +20,17 @@ X1 `get_user_capabilities` first. If `submit_my_meeting` or
 sends on for this account yet. Don't substitute another X1 write tool, invent
 an endpoint, or save the meeting somewhere else in X1.
 
+Before using `dueStatement` or `detail`, inspect the mounted
+`submit_my_meeting` input schema from MCP `tools/list` and check its
+`meeting.actionItems` item properties. A mounted tool name alone does not
+prove support for a field. If that schema is unavailable, an available X1
+`get_user_capabilities` action proposal contract for `submit_my_meeting`
+may supply the argument schema; capability discovery never grants approval.
+If a needed field is absent or neither discovery path supplies its schema,
+stop before requesting a send and ask: “Can you update or reconnect X1 so
+it accepts this meeting's original timing or detail?” Do not silently drop
+conditional timing or rewrite a task to work around an older backend.
+
 ## Workflow
 
 1. Identify exactly one meeting the user attended. Use Minutes
@@ -41,10 +52,22 @@ an endpoint, or save the meeting somewhere else in X1.
      Never paste transcript text from `body`. Up to 12,000 bytes.
    - `decisions`: one `{ title, detail }` per Minutes decision, with
      `title` from `text` and `detail` from `topic` when present.
-   - `actionItems`: one `{ title, owner, dueDate }` per open Minutes action
-     item, with `title` from `task`, `owner` from `assignee` when it isn't
-     empty, and `dueDate` from `due` only when it is already `YYYY-MM-DD`.
-     Skip items whose `status` is `done`.
+   - `actionItems`: one entry per open Minutes action item. Copy `task`
+     verbatim to `title`, including prerequisites and conditions; never
+     shorten “after the CPA confirms” into an unconditional instruction.
+     Copy nonempty `assignee` to `owner`. If `due` is already an explicit
+     valid `YYYY-MM-DD` date, copy it unchanged to `dueDate`. Otherwise copy
+     any nonempty `due` verbatim to `dueStatement`, including relative,
+     conditional, and uncertain wording. Never infer a calendar date from
+     the meeting date or today's date, and never send both `dueDate` and
+     `dueStatement`. Omit both when `due` is absent or empty. Skip items
+     whose `status` is `done`.
+     Copy `detail` only if `get_meeting` actually returns a separate,
+     nonempty `detail` field for that action item and X1 advertises support.
+     The current Minutes action-item model exposes `task`, `assignee`,
+     `due`, and `status`; it does not provide a separate detail field. Do
+     not manufacture detail from the summary, transcript, another meeting,
+     or a condition removed from `task`.
    - `openQuestions`: the `what` of each `intents` entry whose `kind` is
      `open-question`. If there are none, send `[]`. Don't write your own
      list, so the same meeting always maps to the same content.
@@ -88,11 +111,15 @@ an endpoint, or save the meeting somewhere else in X1.
    folder path.
 
    Stay inside X1's limits. Decisions, action items, and open questions
-   together are at most 40 entries of up to 1,000 bytes each and 16,000
-   bytes in total. Owner and participant names are up to 200 bytes, and the
-   whole meeting must stay under 40,000 bytes as JSON. If the meeting has
-   more, keep the most important entries and tell the user what you left
-   out. Never cut a single entry mid-sentence to make it fit.
+   together are at most 40 entries. Each title, detail, open question, or
+   due statement is at most 1,000 UTF-8 bytes. Optional action-item
+   `detail` and `dueStatement` are each nonempty and at most 1,000 UTF-8 bytes.
+   Combined outcome text is at most 16,000 bytes, including the new detail,
+   due statement, and exact due date fields. Owner and participant names
+   are up to 200 bytes, and the whole meeting must stay under 40,000 bytes
+   as JSON. If the meeting has more, keep the most important complete
+   entries and tell the user what you left out. Never cut a single entry
+   mid-sentence or remove a condition to make it fit.
 
 5. Set `idempotencyKey` to `mx1:<externalMeetingId>:<own or the clientId>`,
    cut to its first 110 characters so a suffix still fits under X1's
@@ -106,6 +133,23 @@ an endpoint, or save the meeting somewhere else in X1.
    approve it in X1. Don't describe what X1 will show; X1 shows it. The
    meeting isn't sent until they approve. If they ask later, read the status
    with X1 `get_my_action_requests`.
+
+## Mapping checks before requesting approval
+
+These are source-to-argument examples, not permission to send or infer facts:
+
+| Minutes open action item | X1 action item |
+| --- | --- |
+| `task: "Send the reviewed schedule"`, `due: "2026-11-12"` | `{"title":"Send the reviewed schedule","dueDate":"2026-11-12"}` |
+| `task: "Send the amendment only after the attorney confirms the trustee"`, `due: "after the CPA confirms the 2023 return"` | `{"title":"Send the amendment only after the attorney confirms the trustee","dueStatement":"after the CPA confirms the 2023 return"}` |
+| `task: "Review the account beneficiary"`, `due: "next Friday, if the statement arrives"` | `{"title":"Review the account beneficiary","dueStatement":"next Friday, if the statement arrives"}` |
+| `task: "Ask which tax year applies"`, `due: "unknown until the source is checked"` | `{"title":"Ask which tax year applies","dueStatement":"unknown until the source is checked"}` |
+| `task: "Check the attachment"`, no `due` or `detail` | `{"title":"Check the attachment"}` |
+
+A `done` item produces no action item. If a future `get_meeting` response
+actually supplies `detail: "Use the signed copy, not the draft"`, preserve
+that exact detail only after checking the X1 schema. These checks never use
+`body` to reconstruct a missing field.
 
 ## Handling X1's answers
 

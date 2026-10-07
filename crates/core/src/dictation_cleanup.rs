@@ -142,6 +142,17 @@ impl CleanupOptions {
 /// Pure and idempotent: `clean(clean(x)) == clean(x)`. With [`CleanupEngine::None`]
 /// the input is only trimmed.
 pub fn clean_dictation_text(raw: &str, opts: &CleanupOptions) -> String {
+    clean(raw, opts, true)
+}
+
+/// Accumulating capture keeps repair markers until the complete session is
+/// available. Ordinary spelling, filler and punctuation cleanup still runs.
+#[cfg(all(feature = "streaming", feature = "whisper"))]
+pub(crate) fn clean_without_repairs(raw: &str, opts: &CleanupOptions) -> String {
+    clean(raw, opts, false)
+}
+
+fn clean(raw: &str, opts: &CleanupOptions, repairs: bool) -> String {
     if opts.engine == CleanupEngine::None {
         return raw.trim().to_string();
     }
@@ -157,6 +168,9 @@ pub fn clean_dictation_text(raw: &str, opts: &CleanupOptions) -> String {
     }
     if opts.remove_fillers {
         text = remove_fillers(&text);
+        if repairs {
+            text = clean_contextual_repairs(&text, opts);
+        }
     }
     if opts.spoken_punctuation {
         text = apply_spoken_punctuation(&text);
@@ -178,6 +192,31 @@ pub fn clean_dictation_text(raw: &str, opts: &CleanupOptions) -> String {
     text = capitalize_standalone_i(&text);
 
     text.trim().to_string()
+}
+
+/// Apply only repair rules to already-cleaned, joined utterances. Do not repeat
+/// vocabulary substitution or spoken punctuation (which need not be idempotent).
+pub(crate) fn clean_contextual_repairs(text: &str, opts: &CleanupOptions) -> String {
+    if opts.engine == CleanupEngine::None
+        || !opts.remove_fillers
+        || opts.text_mode == DictationTextMode::TerminalCode
+    {
+        return text.to_string();
+    }
+    text.split('\n')
+        .map(|line| {
+            if line_looks_literal(line) {
+                return line.to_string();
+            }
+            let repaired = crate::dictation_disfluency::clean(line);
+            if repaired == line {
+                repaired
+            } else {
+                capitalize_sentences(&repaired)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn capitalize_agent_prompt(text: &str) -> String {
@@ -699,6 +738,55 @@ mod tests {
             ..rules()
         };
         assert_eq!(clean_dictation_text("um okay", &opts), "Um okay");
+    }
+
+    #[test]
+    fn natural_cleanup_handles_hesitations_and_clear_corrections() {
+        for (raw, expected) in [
+            (
+                "Alright, this is a dictation app test. Well, I mean, yeah, let's try that again.",
+                "Alright, this is a dictation app test. Let's try that again.",
+            ),
+            (
+                "All right, let's try that again. I mean, um, well, let's try that again",
+                "All right, let's try that again",
+            ),
+            ("Meet on Tuesday, actually Thursday.", "Meet on Thursday."),
+            (
+                "This is a recording test—actually, a dictation test.",
+                "This is a dictation test.",
+            ),
+        ] {
+            let cleaned = clean_dictation_text(raw, &rules());
+            assert_eq!(cleaned, expected);
+            assert_eq!(clean_dictation_text(&cleaned, &rules()), cleaned);
+        }
+    }
+
+    #[test]
+    fn contextual_cleanup_obeys_literal_and_disabled_preferences() {
+        let raw = "Well, I mean, yeah, meet on Tuesday, actually Thursday.";
+        for opts in [
+            CleanupOptions::disabled(),
+            CleanupOptions {
+                text_mode: DictationTextMode::TerminalCode,
+                ..rules()
+            },
+            CleanupOptions {
+                remove_fillers: false,
+                ..rules()
+            },
+        ] {
+            assert_eq!(clean_dictation_text(raw, &opts), raw);
+        }
+        let opts = CleanupOptions {
+            text_mode: DictationTextMode::AgentPrompt,
+            ..rules()
+        };
+        assert_eq!(
+            clean_dictation_text("git commit -m 'Tuesday, actually Thursday'", &opts),
+            "git commit -m 'Tuesday, actually Thursday'"
+        );
     }
 
     #[test]

@@ -5329,15 +5329,10 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people remain candidates for entity links, but cannot
+        // authorize a transcript rewrite. Use the same evidence as persistence.
+        let participants =
+            confirmed_attendees(&artifact.frontmatter.attendees, &attendees, &speaker_map);
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
@@ -6031,7 +6026,7 @@ where
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
     // See `confirmed_attendees`: `attendees` stays the merged superset for
-    // entity links and name correction, and only the persisted field narrows.
+    // entity links and candidate matching; persistence and rewrite permission narrow.
     let persisted_attendees = confirmed_attendees(&calendar_attendees, &attendees, &speaker_map);
     let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
         && content_type == ContentType::Meeting
@@ -6041,20 +6036,13 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people cannot authorize a transcript rewrite.
+        let participants = &persisted_attendees;
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
                 &name_pool,
-                &participants,
+                participants,
             );
         transcript = corrected_transcript;
         corrections
@@ -10568,6 +10556,44 @@ mod tests {
             source.contains(&format!("{}{}", "attendees: persisted_", "attendees,")),
             "the foreground path no longer narrows attendees before writing them"
         );
+    }
+
+    #[test]
+    fn mentioned_or_uncertain_people_cannot_authorize_name_rewrites() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speaker_map = vec![
+            attribution("SPEAKER_00", "Geert", diarize::Confidence::Medium),
+            attribution("SPEAKER_01", "Jacques", diarize::Confidence::Low),
+        ];
+        let participants = confirmed_attendees(&[], &candidates, &speaker_map);
+        let raw = "thanks bert for the notes; merci jacque for joining";
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            raw,
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, raw);
+        assert!(corrections.is_empty());
+    }
+
+    #[test]
+    fn trusted_quiet_attendees_and_high_confidence_speakers_keep_name_corrections() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speakers = vec![attribution(
+            "SPEAKER_00",
+            "Jacques",
+            diarize::Confidence::High,
+        )];
+        // Existing calendar/prior-artifact trust is preserved, including someone
+        // who did not produce an attributable speaking segment.
+        let participants = confirmed_attendees(&["Geert".into()], &candidates, &speakers);
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            "thanks bert for the notes; merci jacque for joining",
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, "thanks Geert for the notes; merci Jacques for joining");
+        assert_eq!(corrections.len(), 2);
     }
 
     #[test]

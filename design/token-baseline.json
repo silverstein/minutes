@@ -867,11 +867,6 @@
   {
     "file": "tauri/src/index.html",
     "property": "--shadow-strong",
-    "value": "rgba(0, 0, 0, 0.16)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--shadow-strong",
     "value": "rgba(0, 0, 0, 0.40)"
   },
   {
@@ -2037,11 +2032,6 @@
   {
     "file": "tauri/src/styles/theme-tokens.css",
     "property": "--palette-scroll-thumb",
-    "value": "rgba(0, 0, 0, 0.16)"
-  },
-  {
-    "file": "tauri/src/styles/theme-tokens.css",
-    "property": "--palette-scroll-thumb",
     "value": "rgba(255, 255, 255, 0.08)"
   },
   {
@@ -2243,11 +2233,6 @@
     "file": "tauri/src/styles/theme-tokens.css",
     "property": "--shadow-soft",
     "value": "rgba(0, 0, 0, 0.12)"
-  },
-  {
-    "file": "tauri/src/styles/theme-tokens.css",
-    "property": "--shadow-strong",
-    "value": "rgba(0, 0, 0, 0.16)"
   },
   {
     "file": "tauri/src/styles/theme-tokens.css",

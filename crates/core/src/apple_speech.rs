@@ -784,9 +784,19 @@ fn benchmark_minutes_backend(
     config.transcription.language = locale_language_hint(locale);
 
     let started = Instant::now();
-    let result = match case.content_type {
-        ContentType::Meeting => transcribe::transcribe_meeting(&case.audio_path, &config),
-        _ => transcribe::transcribe(&case.audio_path, &config),
+    // A production fallback is useful during capture, but invalidates a named
+    // engine comparison. Record unavailable engines instead of timing Whisper
+    // under a Parakeet label.
+    let effective = transcribe::effective_transcription_engine(&config);
+    let result = if effective != engine {
+        Err(TranscribeError::EngineNotAvailable(format!(
+            "Requested {engine}, but this installation resolves to {effective}. No fallback was benchmarked."
+        )))
+    } else {
+        match case.content_type {
+            ContentType::Meeting => transcribe::transcribe_meeting(&case.audio_path, &config),
+            _ => transcribe::transcribe(&case.audio_path, &config),
+        }
     };
 
     match result {
@@ -1139,6 +1149,34 @@ fn locale_language_hint(locale: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unavailable_engine_is_not_reported_as_a_fallback_success() {
+        let case = AppleSpeechBenchmarkCase {
+            id: "unavailable-test".into(),
+            audio_path: PathBuf::from("/does-not-exist.wav"),
+            content_type: ContentType::Dictation,
+            locale: Some("en-US".into()),
+            reference_text: "Do not send this.".into(),
+            reference_path: None,
+            required_terms: vec!["not".into()],
+            forbidden_terms: vec![],
+        };
+        let result = benchmark_minutes_backend(
+            &case,
+            "en-US",
+            "parakeet",
+            &Config::default(),
+            Some(&case.reference_text),
+        );
+        assert_eq!(result.status, "unsupported");
+        assert!(result.transcript.is_empty());
+        assert_eq!(result.total_elapsed_ms, None);
+        assert!(result
+            .error
+            .unwrap()
+            .contains("No fallback was benchmarked"));
+    }
+
     use super::*;
     use std::path::Path;
     use tempfile::tempdir;

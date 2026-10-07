@@ -36,3 +36,7 @@ Anarlog is the maintained open-source project formerly called Hyprnote. Char is 
 - [Anarlog documentation](https://docs.anarlog.so)
 - [Minutes agent workflow](https://useminutes.app/for-agents)
 - [Minutes proof and limitations](https://useminutes.app/proof)
+
+## Release spot check
+
+Release spot check, October 7, 2026: reviewed the linked official product pages for current workflow, provider, platform, and pricing claims. This is not a new hands-on benchmark. Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.

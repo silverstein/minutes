@@ -18,7 +18,7 @@ const comparisonRows = [
   },
   {
     label: "Pricing",
-    competitor: "Basic free, Pro $16.99/user/mo, Business $30/user/mo, Enterprise custom",
+    competitor: "Basic free, Pro $16.99/user/mo, Business $30/user/mo (monthly billing), Enterprise custom",
     minutes: "Open source and free to run yourself",
   },
   {
@@ -38,7 +38,7 @@ const comparisonRows = [
   },
   {
     label: "API / webhooks",
-    competitor: "Available on higher-end plans and beta/public API paths",
+    competitor: "Public API available to Enterprise customers",
     minutes: "Open-source stack with CLI, SDK, and MCP surfaces",
   },
   {
@@ -56,7 +56,7 @@ const comparisonRows = [
 const sources = [
   { label: "Otter pricing", href: "https://otter.ai/pricing" },
   { label: "Otter apps and integrations", href: "https://otter.ai/apps" },
-  { label: "Otter API (beta)", href: "https://help.otter.ai/hc/en-us/articles/4412365535895-Does-Otter-offer-an-open-API" },
+  { label: "Otter Enterprise API", href: "https://help.otter.ai/hc/en-us/articles/4412365535895-Does-Otter-offer-an-open-API" },
   { label: "Otter Zapier integration", href: "https://help.otter.ai/hc/en-us/articles/27616131311127-Zapier-Otter-ai-Integration" },
   { label: "Minutes for agents", href: "https://useminutes.app/for-agents" },
   { label: "Minutes MCP reference", href: "https://useminutes.app/docs/mcp/tools" },
@@ -98,6 +98,7 @@ export default function OtterVsMinutesPage() {
         "It is also not the best fit if you do not care about local-first processing, open artifacts, or multi-surface agent workflows. In those cases, Otter may be the better product.",
       ]}
       evaluatedSection={[
+        "Release spot check, October 7, 2026: reviewed the linked official product pages for current workflow, provider, platform, and pricing claims. This is not a new hands-on benchmark. Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.",
         "This page is based on current official product and documentation sources, reviewed on 2026-04-09. It is intentionally a fit-based comparison, not a teardown. Pricing and feature claims can move, so the official sources are linked below.",
         "The Minutes side of the comparison is grounded in the current public agent-facing docs surface and generated MCP reference, not hand-maintained marketing copy.",
       ]}

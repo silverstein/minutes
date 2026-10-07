@@ -71,6 +71,25 @@ cargo install --path crates/cli --no-default-features --features whisper
 
 ### Linux
 
+The prebuilt `minutes-linux-x64` release requires **glibc 2.39 or newer**
+(Ubuntu 24.04) and the ALSA and PipeWire runtime libraries. Those libraries
+are needed to start the executable even for read-only commands and MCP tools;
+a headless server does not need an audio device or a running PipeWire service.
+On Ubuntu 24.04, install the runtime packages before using the downloaded CLI
+or the MCP server's auto-installed engine:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libasound2t64 libpipewire-0.3-0t64
+minutes --version
+minutes agent-readiness --json
+```
+
+Debian 12 ships glibc 2.36 and cannot run that prebuilt binary. Build from
+source on Debian 12 (or another older distribution) using the dependencies
+below. Do not replace your system glibc to run Minutes. A dedicated headless
+binary and a lower minimum glibc for release assets remain separate work.
+
 ```bash
 # Debian/Ubuntu — full dep list:
 sudo apt-get install -y \

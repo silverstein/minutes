@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-09-30
+> Last generated: 2026-10-07
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 

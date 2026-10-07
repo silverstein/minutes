@@ -18,7 +18,7 @@ const comparisonRows = [
   },
   {
     label: "Pricing",
-    competitor: "Free, Pro $18/mo, Business $29/mo, Enterprise/custom tiers",
+    competitor: "Free, Pro $18/mo and Business $29/mo with monthly billing; annual discounts and Enterprise plans",
     minutes: "Open source and free to run yourself",
   },
   {
@@ -101,6 +101,7 @@ export default function FirefliesVsMinutesPage() {
         "It is also not the best fit if you do not care about local-first processing, open artifacts, or multi-surface agent workflows. In those cases, Fireflies.ai may be the better product.",
       ]}
       evaluatedSection={[
+        "Release spot check, October 7, 2026: reviewed the linked official product pages for current workflow, provider, platform, and pricing claims. This is not a new hands-on benchmark. Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.",
         "This page is based on current official product and documentation sources, reviewed on 2026-04-09. It is intentionally a fit-based comparison, not a teardown. Pricing and feature claims can move, so the official sources are linked below.",
         "The Minutes side of the comparison is grounded in the current public agent-facing docs surface and generated MCP reference, not hand-maintained marketing copy.",
       ]}

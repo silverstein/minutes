@@ -12,19 +12,19 @@ superwhisper and Minutes agree on the thing this category usually gets wrong: yo
 ## At a glance
 
 - Core job — superwhisper: speak, get clean formatted text where you're typing; Minutes: capture conversations, transcribe and diarize them, keep a searchable markdown record
-- Where transcription runs — superwhisper: on-device by default, optional cloud models (recommended on Intel Macs); Minutes: on-device always (sealed local whisper.cpp), no cloud path
+- Where transcription runs — superwhisper: on-device by default, optional cloud models (recommended on Intel Macs); Minutes: on-device transcription; optional AI providers are configured separately
 - AI formatting — superwhisper: predefined and custom modes using local or cloud models; Minutes: optional and explicit (Claude via MCP or a local LLM you configure)
 - Durable output — superwhisper: text inserted into the app you're using; Minutes: markdown files with YAML frontmatter, action items, and decisions
 - Meetings and speakers — superwhisper: meeting recording and file transcription; Minutes: diarized speakers, confidence-aware attribution, action items, meeting lifecycle
 - Agent/MCP surface — superwhisper: none we could find; Minutes: MCP server (34 tools), CLI, SDK, Claude Code plugin
 - Open source — superwhisper: no; Minutes: yes, MIT
-- Platforms — superwhisper: macOS, Windows, iOS; Minutes: macOS menu bar app + CLI (open source)
+- Platforms — superwhisper: macOS, Windows, iOS, Android; Minutes: macOS and Windows desktop apps; Linux CLI
 - Pricing — superwhisper: free tier, Pro subscription, lifetime and enterprise options; Minutes: open source and free
 
 ## Where superwhisper wins
 
 - More polished dictation: per-app custom modes (email vs Slack vs prose), 100+ languages
-- Wider platform reach today: macOS, Windows, iOS
+- Wider platform reach today: macOS, Windows, iOS, Android
 - Simpler purchase if you never record meetings and never want a transcript archive
 
 ## Where Minutes wins
@@ -48,3 +48,7 @@ A month from now, will you want to ask an assistant "what did I say about this?"
 - https://useminutes.app/for-agents
 - https://useminutes.app/docs/mcp/tools
 - https://github.com/silverstein/minutes
+
+## Release spot check
+
+Release spot check, October 7, 2026: reviewed the linked official product pages for current workflow, provider, platform, and pricing claims. This is not a new hands-on benchmark. Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.

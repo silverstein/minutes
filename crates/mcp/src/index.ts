@@ -2241,7 +2241,7 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.27.1";
+const MCP_SERVER_VERSION = "0.28.0";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
@@ -3670,6 +3670,26 @@ async function oldCliReadinessGuidance(
   }
 }
 
+function linuxLoaderGuidance(error: unknown, platform: NodeJS.Platform): string | null {
+  if (platform !== "linux") return null;
+  const stderr = (error as { stderr?: unknown })?.stderr;
+  if (typeof stderr !== "string") return null;
+  // These are loader failures before Minutes can run, not policy diagnostics.
+  // Never echo stderr or paths; recognize only known runtime prerequisites.
+  if (/error while loading shared libraries: (?:libpipewire-0\.3|libasound)\.so\.[0-9]+: cannot open shared object file/.test(stderr)) {
+    return "The Minutes Linux engine cannot start because an audio runtime library is missing. " +
+      "On Ubuntu 24.04, install libasound2t64 and libpipewire-0.3-0t64, then restart the MCP host. " +
+      "These libraries are required even for read-only tools. " +
+      "See https://github.com/silverstein/minutes/blob/main/docs/install.md#linux";
+  }
+  if (/version [`']GLIBC_2\.[0-9]{1,2}' not found/.test(stderr)) {
+    return "The downloaded Minutes Linux engine requires glibc 2.39 or newer (Ubuntu 24.04). " +
+      "On an older distribution such as Debian 12, build minutes-cli from source on that machine. " +
+      "See https://github.com/silverstein/minutes/blob/main/docs/install.md#linux";
+  }
+  return null;
+}
+
 export async function readAgentTrustReadiness(
   runner: MinutesRunner = runMinutes,
   platform: NodeJS.Platform = process.platform
@@ -3684,6 +3704,8 @@ export async function readAgentTrustReadiness(
     // the capture tools, and withholding it leaves a Claude Desktop user with
     // "could not be verified safely" and nothing to do about it (#774).
     if (error?.cliMissing) throw error;
+    const loaderGuidance = linuxLoaderGuidance(error, platform);
+    if (loaderGuidance) throw new Error(loaderGuidance);
     if (rejectedUnknownSubcommand(error, "agent-readiness")) {
       const guidance = await oldCliReadinessGuidance(runner, platform);
       if (guidance) throw new Error(guidance);
@@ -4164,7 +4186,10 @@ async function liveCopilotFingerprint(): Promise<string> {
 async function spawnCopilotCli(
   goal: string,
   surface: "stdout" | "tui"
-): Promise<CopilotObserverSession> {
+): Promise<{
+  session: CopilotObserverSession;
+  exitedSuccessfully: () => boolean;
+}> {
   const paths = copilotObserverPaths();
   await mkdir(paths.root, { recursive: true });
   await Promise.all([
@@ -4175,6 +4200,7 @@ async function spawnCopilotCli(
   const stdoutFd = openSync(paths.nudges, "a");
   const stderrFd = openSync(paths.stderr, "a");
   let child: ReturnType<typeof spawn>;
+  let exitCode: number | null | undefined;
   try {
     child = spawn(
       MINUTES_BIN,
@@ -4185,6 +4211,7 @@ async function spawnCopilotCli(
         env: mcpCliChildEnv({ RUST_LOG: "info" }),
       }
     );
+    child.once("exit", (code) => { exitCode = code; });
   } finally {
     closeSync(stdoutFd);
     closeSync(stderrFd);
@@ -4216,7 +4243,7 @@ async function spawnCopilotCli(
     }
     throw error;
   }
-  return session;
+  return { session, exitedSuccessfully: () => exitCode === 0 };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -8706,7 +8733,7 @@ if (COPILOT_SUPPORTED) {
       }
 
       try {
-        const observerSession = await spawnCopilotCli(goal, surface);
+        const { session: observerSession, exitedSuccessfully } = await spawnCopilotCli(goal, surface);
         const status = await waitForCopilotStatus(
           (candidate) => candidate.active || !processIsAlive(observerSession.pid),
           5000
@@ -8745,6 +8772,18 @@ if (COPILOT_SUPPORTED) {
               text:
                 "Copilot start is still arming and has not published active status yet. " +
                 "The independent CLI process is running; use copilot_status to follow startup.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
+        if (status.available && status.setup_needed && exitedSuccessfully()) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                "Coach needs a local AI model before it can start. " +
+                "Run `minutes coach setup`, then start Coach again. No recording was opened.",
             }],
             structuredContent: snapshot,
           };

@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 const comparisonRows = [
   {
     label: "Best for",
-    competitor: "Polished voice-to-text dictation into any app, on Mac, Windows, and iOS",
+    competitor: "Polished voice-to-text dictation into any app, on Mac, Windows, iOS, and Android",
     minutes: "On-device conversation memory: meetings, voice memos, and dictation your agents can query",
   },
   {
@@ -24,7 +24,7 @@ const comparisonRows = [
   {
     label: "Where transcription runs",
     competitor: "On-device by default; optional cloud models (recommended on Intel Macs)",
-    minutes: "On-device always (sealed local whisper.cpp) — there is no cloud path",
+    minutes: "On-device transcription; optional AI providers are configured separately",
   },
   {
     label: "AI formatting / summarization",
@@ -53,8 +53,8 @@ const comparisonRows = [
   },
   {
     label: "Platforms",
-    competitor: "macOS, Windows, iOS",
-    minutes: "macOS menu bar app + CLI (open source, builds from source elsewhere)",
+    competitor: "macOS, Windows, iOS, Android",
+    minutes: "macOS and Windows desktop apps; Linux CLI",
   },
   {
     label: "Pricing",
@@ -105,6 +105,7 @@ export default function SuperwhisperVsMinutesPage() {
         "It's also not the fit if you find markdown files, a CLI, and agent workflows to be complexity you don't want. A single-purpose dictation app is legitimately simpler.",
       ]}
       evaluatedSection={[
+        "Release spot check, October 7, 2026: reviewed the linked official product pages for current workflow, provider, platform, and pricing claims. This is not a new hands-on benchmark. Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.",
         "This is a fit-based comparison, not a teardown, reviewed on 2026-07-11 against superwhisper's public website and pricing, linked below. superwhisper's local-by-default transcription with optional cloud models, its mode system, platform list, and pricing tiers are drawn from its own site.",
         "The Minutes side is grounded in its public agent-facing docs, generated MCP reference, and open-source repository. Where a claim depends on current pricing or feature scope, the official source is linked.",
       ]}

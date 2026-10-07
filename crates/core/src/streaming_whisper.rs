@@ -90,6 +90,7 @@ pub struct StreamingWhisper {
     n_threads: i32,
     /// Language hint (None = auto-detect).
     language: Option<String>,
+    recognition_hint: String,
     /// Whether we've created a state before (suppress init noise on subsequent calls).
     has_created_state: bool,
     /// Cap on partial-transcription window length, in samples at 16kHz. Past
@@ -128,6 +129,7 @@ impl StreamingWhisper {
             last_partial: String::new(),
             n_threads: num_cpus(),
             language,
+            recognition_hint: String::new(),
             has_created_state: false,
             partial_max_samples,
             abort_signal: None,
@@ -141,6 +143,11 @@ impl StreamingWhisper {
     /// yield immediately to recording shutdown.
     pub fn with_abort_signal(mut self, abort_signal: Arc<AtomicBool>) -> Self {
         self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    pub fn with_recognition_hint(mut self, hint: String) -> Self {
+        self.recognition_hint = hint;
         self
     }
 
@@ -212,6 +219,9 @@ impl StreamingWhisper {
         let mut params = streaming_whisper_params();
         params.set_n_threads(self.n_threads);
         params.set_language(self.language.as_deref());
+        if !self.recognition_hint.is_empty() {
+            params.set_initial_prompt(&self.recognition_hint);
+        }
         // Stack-owned so it outlives `state.full`; whisper-rs's closure
         // setter is unsound for capturing closures (see `set_abort_callback`).
         let abort_signal = self.abort_signal.clone();

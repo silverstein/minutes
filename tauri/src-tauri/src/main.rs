@@ -23,6 +23,8 @@ mod call_detect;
 mod cli_setup;
 mod commands;
 mod context;
+mod dictation_experience;
+mod dictation_field;
 mod palette_dispatch;
 mod pty;
 mod secret_store;
@@ -2147,6 +2149,7 @@ fn main() {
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
 
+            dictation_experience::install_shortcuts(app.handle());
             let recovered_dictations = commands::adopt_orphaned_dictation_audio();
             if recovered_dictations > 0 {
                 eprintln!(
@@ -3213,6 +3216,22 @@ fn main() {
             commands::cmd_dismiss_dictation_overlay,
             commands::cmd_dictation_overlay_ready,
             commands::cmd_recent_dictations,
+            dictation_experience::cmd_accept_dictation_recovery,
+            dictation_experience::cmd_dictation_audio,
+            dictation_experience::cmd_dictation_preferences,
+            dictation_experience::cmd_dictation_history_destination,
+            dictation_experience::cmd_dictation_correction,
+            dictation_experience::cmd_copy_dictation_text,
+            dictation_experience::cmd_save_dictation_preferences,
+            dictation_experience::cmd_test_dictation_microphone,
+            dictation_experience::cmd_stop_dictation_mic_test,
+            dictation_experience::cmd_dictation_devices,
+            dictation_experience::cmd_undo_last_dictation,
+            dictation_experience::cmd_show_dictation_history,
+            dictation_experience::cmd_dictation_selection,
+            dictation_experience::cmd_clear_dictation_history_target,
+            dictation_experience::cmd_paste_dictation_from_history,
+            dictation_experience::cmd_dictation_rewrite,
             commands::cmd_copy_dictation,
             commands::cmd_copy_pre_command_dictation,
             commands::cmd_copy_raw_dictation,
@@ -3480,7 +3499,8 @@ mod tray_activity_tests {
             "routine startup must not imply a warm model is loading"
         );
         assert!(
-            overlay.contains(">Starting…</span>")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("id=\"label\"></span>")
                 && !overlay.contains("Preparing dictation")
                 && !overlay.contains("preparationTimer"),
             "the first frame may be neutral, but routine startup must not expose internal preparation phases"
@@ -3588,7 +3608,8 @@ mod tray_activity_tests {
             "routine dictation activity should use capture blue, not error red"
         );
         assert!(
-            overlay.contains("setIndicator('dot-neutral')")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("class=\"busy-mark\" aria-hidden=\"true\"")
                 && overlay.contains("indicator.className = 'dot capture blink'")
                 && overlay.contains("indicator.className = 'dot capture'"),
             "dictation startup should remain neutral until active capture is confirmed"
@@ -3618,8 +3639,8 @@ mod tray_activity_tests {
 
         assert!(commands_rs.contains("\"activeLabel\": \"copy only\""));
         assert!(
-            overlay.contains("const destinationHint = earlyInsertionFallback")
-                && overlay.contains("insertionActiveLabel || 'copy only'")
+            overlay.contains("return earlyInsertionFallback ? 'Copy only' : ''")
+                && overlay.contains("pill.classList.add('capture-warning')")
                 && overlay.contains("'Copied · typing needs setup'")
                 && overlay.contains("permissionButton.classList.remove('hidden')")
                 && overlay.contains("cmd_show_dictation_permission_help"),
@@ -3716,19 +3737,24 @@ mod tray_activity_tests {
         let overlay =
             std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
                 .expect("failed to read dictation overlay");
-        let success_case = overlay
-            .split("case 'success':")
+        let checkpoint_guard = overlay
+            .split("function renderOverlaySnapshot(snapshot) {")
             .nth(1)
-            .and_then(|tail| tail.split("case 'copied':").next())
-            .expect("success case should be extractable");
+            .and_then(|tail| {
+                tail.split("const stateChanged = state !== lastState;")
+                    .next()
+            })
+            .expect("snapshot checkpoint guard should be extractable");
 
         assert!(
-            success_case.contains("label.textContent = 'Captured'"),
-            "per-utterance success should be presented as an in-session capture checkpoint"
+            checkpoint_guard.contains("if (state === 'success') return;"),
+            "per-utterance success must preserve the current listening presentation"
         );
         assert!(
-            !success_case.contains("scheduleDismiss") && !success_case.contains("dismiss()"),
-            "per-utterance success must not schedule dismissal while dictation can continue"
+            !checkpoint_guard.contains("scheduleDismiss")
+                && !checkpoint_guard.contains("dismiss()")
+                && !checkpoint_guard.contains("playCue("),
+            "per-utterance success must not dismiss or play completion feedback"
         );
         assert!(
             overlay.contains("if (!isTerminalState(state))")
@@ -3856,11 +3882,15 @@ mod tray_activity_tests {
         let dictation = index
             .split("<!-- Dictation -->")
             .nth(1)
-            .and_then(|tail| tail.split("<!-- Live Transcript -->").next())
+            .and_then(|tail| tail.split("id=\"panel-ai\"").next())
             .expect("dictation settings section should be extractable");
-        let (routine, advanced) = dictation
+        let (before_advanced, rest) = dictation
             .split_once("<details class=\"settings-advanced\">")
             .expect("dictation settings should have an Advanced disclosure");
+        let (advanced, after_advanced) = rest
+            .split_once("</details>")
+            .expect("Advanced disclosure should be bounded");
+        let routine = format!("{before_advanced}{after_advanced}");
 
         for id in [
             "settings-dictation-destination",
@@ -3870,6 +3900,10 @@ mod tray_activity_tests {
             "settings-dictation-recents",
         ] {
             assert!(routine.contains(id), "routine settings should contain {id}");
+            assert!(
+                !advanced.contains(id),
+                "routine settings must stay outside Advanced: {id}"
+            );
         }
         for id in [
             "settings-dictation-model",

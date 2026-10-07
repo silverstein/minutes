@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-convert"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "anydoc",
  "flate2",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-core"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "cap-std",
  "chrono",
@@ -3820,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-ocr"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "libc",
  "mach2 0.7.0",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-semantic"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "libc",
  "mach2 0.7.0",
@@ -3853,14 +3853,14 @@ dependencies = [
 
 [[package]]
 name = "minutes-archive-worker-control"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "minutes-cli"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-core"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -3950,7 +3950,7 @@ dependencies = [
 
 [[package]]
 name = "minutes-reader"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "chrono",
  "schemars 1.2.2",
@@ -4937,7 +4937,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d5285893bb5eb82e6aaf5d59ee909a06a16737a8970984dd7746ba9283498d6"
 dependencies = [
  "phf_shared 0.10.0",
- "rand 0.8.5",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -4947,7 +4947,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared 0.11.3",
- "rand 0.8.5",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -5482,9 +5482,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -5966,9 +5966,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.37"
+version = "0.23.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "log",
  "once_cell",
@@ -6030,9 +6030,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",

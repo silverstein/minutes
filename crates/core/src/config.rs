@@ -832,6 +832,12 @@ pub struct CalendarConfig {
     /// event's title as the meeting title (overriding the AI-generated title).
     /// Opt-in; defaults to false to preserve existing behavior.
     pub use_event_title_for_meeting_title: bool,
+    /// Drop events whose title contains any of these substrings
+    /// (case-insensitive), e.g. "focus time" or "lunch". Empty by default.
+    pub ignore_title_contains: Vec<String>,
+    /// When true, drop events that have neither attendees nor a meeting URL,
+    /// such as personal blocks and reminders. Opt-in; defaults to false.
+    pub require_attendees_or_url: bool,
 }
 
 impl Default for CalendarConfig {
@@ -839,6 +845,8 @@ impl Default for CalendarConfig {
         Self {
             enabled: true,
             use_event_title_for_meeting_title: false,
+            ignore_title_contains: Vec::new(),
+            require_attendees_or_url: false,
         }
     }
 }
@@ -954,6 +962,7 @@ impl IdentityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictationConfig {
+    pub experience: crate::dictation_experience::DictationExperience,
     pub backend: String,
     pub destination: String,
     pub accumulate: bool,
@@ -1002,6 +1011,7 @@ pub struct VaultConfig {
 impl Default for DictationConfig {
     fn default() -> Self {
         Self {
+            experience: Default::default(),
             backend: "whisper".into(),
             destination: "insert".into(),
             accumulate: true,
@@ -1538,7 +1548,16 @@ fn home_dir() -> PathBuf {
 }
 
 fn minutes_dir() -> PathBuf {
-    home_dir().join(".minutes")
+    minutes_dir_from(std::env::var_os("MINUTES_DATA_DIR"), home_dir())
+}
+
+// A process-scoped native dogfood root keeps history, recovery audio and state
+// away from the user's production data. Empty/relative paths cannot redirect it.
+fn minutes_dir_from(override_dir: Option<OsString>, home: PathBuf) -> PathBuf {
+    override_dir
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".minutes"))
 }
 
 fn config_base_dir_from(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
@@ -1841,13 +1860,36 @@ impl Config {
     }
 
     pub fn load_strict_from(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let contents = std::fs::read_to_string(path)
-            .map_err(|_| "Minutes config exists but could not be read safely.".to_string())?;
-        let mut config: Self = toml::from_str(&contents)
-            .map_err(|_| "Minutes config exists but is malformed.".to_string())?;
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(std::fs::symlink_metadata(path), Err(ref metadata_error)
+                    if metadata_error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Minutes config could not be read safely ({:?}).",
+                    error.kind()
+                ))
+            }
+        };
+        let mut config: Self = toml::from_str(&contents).map_err(|error| {
+            // TOML's Display includes source excerpts, which may contain secrets.
+            // Expose only the location; the original bytes stay on disk.
+            let location = error
+                .span()
+                .map(|span| {
+                    let prefix = contents.get(..span.start).unwrap_or("");
+                    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                    let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+                    format!(" at line {line}, column {column}")
+                })
+                .unwrap_or_default();
+            format!("Minutes config exists but is malformed{location}.")
+        })?;
         apply_raw_toml_compat(&mut config, inspect_raw_toml_compat(&contents));
         Ok(config)
     }
@@ -1912,7 +1954,13 @@ impl Config {
             .map(inspect_raw_toml_compat)
             .unwrap_or_default();
 
-        let mut config = Self::load_from(path);
+        let mut config = match Self::load_strict_from(path) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "Using defaults; skipping config migrations");
+                return Self::default();
+            }
+        };
         let mut migrated_toml: Option<String> = None;
 
         // Apple Speech migration: older configs overloaded
@@ -2014,10 +2062,6 @@ impl Config {
     /// Load config from a specific path. Used for testing and by
     /// [`Self::load_with_migrations_from`].
     pub fn load_from(path: &Path) -> Self {
-        if !path.exists() {
-            return Self::default();
-        }
-
         match Self::load_strict_from(path) {
             Ok(config) => config,
             Err(error) => {
@@ -2625,6 +2669,46 @@ mod tests {
     }
 
     #[test]
+    fn malformed_config_migrations_preserve_original_bytes_and_report_location() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        let contents = "[transcription]\nmodel = \"PRIVATE-CONFIG-CANARY\n";
+        std::fs::write(&path, contents).unwrap();
+        let error = Config::load_strict_from(&path).unwrap_err();
+        assert!(error.contains("line 2"));
+        assert!(!error.contains("PRIVATE-CONFIG-CANARY"));
+        assert_eq!(
+            Config::load_with_migrations_from(&path).transcription.model,
+            "small"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        assert!(Config::default().save_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        std::fs::write(&path, "[transcription]\nmodel = \"base\"\n").unwrap();
+        assert_eq!(
+            Config::load_strict_from(&path).unwrap().transcription.model,
+            "base"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_config_symlink_is_an_error_instead_of_a_first_run() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::os::unix::fs::symlink(directory.path().join("missing.toml"), &path).unwrap();
+        assert!(Config::load_strict_from(&path)
+            .unwrap_err()
+            .contains("could not be read"));
+        Config::load_with_migrations_from(&path);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!directory.path().join("missing.toml").exists());
+    }
+
+    #[test]
     fn string_setting_upsert_creates_a_fresh_minimal_config() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("nested/minutes/config.toml");
@@ -2716,6 +2800,24 @@ enabled = true
             assert!(!error.to_string().contains("PRIVATE-CANARY"));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn dogfood_data_root_requires_an_absolute_path_and_preserves_the_default() {
+        let directory = TempDir::new().unwrap();
+        let home = directory.path().join("home");
+        let isolated = directory.path().join("isolated");
+        assert_eq!(minutes_dir_from(None, home.clone()), home.join(".minutes"));
+        for invalid in [OsString::new(), OsString::from("relative/state")] {
+            assert_eq!(
+                minutes_dir_from(Some(invalid), home.clone()),
+                home.join(".minutes")
+            );
+        }
+        assert_eq!(
+            minutes_dir_from(Some(isolated.clone().into_os_string()), home),
+            isolated
+        );
     }
 
     #[test]

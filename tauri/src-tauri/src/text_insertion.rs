@@ -661,9 +661,10 @@ struct ClipboardSnapshot {
     text: Option<String>,
     has_plain_text: bool,
     types: Vec<String>,
+    items: Option<Vec<std::collections::BTreeMap<String, Vec<u8>>>>,
 }
 
-fn write_clipboard(text: &str) -> Result<(), String> {
+pub fn write_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::io::Write;
@@ -711,6 +712,18 @@ struct MacosPasteTiming {
     restored: bool,
     visible_ms: u64,
     clipboard_restore_ms: Option<u64>,
+}
+
+pub fn focus_captured_process(process_id: i32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_ax::focus_process(process_id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = process_id;
+        Err("Use Copy and paste into your destination app.".into())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -804,24 +817,6 @@ fn restore_macos_clipboard_after_paste(
     snapshot: ClipboardSnapshot,
     after_write_change_count: Option<i64>,
 ) -> Result<bool, String> {
-    if !snapshot.has_plain_text {
-        tracing::info!(
-            change_count = snapshot.change_count,
-            types = ?snapshot.types,
-            "skipping dictation clipboard restore because original clipboard was non-text"
-        );
-        return Ok(false);
-    }
-
-    let Some(text) = snapshot.text else {
-        tracing::info!(
-            change_count = snapshot.change_count,
-            types = ?snapshot.types,
-            "skipping dictation clipboard restore because original text was unavailable"
-        );
-        return Ok(false);
-    };
-
     let Some(after_write_change_count) = after_write_change_count else {
         tracing::warn!(
             "skipping dictation clipboard restore because changeCount after write was unavailable"
@@ -840,16 +835,38 @@ fn restore_macos_clipboard_after_paste(
         return Ok(false);
     }
 
-    write_clipboard(&text)?;
-    Ok(true)
+    if let Some(items) = snapshot.items {
+        return macos_pasteboard::restore(items, after_write_change_count);
+    }
+    // Never replace rich clipboard contents with a partial text-only snapshot.
+    if snapshot.has_plain_text
+        && snapshot.types.iter().all(|ty| {
+            matches!(
+                ty.as_str(),
+                "public.utf8-plain-text" | "NSStringPboardType" | "public.text"
+            )
+        })
+    {
+        if let Some(text) = snapshot.text {
+            write_clipboard(&text)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
 fn wait_for_clipboard_restore_window(after_write_change_count: i64) {
-    const MAX_WAIT: Duration = Duration::from_millis(500);
+    let max_wait = Duration::from_millis(
+        minutes_core::config::Config::load()
+            .dictation
+            .experience
+            .clipboard_restore_delay_ms
+            .clamp(250, 5000),
+    );
     const STEP: Duration = Duration::from_millis(25);
     let started = std::time::Instant::now();
-    while started.elapsed() < MAX_WAIT {
+    while started.elapsed() < max_wait {
         std::thread::sleep(STEP);
         match macos_clipboard_change_count() {
             Ok(current) if current != after_write_change_count => break,
@@ -861,7 +878,7 @@ fn wait_for_clipboard_restore_window(after_write_change_count: i64) {
 
 #[cfg(target_os = "macos")]
 fn macos_clipboard_change_count() -> Result<i64, String> {
-    Ok(macos_pasteboard::snapshot()?.change_count)
+    macos_pasteboard::change_count()
 }
 
 #[cfg(target_os = "macos")]
@@ -1240,27 +1257,214 @@ mod macos_pasteboard {
 
     const NS_UTF8_STRING_ENCODING: NSUInteger = 4;
 
+    pub fn change_count() -> Result<i64, String> {
+        unsafe { Ok(msg_send_id_isize(general_pasteboard()?, sel("changeCount")?) as i64) }
+    }
+    struct Pool(Id);
+    impl Pool {
+        unsafe fn new() -> Result<Self, String> {
+            Ok(Self(msg_send_class_id(
+                class("NSAutoreleasePool")?,
+                sel("new")?,
+            )))
+        }
+    }
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            unsafe {
+                if let Ok(selector) = sel("drain") {
+                    let call: unsafe extern "C" fn(Id, Sel) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    call(self.0, selector);
+                }
+            }
+        }
+    }
     pub fn snapshot() -> Result<ClipboardSnapshot, String> {
         unsafe {
-            let pasteboard = general_pasteboard()?;
-            let change_count = msg_send_id_isize(pasteboard, sel("changeCount")?) as i64;
-            let types = read_types(pasteboard)?;
-            let has_plain_text = types.iter().any(|ty| {
-                ty == "public.utf8-plain-text" || ty == "NSStringPboardType" || ty == "public.text"
-            });
-            let text = if has_plain_text {
-                read_string_for_type(pasteboard, "public.utf8-plain-text")?
-                    .or(read_string_for_type(pasteboard, "NSStringPboardType")?)
-                    .or(read_string_for_type(pasteboard, "public.text")?)
-            } else {
-                None
-            };
-            Ok(ClipboardSnapshot {
-                change_count,
-                text,
-                has_plain_text,
-                types,
-            })
+            let _pool = Pool::new()?;
+            snapshot_from(general_pasteboard()?)
+        }
+    }
+    unsafe fn snapshot_from(pasteboard: Id) -> Result<ClipboardSnapshot, String> {
+        let change_count = msg_send_id_isize(pasteboard, sel("changeCount")?) as i64;
+        let types = read_types(pasteboard)?;
+        let has_plain_text = types.iter().any(|ty| {
+            ty == "public.utf8-plain-text" || ty == "NSStringPboardType" || ty == "public.text"
+        });
+        let text = if has_plain_text {
+            read_string_for_type(pasteboard, "public.utf8-plain-text")?
+                .or(read_string_for_type(pasteboard, "NSStringPboardType")?)
+                .or(read_string_for_type(pasteboard, "public.text")?)
+        } else {
+            None
+        };
+        let items = read_items(pasteboard)?;
+        if msg_send_id_isize(pasteboard, sel("changeCount")?) as i64 != change_count {
+            return Err("Clipboard changed while its formats were being read.".into());
+        }
+        Ok(ClipboardSnapshot {
+            change_count,
+            text,
+            has_plain_text,
+            types,
+            items,
+        })
+    }
+
+    type Items = Vec<std::collections::BTreeMap<String, Vec<u8>>>;
+    unsafe fn read_items(pasteboard: Id) -> Result<Option<Items>, String> {
+        let items = msg_send_id_id(pasteboard, sel("pasteboardItems")?);
+        if items.is_null() {
+            return Ok(Some(Vec::new()));
+        }
+        let count = msg_send_id_usize(items, sel("count")?);
+        if count > 64 {
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        let mut total = 0usize;
+        for index in 0..count {
+            let item = msg_send_id_usize_id(items, sel("objectAtIndex:")?, index);
+            let types = read_types(item)?;
+            if types.len() > 32 {
+                return Ok(None);
+            }
+            let mut captured = std::collections::BTreeMap::new();
+            for ty in types {
+                let data = msg_send_id_id_id(item, sel("dataForType:")?, nsstring(&ty)?);
+                if data.is_null() {
+                    return Ok(None);
+                }
+                let len = msg_send_id_usize(data, sel("length")?);
+                total = total.saturating_add(len);
+                if total > 16 * 1024 * 1024 {
+                    return Ok(None);
+                }
+                let bytes = msg_send_id_ptr(data, sel("bytes")?);
+                if len > 0 && bytes.is_null() {
+                    return Ok(None);
+                }
+                let bytes = if len == 0 {
+                    Vec::new()
+                } else {
+                    std::slice::from_raw_parts(bytes.cast::<u8>(), len).to_vec()
+                };
+                captured.insert(ty, bytes);
+            }
+            out.push(captured);
+        }
+        Ok(Some(out))
+    }
+    pub fn restore(items: Items, expected_count: i64) -> Result<bool, String> {
+        unsafe {
+            let _pool = Pool::new()?;
+            restore_to(general_pasteboard()?, items, expected_count)
+        }
+    }
+    unsafe fn restore_to(
+        pasteboard: Id,
+        items: Items,
+        expected_count: i64,
+    ) -> Result<bool, String> {
+        let array = msg_send_class_id(class("NSMutableArray")?, sel("array")?);
+        for item in items {
+            let object = msg_send_class_id(class("NSPasteboardItem")?, sel("new")?);
+            if object.is_null() {
+                return Ok(false);
+            }
+            for (ty, bytes) in item {
+                let data_fn: unsafe extern "C" fn(Class, Sel, *const u8, usize) -> Id =
+                    std::mem::transmute(objc_msgSend as *const ());
+                let data = data_fn(
+                    class("NSData")?,
+                    sel("dataWithBytes:length:")?,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                );
+                let set_fn: unsafe extern "C" fn(Id, Sel, Id, Id) -> bool =
+                    std::mem::transmute(objc_msgSend as *const ());
+                if data.is_null() || !set_fn(object, sel("setData:forType:")?, data, nsstring(&ty)?)
+                {
+                    let release: unsafe extern "C" fn(Id, Sel) =
+                        std::mem::transmute(objc_msgSend as *const ());
+                    release(object, sel("release")?);
+                    return Ok(false);
+                }
+            }
+            let add: unsafe extern "C" fn(Id, Sel, Id) =
+                std::mem::transmute(objc_msgSend as *const ());
+            add(array, sel("addObject:")?, object);
+            let release: unsafe extern "C" fn(Id, Sel) =
+                std::mem::transmute(objc_msgSend as *const ());
+            release(object, sel("release")?);
+        }
+        // Recheck immediately before mutation, after materializing all items.
+        if msg_send_id_isize(pasteboard, sel("changeCount")?) as i64 != expected_count {
+            return Ok(false);
+        }
+        let _ = msg_send_id_isize(pasteboard, sel("clearContents")?);
+        let write_fn: unsafe extern "C" fn(Id, Sel, Id) -> bool =
+            std::mem::transmute(objc_msgSend as *const ());
+        if msg_send_id_usize(array, sel("count")?) == 0 {
+            return Ok(true);
+        }
+        Ok(write_fn(pasteboard, sel("writeObjects:")?, array))
+    }
+
+    #[cfg(test)]
+    mod clipboard_tests {
+        use super::*;
+        #[test]
+        fn native_rich_roundtrip_preserves_formats_and_yields_to_new_copies() {
+            unsafe {
+                let _pool = Pool::new().unwrap();
+                // Unique named board: never read or mutate the user's clipboard.
+                let board = msg_send_class_id(
+                    class("NSPasteboard").unwrap(),
+                    sel("pasteboardWithUniqueName").unwrap(),
+                );
+                assert!(!board.is_null());
+                let fixture = vec![std::collections::BTreeMap::from([
+                    ("public.utf8-plain-text".into(), b"fixture words".to_vec()),
+                    ("public.rtf".into(), b"{\\rtf1 fixture words}".to_vec()),
+                    ("public.png".into(), vec![0, 1, 2, 255]),
+                ])];
+                let original_count = msg_send_id_isize(board, sel("changeCount").unwrap()) as i64;
+                assert!(restore_to(board, fixture.clone(), original_count).unwrap());
+                let saved = snapshot_from(board).unwrap();
+                let captured = saved.items.clone().unwrap();
+                for (format, bytes) in &fixture[0] {
+                    assert_eq!(captured[0].get(format), Some(bytes));
+                }
+                // macOS can add equivalent UTF-16 representations. Preserve
+                // every captured format, including those added by the OS.
+                let inserted = vec![std::collections::BTreeMap::from([(
+                    "public.utf8-plain-text".into(),
+                    b"dictated words".to_vec(),
+                )])];
+                assert!(restore_to(board, inserted, saved.change_count).unwrap());
+                let after_insert = snapshot_from(board).unwrap();
+                assert!(restore_to(board, captured.clone(), after_insert.change_count).unwrap());
+                let restored = snapshot_from(board).unwrap();
+                assert_eq!(restored.items, Some(captured.clone()));
+                let newer = vec![std::collections::BTreeMap::from([(
+                    "public.utf8-plain-text".into(),
+                    b"newer copy".to_vec(),
+                )])];
+                assert!(restore_to(board, newer.clone(), restored.change_count).unwrap());
+                assert!(!restore_to(board, captured, restored.change_count).unwrap());
+                let final_items = snapshot_from(board).unwrap().items.unwrap();
+                assert_eq!(
+                    final_items[0].get("public.utf8-plain-text"),
+                    newer[0].get("public.utf8-plain-text")
+                );
+                assert!(!final_items[0].contains_key("public.rtf"));
+                assert!(!final_items[0].contains_key("public.png"));
+                let release: unsafe extern "C" fn(Id, Sel) =
+                    std::mem::transmute(objc_msgSend as *const ());
+                release(board, sel("releaseGlobally").unwrap());
+            }
         }
     }
 
@@ -1312,7 +1516,7 @@ mod macos_pasteboard {
         if ns.is_null() {
             Err("Could not create NSString".into())
         } else {
-            Ok(ns)
+            Ok(msg_send_id_id(ns, sel("autorelease")?))
         }
     }
 

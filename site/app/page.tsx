@@ -1,12 +1,14 @@
 import { CopyButton } from "@/components/copy-button";
 import { DemoPlayer } from "@/components/demo-player";
 import { MemoryCompoundsHero } from "@/components/memory-compounds-hero";
-import { APPLE_SILICON_DOWNLOAD_PATH } from "@/lib/downloads";
+import {
+  APPLE_SILICON_DOWNLOAD_PATH,
+  WINDOWS_INSTALLER_DOWNLOAD_URL,
+} from "@/lib/downloads";
 import {
   MINUTES_MCP_TOOL_COUNT,
   MINUTES_RELEASE_VERSION,
   MINUTES_TEST_COUNT,
-  WINDOWS_SETUP_EXE,
 } from "@/lib/release";
 import { organizationSchema, softwareApplicationSchema } from "@/lib/schema";
 import { NumberedSectionLabel as SectionLabel } from "@/components/section-label";
@@ -40,7 +42,7 @@ const featureGrid = [
     label: "For daily work",
     title: "Dictation that stays useful",
     description:
-      "Hold the hotkey, speak, release. Minutes inserts the text where you are working, keeps a clipboard copy, and saves it to your daily note.",
+      "Speak, correct yourself, and get usable text. Choose natural cleanup or literal transcription, then insert it where you are working or recover it from recent dictations.",
   },
   {
     label: "For recall",
@@ -68,7 +70,7 @@ const capabilityColumns = [
       ],
       [
         "Dictation mode",
-        "Clipboard + daily note flow for short-form thoughts and commands.",
+        "Natural or literal text, clipboard recovery, and a daily note for short thoughts and commands.",
       ],
     ],
   },
@@ -116,10 +118,10 @@ const capabilityColumns = [
   },
 ] as const;
 
-// Public product documentation reviewed September 15, 2026. See linked comparisons.
+// Public product documentation spot-checked October 7, 2026. See linked comparisons.
 const comparisons = [
   ["Product", "Hosted meeting notepad", "Hosted meeting assistant", "Local meeting notepad", "Local conversation memory"],
-  ["Agent access", "Hosted MCP", "Hosted integrations", "CLI + MCP", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
+  ["Agent access", "Hosted MCP", "Hosted MCP and integrations", "CLI + MCP", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
   ["Primary storage", "Hosted workspace", "Hosted workspace", "Local SQLite + files", "Local Markdown + YAML"],
   ["Local AI", "Cloud transcription", "Cloud transcription", "With local providers", "Local transcription; AI provider of your choice"],
 ] as const;
@@ -374,7 +376,7 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          makes prep briefs and other Markdown notes visible in list and search, and prevents concurrent setup processes from racing over one model download.{" "}
+          brings a smaller dictation interface, speech cleanup, and recent-text recovery, plus clearer settings repair when configuration needs attention.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
@@ -409,7 +411,7 @@ export default function Home() {
             Mac (Apple Silicon)
           </a>
           <a
-            href={WINDOWS_SETUP_EXE}
+            href={WINDOWS_INSTALLER_DOWNLOAD_URL}
             data-download-target="windows"
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >

@@ -4,8 +4,8 @@ This local plugin packages all 25 canonical Minutes skills and connects the
 existing 34-tool Minutes MCP server. It includes recording, live transcripts,
 copilot, dictation, conversation search, meeting preparation, notes, summaries,
 commitments, and follow-up. The generated package is at
-`.agents/plugins/minutes`; its version is 0.2.4 and its MCP runtime is pinned to
-`minutes-mcp@0.28.0`.
+`.agents/plugins/minutes`; its version is 0.2.5 and its MCP runtime is pinned to
+`minutes-mcp@0.28.1`.
 
 ChatGPT Work on desktop can load a local marketplace and run a stdio MCP server.
 The local Minutes engine performs capture and audio processing. Dictation
@@ -16,11 +16,17 @@ permissions, or make desktop capture available in a web browser. Hosted
 ChatGPT Work, web/mobile access and public directory submission need a separate
 remote connection and qualification.
 
+Keep ChatGPT dictation acceptance pending: its CLI start tool does not yet
+confirm microphone readiness, and its stop tool still resolves the normal
+home state instead of the isolated sample state. Do not exercise sample
+dictation until that stop path is corrected. Native Minutes Dev recording and
+insertion checks do not qualify these ChatGPT tool paths.
+
 ## Install locally
 
 Requirements: Node 22 or later, npm, a Codex CLI with plugin marketplace support,
 and an installed Minutes CLI. The MCP server rejects engines older than 0.25.0.
-Use the released Minutes 0.28.0 engine for current qualification. Historical
+Use Minutes 0.28.1 or later for current qualification. Historical
 receipts used older engines; they do not establish current ChatGPT conversation
 or hardware acceptance.
 
@@ -120,20 +126,20 @@ this check catches that failure. In-app execution still needs a separate
 ChatGPT conversation test after the plugin has reloaded.
 
 The [October 7 conversation record](chatgpt-conversation-qualification-2026-10-07.json)
-confirms real ChatGPT Work calls to `get_status`, `search_meetings`, and
-`list_meetings`. Status succeeds. Sourced retrieval is still blocked on the
-released 0.28.0 engine when installed QMD prints its empty-registry response on
-one line. This change includes a narrowly checked engine parser fix and
-regression coverage; that fix must reach an engine release before the affected
-host can pass retrieval. Do not remove real registrations or bypass readiness
-to make a sample test pass.
+records real ChatGPT Work calls to `get_status`, `search_meetings`, and
+`list_meetings` using the older 0.28.0 engine. Status succeeded, but sourced
+retrieval failed because its parser rejected QMD's complete one-line
+empty-registry response. Minutes 0.28.1 includes the parser fix and regression
+coverage. The earlier receipt remains a failure record; the new plugin and
+engine still require a fresh in-app sourced-answer test. Do not remove real
+registrations or bypass readiness to make a sample test pass.
 
 ```bash
 cd integrations/openai-plugin
 npm ci --ignore-scripts
 npm run qualify
 # On Linux, isolate a separately downloaded, checksum-verified CLI:
-MINUTES_QUALIFICATION_BIN=/absolute/path/to/minutes-v0.28.0 npm run qualify
+MINUTES_QUALIFICATION_BIN=/absolute/path/to/minutes-v0.28.1 npm run qualify
 ```
 
 This uses five public synthetic meetings, an isolated Minutes configuration,

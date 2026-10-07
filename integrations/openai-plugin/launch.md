@@ -7,17 +7,17 @@ directory listing. Native capture and insertion have their own acceptance gates.
 
 ## Current testing gate
 
-As of October 7, ChatGPT discovery and `get_status` work. Sourced retrieval is
-blocked with the installed QMD and released Minutes 0.28.0 engine: its registry
-parser rejects QMD's complete one-line empty-registry response. This branch
-contains the tested engine fix, but the installed release does not yet contain
-it. Publish that patch and verify the two-meeting answer below before inviting
-testers or recording a demonstration. See the
+The first October 7 test confirmed ChatGPT discovery and `get_status`, but
+sourced retrieval failed with Minutes 0.28.0 because its parser rejected QMD's
+complete one-line empty-registry response. Minutes 0.28.1 includes that fix.
+Plugin preview 0.2.5 pins MCP 0.28.1; verify the engine loaded by the host and
+the fresh two-meeting answer below before inviting testers or recording a
+demonstration. See the historical
 [conversation qualification](chatgpt-conversation-qualification-2026-10-07.json).
 
 ## Install and test the connection
 
-Use Node 22+, npm, a Codex CLI with plugin support, and Minutes 0.28.0. The released
+Use Node 22+, npm, a Codex CLI with plugin support, and Minutes 0.28.1 or later. The released
 Mac desktop package includes a CLI:
 
 ```bash

@@ -6,7 +6,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "minutes-mcp@0.28.0"
+        "minutes-mcp@0.28.1"
       ],
       "env": {
         "MINUTES_MCP_AUTO_SETUP": "0"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "minutes",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Record conversations, search your local Minutes library, prepare meetings, and follow up. Includes the full Minutes skill set and MCP tools; local capabilities require the Minutes engine and OS permissions.",
   "author": {
     "name": "Mat Silverstein",

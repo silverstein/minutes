@@ -119,6 +119,15 @@ direct MCP handshake can pass while the desktop runtime ignores the server;
 this check catches that failure. In-app execution still needs a separate
 ChatGPT conversation test after the plugin has reloaded.
 
+The [October 7 conversation record](chatgpt-conversation-qualification-2026-10-07.json)
+confirms real ChatGPT Work calls to `get_status`, `search_meetings`, and
+`list_meetings`. Status succeeds. Sourced retrieval is still blocked on the
+released 0.28.0 engine when installed QMD prints its empty-registry response on
+one line. This change includes a narrowly checked engine parser fix and
+regression coverage; that fix must reach an engine release before the affected
+host can pass retrieval. Do not remove real registrations or bypass readiness
+to make a sample test pass.
+
 ```bash
 cd integrations/openai-plugin
 npm ci --ignore-scripts
@@ -133,6 +142,10 @@ against the repository manifest, searches the two dated pricing sources,
 checks the decision reversal, and denies an outside file. It makes no model
 calls and reads no real meeting contents. The Linux sandbox does not repair or
 replace the host's existing Minutes profile.
+The installer and qualification use the same isolated config, engine state,
+correction state, and QMD cache/registry selectors. A failing readiness check
+is a qualification failure, even when another shell without QMD on its PATH
+passes. The five-record fixture alone does not prove host acceptance.
 
 The [October 1 qualification record](full-plugin-qualification-2026-10-01.json)
 distinguishes compiler parity, sample retrieval, Silverbook installation and

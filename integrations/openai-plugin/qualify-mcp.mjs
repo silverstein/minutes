@@ -1,25 +1,24 @@
 // Real stdio qualification of the published package; no model calls or user corpus.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, cp, rm, readFile, realpath, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { prepareSampleProfile } from './sample-profile.mjs';
 
 const require = createRequire(import.meta.url);
 const packageVersion = JSON.parse(await readFile(new URL('node_modules/minutes-mcp/package.json', import.meta.url), 'utf8')).version;
 const expectedTools = JSON.parse(await readFile(new URL('../../manifest.json', import.meta.url), 'utf8')).tools;
 const profile = await realpath(await mkdtemp(path.join(tmpdir(), 'minutes-openai-plugin-')));
-const corpus = path.join(profile, 'sample-meetings');
+const corpus = path.join(profile, 'sample-profile', 'meetings');
 const outside = path.join(profile, 'outside.md');
 const client = new Client({ name: 'minutes-openai-qualification', version: '0.1.0' });
 try {
-  await cp(fileURLToPath(new URL('../../crates/mcp/fixtures/demo/', import.meta.url)), corpus, { recursive: true });
+  const sampleEnv = await prepareSampleProfile(profile, fileURLToPath(new URL('../../crates/mcp/fixtures/demo/', import.meta.url)));
   await writeFile(outside, '---\ntitle: Outside sample library\ndate: 2026-09-30\n---\nPrivate violet lantern.\n');
-  await mkdir(path.join(profile, 'config'), { recursive: true });
-  await mkdir(path.join(profile, 'minutes-home'), { recursive: true });
   const binary = process.env.MINUTES_QUALIFICATION_BIN;
   if (binary && (process.platform !== 'linux' || !path.isAbsolute(binary))) throw new Error('MINUTES_QUALIFICATION_BIN requires Linux/bubblewrap and an absolute binary path.');
   // The published MCP resolves ~/.cargo/bin/minutes before PATH and has no
@@ -27,14 +26,12 @@ try {
   // the installed host CLI and HOME. No shim or source-package substitution.
   const command = binary ? 'bwrap' : process.execPath;
   const args = binary ? ['--ro-bind', '/', '/', '--tmpfs', '/tmp', '--bind', profile, profile,
-    '--bind', path.join(profile, 'minutes-home'), path.join(homedir(), '.minutes'),
-    '--bind', path.join(profile, 'config'), path.join(homedir(), '.config'),
+    '--bind', sampleEnv.MINUTES_HOME, path.join(homedir(), '.minutes'),
+    '--bind', sampleEnv.XDG_CONFIG_HOME, path.join(homedir(), '.config'),
     '--ro-bind', binary, path.join(homedir(), '.cargo/bin/minutes'), '--proc', '/proc', '--dev', '/dev',
     '--', process.execPath, require.resolve('minutes-mcp')] : [require.resolve('minutes-mcp')];
   const transport = new StdioClientTransport({ command, args,
-    env: { ...process.env, MEETINGS_DIR: corpus, MINUTES_HOME: path.join(profile, 'minutes-home'),
-      MINUTES_DATA_DIR: path.join(profile, 'minutes-home'),
-      XDG_CONFIG_HOME: path.join(profile, 'config'), MINUTES_MCP_AUTO_SETUP: '0' }, stderr: 'pipe' });
+    env: { ...process.env, ...sampleEnv, MINUTES_MCP_AUTO_SETUP: '0' }, stderr: 'pipe' });
   // Avoid printing machine-specific or private diagnostics. The failed assertion
   // supplies a named check; inspect stderr locally if qualification fails.
   transport.stderr?.on('data', () => {});

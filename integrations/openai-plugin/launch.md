@@ -5,7 +5,17 @@ MCP tools to ChatGPT Work on your computer. It is the draft in
 [PR #1069](https://github.com/silverstein/minutes/pull/1069), separate from a public
 directory listing. Native capture and insertion have their own acceptance gates.
 
-## Install and get a sourced answer
+## Current testing gate
+
+As of October 7, ChatGPT discovery and `get_status` work. Sourced retrieval is
+blocked with the installed QMD and released Minutes 0.28.0 engine: its registry
+parser rejects QMD's complete one-line empty-registry response. This branch
+contains the tested engine fix, but the installed release does not yet contain
+it. Publish that patch and verify the two-meeting answer below before inviting
+testers or recording a demonstration. See the
+[conversation qualification](chatgpt-conversation-qualification-2026-10-07.json).
+
+## Install and test the connection
 
 Use Node 22+, npm, a Codex CLI with plugin support, and Minutes 0.28.0. The released
 Mac desktop package includes a CLI:
@@ -23,7 +33,8 @@ node integrations/openai-plugin/install-local.mjs --sample
 ```
 
 The sample install contains five public synthetic meetings and its own private
-configuration. Your real library and other marketplaces are preserved. It uses a
+configuration. All sample state selectors point to this installation; unrelated marketplace
+registrations are preserved. It uses a
 pinned MCP runtime and disables automatic engine/model setup. If a previous
 installation used a custom parent, supply that same `--parent`; see the
 [installer guide](README.md).
@@ -31,8 +42,8 @@ installation used a custom parent, supply that same `--parent`; see the
 Reload ChatGPT desktop when no work is active, enable Minutes in the local
 marketplace if prompted, and start a new Work conversation. First ask:
 
-> Check the Minutes connection using its get_status tool. Report the engine
-> version and active capture modes. Do not read meetings, change configuration,
+> Check the Minutes connection using its get_status tool. Report whether a
+> recording is in progress. Do not read meetings, change configuration,
 > run setup or start recording.
 
 Verify an actual tool call. Then ask:
@@ -71,7 +82,8 @@ and sourced answer. Keep the synthetic-data disclosure visible. Use a fresh
 successful run; label historical captures by date and disclose shortened waits.
 Keep account details, credentials and unrelated windows out of the recording.
 
-Invite a few willing testers with this one try-it link. Track installation
+After the engine patch passes the real ChatGPT retrieval test, invite a few
+willing testers with this one try-it link. Track installation
 completion, time to first sourced answer, blocking errors and return use in the
 existing Beads lane. Views and stars measure attention; repeat useful
 conversations are evidence of adoption. No recorded clip, public post or measured

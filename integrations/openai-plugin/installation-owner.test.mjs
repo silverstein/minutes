@@ -50,12 +50,14 @@ test('sample installation isolates records and configuration from the user profi
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixtures = new URL('../../crates/mcp/fixtures/demo/', import.meta.url);
   const env = await prepareSampleProfile(root, fixtures);
-  assert.deepEqual(Object.keys(env).sort(), ['MEETINGS_DIR', 'MINUTES_DATA_DIR', 'MINUTES_HOME', 'XDG_CONFIG_HOME']);
+  assert.deepEqual(Object.keys(env).sort(), ['INDEX_PATH', 'MEETINGS_DIR', 'MINUTES_CONFIG_PATH', 'MINUTES_DATA_DIR', 'MINUTES_HOME', 'QMD_CONFIG_DIR', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME']);
   assert.equal(env.MINUTES_DATA_DIR, env.MINUTES_HOME, 'native readiness and MCP corrections must share isolated state');
-  for (const directory of Object.values(env)) {
-    assert.ok(directory.startsWith(root + path.sep));
+  for (const [key, value] of Object.entries(env)) {
+    assert.ok(value.startsWith(root + path.sep));
+    const directory = ['INDEX_PATH', 'MINUTES_CONFIG_PATH'].includes(key) ? path.dirname(value) : value;
     assert.ok((await stat(directory)).isDirectory());
   }
+  assert.equal(await readFile(env.MINUTES_CONFIG_PATH, 'utf8'), `output_dir = ${JSON.stringify(env.MEETINGS_DIR)}\n`);
   const reversal = await readFile(path.join(env.MEETINGS_DIR, '2026-03-25-pricing-reversal.md'), 'utf8');
   assert.match(reversal, /annual-only/);
   const empty = path.join(root, 'empty');

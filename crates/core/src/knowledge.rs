@@ -3300,6 +3300,17 @@ fn parse_qmd_collection_names(stdout: &str) -> Result<Vec<String>, String> {
             }
             continue;
         }
+        // Published QMD also emits its empty-registry message on one line.
+        // Admit the exact complete response, preserving duplicate/count and
+        // trailing-output rejection rather than accepting a prefix as empty.
+        if line == "No collections found. Run 'qmd collection add .' to create one." {
+            if declared_count.replace(0).is_some() {
+                return Err("QMD registry list output was malformed".into());
+            }
+            upstream_zero_found = true;
+            upstream_zero_hint = true;
+            continue;
+        }
         if line == "No collections found." {
             if declared_count.replace(0).is_some() {
                 return Err("QMD registry list output was malformed".into());
@@ -12367,6 +12378,24 @@ mod tests {
         );
         assert!(parse_qmd_collection_names("No collections found.\n").is_err());
         assert!(parse_qmd_collection_names("Run 'qmd collection add .' to create one.\n").is_err());
+        let inline_empty = "No collections found. Run 'qmd collection add .' to create one.\n";
+        assert_eq!(
+            parse_qmd_collection_names(inline_empty).unwrap(),
+            Vec::<String>::new()
+        );
+        for extra in [
+            "Collections (0):\n",
+            "Collections (1):\nminutes (qmd://minutes/)\n",
+            "No collections\n",
+            inline_empty,
+            "unexpected diagnostic\n",
+        ] {
+            assert!(parse_qmd_collection_names(&format!("{inline_empty}{extra}")).is_err());
+            assert!(parse_qmd_collection_names(&format!("{extra}{inline_empty}")).is_err());
+        }
+        assert!(
+            parse_qmd_collection_names(inline_empty.trim_end().strip_suffix('.').unwrap()).is_err()
+        );
         assert_eq!(
             parse_qmd_collection_names(
                 "Collections (1):\n\nminutes (qmd://minutes/)\n  Pattern: **/*.md\n  Ignore: archive/**\n  [excluded]\n  Files: 4\n"

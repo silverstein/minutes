@@ -601,10 +601,14 @@ where
         loop {
             // Check stop flag (Esc / Ctrl-C / MCP stop)
             let remote_stop = pid::check_and_clear_sentinel();
-            if stop_flag.load(Ordering::Relaxed)
+            let stopping = stop_flag.load(Ordering::Relaxed)
                 || remote_stop
-                || cancellation::requested(options.cancel_flag.as_deref())
-            {
+                || cancellation::requested(options.cancel_flag.as_deref());
+            let yielding = !stopping && matches!(pid::check_recording(), Ok(Some(_)));
+            if stopping || yielding {
+                if yielding {
+                    tracing::info!("recording started — yielding dictation");
+                }
                 if cancellation::requested(options.cancel_flag.as_deref()) {
                     // Cancellation is a true discard boundary. In particular,
                     // do not flush accumulated results: that path writes the
@@ -619,6 +623,27 @@ where
                     on_event(DictationEvent::Cancelled);
                     break;
                 }
+                let pending_chunks = stream.into_pending_chunks();
+                retain_pending_dictation_audio(
+                    pending_chunks,
+                    &mut vad,
+                    &mut utterance_samples,
+                    &mut has_spoken,
+                    |samples, include_in_utterance| {
+                        if let Some(capture) = recovery_capture.as_mut() {
+                            capture.append_samples(samples)?;
+                        }
+                        if include_in_utterance {
+                            if final_backend.needs_utterance_samples() {
+                                final_utterance_samples.extend_from_slice(samples);
+                            }
+                            if whisper_ctx.is_some() {
+                                streaming.append_samples(samples);
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
                 // Finalize any in-progress transcription before exiting
                 if utterance_samples > 0 {
                     on_event(DictationEvent::Processing);
@@ -641,8 +666,15 @@ where
                         on_event(DictationEvent::Success);
                     }
                     if cancellation::requested(options.cancel_flag.as_deref()) {
-                        // Return to the shared discard path before settling audio or outputs.
-                        continue;
+                        final_utterance_samples.clear();
+                        discard_accumulated_results(&mut accumulated_results);
+                        settle_recovery_capture(
+                            &mut recovery_capture,
+                            options.recovery_audio_path.as_ref(),
+                            false,
+                        )?;
+                        on_event(DictationEvent::Cancelled);
+                        break;
                     }
                     final_utterance_samples.clear();
                 }
@@ -658,51 +690,9 @@ where
                     on_event,
                     on_result,
                 );
-                break;
-            }
-
-            // Check if recording started (yield to recording)
-            if let Ok(Some(_)) = pid::check_recording() {
-                tracing::info!("recording started — yielding dictation");
-                if utterance_samples > 0 {
-                    on_event(DictationEvent::Processing);
-                    if decode_and_handle_utterance(
-                        config,
-                        options,
-                        &mut accumulated_results,
-                        on_result,
-                        || {
-                            finalize_dictation_transcription(
-                                config,
-                                final_backend,
-                                &apple_session,
-                                &final_utterance_samples,
-                                &mut streaming,
-                                whisper_ctx.as_ref(),
-                            )
-                        },
-                    ) {
-                        on_event(DictationEvent::Success);
-                    }
-                    if cancellation::requested(options.cancel_flag.as_deref()) {
-                        // Return to the shared discard path before settling audio or outputs.
-                        continue;
-                    }
-                    final_utterance_samples.clear();
+                if yielding {
+                    on_event(DictationEvent::Yielded);
                 }
-                settle_recovery_capture(
-                    &mut recovery_capture,
-                    options.recovery_audio_path.as_ref(),
-                    has_spoken,
-                )?;
-                flush_accumulated_results(
-                    config,
-                    options,
-                    &mut accumulated_results,
-                    on_event,
-                    on_result,
-                );
-                on_event(DictationEvent::Yielded);
                 break;
             }
 
@@ -906,6 +896,28 @@ where
 
         Ok(())
     }
+}
+
+/// Keep completed microphone chunks queued during a blocking partial pass.
+/// Once speech begins, retain its trailing silence too: the final decoder can
+/// resolve the ending without another partial pass or a VAD-triggered flush.
+fn retain_pending_dictation_audio(
+    chunks: impl IntoIterator<Item = crate::streaming::AudioChunk>,
+    vad: &mut Vad,
+    utterance_samples: &mut usize,
+    has_spoken: &mut bool,
+    mut append: impl FnMut(&[f32], bool) -> Result<(), MinutesError>,
+) -> Result<(), MinutesError> {
+    for chunk in chunks {
+        let speaking = vad.process(chunk.rms).speaking;
+        let include_in_utterance = speaking || *utterance_samples > 0;
+        append(&chunk.samples, include_in_utterance)?;
+        if include_in_utterance {
+            *utterance_samples += chunk.samples.len();
+        }
+        *has_spoken |= speaking;
+    }
+    Ok(())
 }
 
 /// Dictation-only device preferences never change recording.device.
@@ -1907,6 +1919,103 @@ fn num_cpus() -> i32 {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn pending_chunk(index: u64, value: f32) -> crate::streaming::AudioChunk {
+        crate::streaming::AudioChunk {
+            samples: vec![value; 1600],
+            rms: value.abs(),
+            timestamp: Instant::now(),
+            index,
+            source: crate::streaming::SourceRole::Default,
+        }
+    }
+
+    #[test]
+    fn stop_preserves_speech_queued_during_a_partial_decode() {
+        let (sender, receiver) = crossbeam_channel::bounded(64);
+        let mut expected = vec![0.1; 16000];
+        for index in 0..24 {
+            let chunk = pending_chunk(index, (index + 1) as f32 / 100.0);
+            expected.extend_from_slice(&chunk.samples);
+            sender.send(chunk).unwrap();
+        }
+        drop(sender);
+        let mut streaming = StreamingWhisper::new(None);
+        streaming.append_samples(&expected[..16000]);
+        let mut final_samples = expected[..16000].to_vec();
+        let mut recovered = Vec::new();
+        let mut utterance_samples = 16000;
+        let mut has_spoken = true;
+        retain_pending_dictation_audio(
+            receiver.try_iter(),
+            &mut Vad::new(),
+            &mut utterance_samples,
+            &mut has_spoken,
+            |samples, include| {
+                recovered.extend_from_slice(samples);
+                if include {
+                    final_samples.extend_from_slice(samples);
+                    streaming.append_samples(samples);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(final_samples, expected);
+        assert_eq!(recovered, expected[16000..]);
+        assert_eq!(utterance_samples, expected.len());
+        assert_eq!(streaming.duration_secs(), expected.len() as f64 / 16000.0);
+        assert!(has_spoken);
+        assert!(receiver.is_empty());
+    }
+
+    #[test]
+    fn stop_retains_trailing_silence_with_the_final_speech() {
+        let mut final_samples = Vec::new();
+        let mut utterance_samples = 0;
+        let mut has_spoken = false;
+        let chunks = std::iter::once(pending_chunk(0, 0.1))
+            .chain((1..9).map(|index| pending_chunk(index, 0.0)));
+        retain_pending_dictation_audio(
+            chunks,
+            &mut Vad::new(),
+            &mut utterance_samples,
+            &mut has_spoken,
+            |samples, include| {
+                if include {
+                    final_samples.extend_from_slice(samples);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(utterance_samples, 9 * 1600);
+        assert_eq!(&final_samples[..1600], &[0.1; 1600]);
+        assert!(final_samples[1600..].iter().all(|sample| *sample == 0.0));
+        assert!(has_spoken);
+    }
+
+    #[test]
+    fn queued_silence_is_recoverable_but_does_not_create_an_utterance() {
+        let mut utterance_samples = 0;
+        let mut has_spoken = false;
+        let mut recovered_samples = 0;
+        retain_pending_dictation_audio(
+            (0..10).map(|index| pending_chunk(index, 0.0)),
+            &mut Vad::new(),
+            &mut utterance_samples,
+            &mut has_spoken,
+            |samples, include| {
+                assert!(!include);
+                recovered_samples += samples.len();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(recovered_samples, 16000);
+        assert_eq!(utterance_samples, 0);
+        assert!(!has_spoken);
+    }
 
     fn test_config(root: &std::path::Path) -> Config {
         Config {

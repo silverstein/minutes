@@ -302,6 +302,15 @@ jobs:
         run: cargo test -p minutes-core --no-default-features --features streaming --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
 
+      - name: Dictation shutdown and streaming decoder regressions
+        # Dictation requires both streaming and Whisper. Neither of the
+        # no-whisper suites above executes its queued-audio or cancellation
+        # tests; these focused suites use synthetic samples without a model.
+        run: |
+          cargo test -p minutes-core --no-default-features --features streaming,parakeet --lib dictation:: -- --test-threads=1
+          cargo test -p minutes-core --no-default-features --features streaming,parakeet --lib streaming_whisper:: -- --test-threads=1
+        timeout-minutes: 5
+
       - name: Copilot attach, routing, and window-contract tests
         # On Windows this executes the real named-pipe connect/reconnect path.
         # On Unix it also asserts owner-only socket/discovery permissions.

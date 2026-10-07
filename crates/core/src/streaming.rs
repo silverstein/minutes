@@ -1,4 +1,5 @@
 use crate::error::CaptureError;
+use cpal::traits::StreamTrait;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -313,6 +314,19 @@ impl AudioStream {
     /// Stop the audio stream.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Close capture before draining chunks that arrived while a consumer was
+    /// busy. Keeping the receiver alive across the stream drop preserves the
+    /// final completed callbacks without waiting for future microphone input.
+    pub fn into_pending_chunks(self) -> Vec<AudioChunk> {
+        let receiver = self.receiver.clone();
+        self.stop();
+        if let Err(error) = self._stream.pause() {
+            tracing::debug!(%error, "audio stream pause unavailable; closing capture before drain");
+        }
+        drop(self);
+        receiver.try_iter().collect()
     }
 }
 

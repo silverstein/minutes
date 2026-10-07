@@ -50,6 +50,8 @@ test('sample installation isolates records and configuration from the user profi
   t.after(() => rm(root, { recursive: true, force: true }));
   const fixtures = new URL('../../crates/mcp/fixtures/demo/', import.meta.url);
   const env = await prepareSampleProfile(root, fixtures);
+  assert.deepEqual(Object.keys(env).sort(), ['MEETINGS_DIR', 'MINUTES_DATA_DIR', 'MINUTES_HOME', 'XDG_CONFIG_HOME']);
+  assert.equal(env.MINUTES_DATA_DIR, env.MINUTES_HOME, 'native readiness and MCP corrections must share isolated state');
   for (const directory of Object.values(env)) {
     assert.ok(directory.startsWith(root + path.sep));
     assert.ok((await stat(directory)).isDirectory());

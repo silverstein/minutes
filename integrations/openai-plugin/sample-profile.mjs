@@ -14,5 +14,9 @@ export async function prepareSampleProfile(root, fixtures) {
   const records = (await readdir(meetings, { withFileTypes: true }))
     .filter(entry => entry.isFile() && entry.name.endsWith('.md'));
   if (records.length !== 5) throw new Error('Sample installation requires the five canonical synthetic meetings.');
-  return { MINUTES_HOME: minutesHome, XDG_CONFIG_HOME: config, MEETINGS_DIR: meetings };
+  // The MCP/correction layer uses MINUTES_HOME, while the native engine's
+  // history, recovery and QMD retirement state use MINUTES_DATA_DIR.
+  // Isolate both; overriding only one still consults the user's .minutes.
+  return { MINUTES_HOME: minutesHome, MINUTES_DATA_DIR: minutesHome,
+    XDG_CONFIG_HOME: config, MEETINGS_DIR: meetings };
 }

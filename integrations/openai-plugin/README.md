@@ -4,7 +4,7 @@ This local plugin packages all 25 canonical Minutes skills and connects the
 existing 34-tool Minutes MCP server. It includes recording, live transcripts,
 copilot, dictation, conversation search, meeting preparation, notes, summaries,
 commitments, and follow-up. The generated package is at
-`.agents/plugins/minutes`; its version is 0.2.3 and its MCP runtime is pinned to
+`.agents/plugins/minutes`; its version is 0.2.4 and its MCP runtime is pinned to
 `minutes-mcp@0.28.0`.
 
 ChatGPT Work on desktop can load a local marketplace and run a stdio MCP server.

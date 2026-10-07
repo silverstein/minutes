@@ -33,6 +33,7 @@ try {
     '--', process.execPath, require.resolve('minutes-mcp')] : [require.resolve('minutes-mcp')];
   const transport = new StdioClientTransport({ command, args,
     env: { ...process.env, MEETINGS_DIR: corpus, MINUTES_HOME: path.join(profile, 'minutes-home'),
+      MINUTES_DATA_DIR: path.join(profile, 'minutes-home'),
       XDG_CONFIG_HOME: path.join(profile, 'config'), MINUTES_MCP_AUTO_SETUP: '0' }, stderr: 'pipe' });
   // Avoid printing machine-specific or private diagnostics. The failed assertion
   // supplies a named check; inspect stderr locally if qualification fails.

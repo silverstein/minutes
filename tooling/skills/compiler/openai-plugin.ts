@@ -7,7 +7,7 @@ import { resolveSkillAssetSourcePath } from "./validate.js";
 
 export const OPENAI_PLUGIN_ROOT = ".agents/plugins/minutes";
 export const OPENAI_MCP_VERSION = "0.28.0";
-export const OPENAI_PLUGIN_VERSION = "0.2.3";
+export const OPENAI_PLUGIN_VERSION = "0.2.4";
 
 export async function renderOpenAIPlugin(rootDir: string, skills: CanonicalSkillSource[]): Promise<Map<string, string>> {
   const artifacts = new Map<string, string>();

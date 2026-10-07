@@ -39,6 +39,8 @@ function assertSendContract(body: string) {
   assert.match(text, /If a needed field is absent or neither discovery path supplies its schema, stop before requesting a send/);
   assert.match(text, /Do not silently drop conditional timing or rewrite a task/);
   assert.match(text, /`detail` and `dueStatement` are each nonempty and at most 1,000 UTF-8 bytes/);
+  assert.match(text, /Combined outcome text is at most 16,000 bytes, including the new detail, due statement, and exact due date fields/);
+  assert.match(text, /Never cut a single entry mid-sentence or remove a condition to make it fit/);
   assert.match(text, /Never call `submit_my_meeting` directly, approve anything on the user's behalf/);
   assert.match(text, /restricted meeting is never sent/);
   assert.match(text, /Never paste transcript text from `body`/);

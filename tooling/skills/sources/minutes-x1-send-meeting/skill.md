@@ -135,14 +135,15 @@ conditional timing or rewrite a task to work around an older backend.
    folder path.
 
    Stay inside X1's limits. Decisions, action items, and open questions
-   together are at most 40 entries of up to 1,000 bytes each and 16,000
-   bytes in total. Optional action-item `detail` and `dueStatement` are each
-   nonempty and at most 1,000 UTF-8 bytes, and count toward that same
-   16,000-byte entry budget and the whole-meeting JSON budget. Owner and
-   participant names are up to 200 bytes, and the
-   whole meeting must stay under 40,000 bytes as JSON. If the meeting has
-   more, keep the most important entries and tell the user what you left
-   out. Never cut a single entry mid-sentence to make it fit.
+   together are at most 40 entries. Each title, detail, open question, or
+   due statement is at most 1,000 UTF-8 bytes. Optional action-item
+   `detail` and `dueStatement` are each nonempty and at most 1,000 UTF-8 bytes.
+   Combined outcome text is at most 16,000 bytes, including the new detail,
+   due statement, and exact due date fields. Owner and participant names
+   are up to 200 bytes, and the whole meeting must stay under 40,000 bytes
+   as JSON. If the meeting has more, keep the most important complete
+   entries and tell the user what you left out. Never cut a single entry
+   mid-sentence or remove a condition to make it fit.
 
 5. Set `idempotencyKey` to `mx1:<externalMeetingId>:<own or the clientId>`,
    cut to its first 110 characters so a suffix still fits under X1's

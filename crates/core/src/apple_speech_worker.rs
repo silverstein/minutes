@@ -704,11 +704,10 @@ pub fn run_xpc_service_main() -> ! {
 mod tests {
     use super::*;
 
-    #[test]
-    fn request_budget_is_finite_and_below_one_hour() {
+    const _: () = {
         assert!(MAX_UTTERANCE_SECONDS <= 10 * 60);
         assert!(MAX_REQUEST_BYTES < 64 * 1024 * 1024);
-    }
+    };
 
     #[cfg(target_os = "macos")]
     fn framed_request(mut metadata: PrivateAudioRequest, samples: &[f32]) -> Vec<u8> {

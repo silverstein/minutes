@@ -1414,7 +1414,7 @@ mod tests {
             "ulimit -H -v unlimited 2>/dev/null; ulimit -S -v {budget_kib} || exit 70; \
              exec \"$1\" {PROBE_DURATION_ARG} -- \"$2\""
         );
-        let output = std::process::Command::new("/bin/sh")
+        let output = crate::engine_process::command("/bin/sh")
             .arg("-c")
             .arg(&script)
             .arg("minutes-soft-ceiling-probe")

@@ -690,9 +690,9 @@ mod tests {
         let mut tail = StemTail::open(&stem).unwrap();
 
         // 48 kHz in, 16 kHz out: expect roughly a third of the frames.
-        append_f32(&stem, &vec![0.25_f32; 48]);
+        append_f32(&stem, &[0.25_f32; 48]);
         let first = tail.poll().unwrap().len();
-        append_f32(&stem, &vec![0.25_f32; 48]);
+        append_f32(&stem, &[0.25_f32; 48]);
         let second = tail.poll().unwrap().len();
 
         assert!((15..=17).contains(&first), "first chunk: {first}");

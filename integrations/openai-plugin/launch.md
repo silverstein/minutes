@@ -10,10 +10,13 @@ directory listing. Native capture and insertion have their own acceptance gates.
 The first October 7 test confirmed ChatGPT discovery and `get_status`, but
 sourced retrieval failed with Minutes 0.28.0 because its parser rejected QMD's
 complete one-line empty-registry response. Minutes 0.28.1 includes that fix.
-Plugin preview 0.2.5 pins MCP 0.28.1; verify the engine loaded by the host and
-the fresh two-meeting answer below before inviting testers or recording a
-demonstration. See the historical
-[conversation qualification](chatgpt-conversation-qualification-2026-10-07.json).
+Plugin preview 0.2.5 pins MCP 0.28.1. The subsequent
+[sourced-answer test](chatgpt-sourced-answer-qualification-2026-10-07.json)
+passed in actual ChatGPT Work with the published engine: both dated meetings
+were cited, their decision reversal was preserved, and unfinished work was
+not reported as complete. The normal library connection was restored afterward.
+The historical [failure record](chatgpt-conversation-qualification-2026-10-07.json)
+is retained. Capture, live and optional workflows still need separate testing.
 
 ## Install and test the connection
 
@@ -82,7 +85,7 @@ and sourced answer. Keep the synthetic-data disclosure visible. Use a fresh
 successful run; label historical captures by date and disclose shortened waits.
 Keep account details, credentials and unrelated windows out of the recording.
 
-After the engine patch passes the real ChatGPT retrieval test, invite a few
+With the engine patch passing the real ChatGPT retrieval test, invite a few
 willing testers with this one try-it link. Track installation
 completion, time to first sourced answer, blocking errors and return use in the
 existing Beads lane. Views and stars measure attention; repeat useful

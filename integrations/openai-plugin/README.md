@@ -130,9 +130,15 @@ records real ChatGPT Work calls to `get_status`, `search_meetings`, and
 `list_meetings` using the older 0.28.0 engine. Status succeeded, but sourced
 retrieval failed because its parser rejected QMD's complete one-line
 empty-registry response. Minutes 0.28.1 includes the parser fix and regression
-coverage. The earlier receipt remains a failure record; the new plugin and
-engine still require a fresh in-app sourced-answer test. Do not remove real
-registrations or bypass readiness to make a sample test pass.
+coverage. The earlier receipt remains a failure record. The subsequent
+[0.2.5 sourced-answer record](chatgpt-sourced-answer-qualification-2026-10-07.json)
+passes actual ChatGPT Work status, search and meeting calls with the published
+0.28.1 runtime and engine. Its answer cites February's monthly experiment and
+March's annual-only reversal, discloses demo sources and keeps follow-up work
+unfinished. The normal library connection was restored afterward and all 34
+tools rediscovered without reading real meetings. Capture and optional workflows
+remain separate acceptance gates. Do not remove real registrations or bypass
+readiness to make a sample test pass.
 
 ```bash
 cd integrations/openai-plugin

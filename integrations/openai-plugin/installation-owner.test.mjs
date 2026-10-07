@@ -5,6 +5,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { ownsMinutesInstallation } from './installation-owner.mjs';
 import { prepareDesktopLayout } from './desktop-layout.mjs';
+import { prepareSampleProfile } from './sample-profile.mjs';
 
 test('desktop install removes portable shadowing and retains the patched MCP file', async t => {
   const root = await mkdtemp(path.join(tmpdir(), 'minutes-desktop-layout-'));
@@ -42,4 +43,20 @@ test('upgrades distinguish owned installations from unrelated or linked sources'
   assert.equal(await ownsMinutesInstallation(root, parent), false, 'different plugin identity');
   await writeFile(path.join(root, 'installation.json'), 'not JSON');
   assert.equal(await ownsMinutesInstallation(root, parent), false, 'invalid ownership receipt');
+});
+
+test('sample installation isolates records and configuration from the user profile', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'minutes-sample-profile-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixtures = new URL('../../crates/mcp/fixtures/demo/', import.meta.url);
+  const env = await prepareSampleProfile(root, fixtures);
+  for (const directory of Object.values(env)) {
+    assert.ok(directory.startsWith(root + path.sep));
+    assert.ok((await stat(directory)).isDirectory());
+  }
+  const reversal = await readFile(path.join(env.MEETINGS_DIR, '2026-03-25-pricing-reversal.md'), 'utf8');
+  assert.match(reversal, /annual-only/);
+  const empty = path.join(root, 'empty');
+  await mkdir(empty);
+  await assert.rejects(prepareSampleProfile(path.join(root, 'invalid'), empty), /five canonical/);
 });

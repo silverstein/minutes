@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { discoverCanonicalSkills } from "./discover.js";
 import { renderOpenAIPlugin, OPENAI_MCP_VERSION, OPENAI_PLUGIN_ROOT } from "./openai-plugin.js";
@@ -38,9 +38,12 @@ test("local marketplace stays contained and pins the published MCP package", asy
   assert.equal(marketplace.plugins[0].source.path, `./${OPENAI_PLUGIN_ROOT}`);
   assert.equal(mcp.mcpServers.minutes.type, "stdio");
   assert.deepEqual(mcp.mcpServers.minutes.args, ["-y", `minutes-mcp@${OPENAI_MCP_VERSION}`]);
+  assert.equal(mcp.mcpServers.minutes.env.MINUTES_MCP_AUTO_SETUP, "0");
+  const runtime = JSON.parse(await readFile(path.join(root, "../../integrations/openai-plugin/package.json"), "utf8"));
+  assert.equal(runtime.dependencies["minutes-mcp"], OPENAI_MCP_VERSION, "installer and generated package must use the same published runtime");
   assert.ok([...artifacts.keys()].every(target => !path.isAbsolute(target) && !target.split("/").includes("..")));
-  const runtime = artifacts.get(`${OPENAI_PLUGIN_ROOT}/skills/_runtime/hooks/lib/minutes-learn.mjs`);
-  assert.ok(runtime?.includes("export"));
+  const learningRuntime = artifacts.get(`${OPENAI_PLUGIN_ROOT}/skills/_runtime/hooks/lib/minutes-learn.mjs`);
+  assert.ok(learningRuntime?.includes("export"));
 });
 
 test("desktop compatibility entrypoint declares the installed MCP file", async () => {

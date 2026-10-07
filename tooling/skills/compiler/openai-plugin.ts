@@ -6,8 +6,8 @@ import { renderSkillForHost } from "./render.js";
 import { resolveSkillAssetSourcePath } from "./validate.js";
 
 export const OPENAI_PLUGIN_ROOT = ".agents/plugins/minutes";
-export const OPENAI_MCP_VERSION = "0.27.1";
-export const OPENAI_PLUGIN_VERSION = "0.2.2";
+export const OPENAI_MCP_VERSION = "0.28.0";
+export const OPENAI_PLUGIN_VERSION = "0.2.3";
 
 export async function renderOpenAIPlugin(rootDir: string, skills: CanonicalSkillSource[]): Promise<Map<string, string>> {
   const artifacts = new Map<string, string>();
@@ -33,7 +33,7 @@ export async function renderOpenAIPlugin(rootDir: string, skills: CanonicalSkill
   }));
   artifacts.set(`${OPENAI_PLUGIN_ROOT}/mcp.json`, json({
     $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-    mcpServers: { minutes: { type: "stdio", command: "npx", args: ["-y", `minutes-mcp@${OPENAI_MCP_VERSION}`] } },
+    mcpServers: { minutes: { type: "stdio", command: "npx", args: ["-y", `minutes-mcp@${OPENAI_MCP_VERSION}`], env: { MINUTES_MCP_AUTO_SETUP: "0" } } },
   }));
   artifacts.set(".agents/plugins/marketplace.json", json({
     name: "minutes", interface: { displayName: "Minutes" },

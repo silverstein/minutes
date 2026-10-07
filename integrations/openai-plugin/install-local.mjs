@@ -8,12 +8,15 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { ownsMinutesInstallation } from './installation-owner.mjs';
 import { prepareDesktopLayout } from './desktop-layout.mjs';
+import { prepareSampleProfile } from './sample-profile.mjs';
 
 const args = process.argv.slice(2);
 const options = {};
-for (let i = 0; i < args.length; i += 2) {
-  if (!['--codex', '--npm', '--source', '--parent'].includes(args[i]) || !args[i + 1] || options[args[i]]) throw new Error('Use --codex, --npm, --source or --parent followed by a path.');
-  options[args[i]] = args[i + 1];
+let sample = false;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--sample' && !sample) { sample = true; continue; }
+  if (!['--codex', '--npm', '--source', '--parent'].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith('--') || options[args[i]]) throw new Error('Use --sample or --codex, --npm, --source, --parent followed by a path.');
+  options[args[i]] = args[++i];
 }
 const source = path.resolve(options['--source'] ?? fileURLToPath(new URL('../..', import.meta.url)));
 const codex = options['--codex'] ?? 'codex';
@@ -58,6 +61,8 @@ await run(npm, ['ci', '--ignore-scripts'], runtime);
 manifest.mcpServers.minutes.command = process.execPath;
 manifest.mcpServers.minutes.args = [path.join(runtime, 'node_modules/minutes-mcp/dist/index.js')];
 manifest.mcpServers.minutes.env = { MINUTES_MCP_AUTO_SETUP: '0' };
+if (sample) Object.assign(manifest.mcpServers.minutes.env,
+  await prepareSampleProfile(root, path.join(source, 'crates/mcp/fixtures/demo')));
 await writeFile(path.join(root, '.agents/plugins/minutes/mcp.json'), JSON.stringify(manifest, null, 2) + '\n');
 // ChatGPT 26.928's bundled Codex 0.159.2 reads portable skills but does not
 // load portable MCP components, even with an inline or compatibility override.
@@ -75,7 +80,7 @@ for (const [from, name] of [[path.join(homedir(), '.codex/config.toml'), 'codex-
     await chmod(path.join(backup, name), 0o600);
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
 }
-await writeFile(path.join(root, 'installation.json'), JSON.stringify({ plugin: 'minutes@minutes', version: plugin.version, runtime: runtimePackage.dependencies['minutes-mcp'], node: process.execPath, source, created_at: new Date().toISOString(), local_mcp_only: true, manifest_layout: 'codex-compatibility' }, null, 2) + '\n', { mode: 0o600 });
+await writeFile(path.join(root, 'installation.json'), JSON.stringify({ plugin: 'minutes@minutes', version: plugin.version, runtime: runtimePackage.dependencies['minutes-mcp'], node: process.execPath, source, created_at: new Date().toISOString(), local_mcp_only: true, manifest_layout: 'codex-compatibility', sample_library: sample }, null, 2) + '\n', { mode: 0o600 });
 const marketplaces = JSON.parse(await capture(codex, ['plugin', 'marketplace', 'list', '--json'], homedir()));
 const previous = marketplaces.marketplaces.find(item => item.name === 'minutes');
 const previousRoot = previous?.marketplaceSource?.source;
@@ -102,4 +107,4 @@ try {
   throw error;
 }
 await run(codex, ['plugin', 'list', '--marketplace', 'minutes', '--json'], root);
-console.log(JSON.stringify({ installed: true, root, version: plugin.version, restart_chatgpt_desktop_needed: true, native_app_changed: false, model_calls: 0, meeting_reads: 0 }));
+console.log(JSON.stringify({ installed: true, root, version: plugin.version, sample_library: sample, restart_chatgpt_desktop_needed: true, native_app_changed: false, model_calls: 0, meeting_reads: 0 }));

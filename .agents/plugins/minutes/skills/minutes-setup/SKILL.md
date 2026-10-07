@@ -27,82 +27,54 @@ or a Git checkout. The bundled runtime is under MINUTES_SKILLS_ROOT/_runtime.
 
 # /minutes-setup
 
-Walk the user through first-time Minutes setup, step by step.
+Help the user reach the requested Minutes workflow using the components already installed.
 
-## Setup steps
+## Check the connection first
 
-### 1. Check current state first
+If Minutes MCP is connected, call `get_status` and report the engine and current capture modes from its result. Otherwise use the verify skill's helper on the local Minutes computer:
 
-Run the verify skill's script to see what's already done:
 ```bash
 bash "$MINUTES_SKILLS_ROOT/minutes-verify/scripts/verify-setup.sh"
 ```
 
-Skip any steps that already pass.
+Skip working components. Distinguish library retrieval, audio capture, optional model processing and destination insertion. A plugin installation or discovered tool does not establish that each of these is ready.
 
-### 2. Build the binary (if needed)
+## Install a released engine if needed
 
-```bash
-cd ~/Sites/minutes
-export CXXFLAGS="-I$(xcrun --show-sdk-path)/usr/include/c++/v1"
-cargo build --release
-```
-
-The binary lands at `target/release/minutes`. The user should add it to their PATH or create a symlink.
-
-### 3. Download a whisper model
-
-Ask the user which quality level they want using AskUserQuestion:
-
-| Model | Size | Speed | Quality | Best for |
-|-------|------|-------|---------|----------|
-| `tiny` | 75 MB | ~10x real-time | Low | Quick tests, short memos |
-| `small` | 466 MB | ~4x real-time | Good | Daily meetings (recommended) |
-| `medium` | 1.5 GB | ~2x real-time | Great | Important meetings, accents |
-| `large-v3` | 3.1 GB | ~1x real-time | Best | Legal, medical, foreign language |
-
-Then run:
-```bash
-minutes setup --model <chosen-model>
-```
-
-### 4. Create directories
+On a supported Mac, the desktop package includes a bundled CLI:
 
 ```bash
-mkdir -p ~/meetings/memos
+brew install --cask silverstein/tap/minutes
 ```
 
-### 5. Audio input (if recording calls)
-
-For in-person conversations, the built-in mic works fine. For Zoom/Meet/Teams:
-
-1. Install BlackHole: `brew install blackhole-2ch`
-2. Open Audio MIDI Setup (Spotlight → "Audio MIDI Setup")
-3. Create a Multi-Output Device combining speakers + BlackHole
-4. Set the Multi-Output Device as system output
-5. Set BlackHole as Minutes' input (or system default input)
-
-See `minutes-record/references/audio-devices.md` for the full guide.
-
-### 6. Verify
-
-Run verify again to confirm everything passes:
-```bash
-bash "$MINUTES_SKILLS_ROOT/minutes-verify/scripts/verify-setup.sh"
-```
-
-### 7. Test recording
+For a standalone CLI instead:
 
 ```bash
-minutes record --title "Test recording"
-# Speak for 10-15 seconds
-minutes stop
+brew install silverstein/tap/minutes
 ```
 
-Check the output file exists in `~/meetings/` and has a transcript.
+For other platforms, use https://useminutes.app or the repository's installation instructions. Do not assume a checkout at `~/Sites/minutes`, build from source by default, or replace an existing desktop app with an ad-hoc bundle. Development privacy testing uses the project's signed Minutes Dev identity.
 
-## Gotchas
+## Configure the requested library
 
-- **macOS 26 (Tahoe) requires CXXFLAGS** — The whisper.cpp build needs the C++ include path set explicitly. This is a known Apple SDK issue.
-- **First model download can be slow** — The `small` model is 466 MB. On slow connections, `tiny` is a good starting point (75 MB).
-- **BlackHole setup is the hardest part** — Most users struggle with the Audio MIDI Setup step. Offer to walk through it if they get stuck.
+Use the existing configured library. Create or change a library only when requested. Search and sourced retrieval can use existing text records without installing a speech model. An OpenAI plugin uses the AI host's existing session; the separate ChatGPT-plan OAuth prototype is not required for plugin setup.
+
+Explain the sharing boundary: records stay in the local library, while requested tool results become context for the AI host. Preserve restricted-meeting rules.
+
+## Prepare audio capture when requested
+
+If a speech model is missing, explain its download size and let the user choose. Whisper small is a reasonable starting point; use the runtime's exact missing-model guidance when another model is configured.
+
+```bash
+minutes setup --model small
+```
+
+For in-person capture, check the selected microphone. For Mac calls, use the running Minutes desktop app's native call/system-audio route and call preflight. Request the specific OS permission in the responsible app when needed. BlackHole is an optional virtual-device fallback for a deliberately configured route; see `minutes-record/references/audio-devices.md`.
+
+Dictation insertion additionally requires its own destination permissions. Keep Microphone, system-audio capture, Input Monitoring and Accessibility distinct. A visible Settings toggle alone is not runtime permission evidence.
+
+## Verify the requested operation
+
+Start with a connection/status check. For retrieval, ask a question against an explicit sample or user-selected record and check its source. For capture, start a short test only when requested, confirm active state, stop through the connected tool or native control, then check the saved output and processing state.
+
+Do not stop an existing meeting to run a setup test. Do not start microphone capture merely because the user asked to check the connection. Report remaining dependencies with a concrete next step. Setup questions belong at https://github.com/silverstein/minutes/discussions.

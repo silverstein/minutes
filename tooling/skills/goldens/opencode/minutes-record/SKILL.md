@@ -15,81 +15,61 @@ export MINUTES_SKILL_ROOT="$MINUTES_SKILLS_ROOT/minutes-record"
 
 # /minutes-record
 
-Record audio from the microphone, transcribe it locally with whisper.cpp, and save as searchable markdown.
+Capture a meeting, call or voice memo with the local Minutes engine and save a searchable record.
 
-## How it works
+## Choose the connected capture path
 
-Recording is a two-step process — start and stop. Between those two commands, audio is captured continuously from the default input device.
+Check `get_status` first when Minutes MCP tools are connected. Resolve the exact registered tool names from the host. If another capture already owns the microphone, report its state; stop it only when the user asks.
 
-**Start recording:**
+Use `start_recording` for a requested recording, with the title, capture mode and intent supported by its schema. For a call, use call intent so Minutes checks the system-audio route and delegates to the running desktop app where needed. Keep the call preflight intact. If it reports unavailable system audio, explain the missing route; do not silently permit microphone-only call capture.
+
+Use `stop_recording` when the user asks to finish. The stop response may describe processing still in progress. Check `list_processing_jobs` or `get_status` before claiming the final transcript is ready. Report the resulting path or the actual failure.
+
+The MCP server does not listen for spoken stop commands. The user must request stop in chat or use Minutes' native stop control. Do not promise that saying "stop recording" into a meeting will stop capture.
+
+## Local CLI alternative
+
+If no connected MCP capture tool is available and a local shell is on the same computer as Minutes:
+
 ```bash
-minutes record
-# Or with a title:
+minutes status
 minutes record --title "Weekly standup with Alex"
 ```
 
-The process runs in the foreground. It captures audio from whatever input device is active — the built-in MacBook mic for in-person conversations, or a BlackHole virtual audio device for system audio (Zoom, Meet, Teams calls).
+`minutes record` runs in the foreground. Keep its owned process/session alive during capture. Use a separate local command to finish:
 
-**Stop recording:**
 ```bash
 minutes stop
 ```
-This sends a signal to the recording process, which then:
-1. Stops audio capture
-2. Transcribes the audio locally via whisper.cpp (no cloud, no data leaves the machine)
-3. Saves the transcript as a markdown file in `~/meetings/`
-4. Prints the output path and word count as JSON
 
-**Live transcript during recording:**
+A successful command dispatch is not proof of active recording. Check status after startup, preserve the WAV on interruption, and report capture and transcription separately. Do not terminate an unrelated recording process or close its terminal.
 
-While recording, Minutes streams a real-time transcript to `~/.minutes/live-transcript.jsonl`. You can read it with:
+## Call audio and permissions
+
+The supported Minutes desktop app can capture Mac call audio through its native system-audio path. BlackHole is an optional configured virtual-device alternative, not a prerequisite for every Mac call. Follow `references/audio-devices.md` for native preflight and optional routing.
+
+Microphone and system-audio permissions belong to the responsible local app/process. Installing an AI plugin does not grant them. If capture fails, identify the failed permission or route from the runtime result. Keep Input Monitoring and Accessibility separate from audio permissions; do not reset privacy settings or replace the installed app to troubleshoot.
+
+## Live transcript
+
+Use `read_live_transcript` when the current capture exposes a live stream, or inspect the local CLI:
+
 ```bash
-minutes transcript                    # all lines
-minutes transcript --since 42         # lines after cursor
-minutes transcript --since 5m         # last 5 minutes
-minutes transcript --status           # check if active
+minutes transcript --status
+minutes transcript --since 42
 ```
 
-This lets you follow what's being discussed mid-meeting. The live output is rougher than the final transcript produced after stop -- it prioritizes speed over accuracy.
+Live text is provisional. If a live consumer fails, recording and WAV preservation must continue. Do not claim that starting recording necessarily starts every optional live consumer.
 
-**Check status:**
-```bash
-minutes status
-```
-Returns JSON: `{"recording": true, "pid": 12345}` or `{"recording": false}`
+## Output and first capture setup
 
-## What you get
+Minutes saves to the configured library, commonly `~/meetings/`, with title/date metadata and a transcript. Summary, decisions and action items depend on configured processing and must be described only when present. Local transcription keeps audio processing on the computer; excerpts returned through MCP become context for the AI host under its settings.
 
-A markdown file at `~/meetings/YYYY-MM-DD-title.md` with:
-- YAML frontmatter (title, date, duration, type)
-- Timestamped transcript
-- Summary, decisions, and action items (if LLM summarization is configured)
+A missing speech model blocks capture/transcription, not every library-retrieval operation. Use the actual missing-model result and the setup skill. A supported Whisper starting point is:
 
-File permissions are set to 0600 (owner-only) because transcripts contain sensitive content.
-
-## First-time setup
-
-If the user hasn't set up minutes before, they need a speech model:
-
-**Whisper (default):**
 ```bash
 minutes setup --model small
 ```
-This downloads a ~466MB model. For faster but lower quality: `--model tiny` (75MB). For best quality: `--model large-v3` (3.1GB).
 
-Parakeet preferences currently resolve to Whisper on every platform. The
-pathname-only helper cannot safely receive Minutes' sealed private audio, so
-setup and selection fail closed until a secure byte transport lands. Do not
-send users through the Parakeet setup guide as a recording prerequisite.
-
-## Gotchas
-
-- **"model not found"** → Run `minutes setup --model small`. This is the most common first-run error.
-- **"already recording"** → Run `minutes stop` first, or `minutes status` to check. If the PID file is stale (process crashed), `minutes stop` will clean it up.
-- **No audio captured / empty transcript** → Check that the right input device is selected in System Settings > Sound. On MacBooks, the default mic works for in-person conversations but won't capture system audio.
-- **For Zoom/Meet/Teams audio** → You need BlackHole to capture system audio. See `references/audio-devices.md` in this skill folder for the full setup guide.
-- **Recording runs but transcription is garbage** → The `tiny` model is fast but low quality. Upgrade to `small` or `medium` for real meetings: `minutes setup --model small`.
-- **"permission denied" on output file** → Output files are `0600` (owner-only). This is intentional — transcripts contain sensitive content. Don't chmod them to be world-readable.
-- **Long meetings (>2 hours)** → Transcription time scales with duration. A 2-hour meeting with the `small` model takes ~3-5 minutes on Apple Silicon. The `tiny` model is ~4x faster but much less accurate.
-- **Recording process disappeared** → If you close the terminal tab where `minutes record` is running, the recording stops but may not process. Always use `minutes stop` from another terminal.
+Do not automatically download a model or change engines while qualifying the connection. Respect restricted-meeting policies and private file permissions. For setup help, use https://github.com/silverstein/minutes/discussions.
 

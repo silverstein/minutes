@@ -286,171 +286,6 @@ impl MacGraphJournal {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{descriptor_scan_ceiling, MacGraphJournal, MAX_DESCRIPTOR_OCCUPANCY_SCAN};
-
-    #[test]
-    fn high_soft_descriptor_limits_skip_the_linear_occupancy_scan() {
-        assert_eq!(
-            descriptor_scan_ceiling(MAX_DESCRIPTOR_OCCUPANCY_SCAN as libc::rlim_t).unwrap(),
-            Some(MAX_DESCRIPTOR_OCCUPANCY_SCAN)
-        );
-        assert_eq!(
-            descriptor_scan_ceiling((MAX_DESCRIPTOR_OCCUPANCY_SCAN + 1) as libc::rlim_t).unwrap(),
-            None
-        );
-        assert_eq!(descriptor_scan_ceiling(libc::RLIM_INFINITY).unwrap(), None);
-    }
-
-    #[test]
-    fn vnode_budget_fails_closed_before_opening_an_unbounded_namespace() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        std::fs::write(corpus.join("one.md"), b"one").unwrap();
-
-        let error = match MacGraphJournal::start_with_limit(
-            &corpus,
-            &corrections,
-            &corrections.join("vocabulary.toml"),
-            &corrections.join("overlays.db"),
-            1,
-        ) {
-            Ok(_) => panic!("over-budget journal unexpectedly succeeded"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("vnode budget"));
-    }
-
-    #[test]
-    fn root_registration_precedes_inventory_and_catches_a_new_source() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        let created = corpus.join("created-after-root-registration.md");
-
-        let mut journal = MacGraphJournal::start_with_limit_and_hook(
-            &corpus,
-            &corrections,
-            &corrections.join("vocabulary.toml"),
-            &corrections.join("overlays.db"),
-            64,
-            || std::fs::write(&created, b"sensitivity: normal\n").unwrap(),
-        )
-        .unwrap();
-        assert!(
-            journal.changed().unwrap(),
-            "the pre-inventory root watch must retain the create event"
-        );
-    }
-
-    #[test]
-    fn unrelated_correction_root_activity_is_re_attested_and_ignored() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
-        std::fs::write(corrections.join("vocabulary.toml"), b"version = 1\n").unwrap();
-        std::fs::write(corrections.join("overlays.db"), b"stable").unwrap();
-        for suffix in ["-wal", "-shm", "-journal"] {
-            std::fs::write(corrections.join(format!("overlays.db{suffix}")), b"stable").unwrap();
-        }
-        let mut journal = MacGraphJournal::start(
-            &corpus,
-            &corrections,
-            &corrections.join("vocabulary.toml"),
-            &corrections.join("overlays.db"),
-        )
-        .unwrap();
-
-        std::fs::write(corrections.join("unrelated-job.json"), b"{}").unwrap();
-        assert!(!journal.changed().unwrap());
-        std::fs::write(corrections.join("vocabulary.toml"), b"version = 2\n").unwrap();
-        assert!(journal.changed().unwrap());
-    }
-
-    #[test]
-    fn absent_correction_create_delete_aba_fails_closed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
-        let vocabulary = corrections.join("vocabulary.toml");
-        let mut journal = MacGraphJournal::start(
-            &corpus,
-            &corrections,
-            &vocabulary,
-            &corrections.join("overlays.db"),
-        )
-        .unwrap();
-
-        std::fs::write(&vocabulary, b"version = 1\n").unwrap();
-        std::fs::remove_file(&vocabulary).unwrap();
-        assert!(
-            journal.changed().unwrap(),
-            "an initially absent correction leaf cannot erase create/delete ABA evidence"
-        );
-    }
-
-    #[test]
-    fn correction_root_rename_restore_aba_fails_closed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        let displaced = tmp.path().join("state-displaced");
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
-        std::fs::write(corrections.join("vocabulary.toml"), b"version = 1\n").unwrap();
-        let mut journal = MacGraphJournal::start(
-            &corpus,
-            &corrections,
-            &corrections.join("vocabulary.toml"),
-            &corrections.join("overlays.db"),
-        )
-        .unwrap();
-
-        std::fs::rename(&corrections, &displaced).unwrap();
-        std::fs::rename(&displaced, &corrections).unwrap();
-        assert!(
-            journal.changed().unwrap(),
-            "restoring the correction-root pathname cannot erase its vnode rename"
-        );
-    }
-
-    #[test]
-    fn inactive_corpus_subtrees_do_not_consume_or_poison_vnode_watches() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let corpus = tmp.path().join("meetings");
-        let corrections = tmp.path().join("state");
-        let archive = corpus.join("archive");
-        std::fs::create_dir_all(&archive).unwrap();
-        std::fs::create_dir_all(&corrections).unwrap();
-        symlink("/tmp", archive.join("ignored-link")).unwrap();
-        let mut journal = MacGraphJournal::start(
-            &corpus,
-            &corrections,
-            &corrections.join("vocabulary.toml"),
-            &corrections.join("overlays.db"),
-        )
-        .unwrap();
-
-        std::fs::write(archive.join("ignored.md"), b"ignored").unwrap();
-        assert!(!journal.changed().unwrap());
-    }
-}
-
 impl Drop for MacGraphJournal {
     fn drop(&mut self) {
         for fd in self.vnodes.drain(..) {
@@ -625,5 +460,170 @@ fn blank_event() -> libc::kevent {
         fflags: 0,
         data: 0,
         udata: std::ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{descriptor_scan_ceiling, MacGraphJournal, MAX_DESCRIPTOR_OCCUPANCY_SCAN};
+
+    #[test]
+    fn high_soft_descriptor_limits_skip_the_linear_occupancy_scan() {
+        assert_eq!(
+            descriptor_scan_ceiling(MAX_DESCRIPTOR_OCCUPANCY_SCAN as libc::rlim_t).unwrap(),
+            Some(MAX_DESCRIPTOR_OCCUPANCY_SCAN)
+        );
+        assert_eq!(
+            descriptor_scan_ceiling((MAX_DESCRIPTOR_OCCUPANCY_SCAN + 1) as libc::rlim_t).unwrap(),
+            None
+        );
+        assert_eq!(descriptor_scan_ceiling(libc::RLIM_INFINITY).unwrap(), None);
+    }
+
+    #[test]
+    fn vnode_budget_fails_closed_before_opening_an_unbounded_namespace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        std::fs::write(corpus.join("one.md"), b"one").unwrap();
+
+        let error = match MacGraphJournal::start_with_limit(
+            &corpus,
+            &corrections,
+            &corrections.join("vocabulary.toml"),
+            &corrections.join("overlays.db"),
+            1,
+        ) {
+            Ok(_) => panic!("over-budget journal unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("vnode budget"));
+    }
+
+    #[test]
+    fn root_registration_precedes_inventory_and_catches_a_new_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        let created = corpus.join("created-after-root-registration.md");
+
+        let mut journal = MacGraphJournal::start_with_limit_and_hook(
+            &corpus,
+            &corrections,
+            &corrections.join("vocabulary.toml"),
+            &corrections.join("overlays.db"),
+            64,
+            || std::fs::write(&created, b"sensitivity: normal\n").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            journal.changed().unwrap(),
+            "the pre-inventory root watch must retain the create event"
+        );
+    }
+
+    #[test]
+    fn unrelated_correction_root_activity_is_re_attested_and_ignored() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
+        std::fs::write(corrections.join("vocabulary.toml"), b"version = 1\n").unwrap();
+        std::fs::write(corrections.join("overlays.db"), b"stable").unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            std::fs::write(corrections.join(format!("overlays.db{suffix}")), b"stable").unwrap();
+        }
+        let mut journal = MacGraphJournal::start(
+            &corpus,
+            &corrections,
+            &corrections.join("vocabulary.toml"),
+            &corrections.join("overlays.db"),
+        )
+        .unwrap();
+
+        std::fs::write(corrections.join("unrelated-job.json"), b"{}").unwrap();
+        assert!(!journal.changed().unwrap());
+        std::fs::write(corrections.join("vocabulary.toml"), b"version = 2\n").unwrap();
+        assert!(journal.changed().unwrap());
+    }
+
+    #[test]
+    fn absent_correction_create_delete_aba_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
+        let vocabulary = corrections.join("vocabulary.toml");
+        let mut journal = MacGraphJournal::start(
+            &corpus,
+            &corrections,
+            &vocabulary,
+            &corrections.join("overlays.db"),
+        )
+        .unwrap();
+
+        std::fs::write(&vocabulary, b"version = 1\n").unwrap();
+        std::fs::remove_file(&vocabulary).unwrap();
+        assert!(
+            journal.changed().unwrap(),
+            "an initially absent correction leaf cannot erase create/delete ABA evidence"
+        );
+    }
+
+    #[test]
+    fn correction_root_rename_restore_aba_fails_closed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        let displaced = tmp.path().join("state-displaced");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        std::fs::write(corpus.join("meeting.md"), b"sensitivity: normal\n").unwrap();
+        std::fs::write(corrections.join("vocabulary.toml"), b"version = 1\n").unwrap();
+        let mut journal = MacGraphJournal::start(
+            &corpus,
+            &corrections,
+            &corrections.join("vocabulary.toml"),
+            &corrections.join("overlays.db"),
+        )
+        .unwrap();
+
+        std::fs::rename(&corrections, &displaced).unwrap();
+        std::fs::rename(&displaced, &corrections).unwrap();
+        assert!(
+            journal.changed().unwrap(),
+            "restoring the correction-root pathname cannot erase its vnode rename"
+        );
+    }
+
+    #[test]
+    fn inactive_corpus_subtrees_do_not_consume_or_poison_vnode_watches() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let corpus = tmp.path().join("meetings");
+        let corrections = tmp.path().join("state");
+        let archive = corpus.join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::create_dir_all(&corrections).unwrap();
+        symlink("/tmp", archive.join("ignored-link")).unwrap();
+        let mut journal = MacGraphJournal::start(
+            &corpus,
+            &corrections,
+            &corrections.join("vocabulary.toml"),
+            &corrections.join("overlays.db"),
+        )
+        .unwrap();
+
+        std::fs::write(archive.join("ignored.md"), b"ignored").unwrap();
+        assert!(!journal.changed().unwrap());
     }
 }

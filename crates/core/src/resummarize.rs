@@ -1562,13 +1562,13 @@ mod tests {
         // not the umask default (a 0644 copy of a 0600 transcript would be
         // a privacy leak).
         let backup = report.backup.as_ref().unwrap();
-        assert_eq!(fs::read_to_string(&backup).unwrap(), MEETING);
+        assert_eq!(fs::read_to_string(backup).unwrap(), MEETING);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
-            let backup_mode = fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+            let backup_mode = fs::metadata(backup).unwrap().permissions().mode() & 0o777;
             assert_eq!(backup_mode, 0o600);
         }
         // The result still parses and still resummarizes (idempotent shape).

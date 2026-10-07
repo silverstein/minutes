@@ -7112,7 +7112,7 @@ where
     Err("PARA completed transaction retention slots are exhausted".into())
 }
 
-#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn remove_owner_private_para_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let parent = path.parent().ok_or("private PARA file has no parent")?;
     let name = path.file_name().ok_or("private PARA file has no name")?;
@@ -18863,6 +18863,7 @@ mod tests {
     }
 
     /// Stands in for a machine where `qmd` was never installed.
+    #[allow(dead_code)]
     struct AbsentQmdRunner;
 
     impl QmdRunner for AbsentQmdRunner {
@@ -18879,6 +18880,7 @@ mod tests {
     }
 
     /// Installed, but cannot be inspected.
+    #[allow(dead_code)]
     struct BrokenQmdRunner;
 
     impl QmdRunner for BrokenQmdRunner {

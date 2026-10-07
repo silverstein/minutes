@@ -275,8 +275,10 @@ mod tests {
         write_test_wav(&wav);
         fs::write(&jsonl, "{\"line\":1,\"text\":\"hello\"}\n").unwrap();
 
-        let mut config = Config::default();
-        config.output_dir = temp.path().join("meetings");
+        let mut config = Config {
+            output_dir: temp.path().join("meetings"),
+            ..Config::default()
+        };
         config.summarization.engine = "none".into();
         (temp, wav, jsonl, config)
     }

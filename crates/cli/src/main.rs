@@ -7408,6 +7408,10 @@ fn build_capability_report_with_parakeet(
     features.insert("research_topic".into(), true);
     features.insert("search_meetings".into(), true);
     features.insert("start_dictation".into(), true);
+    features.insert(
+        "dictation_addressed_stop_v1".into(),
+        cfg!(feature = "whisper"),
+    );
     features.insert("start_live_transcript".into(), true);
     features.insert("start_recording".into(), true);
     features.insert("stop_dictation".into(), true);
@@ -10154,6 +10158,16 @@ life (qmd://life/)
             )
             .unwrap(),
             vec!["minutes".to_string()]
+        );
+    }
+
+    #[test]
+    fn dictation_stop_protocol_requires_a_capture_capable_build() {
+        assert_eq!(
+            build_capability_report()
+                .features
+                .get("dictation_addressed_stop_v1"),
+            Some(&cfg!(feature = "whisper"))
         );
     }
 

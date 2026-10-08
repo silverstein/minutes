@@ -551,6 +551,7 @@ impl CoreAudioTapCallbackContext {
                 timestamp: std::time::Instant::now(),
                 index,
                 source: SourceRole::Call,
+                lineage: None,
             });
         });
     }

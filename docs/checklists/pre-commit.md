@@ -42,13 +42,15 @@ CI enforces the version-sync and generated-skills checks. The pre-push hooks are
 
 ## Corpus-lease tests need the test-harness budget
 
-The meeting-corpus authorization handshake has a fail-closed production deadline
-derived from its full bounded read envelope. It is currently 60 s: three manifest
-passes per attempt, two physical reads per manifest, two possible attempts, an
-80 MiB corpus ceiling, and the same 16 MiB/s storage floor used by the native reader
-(#933). The MCP test script wraps vitest in `scripts/run_corpus_test_harness.mjs`,
-and CI sets the same `NODE_ENV=test`, `MINUTES_TEST_HARNESS=1`, and
+The meeting-corpus authorization handshake uses a bounded production deadline.
+The standard profile is 60 seconds, derived from its byte read envelope. That
+estimate does not include seek and per-file reader overhead. The documented
+`MINUTES_CORPUS_STORAGE_PROFILE=slow` profile permits up to 240 seconds while
+preserving the same verification and resource limits.
+
+The MCP test script wraps vitest in `scripts/run_corpus_test_harness.mjs`, and CI
+sets the same `NODE_ENV=test`, `MINUTES_TEST_HARNESS=1`, and
 `MINUTES_CORPUS_AUTH_TIMEOUT_MS=60000` contract for the focused SDK suite. Running
-vitest directly bypasses that explicit harness contract. Both markers are required;
-the override never applies outside the harness, and the production deadline remains
-bounded by its derived envelope.
+vitest directly bypasses that explicit harness contract. Both markers are required
+for the numeric override; it never applies outside the harness. Its independent
+120-second cap still applies when the production slow profile is selected.

@@ -1,0 +1,119 @@
+{
+  "date_utc": "2026-09-30",
+  "host": "silverbook",
+  "surface": "standalone Node prototype",
+  "agent_display_name": "Minutes",
+  "sign_in": {
+    "status": "verified",
+    "user_selected_second_account": true,
+    "expected_account_email_matched": true,
+    "identity_checks": [
+      "signature",
+      "issuer",
+      "audience",
+      "expiry",
+      "nonce"
+    ],
+    "chatgpt_plan_scope": "granted",
+    "saved_registrations": 2,
+    "first_registration_preserved": true,
+    "credentials_survive_process_restart": true,
+    "credentials_included_in_receipt": false,
+    "callback_visible_path": "/auth/connected",
+    "callback_query_removed": true
+  },
+  "catalog": {
+    "status": "verified",
+    "visible_models": [
+      "gpt-6-astra",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5"
+    ]
+  },
+  "inference": {
+    "model": "gpt-6-astra",
+    "source_files": [
+      "2026-02-28-pricing-strategy.md",
+      "2026-03-25-pricing-reversal.md"
+    ],
+    "real_meeting_reads": 0,
+    "provider_requests": 3,
+    "attempts": [
+      {
+        "purpose": "initial_second_account_sample",
+        "result": "client_rejected_empty_terminal_output",
+        "completion_event_received": true,
+        "answer_returned_by_client": false
+      },
+      {
+        "purpose": "response_format_diagnostic",
+        "http_status": 200,
+        "content_type": null,
+        "request_id": null,
+        "response_id": "resp_0d9a75162a312d6e016abd14197c8087d0ae787f7e0333eba7",
+        "result": "finished_message_events_present_but_terminal_output_empty",
+        "completion_event_received": true,
+        "answer_returned_by_client": false,
+        "event_counts": {
+          "response.output_text.delta": 324,
+          "response.output_text.done": 1,
+          "response.output_item.done": 1,
+          "response.completed": 1
+        }
+      },
+      {
+        "purpose": "sample_after_finished_message_fix",
+        "result": "completed_answer",
+        "response_id": "resp_0cfa76c5063e85ea016abd157eb6cc87d09df6683f84a1e8a8",
+        "request_id": null,
+        "completion_confirmed": true,
+        "answer_returned_by_client": true,
+        "usage": {
+          "input_tokens": 903,
+          "output_tokens": 359,
+          "total_tokens": 1262
+        }
+      }
+    ],
+    "answer_artifact": "live-sample-answer-2026-09-30.md",
+    "citation_review": {
+      "status": "passed",
+      "both_exact_filenames_and_dates": true,
+      "initial_narrow_consultant_test": true,
+      "later_annual_only_reversal": true,
+      "decisions_separated_from_discussion": true,
+      "open_follow_up_not_claimed_complete": true,
+      "evidence_type": "manual comparison with both shipped source records"
+    },
+    "automatic_retry": false,
+    "provider_or_model_fallback": false,
+    "first_account_quota_receipt": "live-qualification-2026-09-30.json"
+  },
+  "remaining_live_checks": [
+    "refresh rotation near token expiry",
+    "logout and remote revocation"
+  ],
+  "connection_state": "preserved",
+  "native_desktop_integration": "not activated",
+  "public_directory_submission": "not submitted",
+  "protocol_tests": {
+    "linux": {
+      "passed": 29,
+      "failed": 0
+    },
+    "silverbook_macos_initial": {
+      "passed": 25,
+      "failed": 4,
+      "cause": "Test fixtures used a symlink ancestor in the macOS temporary-directory path; the credential guard rejected it."
+    },
+    "test_fixture_fix": "Resolve the system temporary directory before creating synthetic test stores; production symlink rejection unchanged.",
+    "silverbook_macos_after_fix": {
+      "node_version": "22.23.2",
+      "passed": 29,
+      "failed": 0
+    },
+    "test_credentials": "synthetic only"
+  }
+}

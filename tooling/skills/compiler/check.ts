@@ -9,6 +9,7 @@ import { validateSkillAssets } from "./validate.js";
 import { renderClaudePluginManifest } from "./plugin.js";
 import { renderSiteSkillCatalog } from "./site.js";
 import { findUnownedGeneratedArtifacts } from "./ownership.js";
+import { renderOpenAIPlugin } from "./openai-plugin.js";
 
 interface CheckFailure {
   skill: string;
@@ -161,8 +162,16 @@ async function main(): Promise<void> {
     }
   }
 
+  const openaiArtifacts = await renderOpenAIPlugin(rootDir, skills);
+  for (const [target, expected] of openaiArtifacts) {
+    let actual: string | null = null;
+    try { actual = await readFile(path.join(rootDir, "..", "..", target), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (actual !== expected) failures.push({ skill: target, host: "openai-plugin", message: "Generated OpenAI plugin is stale; run compile." });
+  }
+
   const repoRoot = path.join(rootDir, "..", "..");
-  const unownedArtifacts = await findUnownedGeneratedArtifacts(repoRoot, skills);
+  const unownedArtifacts = await findUnownedGeneratedArtifacts(repoRoot, skills, openaiArtifacts.keys());
   for (const artifactPath of unownedArtifacts) {
     const host = artifactPath.startsWith(".claude/")
       ? "claude"

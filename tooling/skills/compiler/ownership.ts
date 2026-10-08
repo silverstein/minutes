@@ -12,6 +12,7 @@ interface GeneratedArtifactScope {
 const GENERATED_ARTIFACT_SCOPES: readonly GeneratedArtifactScope[] = [
   { root: ".claude/plugins/minutes", kind: "tree" },
   { root: ".agents/skills/minutes", kind: "tree" },
+  { root: ".agents/plugins/minutes", kind: "tree" },
   { root: ".opencode/skills", kind: "tree" },
   { root: ".opencode/commands", kind: "opencode-commands" },
 ];
@@ -138,8 +139,10 @@ async function listOpenCodeCommandEntries(
 export async function findUnownedGeneratedArtifacts(
   repoRoot: string,
   skills: CanonicalSkillSource[],
+  additionalArtifacts: Iterable<string> = [],
 ): Promise<string[]> {
   const owned = planOwnedArtifactPaths(skills);
+  for (const artifact of additionalArtifacts) addPathAndParents(owned, artifact);
   const generatedEntries: string[] = [];
 
   for (const scope of GENERATED_ARTIFACT_SCOPES) {

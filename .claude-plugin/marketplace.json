@@ -9,7 +9,7 @@
       "name": "minutes",
       "source": "./.claude/plugins/minutes",
       "description": "24 skills + 1 agent + 2 hooks for the full meeting lifecycle, including a governed Minutes to X1 closeout handoff",
-      "version": "0.21.1",
+      "version": "0.21.2",
       "author": {
         "name": "Mat Silverstein"
       },

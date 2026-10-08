@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "minutes": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "minutes-mcp@0.28.1"
+      ],
+      "env": {
+        "MINUTES_MCP_AUTO_SETUP": "0"
+      }
+    }
+  }
+}

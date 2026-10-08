@@ -1,0 +1,120 @@
+{
+  "date": "2026-10-07",
+  "plugin": "minutes@minutes",
+  "plugin_version": "0.2.4",
+  "mcp_runtime": "0.28.0",
+  "engine_version": "0.28.0",
+  "chatgpt_version": "26.930.51102",
+  "bundled_codex_version": "0.160.0",
+  "desktop_runtime_discovery": {
+    "status": "passed",
+    "minutes_servers": 1,
+    "canonical_tools": 34,
+    "model_turns": 0,
+    "meeting_reads": 0
+  },
+  "chatgpt_status_conversation": {
+    "thread_id": "01a114b4-01ff-7b03-900d-714cb1ffa7a2",
+    "surface": "Minutes Try now, ChatGPT Work",
+    "tool": "get_status",
+    "calls": 2,
+    "result": "No recording in progress.",
+    "plugin_attribution_verified": true,
+    "engine_version_and_capture_modes_in_tool_result": false,
+    "meeting_reads": 0,
+    "recording_started": false
+  },
+  "chatgpt_sample_retrieval": {
+    "thread_id": "01a114ba-20d7-79c1-bd95-b22c1f6b7faf",
+    "skill_version_loaded": "0.2.4",
+    "tools": [
+      "search_meetings",
+      "list_meetings"
+    ],
+    "status": "blocked",
+    "reason": "Published engine rejects installed QMD exact inline empty-registry message.",
+    "answer": "ChatGPT declined to invent a pricing comparison without sources.",
+    "sourced_answer_verified": false,
+    "real_meeting_contents_read": false,
+    "recording_started": false
+  },
+  "qmd_reproduction": {
+    "transport": "actual installed QMD and released Mac CLI, isolated process config/data/cache",
+    "command": [
+      "qmd",
+      "collection",
+      "list"
+    ],
+    "exit_code": 0,
+    "stdout": "No collections found. Run 'qmd collection add .' to create one.\n",
+    "published_engine_readiness": "blocked",
+    "source_fix": "Accept only exact complete inline response; preserve duplicate/count/trailing-output rejection. Engine patch is not yet published.",
+    "tracking": "minutes-o3eo"
+  },
+  "sample_isolation": {
+    "roots": [
+      "MINUTES_HOME",
+      "MINUTES_DATA_DIR",
+      "MINUTES_CONFIG_PATH",
+      "XDG_CONFIG_HOME",
+      "XDG_CACHE_HOME",
+      "QMD_CONFIG_DIR",
+      "INDEX_PATH",
+      "MEETINGS_DIR"
+    ],
+    "public_synthetic_meetings": 5,
+    "normal_config_explicitly_edited": false,
+    "explicit_qmd_cleanup_or_readiness_bypass_used": false,
+    "early_profile_defect": "The first 0.2.3 attempt isolated MINUTES_HOME and config but omitted native MINUTES_DATA_DIR. Readiness could consult or retire legacy native QMD state; no real meeting contents were returned. 0.2.4 now isolates both namespaces and the QMD selectors."
+  },
+  "checks": {
+    "compiler_tests": 37,
+    "installer_tests": 3,
+    "routing_cases": 24,
+    "canonical_skills": 25,
+    "native_hardware_acceptance": "not tested",
+    "published_mcp_sample_qualification": "Passed before the fully isolated QMD environment; faithfully reproduces the engine blocker when QMD is available.",
+    "qmd_core_tests_passed": 47,
+    "qmd_core_test_host": "macOS, Rust 1.95.0, isolated source archive",
+    "tested_core_source_sha256": "777a8facd8691f04f5a1ac93f8945a7d98ce1c4dbcfab2b6bfaa21c85b455ec3",
+    "strict_workspace_clippy": "passed, no-default-features, Rust 1.95.0",
+    "workspace_tests": {
+      "core_passed": 2057,
+      "core_failed": 2,
+      "core_ignored": 5,
+      "status": "failed",
+      "failures": [
+        "transcribe::tests::per_chunk_backends_bypass_rotation_without_a_private_audio_capability",
+        "transcribe::tests::runtime_unavailable_private_audio_bypasses_multi_chunk_dispatch"
+      ],
+      "workspace_feature_graph": "minutes-app enables core default/whisper, despite workspace --no-default-features",
+      "tracking": "minutes-31as",
+      "baseline_reproduction": {
+        "source": "origin/main 9377cb71f215b552b955425dc928920c0648a09c, unmodified knowledge.rs",
+        "both_tests_fail": true,
+        "test_threads": 1,
+        "patched_parser_restored_after_run": true
+      }
+    },
+    "required_serial_core_tests": {
+      "passed": 1925,
+      "failed": 0,
+      "ignored": 1,
+      "test_threads": 1,
+      "cli_rebuilt_before_run": true
+    }
+  },
+  "native_app_replaced": false,
+  "public_directory_submitted": false,
+  "remote_mcp_deployed": false,
+  "full_plugin_acceptance": "Incomplete: publish engine compatibility fix and repeat sourced retrieval, then qualify capture and optional workflows separately.",
+  "normal_profile_restoration": {
+    "plugin_version": "0.2.4",
+    "sample_library": false,
+    "host_discovery": "passed",
+    "canonical_tools": 34,
+    "meeting_reads": 0,
+    "native_app_changed": false,
+    "prior_installations_retained": true
+  }
+}

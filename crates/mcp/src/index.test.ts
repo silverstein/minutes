@@ -63,6 +63,7 @@ import {
   LIVE_EVENTS_SUBSCRIPTIONS_ENABLED,
   liveMeetingSnippet,
   meetingDetailPayload,
+  meetingDetailEvidence,
   verifiedCliSpeakerOverlay,
   verifiedStopRecordingSummary,
   meetingListItem,
@@ -5237,6 +5238,39 @@ describe("meeting shape contract", () => {
       path: "/tmp/meeting.md",
       view: "detail",
     });
+  });
+
+  it("omits stale source names after a verified correction without changing quote bytes", () => {
+    const body = "[SPEAKER_0 00:05] Keep annual billing.\n";
+    const content = "---\ntitle: Safe\n---\n" + body;
+    const source = {
+      path: "/corpus/safe.md", content, body,
+      speakerMap: [{ speaker_label: "SPEAKER_0", name: "Wrong Name", confidence: "high", source: "inferred" }],
+    };
+    const payload = {
+      overlay_applied: true, raw_markdown: content,
+      overlay_source_sha256: createHash("sha256").update(content).digest("hex"),
+      frontmatter: { speaker_map: [{ ...source.speakerMap[0], name: "Correct Name", source: "manual" }] },
+    };
+    const verified = verifiedCliSpeakerOverlay(payload, content);
+    expect(verified?.speaker_map).toEqual(payload.frontmatter.speaker_map);
+    const raw = meetingDetailEvidence(source, false);
+    expect(raw.segments[0].speaker?.name).toBe("Wrong Name");
+    const corrected = meetingDetailEvidence(source, verified?.overlay_applied === true);
+    expect(corrected.segments[0].speaker).toEqual({ label: "SPEAKER_0" });
+    expect(corrected.source_revision).toBe(raw.source_revision);
+    expect(corrected.segments[0].id).toBe(raw.segments[0].id);
+    expect(corrected.segments[0].timestamp_seconds).toBe(5);
+    expect(content.slice(corrected.segments[0].start, corrected.segments[0].end)).toBe(corrected.segments[0].quote);
+    for (const change of [
+      { overlay_source_sha256: "0".repeat(64) },
+      { raw_markdown: content + "changed" },
+      { overlay_applied: false },
+    ]) {
+      const rejected = verifiedCliSpeakerOverlay({ ...payload, ...change }, content);
+      expect(rejected).toBeNull();
+      expect(meetingDetailEvidence(source, rejected?.overlay_applied === true)).toEqual(raw);
+    }
   });
 
   it("accepts CLI overlays only with an exact source-bound proof", () => {

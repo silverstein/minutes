@@ -455,6 +455,20 @@ export function verifiedCliSpeakerOverlay(
   };
 }
 
+/** Quotes attest raw Markdown bytes, while a verified manual correction lives
+ * outside those bytes. Keep the source speaker label but omit raw names once
+ * a correction is known, rather than attach stale identities to exact quotes.
+ * The corrected map remains available separately in structuredContent. */
+export function meetingDetailEvidence(
+  source: reader.EvidenceSource,
+  overlayApplied: boolean
+): reader.EvidenceBundle {
+  return reader.buildSourceEvidence({
+    ...source,
+    speakerMap: overlayApplied ? [] : source.speakerMap,
+  });
+}
+
 function toolDocsUrl(name: string): string {
   return `${MCP_TOOLS_DOCS_BASE_URL}#tool-${name}`;
 }
@@ -6163,7 +6177,10 @@ registerDocsAppTool(
 
       let structuredOut: Record<string, unknown> = {
         ...structured,
-        evidence: reader.buildSourceEvidence({ path: resolved, content: rawContent, body: rawParsed.body, speakerMap: rawParsed.frontmatter.speaker_map }),
+        evidence: meetingDetailEvidence(
+          { path: resolved, content: rawContent, body: rawParsed.body, speakerMap: rawParsed.frontmatter.speaker_map },
+          structured.overlay_applied === true
+        ),
       };
       if (include_restricted && meetingSensitivity(sensitivityParsed) === "restricted") {
         structuredOut = {

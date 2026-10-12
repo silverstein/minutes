@@ -87,6 +87,12 @@ import {
 import { isCliCompatible, parseVersion } from "./version.js";
 import { nodeChildEnvironment } from "./node-child.js";
 import {
+  DICTATION_CONTROL_UPGRADE_REQUIRED,
+  requestDictationStop,
+  supportsDictationStopProtocol,
+  waitForDictationStartup,
+} from "./dictation-control.js";
+import {
   hasFeature,
   probeCapabilitiesSync,
   type CapabilityProbeResult,
@@ -7680,6 +7686,13 @@ registerTool(
     }
 
     try {
+      if (!supportsDictationStopProtocol(probeCapabilitiesSync(MINUTES_BIN))) {
+        return {
+          content: [{ type: "text" as const, text: DICTATION_CONTROL_UPGRADE_REQUIRED }],
+          structuredContent: { status: "error", code: "DICTATION_CONTROL_UNSUPPORTED" },
+          isError: true,
+        };
+      }
       await execFileAsync(MINUTES_BIN, ["dictate", "--preflight"], {
         timeout: 5000,
         env: mcpCliChildEnv(),
@@ -7726,21 +7739,31 @@ registerTool(
     const dictArgs = ["dictate"];
     if (language) dictArgs.push("--language", language);
     const child = spawn(MINUTES_BIN, dictArgs, {
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: mcpCliChildEnv({ RUST_LOG: "info" }),
     });
     child.unref();
 
-    // Wait briefly for startup
-    await new Promise((r) => setTimeout(r, 500));
+    const startup = await waitForDictationStartup(child);
+    if (startup.status === "error") {
+      return {
+        content: [{ type: "text" as const, text: `Dictation could not start: ${startup.message}` }],
+        structuredContent: { status: "error", code: "DICTATION_START_FAILED" },
+        isError: true,
+      };
+    }
 
     return {
       content: [
         {
           type: "text" as const,
-          text: "Dictation started. Speak naturally — text accumulates across pauses and will be copied when dictation ends. Say \"stop dictation\" when done.",
+          text: (startup.status === "listening"
+            ? "Dictation is listening. Speak naturally — text accumulates across pauses and will be copied when dictation ends."
+            : "Dictation is still starting; microphone readiness has not been confirmed. Do not start another session.") +
+            " When the user asks to finish (typed in chat), invoke stop_dictation. This server does not listen for spoken stop commands.",
         },
       ],
+      structuredContent: startup,
     };
   }
 );
@@ -7753,22 +7776,14 @@ registerTool(
   {},
   { title: "Stop Dictation", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   async () => {
-    const stopped = await terminalControlBeforeContentReadiness(async () => {
-      // Send stop signal by killing the dictation process via PID file.
-      const minutesDir = join(homedir(), ".minutes");
-      const pidPath = join(minutesDir, "dictation.pid");
-      if (existsSync(pidPath)) {
-        try {
-          const pidContent = await readFile(pidPath, "utf-8");
-          const pid = parseInt(pidContent.trim(), 10);
-          if (Number.isFinite(pid) && pid > 0) {
-            process.kill(pid, "SIGTERM");
-          }
-        } catch {
-          // Process already dead or PID file invalid.
-        }
-      }
-    });
+    if (!supportsDictationStopProtocol(probeCapabilitiesSync(MINUTES_BIN))) {
+      return {
+        content: [{ type: "text" as const, text: DICTATION_CONTROL_UPGRADE_REQUIRED }],
+        structuredContent: { status: "error", code: "DICTATION_CONTROL_UNSUPPORTED" },
+        isError: true,
+      };
+    }
+    const stopped = await terminalControlBeforeContentReadiness(() => requestDictationStop());
     if (!stopped.mayRevealContent) {
       return {
         content: [{
@@ -7782,7 +7797,7 @@ registerTool(
       content: [
         {
           type: "text" as const,
-          text: "Dictation stop requested.",
+          text: stopped.result === "inactive" ? "No dictation session is active in this profile." : "Dictation stop requested.",
         },
       ],
     };

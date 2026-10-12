@@ -408,6 +408,9 @@ where
     }
 
     // Acquire dictation PID
+    // Retire an addressed request left by an earlier session in this process
+    // before publishing the new PID. Do not consume another process's request.
+    pid::check_and_clear_sentinel();
     pid::create_pid_file(&dict_pid)?;
 
     // Ensure cleanup on all exit paths
@@ -597,7 +600,9 @@ where
 
         loop {
             // Check stop flag (Esc / Ctrl-C / MCP stop)
+            let remote_stop = pid::check_and_clear_sentinel();
             if stop_flag.load(Ordering::Relaxed)
+                || remote_stop
                 || cancellation::requested(options.cancel_flag.as_deref())
             {
                 if cancellation::requested(options.cancel_flag.as_deref()) {

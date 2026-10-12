@@ -157,11 +157,13 @@ fn clean(raw: &str, opts: &CleanupOptions, repairs: bool) -> String {
         return raw.trim().to_string();
     }
 
-    if opts.text_mode == DictationTextMode::TerminalCode {
-        return raw.trim().to_string();
+    let terminal = opts.text_mode == DictationTextMode::TerminalCode;
+    let without_sound_labels = remove_sound_labels(raw.trim(), terminal);
+    if terminal {
+        return without_sound_labels.trim().to_string();
     }
 
-    let mut text = collapse_whitespace(raw.trim());
+    let mut text = collapse_whitespace(&without_sound_labels);
 
     if !opts.replacements.is_empty() {
         text = apply_replacements(&text, &opts.replacements);
@@ -192,6 +194,77 @@ fn clean(raw: &str, opts: &CleanupOptions, repairs: bool) -> String {
     text = capitalize_standalone_i(&text);
 
     text.trim().to_string()
+}
+
+/// Whisper can surround real speech with descriptions of nearby sounds.
+/// Only exact known labels are removable; ordinary parentheses and quoted
+/// labels remain content. Raw mode opts out; terminal mode keeps ambiguous
+/// single-word tags such as `[typing]` literal and preserves code formatting.
+fn remove_sound_labels(text: &str, terminal: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut offset = 0;
+    let mut nesting = Vec::new();
+    while offset < text.len() {
+        let character = text[offset..].chars().next().unwrap();
+        let closing = match character {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        if let Some(closing) = closing.filter(|_| nesting.is_empty()) {
+            if let Some((relative_end, _)) = text[offset + 1..]
+                .char_indices()
+                .take(40)
+                .find(|(_, candidate)| *candidate == closing)
+            {
+                let end = offset + 1 + relative_end;
+                let label = text[offset + 1..end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+                let before = text[..offset].chars().next_back();
+                let after = text[end + 1..].chars().next();
+                let quoted = matches!(
+                    (before, after),
+                    (Some('"'), Some('"'))
+                        | (Some('\''), Some('\''))
+                        | (Some('`'), Some('`'))
+                        | (Some('“'), Some('”'))
+                        | (Some('‘'), Some('’'))
+                );
+                if !(quoted || terminal && matches!(label.as_str(), "typing" | "music"))
+                    && matches!(
+                        label.as_str(),
+                        "keyboard clacking"
+                            | "keyboard clicking"
+                            | "keyboard typing"
+                            | "keyboard tapping"
+                            | "typing"
+                            | "music"
+                            | "music playing"
+                            | "background music"
+                    )
+                {
+                    if !out.chars().next_back().is_some_and(char::is_whitespace)
+                        && !after.is_some_and(char::is_whitespace)
+                    {
+                        out.push(' ');
+                    }
+                    offset = end + 1;
+                    continue;
+                }
+            }
+        }
+        if let Some(closing) = closing {
+            nesting.push(closing);
+        } else if nesting.last() == Some(&character) {
+            nesting.pop();
+        }
+        out.push(character);
+        offset += character.len_utf8();
+    }
+    out
 }
 
 /// Apply only repair rules to already-cleaned, joined utterances. Do not repeat
@@ -636,6 +709,67 @@ mod tests {
             clean_dictation_text("  hello   world  ", &opts),
             "hello   world"
         );
+    }
+
+    #[test]
+    fn keyboard_label_is_removed_without_losing_the_complete_phrase() {
+        let speech = "This is a synthetic minutes recording test. The team decided to keep annual billing and prepare the follow-up next Tuesday.";
+        assert_eq!(
+            clean_dictation_text(&format!("(keyboard clacking) {speech}"), &rules()),
+            speech
+        );
+    }
+
+    #[test]
+    fn known_sound_labels_are_case_insensitive_and_do_not_join_words() {
+        assert_eq!(
+            clean_dictation_text(
+                "[MUSIC PLAYING]all right[KEYBOARD CLICKING], café is ready. (typing)",
+                &rules()
+            ),
+            "All right, café is ready."
+        );
+        assert_eq!(
+            clean_dictation_text("[music] (keyboard clacking)", &rules()),
+            ""
+        );
+    }
+
+    #[test]
+    fn ordinary_parentheses_and_quoted_sound_labels_remain_content() {
+        let raw = "Keep (the annual plan) and [draft]. Write \"(keyboard clacking)\" or `[typing]` or “(typing)”.";
+        assert_eq!(clean_dictation_text(raw, &rules()), raw);
+    }
+
+    #[test]
+    fn raw_mode_opts_out_and_terminal_mode_preserves_code_formatting() {
+        let raw = "(keyboard clacking) git status [typing]";
+        assert_eq!(clean_dictation_text(raw, &CleanupOptions::disabled()), raw);
+        let terminal = CleanupOptions {
+            text_mode: DictationTextMode::TerminalCode,
+            ..rules()
+        };
+        assert_eq!(clean_dictation_text(raw, &terminal), "git status [typing]");
+        assert_eq!(
+            clean_dictation_text("[MUSIC PLAYING]git  status --short", &terminal),
+            "git  status --short"
+        );
+        assert_eq!(
+            clean_dictation_text("echo \"(keyboard clacking)\"", &terminal),
+            "echo \"(keyboard clacking)\""
+        );
+    }
+
+    #[test]
+    fn malformed_and_nested_sound_labels_are_preserved() {
+        for raw in [
+            "(keyboard clacking",
+            "[typing",
+            "((typing))",
+            "[notes (typing)]",
+        ] {
+            assert_eq!(remove_sound_labels(raw, false), raw);
+        }
     }
 
     #[test]

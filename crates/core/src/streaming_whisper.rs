@@ -158,8 +158,7 @@ impl StreamingWhisper {
     /// newest bounded window to avoid CPU runaway while staying current during
     /// long uninterrupted speech. `finalize()` still sees the full utterance.
     pub fn feed(&mut self, samples: &[f32], ctx: &WhisperContext) -> Option<StreamingResult> {
-        self.audio_buffer.extend_from_slice(samples);
-        self.samples_since_partial += samples.len();
+        self.append_samples(samples);
 
         // Only transcribe if enough new audio AND enough total audio
         if self.samples_since_partial >= PARTIAL_INTERVAL_SAMPLES
@@ -170,6 +169,13 @@ impl StreamingWhisper {
         }
 
         None
+    }
+
+    /// Retain audio for the final pass without running another partial decode.
+    /// Shutdown uses this while draining the microphone queue.
+    pub(crate) fn append_samples(&mut self, samples: &[f32]) {
+        self.audio_buffer.extend_from_slice(samples);
+        self.samples_since_partial += samples.len();
     }
 
     /// Finalize: run one last transcription and return the final result.

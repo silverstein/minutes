@@ -5447,7 +5447,7 @@ fn build_artifact_template(
 
     let body = match kind {
         "follow-up-email" => format!(
-            "# Subject\n\nFollow-up: {meeting_title}\n\n# Email Draft\n\nHi team,\n\nThanks again for the conversation today. Here is the clean follow-up from the meeting.\n\n## Key Points\n\n{summary}\n\n## Decisions\n\n{decisions}\n\n## Action Items\n\n{action_items}\n\n## Open Questions\n\n{open_questions}\n\nBest,\n\n[Your name]\n"
+            "# Subject\n\nFollow-up: {meeting_title}\n\n# Email Draft\n\nHi team,\n\nThanks again for the conversation. Here is a recap and the next steps.\n\n## Key Points\n\n{summary}\n\n## Decisions\n\n{decisions}\n\n## Action Items\n\n{action_items}\n\n## Open Questions\n\n{open_questions}\n\nBest,\n\n[Your name]\n"
         ),
         "meeting-brief" => format!(
             "# Objective\n\nState what this next meeting needs to accomplish.\n\n## Context\n\n- Source meeting: [{meeting_title}]({})\n- Attendees: {attendees}\n\n## What Happened Last Time\n\n{summary}\n\n## Decisions Already Made\n\n{decisions}\n\n## Open Questions\n\n{open_questions}\n\n## Suggested Agenda\n\n- Start with the highest-stakes question\n- Confirm any blocked action items\n- End with explicit owners and dates\n\n## Notes\n\n- Add prep notes here.\n",
@@ -18190,7 +18190,9 @@ mod tests {
         let fm = minutes_core::markdown::Frontmatter {
             title: "Pricing Review".into(),
             r#type: ContentType::Meeting,
-            date: chrono::Local::now(),
+            date: chrono::DateTime::parse_from_rfc3339("2026-03-25T10:00:00+00:00")
+                .unwrap()
+                .with_timezone(&chrono::Local),
             duration: "30m".into(),
             source: None,
             status: Some(minutes_core::markdown::OutputStatus::Complete),
@@ -18249,6 +18251,20 @@ mod tests {
         assert!(body.contains("source_meeting: /tmp/pricing-review.md"));
         assert!(body.contains("Ship the new pricing page"));
         assert!(body.contains("Mat: Send follow-up"));
+
+        // A follow-up can be created long after its source meeting. Preserve
+        // the source date and facts without claiming it happened today.
+        let (_, email) = build_artifact_template(
+            &fm,
+            &sections,
+            Path::new("/tmp/pricing-review.md"),
+            "follow-up-email",
+        )
+        .unwrap();
+        assert!(email.contains(&format!("source_date: {}", fm.date.to_rfc3339())));
+        assert!(!email.contains("today"));
+        assert!(email.contains("Ship the new pricing page"));
+        assert!(email.contains("Mat: Send follow-up"));
     }
 
     #[test]

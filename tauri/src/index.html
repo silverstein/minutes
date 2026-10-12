@@ -2113,7 +2113,10 @@
       display: flex;
       align-items: center;
       gap: 2px;
-      flex-shrink: 0;
+      flex-shrink: 1;
+      flex-wrap: wrap;
+      max-width: 100%;
+      row-gap: 4px;
     }
 
     .md-viewer-toolbar .btn,
@@ -2142,14 +2145,9 @@
     }
 
     .md-viewer-toolbar .md-viewer-mode-btn {
-      font-family: var(--font-mono);
-      font-size: var(--text-2xs);
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
+      font-size: var(--text-meta);
     }
 
-    .md-viewer-toolbar #md-viewer-preview-btn,
-    .md-viewer-toolbar #md-viewer-source-btn,
     .md-viewer-toolbar #md-viewer-save-btn,
     .md-viewer-toolbar .md-viewer-toolbar-sep {
       display: none !important;
@@ -2186,8 +2184,8 @@
 
     .md-viewer-filename {
       font-size: var(--text-xs);
-      font-family: var(--font-mono);
-      color: var(--text-secondary);
+      font-weight: 600;
+      color: var(--text);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -2323,6 +2321,8 @@
       min-width: 88px;
       text-align: right;
     }
+
+    .md-viewer-status:empty { display: none; }
 
     .md-viewer-status.unsaved {
       color: var(--amber);
@@ -2686,9 +2686,28 @@
       font-size: var(--text-base);
     }
 
+    .md-source-details {
+      margin: 0 0 16px;
+      color: var(--text-secondary);
+      font-size: var(--text-meta);
+    }
+
+    .md-source-details > summary {
+      cursor: pointer;
+      padding: 4px 0;
+    }
+
+    .md-source-details > summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 4px;
+    }
+
+    .md-source-details[open] > summary { margin-bottom: 8px; }
+
     .md-frontmatter {
       display: grid;
-      grid-template-columns: max-content minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
       column-gap: 12px;
       row-gap: 2px;
       margin: 0 0 16px;
@@ -2701,6 +2720,7 @@
       border-radius: 6px;
     }
     .md-frontmatter dt { color: var(--text-tertiary); }
+    .md-frontmatter dt:not(:first-child) { margin-top: 8px; }
     .md-frontmatter dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 
     .md-viewer-content h1:first-child,
@@ -6245,8 +6265,8 @@
           <div class="detail-meta" id="detail-meta"></div>
         </div>
         <div class="detail-actions">
-          <button class="btn btn-secondary btn-sm" id="btn-create-artifact">Create Draft</button>
-          <button class="btn btn-primary btn-sm" id="btn-discuss-ai">Discuss with Agent</button>
+          <button class="btn btn-primary btn-sm" id="btn-create-artifact">Create Draft</button>
+          <button class="btn btn-secondary btn-sm" id="btn-discuss-ai">Discuss with Agent</button>
           <button class="btn btn-secondary btn-sm" id="btn-resummarize">Resummarize</button>
           <button class="btn btn-secondary btn-sm" id="btn-open-external">Open in Editor</button>
           <button class="btn btn-danger btn-sm" id="btn-delete-meeting">Delete</button>
@@ -6262,8 +6282,7 @@
   <div class="artifact-template-overlay" id="artifact-template-overlay">
     <div class="artifact-template-card" role="dialog" aria-modal="true" aria-labelledby="artifact-template-title">
       <div class="artifact-template-title" id="artifact-template-title">Create Draft</div>
-      <div class="artifact-template-sub">Pick the artifact you want Minutes to create from this conversation. It opens
-        immediately in source mode beside Recall.</div>
+      <div class="artifact-template-sub">Choose a draft based on this meeting. Read it, edit any paragraph, or refine it with Recall.</div>
       <div class="artifact-template-list">
         <button class="artifact-template-option" data-artifact-kind="debrief-memo">
           <span class="artifact-template-option-title">Debrief Memo</span>
@@ -6272,8 +6291,7 @@
         </button>
         <button class="artifact-template-option" data-artifact-kind="follow-up-email">
           <span class="artifact-template-option-title">Follow-up Email</span>
-          <span class="artifact-template-option-body">An external-facing follow-up with key points, decisions, actions,
-            and open questions already scaffolded.</span>
+          <span class="artifact-template-option-body">A follow-up with key points, decisions, next steps, and open questions. Review it before sending.</span>
         </button>
         <button class="artifact-template-option" data-artifact-kind="meeting-brief">
           <span class="artifact-template-option-title">Meeting Brief</span>
@@ -10881,6 +10899,65 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         detailMeta.appendChild(chip);
       }
 
+      // Decisions card
+      if (detail.decisions && detail.decisions.length > 0) {
+        const decCard = document.createElement('div');
+        decCard.className = 'detail-context';
+
+        const decLabel = document.createElement('div');
+        decLabel.className = 'detail-context-label';
+        decLabel.textContent = 'Decisions';
+        decCard.appendChild(decLabel);
+
+        const decList = document.createElement('div');
+        decList.className = 'detail-action-list';
+        for (const dec of detail.decisions) {
+          const row = document.createElement('div');
+          row.className = 'detail-action-item';
+          const topic = dec.topic ? `[${dec.topic}] ` : '';
+          const textSpan = document.createElement('span');
+          textSpan.className = 'detail-action-text';
+          setHighlightedText(textSpan, `${topic}${dec.text}`, activeSearchQuery);
+          row.appendChild(textSpan);
+          decList.appendChild(row);
+        }
+        decCard.appendChild(decList);
+        detailScroll.appendChild(decCard);
+      }
+
+      // Action items card
+      if (detail.action_items && detail.action_items.length > 0) {
+        const aiCard = document.createElement('div');
+        aiCard.className = 'detail-context';
+
+        const aiLabel = document.createElement('div');
+        aiLabel.className = 'detail-context-label';
+        aiLabel.textContent = 'Next steps';
+        aiCard.appendChild(aiLabel);
+
+        const aiList = document.createElement('div');
+        aiList.className = 'detail-action-list';
+        for (const item of detail.action_items) {
+          const row = document.createElement('div');
+          row.className = 'detail-action-item';
+          const isDone = (item.status || '').toLowerCase() === 'done';
+          const check = isDone ? '\u2611' : '\u2610';
+          const due = item.due ? ` \u00b7 ${item.due}` : '';
+          const checkSpan = document.createElement('span');
+          checkSpan.className = 'detail-action-check';
+          checkSpan.textContent = check;
+          const textSpan = document.createElement('span');
+          textSpan.className = 'detail-action-text';
+          setHighlightedText(textSpan, `${item.assignee}: ${item.task}${due}`, activeSearchQuery);
+          if (isDone) textSpan.style.textDecoration = 'line-through';
+          row.appendChild(checkSpan);
+          row.appendChild(textSpan);
+          aiList.appendChild(row);
+        }
+        aiCard.appendChild(aiList);
+        detailScroll.appendChild(aiCard);
+      }
+
       if (detail.context) {
         const contextCard = document.createElement('div');
         contextCard.className = 'detail-context';
@@ -11003,65 +11080,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
 
         detailScroll.appendChild(speakerCard);
-      }
-
-      // Action items card
-      if (detail.action_items && detail.action_items.length > 0) {
-        const aiCard = document.createElement('div');
-        aiCard.className = 'detail-context';
-
-        const aiLabel = document.createElement('div');
-        aiLabel.className = 'detail-context-label';
-        aiLabel.textContent = 'Action Items';
-        aiCard.appendChild(aiLabel);
-
-        const aiList = document.createElement('div');
-        aiList.className = 'detail-action-list';
-        for (const item of detail.action_items) {
-          const row = document.createElement('div');
-          row.className = 'detail-action-item';
-          const isDone = (item.status || '').toLowerCase() === 'done';
-          const check = isDone ? '\u2611' : '\u2610';
-          const due = item.due ? ` \u00b7 ${item.due}` : '';
-          const checkSpan = document.createElement('span');
-          checkSpan.className = 'detail-action-check';
-          checkSpan.textContent = check;
-          const textSpan = document.createElement('span');
-          textSpan.className = 'detail-action-text';
-          setHighlightedText(textSpan, `${item.assignee}: ${item.task}${due}`, activeSearchQuery);
-          if (isDone) textSpan.style.textDecoration = 'line-through';
-          row.appendChild(checkSpan);
-          row.appendChild(textSpan);
-          aiList.appendChild(row);
-        }
-        aiCard.appendChild(aiList);
-        detailScroll.appendChild(aiCard);
-      }
-
-      // Decisions card
-      if (detail.decisions && detail.decisions.length > 0) {
-        const decCard = document.createElement('div');
-        decCard.className = 'detail-context';
-
-        const decLabel = document.createElement('div');
-        decLabel.className = 'detail-context-label';
-        decLabel.textContent = 'Decisions';
-        decCard.appendChild(decLabel);
-
-        const decList = document.createElement('div');
-        decList.className = 'detail-action-list';
-        for (const dec of detail.decisions) {
-          const row = document.createElement('div');
-          row.className = 'detail-action-item';
-          const topic = dec.topic ? `[${dec.topic}] ` : '';
-          const textSpan = document.createElement('span');
-          textSpan.className = 'detail-action-text';
-          setHighlightedText(textSpan, `${topic}${dec.text}`, activeSearchQuery);
-          row.appendChild(textSpan);
-          decList.appendChild(row);
-        }
-        decCard.appendChild(decList);
-        detailScroll.appendChild(decCard);
       }
 
       if (detail.related_people && detail.related_people.length > 0) {
@@ -17508,6 +17526,25 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return { meta: m[1], body: source.slice(m[0].length), bodyStart: m[0].length };
     }
 
+    // Generated drafts have flat title/type fields. Other documents keep their
+    // filename; this display helper never interprets or rewrites their YAML.
+    function artifactDisplayTitle(source, filename) {
+      const { meta } = splitFrontmatter(source || '');
+      if (!meta || !/^artifact_type:[ \t]*\S/m.test(meta)) return filename;
+      const match = /^title:[ \t]*(.+)$/m.exec(meta);
+      if (!match) return filename;
+      const value = match[1].trim();
+      if (/^[>|]/.test(value)) return filename;
+      if (value.startsWith('"')) {
+        try {
+          const title = JSON.parse(value);
+          return typeof title === 'string' && title ? title : filename;
+        } catch { return filename; }
+      }
+      if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/g, "'") || filename;
+      return value || filename;
+    }
+
     function buildFrontmatterElement(doc, meta) {
       const dl = doc.createElement('dl');
       dl.className = 'md-frontmatter';
@@ -17520,7 +17557,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         dd.textContent = line.slice(idx + 1).trim();
         dl.append(dt, dd);
       }
-      return dl;
+      const details = doc.createElement('details');
+      details.className = 'md-source-details';
+      const summary = doc.createElement('summary');
+      summary.textContent = 'Source and details';
+      details.append(summary, dl);
+      return details;
     }
 
     function annotateBlocksWithSource(body, tokens, source, base = 0) {
@@ -17565,8 +17607,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         annotateBlocksWithSource(doc.body, tokens, body, bodyStart);
       }
       // Prepend AFTER annotation: the block/token zip must see only the body.
-      // The list carries no source range, so clicking it falls through to
-      // source mode with the caret at the top, where the frontmatter is.
+      // The disclosure carries no source range. Its clicks only reveal
+      // metadata; the Source control remains available for editing it.
       if (meta !== null) doc.body.prepend(buildFrontmatterElement(doc, meta));
       el.textContent = '';
       while (doc.body.firstChild) {
@@ -17937,6 +17979,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     function rerenderOpenArtifact(markdownText, { preserveScroll = false } = {}) {
       const previousScrollTop = preserveScroll ? mdViewerContent.scrollTop : 0;
+      mdViewerFilename.textContent = artifactDisplayTitle(markdownText, openArtifactPath?.split(/[\\/]/).pop() || 'Document');
       renderArtifactPreview(mdViewerContent, markdownText);
       if (preserveScroll) {
         mdViewerContent.scrollTop = Math.min(previousScrollTop, mdViewerContent.scrollHeight);
@@ -18084,7 +18127,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       mdViewerReviewVisible = false;
       mdViewerLastSavedAt = null;
       mdViewerMode = initialMode;
-      mdViewerFilename.textContent = filename;
+      mdViewerFilename.textContent = artifactDisplayTitle(markdownText, filename);
+      mdViewerFilename.title = path;
       rerenderOpenArtifact(markdownText);
       mdViewerEditor.value = kind === 'json' ? formatJsonSource(markdownText) : markdownText;
       mdViewer.classList.add('active');
@@ -18226,7 +18270,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const draft = await invoke('cmd_create_artifact_from_meeting', { meetingPath, kind });
         const filename = draft.path.split(/[\\/]/).pop() || draft.path;
         const shown = await showMdViewer(draft.path, filename, draft.content, {
-          mode: 'source',
+          mode: 'preview',
           confirmedDiscard: bypassDiscardPrompt,
           editable: true,
         });
@@ -18273,7 +18317,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const draft = await invoke('cmd_promote_text_file_to_artifact', { path: openArtifactPath });
         const filename = draft.path.split(/[\\/]/).pop() || draft.path;
         const shown = await showMdViewer(draft.path, filename, draft.content, {
-          mode: 'source',
+          mode: 'preview',
           confirmedDiscard: false,
           editable: true,
         });
@@ -18377,6 +18421,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
         return;
       }
+      if (clickedElement?.closest?.('.md-source-details')) return;
       if (window.getSelection?.().toString()) return;
       if (event.target?.closest?.('.md-block-editor')) return;
       if (!openArtifactEditable || mdViewerMode === 'source') return;

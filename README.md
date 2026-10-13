@@ -152,6 +152,7 @@ See the [security documentation](docs/security/) and
 - [Frontmatter schema](docs/architecture/frontmatter-schema.md)
 - [Security](docs/security/)
 - [Personas](docs/personas.md)
+- [Native call capture recovery](docs/native-capture-recovery.md) (`minutes recover-stem`)
 - [MCP tools](https://useminutes.app/docs/mcp/tools)
 - [Error reference](https://useminutes.app/docs/errors)
 - [Agent index](https://useminutes.app/llms.txt)

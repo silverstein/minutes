@@ -327,6 +327,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Recover a native WAV/RF64/BW64 stem into lossless, processable WAV parts
+    RecoverStem {
+        /// Original stem file (preserved unchanged)
+        path: PathBuf,
+        /// New output directory; existing directories are refused
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Duration of each part, at most four hours
+        #[arg(long, default_value_t = 3600)]
+        chunk_secs: u64,
+    },
     /// Start recording audio (foreground process, Ctrl-C or `minutes stop` to finish)
     Record {
         /// Optional title for this recording
@@ -2001,6 +2012,16 @@ fn main() -> Result<()> {
     minutes_core::logging::rotate_logs().ok();
 
     let result = match cli.command {
+        Commands::RecoverStem {
+            path,
+            output_dir,
+            chunk_secs,
+        } => {
+            let receipt = minutes_core::stem_recovery::recover_stem(&path, &output_dir, chunk_secs)
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
         Commands::Record {
             title,
             context,

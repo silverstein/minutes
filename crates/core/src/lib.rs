@@ -205,6 +205,7 @@ pub mod sherpa_engine;
 #[cfg(feature = "engine-sherpa")]
 pub mod sherpa_plugin;
 pub(crate) mod stem_probe;
+pub mod stem_recovery;
 /// Incremental reader for stems that are still being written (#576).
 pub mod stem_tail;
 #[cfg(feature = "streaming-diarize")]

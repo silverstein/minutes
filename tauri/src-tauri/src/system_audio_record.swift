@@ -286,6 +286,7 @@ private final class FixedFormatStemWriter {
     private var converter: AVAudioConverter?
     private var converterInputFormat: AVAudioFormat?
     private(set) var framesSilenced: UInt64 = 0
+    private(set) var framesWritten: UInt64 = 0
 
     /// One converter per (input format → stem format). Recreating it per buffer
     /// discards the resampler's filter state at every buffer boundary and
@@ -332,6 +333,7 @@ private final class FixedFormatStemWriter {
             )
         }
         try file.write(from: output)
+        framesWritten += UInt64(output.frameLength)
         return output.frameLength
     }
 
@@ -361,6 +363,7 @@ private final class FixedFormatStemWriter {
         samples.initialize(repeating: 0, count: Int(frameCount))
         try file.write(from: silence)
         framesSilenced += UInt64(frameCount)
+        framesWritten += UInt64(frameCount)
         return frameCount
     }
 
@@ -528,6 +531,7 @@ private func runPCMDecoderSelfTest() -> Bool {
         let silenceSpanPassed = silenceAudio.frameLength == 200
             && silencedFrames == 80
             && silenceWriter.framesSilenced == 80
+            && silenceWriter.framesWritten == 200
             && (silenceAudio.floatChannelData.map { channels in
                 (120..<200).allSatisfy { abs(channels[0][$0]) < tolerance }
             } ?? false)
@@ -819,8 +823,8 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 self.latestMicLevel = 0
             }
 
-            let shouldEmit = systemLive || micLive || systemLive != self.lastReportedSystemLive || micLive != self.lastReportedMicLive
-            guard shouldEmit else { return }
+            // Emit even when both inputs stop delivering buffers. The parent
+            // distinguishes a healthy timer from actual successful stem writes.
 
             self.lastReportedSystemLive = systemLive
             self.lastReportedMicLive = micLive
@@ -830,6 +834,8 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 "mic_live": micLive,
                 "call_audio_level": self.latestSystemLevel,
                 "mic_level": self.latestMicLevel,
+                "mic_frames_written": self.voiceStemWriter?.framesWritten ?? 0,
+                "system_frames_written": self.systemStemWriter?.framesWritten ?? 0,
                 "mic_frames_silenced": self.voiceStemWriter?.framesSilenced ?? 0,
                 "system_frames_silenced": self.systemStemWriter?.framesSilenced ?? 0,
             ]

@@ -3736,6 +3736,30 @@ fn start_native_call_recording(
     let mut safety_stop_warning = None;
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        match session.check_capture_progress() {
+            crate::call_capture::CaptureProgressAction::None => {}
+            crate::call_capture::CaptureProgressAction::Warning(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call audio progress warning".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
+            crate::call_capture::CaptureProgressAction::Stop(message) => {
+                tracing::warn!("{message}");
+                safety_stop_warning = Some(message);
+                stop_flag.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
         match safety_guard.check_time_and_disk() {
             minutes_core::capture::SafetyAction::None => {}
             minutes_core::capture::SafetyAction::Nudge(message)

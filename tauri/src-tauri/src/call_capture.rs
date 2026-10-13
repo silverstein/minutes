@@ -201,7 +201,7 @@ impl CaptureProgressMonitor {
         } else {
             (
                 audio_age,
-                "Neither call audio nor microphone audio has been written recently.",
+                "The helper has not reported new call-audio or microphone writes recently.",
             )
         };
         // A telemetry reader failure must not stop healthy capture. Require
@@ -952,7 +952,7 @@ mod tests {
             let action = monitor.check(now);
             if second == 30 {
                 assert!(
-                    matches!(action, CaptureProgressAction::Warning(ref s) if s.contains("Neither call audio"))
+                    matches!(action, CaptureProgressAction::Warning(ref s) if s.contains("has not reported new"))
                 );
             } else if second == 120 {
                 assert!(

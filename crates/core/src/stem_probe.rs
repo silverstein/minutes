@@ -315,7 +315,8 @@ pub fn recover_stem(
     let chunk_bytes = chunk_frames
         .checked_mul(frame_bytes)
         .ok_or_else(|| "chunk byte count overflow".to_string())?;
-    if chunk_bytes > u64::from(u32::MAX) - 36 {
+    // Odd-byte PCM also needs a RIFF padding byte. Include it in the limit.
+    if chunk_bytes + 36 + chunk_bytes % 2 > u64::from(u32::MAX) {
         return Err("chunk exceeds RIFF capacity; choose a shorter chunk duration".into());
     }
     let part_count = frames.div_ceil(chunk_frames);
@@ -394,7 +395,9 @@ pub fn recover_stem(
             tempfile::NamedTempFile::new_in(output_dir).map_err(|error| error.to_string())?;
         let mut header = Vec::with_capacity(44);
         header.extend_from_slice(b"RIFF");
-        header.extend_from_slice(&(36 + data_len + data_len % 2).to_le_bytes());
+        let riff_size = u32::try_from(36_u64 + u64::from(data_len) + u64::from(data_len % 2))
+            .map_err(|_| "recovered part exceeds RIFF capacity".to_string())?;
+        header.extend_from_slice(&riff_size.to_le_bytes());
         header.extend_from_slice(b"WAVEfmt ");
         header.extend_from_slice(&16_u32.to_le_bytes());
         header.extend_from_slice(&fields.audio_format.to_le_bytes());
@@ -1189,6 +1192,45 @@ mod tests {
                 .contains("new output directory"));
             assert_eq!(std::fs::read(&path).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn odd_pcm8_parts_include_padding_without_adding_audio_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd.wav");
+        let samples = [0_i8, 127, -128, 1, 2, 52, 62];
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 3,
+                bits_per_sample: 8,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in samples {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let receipt = recover_stem(&path, &dir.path().join("parts"), 1).unwrap();
+        assert_eq!(receipt.parts.len(), 3);
+        let mut decoded = Vec::new();
+        for part in &receipt.parts {
+            let bytes = std::fs::read(&part.path).unwrap();
+            assert_eq!(u64::from(read_u32(&bytes, 4)) + 8, bytes.len() as u64);
+            assert_eq!(read_u32(&bytes, 40) as u64, part.frames);
+            assert_eq!(bytes.len() as u64, 44 + part.frames + part.frames % 2);
+            decoded.extend(
+                hound::WavReader::open(&part.path)
+                    .unwrap()
+                    .samples::<i8>()
+                    .map(Result::unwrap),
+            );
+        }
+        assert_eq!(decoded, samples);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

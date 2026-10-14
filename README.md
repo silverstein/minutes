@@ -92,7 +92,7 @@ quality. See the full [persona notes](docs/personas.md).
 | Surface | What it provides | Docs |
 |---|---|---|
 | Desktop app | Menu bar capture, dictation, Recall, documents, and Coach. | [Install](docs/install.md#desktop-app) |
-| CLI (58 commands) | Local recording, processing, search, import, and automation. | [Commands](docs/features.md) |
+| CLI (60 commands) | Local recording, processing, search, import, and automation. | [Commands](docs/features.md) |
 | MCP server (34 tools) | Local meeting tools and resources for any MCP client. | [MCP reference](docs/integration/agent-integrations.md) |
 | Claude Code plugin (23 skills) | Prep, capture, live help, debrief, and memory workflows. | [Client setup](docs/integration/clients.md#claude-code-plugin) |
 | SDK | TypeScript access to meeting files without MCP. | [Agent architecture](docs/architecture/README.md#building-your-own-agent-on-minutes) |

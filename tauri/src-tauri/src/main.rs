@@ -20,6 +20,8 @@ static PARAKEET_FEATURE_SENTINEL: &[u8] = b"transcribe_parakeet parakeet_helper\
 mod call_capture;
 mod call_detect;
 #[cfg(target_os = "macos")]
+mod capture_recovery_qa;
+#[cfg(target_os = "macos")]
 mod cli_setup;
 mod commands;
 mod context;
@@ -1691,6 +1693,16 @@ fn main() {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    let app_context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().any(|arg| arg == "--capture-recovery-test-root") {
+        // LaunchServices can supply arguments, but not a per-launch environment.
+        // Install the isolated Dev acceptance environment before starting threads.
+        if let Err(error) = capture_recovery_qa::configure(&app_context.config().identifier) {
+            eprintln!("Capture recovery acceptance setup refused: {error}");
+            std::process::exit(64);
+        }
+    }
     #[cfg(target_os = "macos")]
     if let Some(sidecar) = std::env::current_exe()
         .ok()
@@ -3284,7 +3296,7 @@ fn main() {
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context)
         .expect("error while building minutes app")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {

@@ -3754,6 +3754,21 @@ fn start_native_call_recording(
         std::thread::sleep(Duration::from_millis(100));
         match session.check_capture_progress() {
             crate::call_capture::CaptureProgressAction::None => {}
+            crate::call_capture::CaptureProgressAction::Interrupted(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call capture interrupted".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
             crate::call_capture::CaptureProgressAction::Warning(message) => {
                 let notice = OutputNotice {
                     kind: "warning".into(),
@@ -3810,7 +3825,10 @@ fn start_native_call_recording(
             break;
         }
         if let Some(status) = session.try_wait()? {
-            if !status.success() {
+            if crate::call_capture::native_call_exit_is_unexpected(
+                status.success(),
+                stop_flag.load(Ordering::Relaxed),
+            ) {
                 let recording_finished_at = chrono::Local::now();
                 let user_notes = minutes_core::notes::read_notes();
                 let pre_context = minutes_core::notes::read_context();

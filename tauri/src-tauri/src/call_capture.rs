@@ -134,7 +134,56 @@ const CAPTURE_PROGRESS_STOP: Duration = Duration::from_secs(120);
 pub(crate) enum CaptureProgressAction {
     None,
     Warning(String),
+    Interrupted(String),
     Stop(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct CaptureInterruption {
+    reason: &'static str,
+    error_domain: Option<&'static str>,
+    error_code: Option<i64>,
+    observed_at: Option<String>,
+}
+
+impl CaptureInterruption {
+    fn from_helper_event(value: &serde_json::Value) -> Option<Self> {
+        if value.get("event")?.as_str()? != "capture_interrupted" {
+            return None;
+        }
+        let reason = match value.get("reason")?.as_str()? {
+            "stream_error" => "stream_error",
+            "unexpected_output_finish" => "unexpected_output_finish",
+            _ => return None,
+        };
+        Some(Self {
+            reason,
+            error_domain: match value.get("error_domain").and_then(|value| value.as_str()) {
+                Some("com.apple.ScreenCaptureKit.SCStreamErrorDomain") => {
+                    Some("com.apple.ScreenCaptureKit.SCStreamErrorDomain")
+                }
+                _ => None,
+            },
+            error_code: value.get("error_code").and_then(|value| value.as_i64()),
+            observed_at: value
+                .get("observed_at")
+                .and_then(|value| value.as_str())
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.to_rfc3339()),
+        })
+    }
+
+    fn message(&self) -> String {
+        let detail = match self.error_code {
+            Some(code) => format!("macOS reported a call capture interruption (error {code})."),
+            None => "Call capture finished without a stop request.".into(),
+        };
+        format!("{detail} Audio capture has stopped. Minutes is saving the captured segment; recording must be started again to capture the rest of the call.")
+    }
+}
+
+pub(crate) fn native_call_exit_is_unexpected(success: bool, stop_requested: bool) -> bool {
+    !success || !stop_requested
 }
 
 #[derive(Debug)]
@@ -146,6 +195,8 @@ struct CaptureProgressMonitor {
     last_file_progress: Instant,
     last_file_observation: Option<Instant>,
     file_sizes: (u64, u64),
+    interruption: Option<CaptureInterruption>,
+    interruption_reported: bool,
 }
 
 impl CaptureProgressMonitor {
@@ -158,6 +209,8 @@ impl CaptureProgressMonitor {
             last_file_progress: now,
             last_file_observation: None,
             file_sizes: (0, 0),
+            interruption: None,
+            interruption_reported: false,
         }
     }
 
@@ -186,6 +239,13 @@ impl CaptureProgressMonitor {
     }
 
     fn check(&mut self, now: Instant) -> CaptureProgressAction {
+        if let Some(interruption) = &self.interruption {
+            if !self.interruption_reported {
+                self.interruption_reported = true;
+                return CaptureProgressAction::Interrupted(interruption.message());
+            }
+            // Keep the file-progress safety net while the output finalizes.
+        }
         let health_age = now.saturating_duration_since(self.last_health);
         let audio_age = now.saturating_duration_since(self.last_audio);
         let (age, detail) = if health_age >= CAPTURE_PROGRESS_WARNING {
@@ -216,7 +276,7 @@ impl CaptureProgressMonitor {
                 audio_age.as_secs()
             ));
         }
-        if age >= CAPTURE_PROGRESS_WARNING && !self.warned {
+        if age >= CAPTURE_PROGRESS_WARNING && !self.warned && self.interruption.is_none() {
             self.warned = true;
             return CaptureProgressAction::Warning(format!(
                 "{detail} Minutes will stop capture if both stem files also remain stalled for two minutes."
@@ -429,7 +489,10 @@ impl NativeCallCaptureSession {
         let stale = self
             .capture_progress
             .lock()
-            .map(|monitor| monitor.last_health.elapsed() >= Duration::from_secs(3))
+            .map(|monitor| {
+                monitor.interruption.is_some()
+                    || monitor.last_health.elapsed() >= Duration::from_secs(3)
+            })
             .unwrap_or(true);
         self.health
             .lock()
@@ -727,6 +790,31 @@ pub fn start_native_call_capture(
 
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 match value.get("event").and_then(|v| v.as_str()) {
+                    Some("capture_interrupted") => {
+                        if let Some(interruption) = CaptureInterruption::from_helper_event(&value) {
+                            let first = capture_progress_for_thread
+                                .lock()
+                                .map(|mut monitor| {
+                                    if monitor.interruption.is_some() {
+                                        return false;
+                                    }
+                                    monitor.interruption = Some(interruption.clone());
+                                    true
+                                })
+                                .unwrap_or(false);
+                            if first {
+                                minutes_core::logging::log_step(
+                                    "native_call_interrupted",
+                                    "native-call",
+                                    0,
+                                    serde_json::json!(interruption),
+                                );
+                                if let Ok(mut warnings) = warnings_for_thread.lock() {
+                                    warnings.push(interruption.message());
+                                }
+                            }
+                        }
+                    }
                     Some("health") => {
                         if let Ok(mut monitor) = capture_progress_for_thread.lock() {
                             monitor.observe(Instant::now(), &value);
@@ -933,7 +1021,88 @@ fn find_native_call_helper_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureProgressAction, CaptureProgressMonitor};
+    use super::{
+        native_call_exit_is_unexpected, CaptureInterruption, CaptureProgressAction,
+        CaptureProgressMonitor,
+    };
+
+    #[test]
+    fn system_stop_is_reported_immediately_before_delayed_output_finalize() {
+        let start = Instant::now();
+        let mut monitor = CaptureProgressMonitor::new(start);
+        monitor.interruption = CaptureInterruption::from_helper_event(&serde_json::json!({
+            "event": "capture_interrupted",
+            "reason": "stream_error",
+            "error_domain": "com.apple.ScreenCaptureKit.SCStreamErrorDomain",
+            "error_code": -3821,
+            "observed_at": "2026-01-01T12:00:00Z",
+        }));
+        assert!(
+            matches!(monitor.check(start), CaptureProgressAction::Interrupted(ref message)
+            if message.contains("-3821") && message.contains("saving the captured segment"))
+        );
+        // Buffered health can arrive after the stream stopped. It must not
+        // clear the latched failure, and the notice must only fire once.
+        monitor.observe(start + Duration::from_secs(1), &written_frames(480, 480));
+        assert!(monitor.interruption.is_some());
+        assert_eq!(
+            monitor.check(start + Duration::from_secs(60)),
+            CaptureProgressAction::None
+        );
+        monitor.observe_files(start + Duration::from_secs(121), (0, 0));
+        assert!(matches!(
+            monitor.check(start + Duration::from_secs(121)),
+            CaptureProgressAction::Stop(_)
+        ));
+    }
+
+    #[test]
+    fn interruption_diagnostics_never_copy_arbitrary_helper_text() {
+        let event = CaptureInterruption::from_helper_event(&serde_json::json!({
+            "event": "capture_interrupted",
+            "reason": "stream_error",
+            "error_domain": "private window title",
+            "error_code": -3821,
+            "observed_at": "private window title",
+            "description": "private window title",
+        }))
+        .expect("known interruption reason");
+        let diagnostic = serde_json::to_string(&event).unwrap();
+        assert!(!diagnostic.contains("private window"));
+        assert!(diagnostic.contains("-3821"));
+        assert!(CaptureInterruption::from_helper_event(&serde_json::json!({
+            "event": "health", "reason": "stream_error"
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn successful_helper_exit_is_not_evidence_of_a_requested_stop() {
+        assert!(native_call_exit_is_unexpected(true, false));
+        assert!(native_call_exit_is_unexpected(false, false));
+        assert!(native_call_exit_is_unexpected(false, true));
+        assert!(!native_call_exit_is_unexpected(true, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_helper_preserves_interruptions_and_services_the_main_run_loop() {
+        let helper = find_native_call_helper_binary().expect("native call helper should be built");
+        let output = std::process::Command::new(helper)
+            .arg("--self-test-capture-lifecycle")
+            .output()
+            .expect("capture lifecycle self-test should launch without capture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["event"], "capture_lifecycle_self_test");
+        assert_eq!(receipt["status"], "ok");
+        assert_eq!(receipt["main_thread"], true);
+        assert_eq!(receipt["cases"], 5);
+    }
 
     fn written_frames(mic: u64, system: u64) -> serde_json::Value {
         serde_json::json!({"mic_frames_written": mic, "system_frames_written": system})

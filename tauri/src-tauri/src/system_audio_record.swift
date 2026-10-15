@@ -1,6 +1,7 @@
 import AVFoundation
 import AudioToolbox
 import CoreMedia
+import CoreFoundation
 import Dispatch
 import Foundation
 import ScreenCaptureKit
@@ -556,8 +557,59 @@ private func runPCMDecoderSelfTest() -> Bool {
     return passed
 }
 
+// The recording output may finish after an involuntary stream stop. A finished
+// file is not evidence that the user requested the end of capture.
+private final class CaptureLifecycle {
+    private let lock = NSLock()
+    private var stopRequested = false
+    private var interrupted = false
+
+    func requestStop() {
+        lock.lock()
+        defer { lock.unlock() }
+        stopRequested = true
+    }
+
+    func recordInterruption() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopRequested, !interrupted else { return false }
+        interrupted = true
+        return true
+    }
+
+    func completionExitStatus() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopRequested && !interrupted ? 0 : 1
+    }
+}
+
+private func runCaptureLifecycleSelfTest() -> Bool {
+    let unexpected = CaptureLifecycle()
+    let requested = CaptureLifecycle()
+    requested.requestStop()
+    let interrupted = CaptureLifecycle()
+    let firstInterruption = interrupted.recordInterruption()
+    let duplicateInterruption = interrupted.recordInterruption()
+    interrupted.requestStop()
+    let passed = unexpected.completionExitStatus() == 1
+        && requested.completionExitStatus() == 0
+        && !requested.recordInterruption()
+        && firstInterruption && !duplicateInterruption
+        && interrupted.completionExitStatus() == 1
+        && Thread.isMainThread
+    emitJSON([
+        "event": "capture_lifecycle_self_test",
+        "status": passed ? "ok" : "failed",
+        "main_thread": Thread.isMainThread,
+        "cases": 5,
+    ])
+    return passed
+}
+
 @available(macOS 15.0, *)
-final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput {
+final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private let outputURL: URL
@@ -579,6 +631,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var lastReportedSourceFormats: [String: String] = [:]
     private var reportedDecodeFailures = Set<String>()
     private var reportedStemWriteFailures = Set<String>()
+    private let captureLifecycle = CaptureLifecycle()
 
     // Per-source stem writers
     private var voiceStemWriter: FixedFormatStemWriter?
@@ -685,7 +738,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             }
         }
 
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
         try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
         let recordingConfiguration = SCRecordingOutputConfiguration()
@@ -737,6 +790,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     func stop() async {
+        captureLifecycle.requestStop()
         // Spin up the finalize heartbeat BEFORE the sampleQueue.sync block so
         // the Rust parent sees stdout activity throughout the entire stop
         // sequence. Long captures (1h+) take tens of seconds to write the
@@ -1194,7 +1248,28 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         }
     }
 
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        guard captureLifecycle.recordInterruption() else { return }
+        let nativeError = error as NSError
+        // Do not emit localized descriptions or userInfo: they can include
+        // unrelated application/window information. Domain and code suffice.
+        emitJSON([
+            "event": "capture_interrupted",
+            "reason": "stream_error",
+            "error_domain": nativeError.domain,
+            "error_code": nativeError.code,
+            "observed_at": ISO8601DateFormatter().string(from: Date()),
+        ])
+    }
+
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        if captureLifecycle.recordInterruption() {
+            emitJSON([
+                "event": "capture_interrupted",
+                "reason": "unexpected_output_finish",
+                "observed_at": ISO8601DateFormatter().string(from: Date()),
+            ])
+        }
         // Emit elapsed time from the start of stop() to actual .mov finalize.
         // Pair with `stopCapture_returned` to size the moov-write tail (#216
         // / #236).
@@ -1210,7 +1285,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 fflush(stdout)
             }
         }
-        exit(0)
+        exit(captureLifecycle.completionExitStatus())
     }
 
     func recordingOutput(
@@ -1232,10 +1307,22 @@ struct NativeCallRecordMain {
         Task {
             await run()
         }
-        dispatchMain()
+        // ScreenCaptureKit is a WindowServer client. Keep the main CFRunLoop
+        // servicing its Mach/event sources, not just the main dispatch queue.
+        // dispatchMain parks the original main thread and can leave the client
+        // unable to answer WindowServer responsiveness pings.
+        CFRunLoopRun()
     }
 
     static func run() async {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--self-test-capture-lifecycle" {
+            // Exercise the same main run loop without opening any capture.
+            DispatchQueue.main.async {
+                exit(runCaptureLifecycleSelfTest() ? 0 : 1)
+            }
+            return
+        }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--self-test-pcm-decoder" {
             exit(runPCMDecoderSelfTest() ? 0 : 1)

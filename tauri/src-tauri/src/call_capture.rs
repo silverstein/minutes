@@ -1086,7 +1086,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn native_helper_preserves_interruptions_and_services_the_main_run_loop() {
+    fn native_helper_preserves_interruptions_during_output_finalization() {
         let helper = find_native_call_helper_binary().expect("native call helper should be built");
         let output = std::process::Command::new(helper)
             .arg("--self-test-capture-lifecycle")
@@ -1100,8 +1100,7 @@ mod tests {
         let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(receipt["event"], "capture_lifecycle_self_test");
         assert_eq!(receipt["status"], "ok");
-        assert_eq!(receipt["main_thread"], true);
-        assert_eq!(receipt["cases"], 5);
+        assert_eq!(receipt["cases"], 4);
     }
 
     fn written_frames(mic: u64, system: u64) -> serde_json::Value {

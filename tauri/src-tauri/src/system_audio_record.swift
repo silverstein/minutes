@@ -1,7 +1,6 @@
 import AVFoundation
 import AudioToolbox
 import CoreMedia
-import CoreFoundation
 import Dispatch
 import Foundation
 import ScreenCaptureKit
@@ -598,12 +597,10 @@ private func runCaptureLifecycleSelfTest() -> Bool {
         && !requested.recordInterruption()
         && firstInterruption && !duplicateInterruption
         && interrupted.completionExitStatus() == 1
-        && Thread.isMainThread
     emitJSON([
         "event": "capture_lifecycle_self_test",
         "status": passed ? "ok" : "failed",
-        "main_thread": Thread.isMainThread,
-        "cases": 5,
+        "cases": 4,
     ])
     return passed
 }
@@ -1307,21 +1304,13 @@ struct NativeCallRecordMain {
         Task {
             await run()
         }
-        // ScreenCaptureKit is a WindowServer client. Keep the main CFRunLoop
-        // servicing its Mach/event sources, not just the main dispatch queue.
-        // dispatchMain parks the original main thread and can leave the client
-        // unable to answer WindowServer responsiveness pings.
-        CFRunLoopRun()
+        dispatchMain()
     }
 
     static func run() async {
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--self-test-capture-lifecycle" {
-            // Exercise the same main run loop without opening any capture.
-            DispatchQueue.main.async {
-                exit(runCaptureLifecycleSelfTest() ? 0 : 1)
-            }
-            return
+            exit(runCaptureLifecycleSelfTest() ? 0 : 1)
         }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--self-test-pcm-decoder" {

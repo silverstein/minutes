@@ -3614,14 +3614,18 @@ fn start_native_call_recording(
         .device
         .as_deref()
         .and_then(minutes_core::capture::canonicalize_input_device_setting);
-    let mut session =
-        match call_capture::start_native_call_capture(configured_microphone.as_deref()) {
-            Ok(session) => session,
-            Err(error) => {
-                minutes_core::pid::remove().ok();
-                return Err(error);
-            }
-        };
+    let recovery_test_signal = app_handle.config().identifier == "com.useminutes.desktop.dev"
+        && std::env::var("MINUTES_CAPTURE_RECOVERY_TEST").as_deref() == Ok("1");
+    let mut session = match call_capture::start_native_call_capture(
+        configured_microphone.as_deref(),
+        recovery_test_signal,
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            minutes_core::pid::remove().ok();
+            return Err(error);
+        }
+    };
     let output_path = session.output_path().to_path_buf();
     let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
@@ -3754,6 +3758,21 @@ fn start_native_call_recording(
         std::thread::sleep(Duration::from_millis(100));
         match session.check_capture_progress() {
             crate::call_capture::CaptureProgressAction::None => {}
+            crate::call_capture::CaptureProgressAction::Recovered(message) => {
+                let notice = OutputNotice {
+                    kind: "warning".into(),
+                    title: "Call audio reconnected".into(),
+                    path: output_path.display().to_string(),
+                    detail: message,
+                    job_id: None,
+                };
+                set_latest_output(latest_output, Some(notice.clone()));
+                maybe_show_completion_notification(
+                    app_handle,
+                    completion_notifications_enabled,
+                    &notice,
+                );
+            }
             crate::call_capture::CaptureProgressAction::Interrupted(message) => {
                 let notice = OutputNotice {
                     kind: "warning".into(),

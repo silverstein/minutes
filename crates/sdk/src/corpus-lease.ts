@@ -2146,11 +2146,16 @@ async function dispatchStableCorpusLease<T>(
       );
       timer.unref();
       child.once("error", () => fail("meeting corpus worker failed"));
-      child.once("close", (code) => {
+      child.once("close", (code, signal) => {
         clearTimeout(timer);
         if (settled) return;
         if (code !== 0 || !authorized || !operationCompleted) {
-          fail("meeting corpus worker exited before authorization");
+          // Only OS-provided process status belongs in operator diagnostics.
+          // Child stderr can contain corpus data and remains discarded.
+          fail(
+            `meeting corpus worker exited before authorization ` +
+              `(exit code ${code ?? "none"}; signal ${signal ?? "none"})`
+          );
           return;
         }
         settled = true;

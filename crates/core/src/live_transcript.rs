@@ -414,6 +414,7 @@ struct LiveTranscriptWriter {
     speech_ms_at_last_line: u64,
     diagnostic: Option<String>,
     last_status_write: Instant,
+    last_final_at: Option<DateTime<Local>>,
     /// Apple Speech shadow measurement, `None` unless the session opted in
     /// (`transcription.apple_speech_shadow`). Lives on the writer because the
     /// writer is already threaded through every finalize path, so hooking it
@@ -466,6 +467,8 @@ pub struct LiveStatus {
     pub last_offset_ms: u64,
     pub last_duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_final_at: Option<DateTime<Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
@@ -495,6 +498,11 @@ impl LiveTranscriptWriter {
         session_id: Option<String>,
         source: TranscriptSource,
     ) -> Result<Self, MinutesError> {
+        let session_id = session_id.or_else(|| {
+            (source == TranscriptSource::RecordingSidecar)
+                .then(crate::copilot::CaptureRelayServer::current_process_session_id)
+                .flatten()
+        });
         let jsonl_path = pid::live_transcript_jsonl_path();
         if let Some(parent) = jsonl_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -547,6 +555,7 @@ impl LiveTranscriptWriter {
             speech_ms_total: 0,
             speech_ms_at_last_line: 0,
             diagnostic: None,
+            last_final_at: None,
             last_status_write: Instant::now()
                 .checked_sub(SIDECAR_HEARTBEAT_INTERVAL)
                 .unwrap_or_else(Instant::now),
@@ -686,6 +695,7 @@ impl LiveTranscriptWriter {
             line_count: self.line_count,
             last_offset_ms: self.start_time.elapsed().as_millis() as u64,
             last_duration_ms,
+            last_final_at: self.last_final_at,
             session_id: self.session_id.clone(),
             diagnostic: diagnostic
                 .map(str::to_string)
@@ -785,6 +795,8 @@ impl LiveTranscriptWriter {
                 tracing::error!("failed to serialize transcript line: {}", e);
             }
         }
+        // Heartbeats must not make an old final appear freshly transcribed.
+        self.last_final_at = Some(line.ts);
         // Update sidecar after each successful write
         self.write_status(LiveStatusState::Healthy, line.duration_ms, None);
         crate::events::append_event(crate::events::MinutesEvent::LiveUtteranceFinal {
@@ -2189,20 +2201,12 @@ fn transcribe_with_whisper_for_live_sidecar(
         return None;
     }
 
-    // This helper is a batch path: it accumulates `samples` via `feed()` and
-    // discards every partial result, returning only `finalize()`. Running
-    // partials here is wasted work — they cost O(buffer_len) per call but
-    // the caller only ever uses the final. Pass a 1-second cap so partials
-    // are suppressed as soon as the buffer crosses MIN_TRANSCRIBE_SAMPLES,
-    // i.e. effectively never. This is independent of the user's live-mode
-    // `transcription.partial_max_secs` setting; that knob is for live
-    // responsiveness, not for batch fan-in.
-    let mut streaming = StreamingWhisper::with_partial_max_secs(language, 1);
+    // This is one complete recognition job, including current-speech snapshots.
+    // `feed()` runs inference every two seconds even with a one-second rolling
+    // window. Those discarded partial passes used to starve the final queue.
+    let mut streaming = StreamingWhisper::from_complete_audio(language, samples);
     if let Some(abort_signal) = abort_signal {
         streaming = streaming.with_abort_signal(Arc::clone(abort_signal));
-    }
-    for chunk in samples.chunks(1600) {
-        let _ = streaming.feed(chunk, whisper_ctx);
     }
     streaming
         .finalize(whisper_ctx)
@@ -3453,42 +3457,54 @@ fn run_sidecar_inner_mpsc(
             }
         };
 
-        let rms = if samples.is_empty() {
-            0.0
-        } else {
-            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-            (sum_sq / samples.len() as f32).sqrt()
-        };
-
-        if let (Some(gate), Some(publisher)) = (draft_gate.as_mut(), partial_publisher.as_mut()) {
-            match gate.process(&samples, rms, samples_received, publisher) {
-                RecordingDraftGateEvent::Snapshot(job) => draft_jobs.offer_latest(job),
-                RecordingDraftGateEvent::SpeechEnded => {
-                    draft_jobs.clear();
-                    last_draft_text.clear();
-                }
-                RecordingDraftGateEvent::None => {}
+        // Stem polls can deliver a large burst after a scheduling pause. Never
+        // let that burst bypass utterance limits or become one enormous draft.
+        for samples in samples.chunks(1600) {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
             }
-        }
+            let rms = if samples.is_empty() {
+                0.0
+            } else {
+                let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+                (sum_sq / samples.len() as f32).sqrt()
+            };
 
-        let vad_result = vad.process(&samples, rms);
-        gating_stats.observe(samples.len(), vad_result.speaking);
+            if let (Some(gate), Some(publisher)) = (draft_gate.as_mut(), partial_publisher.as_mut())
+            {
+                match gate.process(samples, rms, samples_received, publisher) {
+                    RecordingDraftGateEvent::Snapshot(job) => draft_jobs.offer_latest(job),
+                    RecordingDraftGateEvent::SpeechEnded => {
+                        draft_jobs.clear();
+                        last_draft_text.clear();
+                    }
+                    RecordingDraftGateEvent::None => {}
+                }
+            }
 
-        if vad_result.speaking {
-            was_speaking = true;
-            speech_samples_total += samples.len();
-            utterance.extend_from_slice(&samples);
+            let vad_result = vad.process(samples, rms);
+            gating_stats.observe(samples.len(), vad_result.speaking);
 
-            if utterance.len() >= max_utterance_samples {
-                tracing::info!("sidecar: max utterance duration, force-finalizing");
+            if vad_result.speaking {
+                was_speaking = true;
+                speech_samples_total += samples.len();
+                utterance.extend_from_slice(samples);
+
+                if utterance.len() >= max_utterance_samples {
+                    tracing::info!("sidecar: max utterance duration, force-finalizing");
+                    finish_sidecar_utterance(
+                        &job_tx,
+                        std::mem::take(&mut utterance),
+                        &queue_counters,
+                    );
+                    was_speaking = false;
+                }
+            } else if was_speaking && !utterance.is_empty() {
                 finish_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
                 was_speaking = false;
             }
-        } else if was_speaking && !utterance.is_empty() {
-            finish_sidecar_utterance(&job_tx, std::mem::take(&mut utterance), &queue_counters);
-            was_speaking = false;
+            samples_received = samples_received.saturating_add(samples.len());
         }
-        samples_received = samples_received.saturating_add(samples.len());
     }
 
     // Let the worker drain its queue (post-stop jobs are skipped, and a single
@@ -3733,6 +3749,9 @@ fn derive_session_status(
     };
     let latest_final_age_secs = live_status.as_ref().and_then(|status| {
         (status.line_count > 0).then(|| {
+            if let Some(at) = status.last_final_at {
+                return (now - at).num_milliseconds().max(0) as f64 / 1000.0;
+            }
             let latest_final_end_secs = status
                 .last_offset_ms
                 .saturating_add(status.last_duration_ms)
@@ -3787,6 +3806,7 @@ fn write_live_status_transition(state: LiveStatusState, diagnostic: Option<&str>
         line_count: existing.as_ref().map(|s| s.line_count).unwrap_or(0),
         last_offset_ms: existing.as_ref().map(|s| s.last_offset_ms).unwrap_or(0),
         last_duration_ms: existing.as_ref().map(|s| s.last_duration_ms).unwrap_or(0),
+        last_final_at: existing.as_ref().and_then(|s| s.last_final_at),
         session_id: existing.as_ref().and_then(|s| s.session_id.clone()),
         diagnostic: diagnostic.map(str::to_string),
         pending_utterances: existing.as_ref().and_then(|s| s.pending_utterances),
@@ -3954,6 +3974,7 @@ mod tests {
             line_count: 3,
             last_offset_ms: 1200,
             last_duration_ms: 400,
+            last_final_at: None,
             session_id: None,
             diagnostic: None,
             pending_utterances: None,
@@ -4081,6 +4102,104 @@ mod tests {
         assert_eq!(window.len(), 32_000);
         assert_eq!(window.first(), Some(&16_000.0));
         assert_eq!(window.last(), Some(&47_999.0));
+    }
+
+    #[test]
+    #[ignore = "requires the installed tiny Whisper model; uses repository fixture audio only"]
+    fn complete_sidecar_job_runs_one_recognition_pass_for_fixture_audio() {
+        let model = dirs::home_dir()
+            .unwrap()
+            .join(".minutes/models/ggml-tiny.bin");
+        assert!(
+            model.is_file(),
+            "install the tiny model before running this check"
+        );
+        let ctx = whisper_rs::WhisperContext::new_with_params(
+            model.to_str().unwrap(),
+            crate::transcribe::whisper_context_params(),
+        )
+        .unwrap();
+        let mut fixture = hound::WavReader::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/demo.wav"),
+        )
+        .unwrap();
+        assert_eq!(fixture.spec().sample_rate, 16000);
+        assert_eq!(fixture.spec().channels, 1);
+        let samples: Vec<f32> = fixture
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+        let before = crate::streaming_whisper::recognition_passes_for_test();
+        let started = Instant::now();
+        let result =
+            transcribe_with_whisper_for_live_sidecar(&samples, &ctx, Some("en".into()), None)
+                .expect("the spoken fixture should produce text");
+        assert!(!result.0.trim().is_empty());
+        assert_eq!(result.1, samples.len() as f64 / 16000.0);
+        assert_eq!(
+            crate::streaming_whisper::recognition_passes_for_test() - before,
+            1
+        );
+        eprintln!(
+            "fixture audio_seconds={:.3} recognition_passes=1 elapsed_ms={}",
+            result.1,
+            started.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed tiny Whisper model; replays a fixture without capture"]
+    fn recording_sidecar_splits_a_delayed_audio_burst_before_recognition() {
+        let models = dirs::home_dir().unwrap().join(".minutes/models");
+        assert!(models.join("ggml-tiny.bin").is_file());
+        let mut fixture = hound::WavReader::open(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/demo.wav"),
+        )
+        .unwrap();
+        let speech: Vec<f32> = fixture
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32768.0)
+            .collect();
+        with_temp_home(|| {
+            let mut config = Config::default();
+            config.transcription.model_path = models;
+            config.transcription.vad_engine = "energy".into();
+            config.live_transcript.backend = "whisper".into();
+            config.live_transcript.model = "tiny".into();
+            config.live_transcript.max_utterance_secs = 5;
+            config.live_transcript.save_wav = false;
+            let (tx, rx) = std::sync::mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker =
+                std::thread::spawn(move || run_sidecar_mpsc(rx, worker_stop, &config, None));
+            // One delivery is much longer than the utterance limit, as when
+            // a growing stem is polled after the consumer has fallen behind.
+            tx.send(speech.repeat(6)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if read_live_status(&pid::live_transcript_status_path()).is_some_and(|status| {
+                    status.line_count > 0 && status.pending_utterances.is_none()
+                }) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            stop.store(true, Ordering::Relaxed);
+            worker.join().unwrap();
+            drop(tx);
+            let lines = read_since_line(0).unwrap();
+            assert!(!lines.is_empty(), "the fixture should yield finalized text");
+            assert!(
+                lines.iter().all(|line| line.duration_ms <= 5000),
+                "a transport burst bypassed the five-second utterance limit"
+            );
+            eprintln!(
+                "burst_fixture finalized_lines={} max_duration_ms={}",
+                lines.len(),
+                lines.iter().map(|line| line.duration_ms).max().unwrap()
+            );
+        });
     }
 
     #[test]
@@ -4223,6 +4342,46 @@ mod tests {
             assert_eq!(diagnostic["writer_write"]["count"], 1);
             assert!(!diagnostic.to_string().contains(text));
         });
+    }
+
+    #[test]
+    fn heartbeat_preserves_final_age_and_recording_session_identity() {
+        with_temp_home(|| {
+            let relay = crate::copilot::CaptureRelayServer::start(
+                crate::copilot::CopilotEvidenceMode::CaptureRelayPartials,
+                None,
+            )
+            .unwrap();
+            let mut writer = LiveTranscriptWriter::new(
+                &Config::default(),
+                None,
+                TranscriptSource::RecordingSidecar,
+            )
+            .unwrap();
+            assert!(writer.write_utterance("Synthetic fixture speech", 2.0));
+            writer.last_final_at = Some(Local::now() - ChronoDuration::seconds(45));
+            writer.last_status_write = Instant::now() - SIDECAR_HEARTBEAT_INTERVAL * 2;
+            writer.maybe_write_heartbeat();
+            let status = session_status_for_test_recording();
+            assert_eq!(
+                status.session_id.as_deref(),
+                Some(relay.discovery().session_id.as_str())
+            );
+            let age = status.latest_final_age_secs.unwrap();
+            assert!(
+                (45.0..47.0).contains(&age),
+                "heartbeat reset final age to {age}"
+            );
+        });
+    }
+
+    fn session_status_for_test_recording() -> SessionStatus {
+        derive_session_status(
+            pid::PidFileState::Inactive,
+            Some(std::process::id()),
+            &pid::live_transcript_status_path(),
+            &pid::live_transcript_jsonl_path(),
+        )
     }
 
     #[test]

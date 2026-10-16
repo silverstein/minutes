@@ -103,10 +103,29 @@ pub struct StreamingWhisper {
     abort_signal: Option<Arc<AtomicBool>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static RECOGNITION_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn recognition_passes_for_test() -> u64 {
+    RECOGNITION_PASSES.with(|count| count.get())
+}
+
 impl StreamingWhisper {
     /// Create a new streaming transcriber with the default partial cap (30s).
     pub fn new(language: Option<String>) -> Self {
         Self::with_partial_max_secs(language, DEFAULT_PARTIAL_MAX_SECS)
+    }
+
+    /// Accumulate an already-complete utterance without running partial passes.
+    /// Recording workers only need `finalize()`. Feeding their buffered audio
+    /// through `feed()` would repeatedly recognize partials that nobody uses.
+    pub(crate) fn from_complete_audio(language: Option<String>, samples: &[f32]) -> Self {
+        let mut transcriber = Self::new(language);
+        transcriber.audio_buffer.extend_from_slice(samples);
+        transcriber
     }
 
     /// Create a new streaming transcriber with a custom partial-cap limit
@@ -205,6 +224,8 @@ impl StreamingWhisper {
 
     /// Run whisper on the full accumulated buffer.
     fn transcribe(&mut self, ctx: &WhisperContext, is_final: bool) -> Option<StreamingResult> {
+        #[cfg(test)]
+        RECOGNITION_PASSES.with(|count| count.set(count.get() + 1));
         // Suppress whisper's noisy C-level stderr output on subsequent state creations.
         // The first call prints GPU/backend info (useful); subsequent calls repeat it (noise).
         let mut state = if self.has_created_state {
@@ -404,6 +425,18 @@ mod tests {
 
         assert_eq!(sw.transcription_window_start(false), 15 * 16000);
         assert_eq!(sw.transcription_window_start(true), 0);
+    }
+
+    #[test]
+    fn complete_audio_preserves_the_full_utterance_without_scheduling_partials() {
+        let samples: Vec<f32> = (0..45 * 16000).map(|n| n as f32).collect();
+        let transcriber = StreamingWhisper::from_complete_audio(None, &samples);
+
+        assert_eq!(transcriber.duration_secs(), 45.0);
+        assert_eq!(transcriber.audio_buffer, samples);
+        assert_eq!(transcriber.samples_since_partial, 0);
+        assert_eq!(transcriber.transcription_window_start(true), 0);
+        assert!(!transcriber.has_created_state);
     }
 
     #[test]

@@ -403,6 +403,16 @@ pub struct CaptureRelayServer {
 }
 
 impl CaptureRelayServer {
+    /// The session owned by this exact producer process. Persisting this ID
+    /// with durable transcript status survives a transient client failure.
+    #[cfg(all(feature = "streaming", feature = "whisper"))]
+    pub(crate) fn current_process_session_id() -> Option<String> {
+        read_discovery(&capture_relay_discovery_path()).and_then(|discovery| {
+            (discovery.owner_pid == std::process::id() && discovery.heartbeat_is_fresh(Utc::now()))
+                .then_some(discovery.session_id)
+        })
+    }
+
     pub fn start(
         evidence_mode: CopilotEvidenceMode,
         partials: Option<LivePartialSubscriber>,

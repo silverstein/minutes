@@ -18830,6 +18830,9 @@ struct LiveEvidenceSnapshotV1 {
     current_draft: Option<minutes_core::copilot::RelayCurrentDraft>,
     draft_state: minutes_core::copilot::RelayDraftState,
     capture_relay: Option<TranscriptCaptureRelayProjection>,
+    transcript_status: minutes_core::live_transcript::SessionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_relay_error: Option<String>,
     gap: bool,
 }
 
@@ -18964,8 +18967,8 @@ fn cmd_transcript(
 
     if include_current {
         let session = minutes_core::live_transcript::session_status();
-        let (capture_relay, draft) = match read_current_speech_replay() {
-            Ok((relay, draft)) => (Some(relay), draft),
+        let (capture_relay, draft, capture_relay_error) = match read_current_speech_replay() {
+            Ok((relay, draft)) => (Some(relay), draft, None),
             Err(minutes_core::copilot::CaptureRelayError::NotFound) if !session.active => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
@@ -18973,14 +18976,16 @@ fn cmd_transcript(
                     draft_state: minutes_core::copilot::RelayDraftState::None,
                     gap: false,
                 },
+                None,
             ),
-            Err(_) => (
+            Err(error) => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
                     current_draft: None,
                     draft_state: minutes_core::copilot::RelayDraftState::Unavailable,
                     gap: false,
                 },
+                Some(error.to_string()),
             ),
         };
         let active = session.active || capture_relay.is_some();
@@ -18991,6 +18996,8 @@ fn cmd_transcript(
             current_draft: draft.current_draft,
             draft_state: draft.draft_state,
             capture_relay,
+            transcript_status: session,
+            capture_relay_error,
             gap: draft.gap,
         };
         if format == "json" {

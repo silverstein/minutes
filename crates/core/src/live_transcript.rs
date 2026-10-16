@@ -1072,12 +1072,17 @@ fn run_with_partials_internal(
         )
     };
 
-    match run_inner(
-        stop_flag,
-        config,
-        context_session_id.clone(),
-        partial_publisher,
-    ) {
+    let live_result = {
+        let _activity = crate::live_activity::begin_live_work();
+        run_inner(
+            stop_flag,
+            config,
+            context_session_id.clone(),
+            partial_publisher,
+        )
+    };
+    // The activity ends here, before archival/batch processing, including errors.
+    match live_result {
         Ok((lines, duration, path)) => {
             // The writer is closed now. Keep the liveness lock until the fixed
             // scratch files have moved so a new session cannot truncate them,
@@ -2032,17 +2037,18 @@ struct SileroSidecarVad {
 #[cfg(feature = "whisper")]
 impl SileroSidecarVad {
     fn new(vad_path: &Path) -> Result<Self, whisper_rs::WhisperError> {
+        // This tiny model runs on every 100 ms window. Extra ggml workers add
+        // barrier synchronization and can amplify scheduling stalls. Keep the
+        // same model/thresholds while avoiding that intra-call worker barrier.
+        Self::new_with_threads(vad_path, 1)
+    }
+
+    fn new_with_threads(vad_path: &Path, threads: i32) -> Result<Self, whisper_rs::WhisperError> {
         let vad_path = vad_path
             .to_str()
             .ok_or(whisper_rs::WhisperError::NullPointer)?;
-
         let mut ctx_params = whisper_rs::WhisperVadContextParams::default();
-        ctx_params.set_n_threads(
-            std::thread::available_parallelism()
-                .map(|count| count.get() as i32)
-                .unwrap_or(4)
-                .min(4),
-        );
+        ctx_params.set_n_threads(threads);
 
         let mut params = whisper_rs::WhisperVadParams::default();
         params.set_threshold(SIDECAR_VAD_THRESHOLD);
@@ -3147,6 +3153,7 @@ fn run_sidecar_inner_mpsc(
         return Ok(());
     }
 
+    let _activity = crate::live_activity::begin_live_work();
     let progress = InputProgress::start("sidecar-consumer");
     write_live_status_transition(LiveStatusState::Starting, None);
 
@@ -4754,6 +4761,66 @@ mod tests {
             utterances >= 1,
             "expected at least one utterance from -40 dB WAV after Silero VAD"
         );
+    }
+
+    /// Capture-free regression. Explicitly supply the public Silero model and
+    /// repository demo.wav; never read a user model directory or meeting audio.
+    #[cfg(feature = "whisper")]
+    #[test]
+    #[ignore = "requires MINUTES_TEST_SILERO_MODEL and MINUTES_TEST_PUBLIC_WAV"]
+    fn single_thread_silero_matches_four_thread_segmentation() {
+        let model = std::env::var_os("MINUTES_TEST_SILERO_MODEL")
+            .expect("explicit public model path required");
+        let fixture = std::env::var_os("MINUTES_TEST_PUBLIC_WAV")
+            .expect("explicit public fixture path required");
+        let mut reader = hound::WavReader::open(fixture).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16000);
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        let speech: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / 32768.0)
+            .collect();
+        assert!(!speech.is_empty());
+        let mut samples = vec![0.0; 16000];
+        samples.extend_from_slice(&speech);
+        samples.extend(std::iter::repeat_n(0.0, 16000 * 4));
+        samples.extend(speech.iter().map(|sample| sample * 0.1));
+        samples.extend(std::iter::repeat_n(0.0, 16000 * 4 + 777));
+        let mut one = SileroSidecarVad::new(Path::new(&model)).unwrap();
+        let mut four = SileroSidecarVad::new_with_threads(Path::new(&model), 4).unwrap();
+        let mut speaking = 0;
+        let mut silence = 0;
+        let mut transitions = 0;
+        let mut previous = false;
+        let mut wall = [std::time::Duration::ZERO; 2];
+        let mut maximum = wall;
+        for chunk in samples.chunks(1600) {
+            let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+            let start = std::time::Instant::now();
+            let a = one.process(chunk, rms).unwrap();
+            let elapsed = start.elapsed();
+            wall[0] += elapsed;
+            maximum[0] = maximum[0].max(elapsed);
+            let start = std::time::Instant::now();
+            let b = four.process(chunk, rms).unwrap();
+            let elapsed = start.elapsed();
+            wall[1] += elapsed;
+            maximum[1] = maximum[1].max(elapsed);
+            assert_eq!((a.speaking, a.silence_ms), (b.speaking, b.silence_ms));
+            assert_eq!(a.energy, b.energy);
+            assert_eq!(a.noise_floor, b.noise_floor);
+            speaking += usize::from(a.speaking);
+            silence += usize::from(!a.speaking);
+            transitions += usize::from(a.speaking != previous);
+            previous = a.speaking;
+        }
+        assert!(
+            speaking > 10 && silence > 10 && transitions >= 4,
+            "fixture must exercise speech, silence and utterance boundaries"
+        );
+        eprintln!("Silero parity: windows={} speaking={speaking} silence={silence} transitions={transitions} one_wall={:?} four_wall={:?} one_max={:?} four_max={:?}",
+            samples.len().div_ceil(1600), wall[0], wall[1], maximum[0], maximum[1]);
     }
 
     /// `is_healthy` must surface the sticky `failed` flag through trait

@@ -292,7 +292,8 @@ pub fn spawn_live_transcription_from_stems(
     let feeder = std::thread::Builder::new()
         .name("stem-tail-feeder".into())
         .spawn(move || {
-            feed_from_stems(voice_stem, system_stem, &live_tx, &stop_flag);
+            let progress = InputProgress::start("stem-feeder");
+            feed_from_stems(voice_stem, system_stem, &live_tx, &stop_flag, &progress);
             // Dropping the sender closes the channel so the sidecar finalizes
             // rather than waiting on a producer that is gone.
             drop(live_tx);
@@ -313,8 +314,8 @@ fn feed_from_stems(
     system_stem: Option<PathBuf>,
     live_tx: &std::sync::mpsc::SyncSender<Vec<f32>>,
     stop_flag: &Arc<AtomicBool>,
+    progress: &InputProgress,
 ) {
-    let progress = InputProgress::start("stem-feeder");
     let opened = progress.measure(Stage::HeaderWait, || {
         wait_for_stems(
             &voice_stem,
@@ -734,14 +735,21 @@ mod tests {
         let feeder_stop = Arc::clone(&stop);
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         let feeder = std::thread::spawn(move || {
-            feed_from_stems(voice, Some(system), &tx, &feeder_stop);
+            let progress = InputProgress::for_test();
+            feed_from_stems(voice, Some(system), &tx, &feeder_stop, &progress);
+            progress.snapshot()
         });
         let mixed = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(mixed, vec![0.75; 32_000]);
         stop.store(true, Ordering::Relaxed);
         let suffix = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(suffix, vec![0.5; 16_000]);
-        feeder.join().unwrap();
+        let progress = feeder.join().unwrap();
+        assert_eq!(progress["counters"]["voice_samples_read"], 32_000);
+        assert_eq!(progress["counters"]["system_samples_read"], 48_000);
+        assert_eq!(progress["counters"]["samples_sent"], 48_000);
+        assert_eq!(progress["counters"]["sends_completed"], 2);
+        assert_eq!(progress["counters"]["chunk_remaining_samples"], 0);
         assert!(rx.try_recv().is_err());
     }
 

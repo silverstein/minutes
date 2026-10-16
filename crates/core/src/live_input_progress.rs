@@ -176,6 +176,14 @@ pub(crate) struct InputProgress {
 }
 
 impl InputProgress {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            state: Arc::new(State::new()),
+            stop: None,
+        }
+    }
+
     pub(crate) fn start(component: &'static str) -> Self {
         // Resolve once in the owner thread. A detached final sample must not
         // follow a later test/library switch into a different log directory.

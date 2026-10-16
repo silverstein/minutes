@@ -118,7 +118,7 @@ const capabilityColumns = [
   },
 ] as const;
 
-// Homepage storage and agent-access rows spot-checked October 14, 2026.
+// Homepage storage and agent-access rows spot-checked October 16, 2026.
 // Sources: granola.ai/security, docs.granola.ai/help-center/sharing/integrations/mcp,
 // otter.ai/pricing, anarlog.so/security and github.com/fastrepl/anarlog.
 const comparisons = [
@@ -378,7 +378,7 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          adds opt-in Teams and Zoom call recording, restores bundled Claude skills, and keeps narrow windows usable.{" "}
+          adds automatic audio reconnection for native macOS call recordings.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"

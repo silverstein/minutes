@@ -19,6 +19,7 @@
 //!   so leftover bytes carry into the next poll rather than being dropped.
 
 use crate::config::Config;
+use crate::live_input_progress::{Counter, InputProgress, Stage};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -163,7 +164,10 @@ impl StemTail {
             }
         }
         // Rebase so the position stays relative to the next chunk.
-        self.resample_pos = (self.resample_pos - frames as f64).max(0.0);
+        // Keep a fractional position just before the next chunk too. Clamping
+        // it to zero resets the 24 kHz -> 16 kHz phase on odd poll lengths and
+        // silently loses samples compared with decoding the same bytes at once.
+        self.resample_pos -= frames as f64;
         out
     }
 }
@@ -310,12 +314,16 @@ fn feed_from_stems(
     live_tx: &std::sync::mpsc::SyncSender<Vec<f32>>,
     stop_flag: &Arc<AtomicBool>,
 ) {
-    let Some((mut voice, mut system)) = wait_for_stems(
-        &voice_stem,
-        system_stem.as_deref(),
-        stop_flag,
-        SIBLING_STEM_GRACE,
-    ) else {
+    let progress = InputProgress::start("stem-feeder");
+    let opened = progress.measure(Stage::HeaderWait, || {
+        wait_for_stems(
+            &voice_stem,
+            system_stem.as_deref(),
+            stop_flag,
+            SIBLING_STEM_GRACE,
+        )
+    });
+    let Some((mut voice, mut system)) = opened else {
         return;
     };
     let mut has_voice = voice.is_some();
@@ -344,35 +352,57 @@ fn feed_from_stems(
 
     while !stop_flag.load(Ordering::Relaxed) {
         if let Some(voice) = voice.as_mut() {
-            match poll_source(
-                voice,
-                &mut has_voice,
-                &mut voice_pending,
-                &mut voice_last_progress,
-            ) {
+            let before = voice_pending.len();
+            match progress.measure(Stage::VoicePoll, || {
+                poll_source(
+                    voice,
+                    &mut has_voice,
+                    &mut voice_pending,
+                    &mut voice_last_progress,
+                )
+            }) {
                 Ok(true) => {
                     tracing::info!(
                         "voice stem resumed producing frames; re-attaching it to the live transcript mix"
                     );
                 }
                 Ok(false) => {}
-                Err(error) => tracing::debug!(%error, "voice stem poll failed; continuing"),
+                Err(error) => {
+                    progress.add(Counter::PollErrors, 1);
+                    tracing::debug!(%error, "voice stem poll failed; continuing");
+                }
+            }
+            let read = voice_pending.len().saturating_sub(before);
+            progress.add(Counter::VoiceSamplesRead, read);
+            if read == 0 {
+                progress.add(Counter::EmptyPolls, 1);
             }
         }
         if let Some(system) = system.as_mut() {
-            match poll_source(
-                system,
-                &mut has_system,
-                &mut system_pending,
-                &mut system_last_progress,
-            ) {
+            let before = system_pending.len();
+            match progress.measure(Stage::SystemPoll, || {
+                poll_source(
+                    system,
+                    &mut has_system,
+                    &mut system_pending,
+                    &mut system_last_progress,
+                )
+            }) {
                 Ok(true) => {
                     tracing::info!(
                         "system stem resumed producing frames; re-attaching it to the live transcript mix"
                     );
                 }
                 Ok(false) => {}
-                Err(error) => tracing::debug!(%error, "system stem poll failed; continuing"),
+                Err(error) => {
+                    progress.add(Counter::PollErrors, 1);
+                    tracing::debug!(%error, "system stem poll failed; continuing");
+                }
+            }
+            let read = system_pending.len().saturating_sub(before);
+            progress.add(Counter::SystemSamplesRead, read);
+            if read == 0 {
+                progress.add(Counter::EmptyPolls, 1);
             }
         }
 
@@ -402,28 +432,46 @@ fn feed_from_stems(
             None => {}
         }
 
-        let chunk = take_audio(
-            &mut voice_pending,
-            &mut system_pending,
-            has_voice,
-            has_system,
-        );
-        if !chunk.is_empty() && live_tx.send(chunk).is_err() {
-            // The sidecar is gone; nothing left to feed.
-            return;
+        progress.set(Counter::VoicePendingSamples, voice_pending.len());
+        progress.set(Counter::SystemPendingSamples, system_pending.len());
+        let chunk = progress.measure(Stage::Mix, || {
+            take_audio(
+                &mut voice_pending,
+                &mut system_pending,
+                has_voice,
+                has_system,
+            )
+        });
+        let samples = chunk.len();
+        progress.set(Counter::VoicePendingSamples, voice_pending.len());
+        progress.set(Counter::SystemPendingSamples, system_pending.len());
+        progress.set(Counter::ChunkRemainingSamples, samples);
+        if samples > 0 {
+            if progress
+                .measure(Stage::Send, || live_tx.send(chunk))
+                .is_err()
+            {
+                // The sidecar is gone; nothing left to feed.
+                return;
+            }
+            progress.add(Counter::SamplesSent, samples);
+            progress.add(Counter::SendsCompleted, 1);
+            progress.set(Counter::ChunkRemainingSamples, 0);
         }
 
-        std::thread::sleep(POLL_INTERVAL);
+        progress.measure(Stage::PollSleep, || std::thread::sleep(POLL_INTERVAL));
     }
 
     // Final sweep so the tail of the call is not lost to the stop race.
     if let Some(voice) = voice.as_mut() {
-        if let Ok(samples) = voice.poll() {
+        if let Ok(samples) = progress.measure(Stage::VoicePoll, || voice.poll()) {
+            progress.add(Counter::VoiceSamplesRead, samples.len());
             voice_pending.extend_from_slice(&samples);
         }
     }
     if let Some(system) = system.as_mut() {
-        if let Ok(samples) = system.poll() {
+        if let Ok(samples) = progress.measure(Stage::SystemPoll, || system.poll()) {
+            progress.add(Counter::SystemSamplesRead, samples.len());
             system_pending.extend_from_slice(&samples);
         }
     }
@@ -438,8 +486,14 @@ fn feed_from_stems(
     // One of these buffers is empty after `take_audio` mixes the overlap.
     tail.extend(std::mem::take(&mut voice_pending));
     tail.extend(std::mem::take(&mut system_pending));
-    if !tail.is_empty() {
-        let _ = live_tx.send(tail);
+    progress.set(Counter::VoicePendingSamples, voice_pending.len());
+    progress.set(Counter::SystemPendingSamples, system_pending.len());
+    let samples = tail.len();
+    progress.set(Counter::ChunkRemainingSamples, samples);
+    if !tail.is_empty() && progress.measure(Stage::Send, || live_tx.send(tail)).is_ok() {
+        progress.add(Counter::SamplesSent, samples);
+        progress.add(Counter::SendsCompleted, 1);
+        progress.set(Counter::ChunkRemainingSamples, 0);
     }
 }
 
@@ -615,6 +669,80 @@ mod tests {
         for s in samples {
             f.write_all(&s.to_le_bytes()).unwrap();
         }
+    }
+
+    #[test]
+    fn reads_native_padded_headers_and_preserves_samples_across_rate_and_poll_boundaries() {
+        // Synthetic native RIFF layout: audio begins at 4096, data size remains
+        // a placeholder. No capture device or private recording is involved.
+        for rate in [24_000_u32, 48_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let stem = dir.path().join("synthetic.wav");
+            let mut header = Vec::new();
+            header.extend_from_slice(b"RIFF");
+            header.extend_from_slice(&4088_u32.to_le_bytes());
+            header.extend_from_slice(b"WAVEJUNK");
+            header.extend_from_slice(&28_u32.to_le_bytes());
+            header.extend_from_slice(&[0; 28]);
+            header.extend_from_slice(b"fmt ");
+            header.extend_from_slice(&16_u32.to_le_bytes());
+            header.extend_from_slice(&3_u16.to_le_bytes());
+            header.extend_from_slice(&1_u16.to_le_bytes());
+            header.extend_from_slice(&rate.to_le_bytes());
+            header.extend_from_slice(&(rate * 4).to_le_bytes());
+            header.extend_from_slice(&4_u16.to_le_bytes());
+            header.extend_from_slice(&32_u16.to_le_bytes());
+            header.extend_from_slice(b"FLLR");
+            header.extend_from_slice(&4008_u32.to_le_bytes());
+            header.extend_from_slice(&[0; 4008]);
+            header.extend_from_slice(b"data");
+            header.extend_from_slice(&0_u32.to_le_bytes());
+            assert_eq!(header.len(), 4096);
+            std::fs::write(&stem, &header).unwrap();
+            let mut tail = StemTail::open(&stem).unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            let mut read = Vec::new();
+            // Odd sizes exercise persistent fractional decimation/carry phase.
+            let input: Vec<f32> = (0..rate as usize * 2)
+                .map(|i| (i % 997) as f32 / 997.0)
+                .collect();
+            for chunk in input.chunks(1733) {
+                append_f32(&stem, chunk);
+                read.extend(tail.poll().unwrap());
+                assert!(tail.poll().unwrap().is_empty());
+            }
+            assert_eq!(read.len(), 32_000, "rate {rate}");
+            let mut whole = StemTail::open(&stem).unwrap();
+            assert_eq!(
+                read,
+                whole.poll().unwrap(),
+                "poll boundaries changed the resampling phase at rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn feeder_preserves_mixed_burst_and_stop_suffix_without_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("voice.wav");
+        let system = dir.path().join("system.wav");
+        write_growing_stem(&voice, 1, 24_000, Encoding::F32);
+        write_growing_stem(&system, 1, 48_000, Encoding::F32);
+        append_f32(&voice, &vec![0.25; 48_000]);
+        append_f32(&system, &vec![0.5; 144_000]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let feeder_stop = Arc::clone(&stop);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let feeder = std::thread::spawn(move || {
+            feed_from_stems(voice, Some(system), &tx, &feeder_stop);
+        });
+        let mixed = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(mixed, vec![0.75; 32_000]);
+        stop.store(true, Ordering::Relaxed);
+        let suffix = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(suffix, vec![0.5; 16_000]);
+        feeder.join().unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

@@ -156,6 +156,7 @@ pub mod interaction;
 pub mod jobs;
 pub mod knowledge;
 pub mod knowledge_extract;
+mod live_input_progress;
 pub mod live_partials;
 pub mod live_session;
 pub mod live_sidekick;

@@ -8,6 +8,19 @@ use tauri::Emitter;
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
 const MAX_SESSIONS: usize = 1;
 
+/// A signed app's assistant must use that same app's CLI, including when the
+/// regular app and Minutes Dev are installed at different versions.
+fn bundled_cli_directory(executable: &std::path::Path) -> Option<PathBuf> {
+    let directory = executable.parent()?;
+    if directory.file_name()? != "MacOS"
+        || directory.parent()?.file_name()? != "Contents"
+        || !directory.join("minutes").is_file()
+    {
+        return None;
+    }
+    Some(directory.to_path_buf())
+}
+
 /// Environment overrides shared by the interactive assistant PTY and any
 /// bounded probe that must describe that exact session. GUI apps on macOS get
 /// a stripped PATH, so probing with the ambient process environment can report
@@ -40,6 +53,12 @@ pub fn assistant_process_environment() -> Vec<(String, String)> {
     if npm_global.exists() {
         path_dirs.insert(0, npm_global.display().to_string());
     }
+    if let Some(directory) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| bundled_cli_directory(&executable))
+    {
+        path_dirs.insert(0, directory.display().to_string());
+    }
 
     vec![
         ("PATH".into(), path_dirs.join(":")),
@@ -48,6 +67,26 @@ pub fn assistant_process_environment() -> Vec<(String, String)> {
         ("COLORTERM".into(), "truecolor".into()),
         ("LANG".into(), "en_US.UTF-8".into()),
     ]
+}
+
+#[cfg(test)]
+mod bundled_cli_tests {
+    use super::*;
+
+    #[test]
+    fn app_assistant_resolves_its_own_cli_without_changing_the_global_link() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("Minutes Dev.app/Contents/MacOS");
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("minutes-app");
+        assert_eq!(bundled_cli_directory(&executable), None);
+        std::fs::write(directory.join("minutes"), b"fixture").unwrap();
+        assert_eq!(bundled_cli_directory(&executable), Some(directory));
+        assert_eq!(
+            bundled_cli_directory(&root.path().join("target/debug/minutes-app")),
+            None
+        );
+    }
 }
 
 #[cfg(windows)]

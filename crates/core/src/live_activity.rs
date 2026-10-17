@@ -33,7 +33,7 @@ fn activity_options() -> objc2_foundation::NSActivityOptions {
     objc2_foundation::NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "streaming", feature = "whisper"))]
 pub(crate) fn begin_live_work() -> impl Drop {
     use objc2_foundation::{ns_string, NSProcessInfo};
     let process = NSProcessInfo::processInfo();

@@ -378,7 +378,7 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          adds automatic audio reconnection for native macOS call recordings.{" "}
+          improves background live transcription and current-speech reads.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"

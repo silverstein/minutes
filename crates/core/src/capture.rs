@@ -3562,7 +3562,17 @@ mod tests {
             CaptureWriterPump::start(writer, Arc::clone(&count), Arc::clone(&failed), None);
         let samples = vec![0.25_f32; 32_137];
         pump.queue.push_samples(&samples);
-        pump.finish().unwrap();
+        let finish_started = Instant::now();
+        pump.finish().unwrap_or_else(|error| {
+            panic!(
+                "capture writer stop failed: {error:?}; elapsed_us={}, accepted={}/{}, queued={}, storage_failed={}",
+                finish_started.elapsed().as_micros(),
+                count.load(Ordering::Relaxed),
+                samples.len(),
+                pump.queue.samples.len(),
+                failed.load(Ordering::Acquire),
+            )
+        });
         assert!(!failed.load(Ordering::Acquire));
         assert_eq!(count.load(Ordering::Relaxed), samples.len() as u64);
         let reader = hound::WavReader::open(path).unwrap();

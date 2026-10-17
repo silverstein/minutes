@@ -2,6 +2,7 @@
 use crate::bounded_inference::{try_send_drop_newest, EnqueueResult, QueueCounters};
 use crate::config::Config;
 use crate::error::{LiveTranscriptError, MinutesError, TranscribeError};
+use crate::live_input_progress::{Counter, InputProgress, Stage};
 use crate::live_partials::{LivePartialPublisher, SupersessionReason};
 use crate::pid;
 use crate::sidecar_timing::SidecarWorkerTimings;
@@ -1071,12 +1072,17 @@ fn run_with_partials_internal(
         )
     };
 
-    match run_inner(
-        stop_flag,
-        config,
-        context_session_id.clone(),
-        partial_publisher,
-    ) {
+    let live_result = {
+        let _activity = crate::live_activity::begin_live_work();
+        run_inner(
+            stop_flag,
+            config,
+            context_session_id.clone(),
+            partial_publisher,
+        )
+    };
+    // The activity ends here, before archival/batch processing, including errors.
+    match live_result {
         Ok((lines, duration, path)) => {
             // The writer is closed now. Keep the liveness lock until the fixed
             // scratch files have moved so a new session cannot truncate them,
@@ -2031,17 +2037,18 @@ struct SileroSidecarVad {
 #[cfg(feature = "whisper")]
 impl SileroSidecarVad {
     fn new(vad_path: &Path) -> Result<Self, whisper_rs::WhisperError> {
+        // This tiny model runs on every 100 ms window. Extra ggml workers add
+        // barrier synchronization and can amplify scheduling stalls. Keep the
+        // same model/thresholds while avoiding that intra-call worker barrier.
+        Self::new_with_threads(vad_path, 1)
+    }
+
+    fn new_with_threads(vad_path: &Path, threads: i32) -> Result<Self, whisper_rs::WhisperError> {
         let vad_path = vad_path
             .to_str()
             .ok_or(whisper_rs::WhisperError::NullPointer)?;
-
         let mut ctx_params = whisper_rs::WhisperVadContextParams::default();
-        ctx_params.set_n_threads(
-            std::thread::available_parallelism()
-                .map(|count| count.get() as i32)
-                .unwrap_or(4)
-                .min(4),
-        );
+        ctx_params.set_n_threads(threads);
 
         let mut params = whisper_rs::WhisperVadParams::default();
         params.set_threshold(SIDECAR_VAD_THRESHOLD);
@@ -3146,6 +3153,8 @@ fn run_sidecar_inner_mpsc(
         return Ok(());
     }
 
+    let _activity = crate::live_activity::begin_live_work();
+    let progress = InputProgress::start("sidecar-consumer");
     write_live_status_transition(LiveStatusState::Starting, None);
 
     let mut sidecar_config = config.clone();
@@ -3161,7 +3170,7 @@ fn run_sidecar_inner_mpsc(
         w.mark_healthy();
     }
 
-    let mut vad = RecordingSidecarVad::new(config);
+    let mut vad = progress.measure(Stage::VadInit, || RecordingSidecarVad::new(config));
     let parakeet_live_enabled = sidecar_backend.eq_ignore_ascii_case("parakeet");
     let mut was_speaking = false;
     let mut utterance: Vec<f32> = Vec::new();
@@ -3391,23 +3400,26 @@ fn run_sidecar_inner_mpsc(
     );
 
     loop {
-        if let Some(result) = draft_results.take() {
-            if partial_publisher.as_ref().is_some_and(|publisher| {
-                publisher.current_utterance_sequence() == result.utterance_sequence
-            }) && draft_gate.as_ref().is_some_and(|gate| gate.was_speaking)
-                && result.text != last_draft_text
-            {
-                if let Some(publisher) = partial_publisher.as_mut() {
-                    let _ = publisher.try_publish_for_snapshot(
-                        result.text.clone(),
-                        result.offset_ms,
-                        result.audio_snapshot_at,
-                    );
+        {
+            let _publishing = progress.stage(Stage::PublishDraft);
+            if let Some(result) = draft_results.take() {
+                if partial_publisher.as_ref().is_some_and(|publisher| {
+                    publisher.current_utterance_sequence() == result.utterance_sequence
+                }) && draft_gate.as_ref().is_some_and(|gate| gate.was_speaking)
+                    && result.text != last_draft_text
+                {
+                    if let Some(publisher) = partial_publisher.as_mut() {
+                        let _ = publisher.try_publish_for_snapshot(
+                            result.text.clone(),
+                            result.offset_ms,
+                            result.audio_snapshot_at,
+                        );
+                    }
+                    last_draft_text = result.text;
                 }
-                last_draft_text = result.text;
             }
         }
-
+        let heartbeat = progress.stage(Stage::Heartbeat);
         // The heartbeat must never block behind the worker (which holds the
         // lock across file IO in write_utterance). Skipping a contended tick
         // is fine: the heartbeat interval is 1s and the staleness threshold
@@ -3430,6 +3442,7 @@ fn run_sidecar_inner_mpsc(
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
+        drop(heartbeat);
         if stop_flag.load(Ordering::Relaxed) {
             draft_jobs.clear();
             if let (Some(gate), Some(publisher)) = (draft_gate.as_mut(), partial_publisher.as_mut())
@@ -3441,7 +3454,9 @@ fn run_sidecar_inner_mpsc(
             break;
         }
 
-        let samples = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+        let samples = match progress.measure(Stage::Receive, || {
+            rx.recv_timeout(std::time::Duration::from_millis(100))
+        }) {
             Ok(s) => s,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -3456,6 +3471,10 @@ fn run_sidecar_inner_mpsc(
                 break;
             }
         };
+
+        progress.add(Counter::SamplesReceived, samples.len());
+        let mut remaining = samples.len();
+        progress.set(Counter::ChunkRemainingSamples, remaining);
 
         // Stem polls can deliver a large burst after a scheduling pause. Never
         // let that burst bypass utterance limits or become one enormous draft.
@@ -3472,7 +3491,9 @@ fn run_sidecar_inner_mpsc(
 
             if let (Some(gate), Some(publisher)) = (draft_gate.as_mut(), partial_publisher.as_mut())
             {
-                match gate.process(samples, rms, samples_received, publisher) {
+                match progress.measure(Stage::DraftGate, || {
+                    gate.process(samples, rms, samples_received, publisher)
+                }) {
                     RecordingDraftGateEvent::Snapshot(job) => draft_jobs.offer_latest(job),
                     RecordingDraftGateEvent::SpeechEnded => {
                         draft_jobs.clear();
@@ -3482,8 +3503,18 @@ fn run_sidecar_inner_mpsc(
                 }
             }
 
-            let vad_result = vad.process(samples, rms);
+            let vad_result = progress.measure(Stage::Vad, || vad.process(samples, rms));
             gating_stats.observe(samples.len(), vad_result.speaking);
+            progress.add(Counter::SamplesProcessed, samples.len());
+            if vad_result.speaking {
+                progress.add(Counter::SpeakingWindows, 1);
+            } else {
+                progress.add(Counter::SamplesGated, samples.len());
+                progress.add(Counter::SilenceWindows, 1);
+            }
+            remaining = remaining.saturating_sub(samples.len());
+            progress.set(Counter::ChunkRemainingSamples, remaining);
+            let _segment = progress.stage(Stage::Segment);
 
             if vad_result.speaking {
                 was_speaking = true;
@@ -3511,8 +3542,9 @@ fn run_sidecar_inner_mpsc(
     // in-flight engine call is bounded by the parakeet subprocess timeout),
     // then finalize.
     drop(job_tx);
-    let worker_timings = worker.join().ok();
+    let worker_timings = progress.measure(Stage::WorkerJoin, || worker.join().ok());
 
+    let finalizing = progress.stage(Stage::Finalize);
     let (lines, duration, _path) = match lock_ignore_poison(&writer).take() {
         Some(w) => w.finalize(),
         None => (0, 0.0, PathBuf::new()),
@@ -3569,10 +3601,14 @@ fn run_sidecar_inner_mpsc(
             "dropped_utterances": dropped_utterances,
             "skipped_utterances": SIDECAR_SKIPPED_UTTERANCES.load(Ordering::Relaxed),
             "whisper_failures": crate::streaming_whisper::failure_count(),
+            "samples_fed": gating_stats.samples_fed,
+            "samples_gated": gating_stats.samples_gated,
+            "input_progress": progress.snapshot(),
             "worker_timing": worker_timings,
         }),
     );
 
+    drop(finalizing);
     if input_disconnected_unexpectedly {
         return Err(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
@@ -4727,6 +4763,66 @@ mod tests {
         );
     }
 
+    /// Capture-free regression. Explicitly supply the public Silero model and
+    /// repository demo.wav; never read a user model directory or meeting audio.
+    #[cfg(feature = "whisper")]
+    #[test]
+    #[ignore = "requires MINUTES_TEST_SILERO_MODEL and MINUTES_TEST_PUBLIC_WAV"]
+    fn single_thread_silero_matches_four_thread_segmentation() {
+        let model = std::env::var_os("MINUTES_TEST_SILERO_MODEL")
+            .expect("explicit public model path required");
+        let fixture = std::env::var_os("MINUTES_TEST_PUBLIC_WAV")
+            .expect("explicit public fixture path required");
+        let mut reader = hound::WavReader::open(fixture).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16000);
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        let speech: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|sample| f32::from(sample.unwrap()) / 32768.0)
+            .collect();
+        assert!(!speech.is_empty());
+        let mut samples = vec![0.0; 16000];
+        samples.extend_from_slice(&speech);
+        samples.extend(std::iter::repeat_n(0.0, 16000 * 4));
+        samples.extend(speech.iter().map(|sample| sample * 0.1));
+        samples.extend(std::iter::repeat_n(0.0, 16000 * 4 + 777));
+        let mut one = SileroSidecarVad::new(Path::new(&model)).unwrap();
+        let mut four = SileroSidecarVad::new_with_threads(Path::new(&model), 4).unwrap();
+        let mut speaking = 0;
+        let mut silence = 0;
+        let mut transitions = 0;
+        let mut previous = false;
+        let mut wall = [std::time::Duration::ZERO; 2];
+        let mut maximum = wall;
+        for chunk in samples.chunks(1600) {
+            let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+            let start = std::time::Instant::now();
+            let a = one.process(chunk, rms).unwrap();
+            let elapsed = start.elapsed();
+            wall[0] += elapsed;
+            maximum[0] = maximum[0].max(elapsed);
+            let start = std::time::Instant::now();
+            let b = four.process(chunk, rms).unwrap();
+            let elapsed = start.elapsed();
+            wall[1] += elapsed;
+            maximum[1] = maximum[1].max(elapsed);
+            assert_eq!((a.speaking, a.silence_ms), (b.speaking, b.silence_ms));
+            assert_eq!(a.energy, b.energy);
+            assert_eq!(a.noise_floor, b.noise_floor);
+            speaking += usize::from(a.speaking);
+            silence += usize::from(!a.speaking);
+            transitions += usize::from(a.speaking != previous);
+            previous = a.speaking;
+        }
+        assert!(
+            speaking > 10 && silence > 10 && transitions >= 4,
+            "fixture must exercise speech, silence and utterance boundaries"
+        );
+        eprintln!("Silero parity: windows={} speaking={speaking} silence={silence} transitions={transitions} one_wall={:?} four_wall={:?} one_max={:?} four_max={:?}",
+            samples.len().div_ceil(1600), wall[0], wall[1], maximum[0], maximum[1]);
+    }
+
     /// `is_healthy` must surface the sticky `failed` flag through trait
     /// dispatch. Uses the test-only `force_failed_for_test` seam to
     /// avoid needing a corrupt whisper context, since constructing one
@@ -5593,6 +5689,40 @@ mod tests {
             assert!(status.diagnostic.as_deref().is_some_and(|message| {
                 message.contains("audio feeder disconnected while recording was still active")
             }));
+        });
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
+    fn sidecar_summary_accounts_for_received_processed_and_gated_samples() {
+        with_temp_home(|| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(3);
+            tx.send(vec![0.0; 1600]).unwrap();
+            tx.send(vec![0.0; 1700]).unwrap();
+            tx.send(Vec::new()).unwrap();
+            drop(tx);
+            let stop = Arc::new(AtomicBool::new(false));
+            // The fresh temporary home has no models, so the normal explicit
+            // fallback uses energy VAD. No model inference or device access.
+            let config = Config::default();
+            run_sidecar_mpsc(rx, stop, &config, None);
+            let log = std::fs::read_to_string(crate::logging::log_path()).unwrap();
+            let summaries: Vec<serde_json::Value> = log
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .filter(|entry: &serde_json::Value| entry["step"] == "live_sidecar_ended")
+                .collect();
+            assert_eq!(summaries.len(), 1);
+            let extra = &summaries[0]["extra"];
+            assert_eq!(extra["samples_fed"], 3300);
+            assert_eq!(extra["samples_gated"], 3300);
+            assert_eq!(extra["silence_windows"], 3);
+            let input = &extra["input_progress"];
+            assert_eq!(input["counters"]["samples_received"], 3300);
+            assert_eq!(input["counters"]["samples_processed"], 3300);
+            assert_eq!(input["counters"]["chunk_remaining_samples"], 0);
+            assert_eq!(input["wall_timing"]["vad"]["count"], 3);
+            assert_eq!(extra["worker_timing"]["final_inference"]["count"], 0);
         });
     }
 

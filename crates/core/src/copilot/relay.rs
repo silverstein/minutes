@@ -1595,6 +1595,14 @@ mod tests {
     fn inherited_nonblocking_peer_accepts_delayed_authenticated_request() {
         let (_dir, peer, client) = parser_pair();
         peer.set_nonblocking(true).unwrap(); // emulate macOS accept inheritance
+        let mut reader = client.reader;
+        reader.get_ref().set_nonblocking(false).unwrap();
+        // Configure the read before the worker can close its reply socket.
+        // Darwin may reject timeout changes after the peer has disconnected.
+        reader
+            .get_ref()
+            .set_recv_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
         let shared = synthetic_state();
         let worker_state = Arc::clone(&shared);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1604,7 +1612,6 @@ mod tests {
         });
         // Give the worker a chance to read before any request has been sent.
         let early = rx.recv_timeout(Duration::from_millis(100));
-        let mut reader = client.reader;
         let sent = write_json_line(
             reader.get_mut(),
             &ClientHello {
@@ -1619,11 +1626,6 @@ mod tests {
         join.join().unwrap();
         sent.unwrap();
         result.unwrap();
-        reader.get_ref().set_nonblocking(false).unwrap();
-        reader
-            .get_ref()
-            .set_recv_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
         assert!(matches!(
             read_frame_blocking(&mut reader).unwrap(),
             RelayFrame::Published { nudge_seq: 1 }

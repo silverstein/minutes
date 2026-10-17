@@ -248,8 +248,10 @@ mod tests {
     #[test]
     fn model_implementation_names_map_to_the_same_local_summary() {
         for implementation in ["apple-fm", "ollama"] {
-            let mut status = CopilotSessionStatus::default();
-            status.active = true;
+            let mut status = CopilotSessionStatus {
+                active: true,
+                ..CopilotSessionStatus::default()
+            };
             status.health.provider = implementation.into();
             assert_eq!(
                 status.user_model_summary(),

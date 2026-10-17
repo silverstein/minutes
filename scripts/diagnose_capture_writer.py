@@ -59,10 +59,21 @@ def instrument(original):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--prepare-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--prepare-only", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    mode.add_argument("--restore", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    saved = output / "original-capture.rs"
+    if args.restore:
+        if saved.exists():
+            original = saved.read_bytes()
+            assert SOURCE.read_bytes() in (original, instrument(original)), "unexpected runner edit"
+            SOURCE.write_bytes(original)
+            assert SOURCE.read_bytes() == original
+        return
     original = SOURCE.read_bytes()
     observed = instrument(original)
     provenance = {"original_sha256": hashlib.sha256(original).hexdigest(),
@@ -72,6 +83,12 @@ def main():
                   "observed_file_is_below_bufwriter": True,
                   "real_capture": False}
     (output / "provenance.json").write_text(json.dumps(provenance, indent=2))
+    if args.apply:
+        assert not saved.exists(), "do not overwrite an earlier diagnostic snapshot"
+        saved.write_bytes(original)
+        SOURCE.write_bytes(observed)
+        print(json.dumps(provenance), flush=True)
+        return
     if args.prepare_only:
         (output / "capture-observed.rs").write_bytes(observed)
         return

@@ -147,6 +147,15 @@ mod capture_writer_probe {
             state["queued_samples"] = queued.into();
             state["storage_failed"] = failed.into();
             eprintln!("CAPTURE_WRITER_PROBE {state}");
+            if let Some(path) = std::env::var_os("MINUTES_CAPTURE_WRITER_PROBE_RESULT") {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(file, "{state}");
+                }
+            }
         }
     }
 

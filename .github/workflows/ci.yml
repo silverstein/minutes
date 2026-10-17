@@ -307,6 +307,13 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --no-default-features
 
+      # Temporary capture-free observation in the actual preceding CI context.
+      # Keep the normal test command, timeout and assertions intact below.
+      - name: Observe synthetic Windows writer operations (temporary)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: python scripts/diagnose_capture_writer.py --apply --output "$RUNNER_TEMP/capture-writer-ci-evidence"
+
       - name: Unit tests (no whisper)
         # Keep libtest output visible on hosted Windows so a platform-only
         # assertion is diagnosable even if a later test reaches the job
@@ -314,6 +321,24 @@ jobs:
         # minutes no longer covers its bounded two-worker/QMD regressions.
         run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
         timeout-minutes: 15
+        env:
+          MINUTES_CAPTURE_WRITER_PROBE_RESULT: ${{ runner.temp }}/capture-writer-ci-evidence/results.jsonl
+
+      - name: Restore exact unobserved Windows writer source (temporary)
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        run: python scripts/diagnose_capture_writer.py --restore --output "$RUNNER_TEMP/capture-writer-ci-evidence"
+
+      - name: Preserve synthetic Windows writer observations (temporary)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: capture-writer-full-ci-evidence
+          path: |
+            ${{ runner.temp }}/capture-writer-ci-evidence/*.json
+            ${{ runner.temp }}/capture-writer-ci-evidence/*.jsonl
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Unit tests (streaming feature)
         # The step above runs with streaming off, so every #[cfg(test)] module

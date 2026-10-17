@@ -25,7 +25,9 @@ def once(text, before, after):
 
 
 def instrument(original):
-    text = original.decode()
+    # Windows checkout line endings are not part of the source-code premise.
+    # Normalize the disposable observer, while retaining original bytes for restore.
+    text = original.decode().replace("\r\n", "\n")
     text = text.replace("std::io::BufWriter<std::fs::File>",
                         "std::io::BufWriter<capture_writer_probe::ObservedFile>")
     text = once(text,
@@ -64,6 +66,7 @@ def main():
     original = SOURCE.read_bytes()
     observed = instrument(original)
     provenance = {"original_sha256": hashlib.sha256(original).hexdigest(),
+                  "canonical_original_sha256": hashlib.sha256(original.replace(b"\r\n", b"\n")).hexdigest(),
                   "observed_sha256": hashlib.sha256(observed).hexdigest(),
                   "production_timeout_seconds": 2,
                   "observed_file_is_below_bufwriter": True,

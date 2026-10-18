@@ -9,7 +9,7 @@ use zeroize::Zeroize;
 const DIARIZATION_WORKER_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const MAX_DIARIZATION_SECONDS: u64 = 2 * 60 * 60;
 const MAX_DIARIZATION_SAMPLES: usize = 16_000 * MAX_DIARIZATION_SECONDS as usize;
-#[cfg(feature = "diarize")]
+#[cfg(any(feature = "diarize", test))]
 const MAX_DIARIZATION_SEGMENTS: usize = 100_000;
 #[cfg(feature = "diarize")]
 const MAX_SPEAKER_TEMPLATES: usize = 64;
@@ -3784,13 +3784,88 @@ fn diarize_with_pyannote_rs(
 }
 
 /// A detected speech region with sample-level boundaries for embedding extraction.
-#[cfg(feature = "diarize")]
+#[cfg(any(feature = "diarize", test))]
 #[derive(Clone)]
 struct SpeechSegment {
     start: f64,
     end: f64,
     start_sample: usize,
     end_sample: usize,
+}
+
+// Model frames cover slightly less than each independent ten-second input
+// window. Anchor frame offsets to that window, rather than carrying its frame
+// count forward as an audio clock (which accumulates seconds of drift).
+#[cfg(any(feature = "diarize", test))]
+struct SpeechFrameTimeline {
+    sample_rate: u32,
+    total_samples: usize,
+    speech_start: Option<usize>,
+    next_offset: usize,
+    segments: Vec<SpeechSegment>,
+}
+
+#[cfg(any(feature = "diarize", test))]
+impl SpeechFrameTimeline {
+    const FRAME_HOP: usize = 270;
+    const FRAME_START: usize = 721;
+
+    fn new(sample_rate: u32, total_samples: usize) -> Self {
+        Self {
+            sample_rate,
+            total_samples,
+            speech_start: None,
+            next_offset: 0,
+            segments: Vec::new(),
+        }
+    }
+
+    fn push_frame(
+        &mut self,
+        window_start: usize,
+        frame_index: usize,
+        speech: bool,
+    ) -> Result<(), &'static str> {
+        let offset = window_start
+            .saturating_add(Self::FRAME_START)
+            .saturating_add(frame_index.saturating_mul(Self::FRAME_HOP))
+            .min(self.total_samples);
+        self.next_offset = offset
+            .saturating_add(Self::FRAME_HOP)
+            .min(self.total_samples);
+        // Padded model input is not recorded audio and cannot start a segment.
+        if offset == self.total_samples {
+            return Ok(());
+        }
+        if speech {
+            self.speech_start.get_or_insert(offset);
+        } else {
+            self.end_speech(offset)?;
+        }
+        Ok(())
+    }
+
+    fn end_speech(&mut self, end: usize) -> Result<(), &'static str> {
+        if let Some(start) = self.speech_start.take() {
+            if end > start {
+                if self.segments.len() >= MAX_DIARIZATION_SEGMENTS {
+                    return Err("diarization segment budget exceeded");
+                }
+                self.segments.push(SpeechSegment {
+                    start: start as f64 / self.sample_rate as f64,
+                    end: end as f64 / self.sample_rate as f64,
+                    start_sample: start,
+                    end_sample: end,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Vec<SpeechSegment>, &'static str> {
+        self.end_speech(self.next_offset)?;
+        Ok(self.segments)
+    }
 }
 
 /// L2-normalize a vector to unit length. Returns the zero vector if the input
@@ -3926,21 +4001,10 @@ fn segment_speech(
         .into());
     }
 
-    // These constants come from the pyannote segmentation-3.0 model architecture:
-    // - frame_size (270 samples @ 16kHz = 16.875ms) is the hop between output frames,
-    //   derived from the model's sincnet + temporal pooling stride.
-    // - frame_start (721 samples @ 16kHz = 45ms) is the receptive-field offset, i.e.
-    //   how many input samples precede the center of the first output frame.
-    // - window_size (10s @ sample_rate) matches the model's fixed-length input window.
-    // See pyannote-rs source and pyannote-audio's SlidingWindowFeature for derivation.
-    let frame_size: usize = 270;
-    let frame_start: usize = 721;
+    // Both supported exports use a ten-second waveform and the frame geometry
+    // encoded by SpeechFrameTimeline (16.875 ms hop, 45 ms initial offset).
     let window_size = (sample_rate as usize) * 10;
-
-    let mut result = Vec::new();
-    let mut is_speeching = false;
-    let mut offset = frame_start;
-    let mut start_offset = 0usize;
+    let mut timeline = SpeechFrameTimeline::new(sample_rate, samples.len());
     let mut final_window = zeroize::Zeroizing::new(vec![0.0f32; window_size]);
 
     for window_start in (0..samples.len()).step_by(window_size) {
@@ -3975,6 +4039,7 @@ fn segment_speech(
         let view = ArrayViewD::<f32>::from_shape(IxDyn(&shape_slice), data)
             .map_err(|e| format!("ndarray shape: {e}"))?;
 
+        let mut frame_index = 0;
         for row in view.outer_iter() {
             for sub_row in row.axis_iter(Axis(0)) {
                 let max_index = sub_row
@@ -3984,50 +4049,13 @@ fn segment_speech(
                     .map(|(i, _)| i)
                     .unwrap_or(0);
 
-                if max_index != 0 {
-                    if !is_speeching {
-                        start_offset = offset;
-                        is_speeching = true;
-                    }
-                } else if is_speeching {
-                    let start_secs = start_offset as f64 / sample_rate as f64;
-                    let end_secs = offset as f64 / sample_rate as f64;
-                    let si = start_offset.min(samples.len().saturating_sub(1));
-                    let ei = offset.min(samples.len());
-                    result.push(SpeechSegment {
-                        start: start_secs,
-                        end: end_secs,
-                        start_sample: si,
-                        end_sample: ei,
-                    });
-                    if result.len() > MAX_DIARIZATION_SEGMENTS {
-                        return Err("diarization segment budget exceeded".into());
-                    }
-                    is_speeching = false;
-                }
-                offset += frame_size;
+                timeline.push_frame(window_start, frame_index, max_index != 0)?;
+                frame_index += 1;
             }
         }
     }
 
-    // Flush trailing speech (unlike pyannote-rs, we don't drop it)
-    if is_speeching {
-        let start_secs = start_offset as f64 / sample_rate as f64;
-        let end_secs = offset as f64 / sample_rate as f64;
-        let si = start_offset.min(samples.len().saturating_sub(1));
-        let ei = samples.len();
-        result.push(SpeechSegment {
-            start: start_secs,
-            end: end_secs,
-            start_sample: si,
-            end_sample: ei,
-        });
-        if result.len() > MAX_DIARIZATION_SEGMENTS {
-            return Err("diarization segment budget exceeded".into());
-        }
-    }
-
-    Ok(result)
+    Ok(timeline.finish()?)
 }
 
 #[cfg(feature = "diarize")]
@@ -4274,6 +4302,64 @@ mod tests {
 
     static DIARIZATION_WORKER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static DIARIZATION_WORKER_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn segmentation_windows_keep_absolute_audio_time_over_many_minutes() {
+        const RATE: u32 = 16_000;
+        let mut timeline = SpeechFrameTimeline::new(RATE, RATE as usize * 640);
+        // The actual exports emit 589 frames for each ten-second input.
+        // Treating 589 * 270 samples as ten seconds drifts every window.
+        for window in 0..64 {
+            for frame in 0..589 {
+                timeline
+                    .push_frame(window * 160_000, frame, (100..200).contains(&frame))
+                    .unwrap();
+            }
+        }
+        let segments = timeline.finish().unwrap();
+        assert_eq!(segments.len(), 64);
+        for (window, segment) in segments.iter().enumerate() {
+            assert_eq!(segment.start_sample, window * 160_000 + 721 + 100 * 270);
+            assert_eq!(segment.end_sample, window * 160_000 + 721 + 200 * 270);
+            assert_eq!(segment.start, segment.start_sample as f64 / RATE as f64);
+        }
+    }
+
+    #[test]
+    fn segmentation_padding_cannot_extend_or_create_speech_after_the_audio() {
+        let total_samples = 163_000;
+        let mut timeline = SpeechFrameTimeline::new(16_000, total_samples);
+        for frame in 0..589 {
+            timeline.push_frame(0, frame, false).unwrap();
+        }
+        for frame in 0..589 {
+            timeline.push_frame(160_000, frame, true).unwrap();
+        }
+        let segments = timeline.finish().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_sample, 160_721);
+        assert_eq!(segments[0].end_sample, total_samples);
+        assert_eq!(segments[0].end, total_samples as f64 / 16_000.0);
+
+        let mut padding_only = SpeechFrameTimeline::new(16_000, 160_100);
+        padding_only.push_frame(160_000, 0, true).unwrap();
+        assert!(padding_only.finish().unwrap().is_empty());
+    }
+
+    #[test]
+    fn segmentation_speech_continues_across_a_window_boundary() {
+        let mut timeline = SpeechFrameTimeline::new(16_000, 320_000);
+        for frame in 0..589 {
+            timeline.push_frame(0, frame, frame >= 580).unwrap();
+        }
+        for frame in 0..589 {
+            timeline.push_frame(160_000, frame, frame < 10).unwrap();
+        }
+        let segments = timeline.finish().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_sample, 721 + 580 * 270);
+        assert_eq!(segments[0].end_sample, 160_721 + 10 * 270);
+    }
 
     #[cfg(unix)]
     #[test]

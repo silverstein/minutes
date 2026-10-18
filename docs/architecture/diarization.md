@@ -26,6 +26,12 @@ engine = "pyannote-rs"
 model = "community-1"
 ```
 
+The setup command downloads the model pair; it does not save this selection.
+Update the existing `[diarization]` table in your configuration rather than adding
+a duplicate table. This is separate from `[transcription] model`, which selects
+speech recognition. A running desktop app needs to reload its startup settings;
+restart it when no recording is active before testing the new selection.
+
 The community-1 model is licensed under CC BY 4.0. Distributions and derived
 uses must retain attribution to pyannote and the model authors. The ONNX export
 used by Minutes is published in the

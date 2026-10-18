@@ -33,9 +33,13 @@ parakeet = ["whisper", "minutes-core/parakeet"]
 # `minutes setup --sherpa` works without this feature (path helpers are ungated);
 # this feature compiles the actual engine so `engine = "sherpa"` transcribes.
 engine-sherpa = ["minutes-core/engine-sherpa"]
+pocketstation-capture = ["minutes-core/pocketstation-capture"]
 # Streaming Silero VAD via ort. Pulls minutes-core's vad-ort. Also
 # wires the setup-time download for silero-vad-v6.2.0.onnx.
 vad-ort = ["minutes-core/vad-ort", "dep:ort"]
+# Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
+# Off by default: it is a cloud provider behind an explicit config opt-in.
+voice-live = ["minutes-core/voice-live"]
 coreml = ["minutes-core/coreml"]
 cuda = ["minutes-core/cuda"]
 hipblas = ["minutes-core/hipblas"]
@@ -43,7 +47,7 @@ metal = ["minutes-core/metal"]
 vulkan = ["minutes-core/vulkan"]
 
 [dependencies]
-minutes-core = { path = "../core", version = "0.26.0", default-features = false, features = ["streaming"] }
+minutes-core = { path = "../core", version = "0.30.2", default-features = false, features = ["streaming"] }
 clap = { workspace = true }
 ctrlc = { workspace = true }
 anyhow = { workspace = true }
@@ -54,6 +58,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
+fs2 = { workspace = true }
 schemars = { workspace = true, features = ["derive"] }
 serde_yaml = { workspace = true }
 ureq = { workspace = true }

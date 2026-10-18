@@ -415,6 +415,7 @@ pub fn open_db_at(path: &Path) -> Result<Connection, ContextStoreError> {
     Ok(conn)
 }
 
+#[cfg(unix)]
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -518,6 +519,7 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> Result<ContextSession, ContextStor
             "meeting" => Some(ContentType::Meeting),
             "memo" => Some(ContentType::Memo),
             "dictation" => Some(ContentType::Dictation),
+            "note" => Some(ContentType::Note),
             _ => None,
         });
 
@@ -574,11 +576,7 @@ fn capture_mode_to_db(mode: CaptureMode) -> &'static str {
 }
 
 fn content_type_to_db(kind: ContentType) -> &'static str {
-    match kind {
-        ContentType::Meeting => "meeting",
-        ContentType::Memo => "memo",
-        ContentType::Dictation => "dictation",
-    }
+    kind.as_str()
 }
 
 pub fn session_type_for_capture_mode(mode: CaptureMode) -> ContextSessionType {

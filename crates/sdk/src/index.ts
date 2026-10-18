@@ -57,6 +57,13 @@ export {
   humanizeTranscript,
   findOpenActions,
   findDecisions,
+  getDecisionHistory,
   getPersonProfile,
   listVoiceMemos,
 } from "./reader.js";
+
+export * from "./retrieval.js";
+export * from "./evidence.js";
+export * from "./decision-history.js";
+export * from "./identity.js";
+export * from "./hybrid-ranking.js";

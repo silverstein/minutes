@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_GRAPH_VNODE_WATCHES: usize = 8_192;
 const GRAPH_VNODE_FD_HEADROOM: usize = 512;
+const MAX_DESCRIPTOR_OCCUPANCY_SCAN: usize = 100_000;
 const CONTENT_FLAGS: u32 = libc::NOTE_DELETE
     | libc::NOTE_WRITE
     | libc::NOTE_EXTEND
@@ -287,7 +288,20 @@ impl MacGraphJournal {
 
 #[cfg(test)]
 mod tests {
-    use super::MacGraphJournal;
+    use super::{descriptor_scan_ceiling, MacGraphJournal, MAX_DESCRIPTOR_OCCUPANCY_SCAN};
+
+    #[test]
+    fn high_soft_descriptor_limits_skip_the_linear_occupancy_scan() {
+        assert_eq!(
+            descriptor_scan_ceiling(MAX_DESCRIPTOR_OCCUPANCY_SCAN as libc::rlim_t).unwrap(),
+            Some(MAX_DESCRIPTOR_OCCUPANCY_SCAN)
+        );
+        assert_eq!(
+            descriptor_scan_ceiling((MAX_DESCRIPTOR_OCCUPANCY_SCAN + 1) as libc::rlim_t).unwrap(),
+            None
+        );
+        assert_eq!(descriptor_scan_ceiling(libc::RLIM_INFINITY).unwrap(), None);
+    }
 
     #[test]
     fn vnode_budget_fails_closed_before_opening_an_unbounded_namespace() {
@@ -502,13 +516,14 @@ fn raise_descriptor_limit(additional: usize) -> io::Result<()> {
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let scan_ceiling = usize::try_from(limit.rlim_cur)
-        .map_err(|_| io::Error::other("macOS graph descriptor limit was not representable"))?;
-    if scan_ceiling > 100_000 {
-        return Err(io::Error::other(
-            "macOS graph descriptor occupancy could not be bounded",
-        ));
-    }
+    let Some(scan_ceiling) = descriptor_scan_ceiling(limit.rlim_cur)? else {
+        // A raised limit inherited from Node or another launcher can be much
+        // larger than the journal's bounded 8,192-watch budget. Do not turn
+        // that plentiful-capacity case into a mandatory linear scan. If the
+        // process is unusually close to its high limit, the actual vnode opens
+        // remain authoritative and fail closed while the journal is built.
+        return Ok(());
+    };
     let mut open_count = 0usize;
     let mut high_water = 0usize;
     for descriptor in 0..scan_ceiling {
@@ -546,6 +561,12 @@ fn raise_descriptor_limit(additional: usize) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn descriptor_scan_ceiling(limit: libc::rlim_t) -> io::Result<Option<usize>> {
+    let limit = usize::try_from(limit)
+        .map_err(|_| io::Error::other("macOS graph descriptor limit was not representable"))?;
+    Ok((limit <= MAX_DESCRIPTOR_OCCUPANCY_SCAN).then_some(limit))
 }
 
 fn open_vnode(path: &Path) -> io::Result<RawFd> {

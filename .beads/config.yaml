@@ -52,3 +52,6 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+sync:
+    remote: "git+https://github.com/silverstein/minutes.git"

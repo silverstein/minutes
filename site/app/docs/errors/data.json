@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-09-05",
-  "visibleCount": 68,
+  "generatedAt": "2026-10-17",
+  "visibleCount": 71,
   "hiddenCount": 17,
   "groups": [
     {
       "enumName": "CaptureError",
-      "count": 8,
+      "count": 9,
       "entries": [
         {
           "id": "captureerror-devicenotfound-target-os-macos",
@@ -94,6 +94,17 @@
           "hidden": false,
           "anchorId": "error-captureerror-emptyrecording",
           "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-emptyrecording"
+        },
+        {
+          "id": "captureerror-storageretiring",
+          "enumName": "CaptureError",
+          "variant": "StorageRetiring",
+          "cfg": null,
+          "message": "recording storage is still finishing after the stop deadline; partial audio remains at its original path",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-captureerror-storageretiring",
+          "docsUrl": "https://useminutes.app/docs/errors#error-captureerror-storageretiring"
         }
       ]
     },
@@ -598,7 +609,7 @@
     },
     {
       "enumName": "DictationError",
-      "count": 7,
+      "count": 8,
       "entries": [
         {
           "id": "dictationerror-recordingactive",
@@ -621,6 +632,17 @@
           "hidden": false,
           "anchorId": "error-dictationerror-livetranscriptactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-livetranscriptactive"
+        },
+        {
+          "id": "dictationerror-voiceactive",
+          "enumName": "DictationError",
+          "variant": "VoiceActive",
+          "cfg": null,
+          "message": "a voice session is open — close it before dictating",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-voiceactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-voiceactive"
         },
         {
           "id": "dictationerror-alreadyactive",
@@ -681,7 +703,7 @@
     },
     {
       "enumName": "LiveTranscriptError",
-      "count": 5,
+      "count": 6,
       "entries": [
         {
           "id": "livetranscripterror-recordingactive",
@@ -704,6 +726,17 @@
           "hidden": false,
           "anchorId": "error-livetranscripterror-dictationactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-dictationactive"
+        },
+        {
+          "id": "livetranscripterror-voiceactive",
+          "enumName": "LiveTranscriptError",
+          "variant": "VoiceActive",
+          "cfg": null,
+          "message": "a voice session is open — close it before starting live transcript",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-voiceactive",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-voiceactive"
         },
         {
           "id": "livetranscripterror-alreadyactive",

@@ -26,7 +26,8 @@
     { "name": "minutes-live-sidekick", "path": "skills/minutes-live-sidekick/SKILL.md" },
     { "name": "minutes-release-notes", "path": "skills/minutes-release-notes/SKILL.md" },
     { "name": "minutes-mcp-recall", "path": "skills/minutes-mcp-recall/SKILL.md" },
-    { "name": "minutes-x1-closeout", "path": "skills/minutes-x1-closeout/SKILL.md" }
+    { "name": "minutes-x1-closeout", "path": "skills/minutes-x1-closeout/SKILL.md" },
+    { "name": "minutes-x1-send-meeting", "path": "skills/minutes-x1-send-meeting/SKILL.md" }
   ],
   "agents": [
     { "name": "meeting-analyst", "path": "agents/meeting-analyst.md" }

@@ -21,7 +21,7 @@ import { retireBoundReadersForProcessShutdown } from "./secure-read.js";
 // can never reach the main corpus-lease suite. That containment is
 // structural: no reset seam in production code, nothing exported that could
 // disarm the fail-closed barrier, and nothing here that has to simulate the
-// race. Adding further tests to this file would put them back inside the
+// race. A recovery assertion belongs in its own isolated file, outside the
 // blast radius.
 //
 // The worker route is load-bearing. The raw-error escape this pins lived in
@@ -68,26 +68,5 @@ describe("stable corpus lease refusal contract", () => {
     });
   });
 
-  // Shares this file's isolation for the same reason as the test above: it
-  // drives the worker-termination path, which touches process-global state.
-  it("keeps working after an unconfirmed kill of a worker that never learned the corpus", async () => {
-    await withCorpus(async (root) => {
-      writeFileSync(join(root, "meeting.md"), "never fed canary");
-      // A one-millisecond budget expires while the worker is still starting,
-      // so `begin` is never written and the child cannot hold corpus bytes.
-      await expect(
-        withStableCorpusLease(root, () => "unreachable", {
-          timeoutMs: 1,
-          forceUnconfirmedTerminationForTest: true,
-        })
-      ).rejects.toThrow("stable meeting corpus authorization failed");
 
-      // Issue #689: this used to refuse with "requires a process restart"
-      // until the host process was restarted, and to keep the killed lease's
-      // memory reservation charged forever.
-      await expect(withStableCorpusLease(root, () => "recovered")).resolves.toBe(
-        "recovered"
-      );
-    });
-  });
 });

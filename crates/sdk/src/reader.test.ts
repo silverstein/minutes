@@ -283,6 +283,21 @@ describe("parseFrontmatter", () => {
     expect(result!.frontmatter.action_items).toEqual([]);
   });
 
+  it("parses note artifacts in the meeting corpus", () => {
+    const content = `---
+title: Launch Prep
+type: note
+date: "2026-09-15T10:00:00Z"
+---
+
+Launch checklist.
+`;
+    const result = parseFrontmatter(content, "/test/launch-prep.md");
+    expect(result).not.toBeNull();
+    expect(result!.frontmatter.type).toBe("note");
+    expect(result!.body).toContain("Launch checklist");
+  });
+
   it("returns null for content without frontmatter", () => {
     const result = parseFrontmatter("Just text", "/test/plain.md");
     expect(result).toBeNull();
@@ -371,6 +386,17 @@ describe("listMeetings", () => {
     expect(meetings).toHaveLength(2);
     expect(meetings[0].frontmatter.title).toBe("Q2 Pricing Discussion");
     expect(meetings[1].frontmatter.title).toBe("Earlier Meeting");
+  });
+
+  it("lists note artifacts from the meeting corpus", async () => {
+    writeMeeting(
+      "launch-prep.md",
+      MINIMAL_MEETING.replace("Quick Sync", "Launch Prep").replace("type: memo", "type: note")
+    );
+
+    const meetings = await listMeetings(tempDir, 10);
+    expect(meetings).toHaveLength(1);
+    expect(meetings[0].frontmatter.type).toBe("note");
   });
 
   it("returns empty array for empty directory", async () => {
@@ -661,7 +687,7 @@ describe("getPersonProfile", () => {
   it("builds profile from meeting attendees", async () => {
     writeMeeting("meeting.md", VALID_MEETING);
 
-    const profile = await getPersonProfile(tempDir, "Alex");
+    const profile = await getPersonProfile(tempDir, "Alex K.");
     expect(profile.meetings).toHaveLength(1);
     expect(profile.meetings[0].title).toBe("Q2 Pricing Discussion");
     expect(profile.topics).toContain("pricing");
@@ -1561,11 +1587,11 @@ describe("sensitivity enforcement", () => {
     writeMeeting("valid.md", VALID_MEETING);
     writeMeeting("restricted.md", RESTRICTED_MEETING);
     // "Alex K." attends both; the restricted one must not appear by default.
-    const def = await getPersonProfile(tempDir, "Alex");
+    const def = await getPersonProfile(tempDir, "Alex K.");
     expect(def.meetings.map((m) => m.title)).not.toContain(
       "Board Pricing Strategy"
     );
-    const overridden = await getPersonProfile(tempDir, "Alex", {
+    const overridden = await getPersonProfile(tempDir, "Alex K.", {
       includeRestricted: true,
     });
     expect(overridden.meetings.map((m) => m.title)).toContain(

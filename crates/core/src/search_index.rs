@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::error::SearchError;
 use crate::markdown::{
     extract_field, read_stable_active_markdown, split_frontmatter, ActiveCorpusReadBudget,
-    ContentType, Frontmatter, Sensitivity, StableActiveCorpusRevision, StableMarkdownSnapshot,
+    Frontmatter, Sensitivity, StableActiveCorpusRevision, StableMarkdownSnapshot,
 };
 use crate::search::{SearchFilters, SearchResult};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -731,12 +731,7 @@ impl SearchIndex {
         // Preserve the legacy SearchResult date representation after the
         // typed parse has established that the field exists and is valid.
         let date = extract_field(frontmatter, "date").unwrap_or_else(|| parsed.date.to_rfc3339());
-        let content_type = match parsed.r#type {
-            ContentType::Meeting => "meeting",
-            ContentType::Memo => "memo",
-            ContentType::Dictation => "dictation",
-        }
-        .to_string();
+        let content_type = parsed.r#type.as_str().to_string();
         let mtime_ns = meta
             .modified()
             .ok()
@@ -860,7 +855,11 @@ impl SearchIndex {
             txn.execute("DELETE FROM meetings_fts WHERE rowid = ?", [rowid])?;
             txn.execute(
                 "INSERT INTO meetings_fts (rowid, title, body) VALUES (?, ?, ?)",
-                params![rowid, title, body],
+                params![
+                    rowid,
+                    crate::retrieval::search_tokens(&title).join(" "),
+                    crate::retrieval::search_tokens(&body).join(" "),
+                ],
             )?;
 
             // Replace attendees.
@@ -1021,6 +1020,11 @@ impl SearchIndex {
         if query.trim().is_empty() {
             return search_list(&conn, filters, limit);
         }
+        if !crate::retrieval::query_is_bounded(query) {
+            return Err(SearchIndexError::Io(
+                "search query exceeds 2048 UTF-16 units".into(),
+            ));
+        }
         let sanitized = sanitize_fts_query(query);
         if sanitized.is_empty() {
             // All-punctuation input. Caller treats this as "no match" rather than error.
@@ -1179,11 +1183,7 @@ fn restricted_live_result(
     if frontmatter.sensitivity != Some(Sensitivity::Restricted) {
         return None;
     }
-    let content_type = match frontmatter.r#type {
-        ContentType::Meeting => "meeting",
-        ContentType::Memo => "memo",
-        ContentType::Dictation => "dictation",
-    };
+    let content_type = frontmatter.r#type.as_str();
     if filters
         .content_type
         .as_deref()
@@ -1226,6 +1226,7 @@ fn restricted_live_result(
         content_type: content_type.into(),
         snippet: String::new(),
         matched_via_alias: None,
+        evidence: None,
     })
 }
 
@@ -1278,6 +1279,7 @@ fn search_list(
                 content_type: r.get(3)?,
                 snippet: String::new(),
                 matched_via_alias: None,
+                evidence: None,
             })
         })?
         .filter_map(|r| r.ok())
@@ -1344,6 +1346,7 @@ fn search_match(
                 content_type: r.get(3)?,
                 snippet: snip,
                 matched_via_alias: None,
+                evidence: None,
             })
         })?
         .filter_map(|r| r.ok())
@@ -1446,7 +1449,7 @@ mod tests {
         for (query, body) in [
             (
                 "pricing roadmap",
-                "The roadmap comes first. Much later we revisited prices.",
+                "The roadmap comes first. Much later we revisited pricing.",
             ),
             (
                 "pricing/roadm",
@@ -1456,7 +1459,10 @@ mod tests {
                 "café résu",
                 "The cafe discussion included detailed resumes.",
             ),
-            ("running", "The team runs the migration every morning."),
+            (
+                "running",
+                "The team is running the migration every morning.",
+            ),
         ] {
             assert!(
                 live_fts_match_snippet("Quarterly plan", body, query).is_some(),
@@ -1481,6 +1487,53 @@ mod tests {
             )
             .unwrap();
         (meetings, fts)
+    }
+
+    #[test]
+    fn production_search_accepts_an_ordinary_state_root_without_private_stores() {
+        let _guard = crate::test_home_env_lock();
+        let (dir, config) = temp_config();
+        let home = dir.path().join("home");
+        let state = home.join(".minutes");
+        std::fs::create_dir_all(&state).unwrap();
+        // Restore the process-wide settings even if a regression panics.
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in &self.0 {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+        let _restore = RestoreEnv(
+            ["HOME", "MINUTES_HOME"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect(),
+        );
+        std::env::set_var("HOME", &home);
+        std::env::set_var("MINUTES_HOME", &state);
+        write_meeting(
+            &config.output_dir,
+            "fresh",
+            "Fresh installation",
+            "searchcanary",
+        );
+
+        let index = SearchIndex::open(&config).unwrap();
+        index.sync(&config, SyncMode::Auto).unwrap();
+        let matches = index
+            .search("searchcanary", &SearchFilters::default(), None)
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].title, "Fresh installation");
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 0);
+        #[cfg(windows)]
+        assert!(crate::policy_fs::BoundRecoveryDirectory::prepare_owner_private(&state).is_err());
     }
 
     #[test]

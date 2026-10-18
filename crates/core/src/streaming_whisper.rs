@@ -1,6 +1,6 @@
-use crate::transcribe::streaming_whisper_params;
+use crate::transcribe::{set_abort_callback, streaming_whisper_params};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use whisper_rs::WhisperContext;
@@ -43,6 +43,18 @@ use whisper_rs::WhisperContext;
 //     continues uninterrupted on the main thread.
 // ──────────────────────────────────────────────────────────────
 
+/// Whisper passes that returned an error since the last reset. Read by the
+/// recording sidecar's session summary; reset when a sidecar starts.
+static WHISPER_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn failure_count() -> u64 {
+    WHISPER_FAILURES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn reset_failure_count() {
+    WHISPER_FAILURES.store(0, Ordering::Relaxed);
+}
+
 /// How often to run partial transcription (in audio samples at 16kHz).
 const PARTIAL_INTERVAL_SAMPLES: usize = 16000 * 2; // Every 2 seconds
 
@@ -78,6 +90,7 @@ pub struct StreamingWhisper {
     n_threads: i32,
     /// Language hint (None = auto-detect).
     language: Option<String>,
+    recognition_hint: String,
     /// Whether we've created a state before (suppress init noise on subsequent calls).
     has_created_state: bool,
     /// Cap on partial-transcription window length, in samples at 16kHz. Past
@@ -90,10 +103,29 @@ pub struct StreamingWhisper {
     abort_signal: Option<Arc<AtomicBool>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static RECOGNITION_PASSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn recognition_passes_for_test() -> u64 {
+    RECOGNITION_PASSES.with(|count| count.get())
+}
+
 impl StreamingWhisper {
     /// Create a new streaming transcriber with the default partial cap (30s).
     pub fn new(language: Option<String>) -> Self {
         Self::with_partial_max_secs(language, DEFAULT_PARTIAL_MAX_SECS)
+    }
+
+    /// Accumulate an already-complete utterance without running partial passes.
+    /// Recording workers only need `finalize()`. Feeding their buffered audio
+    /// through `feed()` would repeatedly recognize partials that nobody uses.
+    pub(crate) fn from_complete_audio(language: Option<String>, samples: &[f32]) -> Self {
+        let mut transcriber = Self::new(language);
+        transcriber.audio_buffer.extend_from_slice(samples);
+        transcriber
     }
 
     /// Create a new streaming transcriber with a custom partial-cap limit
@@ -116,6 +148,7 @@ impl StreamingWhisper {
             last_partial: String::new(),
             n_threads: num_cpus(),
             language,
+            recognition_hint: String::new(),
             has_created_state: false,
             partial_max_samples,
             abort_signal: None,
@@ -129,6 +162,11 @@ impl StreamingWhisper {
     /// yield immediately to recording shutdown.
     pub fn with_abort_signal(mut self, abort_signal: Arc<AtomicBool>) -> Self {
         self.abort_signal = Some(abort_signal);
+        self
+    }
+
+    pub fn with_recognition_hint(mut self, hint: String) -> Self {
+        self.recognition_hint = hint;
         self
     }
 
@@ -186,6 +224,8 @@ impl StreamingWhisper {
 
     /// Run whisper on the full accumulated buffer.
     fn transcribe(&mut self, ctx: &WhisperContext, is_final: bool) -> Option<StreamingResult> {
+        #[cfg(test)]
+        RECOGNITION_PASSES.with(|count| count.set(count.get() + 1));
         // Suppress whisper's noisy C-level stderr output on subsequent state creations.
         // The first call prints GPU/backend info (useful); subsequent calls repeat it (noise).
         let mut state = if self.has_created_state {
@@ -200,8 +240,19 @@ impl StreamingWhisper {
         let mut params = streaming_whisper_params();
         params.set_n_threads(self.n_threads);
         params.set_language(self.language.as_deref());
-        if let Some(abort_signal) = self.abort_signal.as_ref().map(Arc::clone) {
-            params.set_abort_callback_safe(move || abort_signal.load(Ordering::Relaxed));
+        if !self.recognition_hint.is_empty() {
+            params.set_initial_prompt(&self.recognition_hint);
+        }
+        // Stack-owned so it outlives `state.full`; whisper-rs's closure
+        // setter is unsound for capturing closures (see `set_abort_callback`).
+        let abort_signal = self.abort_signal.clone();
+        let abort_when_stopped = move || {
+            abort_signal
+                .as_ref()
+                .is_some_and(|signal| signal.load(Ordering::Relaxed))
+        };
+        if self.abort_signal.is_some() {
+            set_abort_callback(&mut params, &abort_when_stopped);
         }
 
         let start = std::time::Instant::now();
@@ -210,6 +261,26 @@ impl StreamingWhisper {
         let transcription_audio = &self.audio_buffer[window_start..];
         if let Err(e) = state.full(params, transcription_audio) {
             tracing::warn!("streaming whisper failed: {}", e);
+            // The desktop app has no tracing subscriber; persist a bounded
+            // trail so a whisper pass that fails on every utterance is
+            // visible in minutes.log rather than only as a thin transcript.
+            let failures = WHISPER_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if crate::live_transcript::should_persist_repeat(failures) {
+                crate::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "warn",
+                    "step": "streaming_whisper_failed",
+                    "file": "",
+                    "message": "streaming whisper pass failed; the utterance produced no text",
+                    "extra": {
+                        "error": e.to_string(),
+                        "failures": failures,
+                        "is_final": is_final,
+                        "audio_secs": format!("{:.1}", transcription_audio.len() as f64 / 16000.0),
+                    },
+                }))
+                .ok();
+            }
             return None;
         }
 
@@ -354,6 +425,18 @@ mod tests {
 
         assert_eq!(sw.transcription_window_start(false), 15 * 16000);
         assert_eq!(sw.transcription_window_start(true), 0);
+    }
+
+    #[test]
+    fn complete_audio_preserves_the_full_utterance_without_scheduling_partials() {
+        let samples: Vec<f32> = (0..45 * 16000).map(|n| n as f32).collect();
+        let transcriber = StreamingWhisper::from_complete_audio(None, &samples);
+
+        assert_eq!(transcriber.duration_secs(), 45.0);
+        assert_eq!(transcriber.audio_buffer, samples);
+        assert_eq!(transcriber.samples_since_partial, 0);
+        assert_eq!(transcriber.transcription_window_start(true), 0);
+        assert!(!transcriber.has_created_state);
     }
 
     #[test]

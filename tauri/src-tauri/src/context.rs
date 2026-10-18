@@ -4,7 +4,14 @@ use minutes_core::search::{self, SearchFilters};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "assistant_skills.rs"]
+pub(crate) mod assistant_skills;
+
 pub const ACTIVE_MEETING_FILE: &str = "CURRENT_MEETING.md";
+/// General meeting-directory context for a Terminal session that opened
+/// without a selected meeting. Written only after the provider is verified
+/// and the user submits a real question, like `CURRENT_MEETING.md`.
+pub const ASSISTANT_CONTEXT_FILE: &str = "ASSISTANT_CONTEXT.md";
 pub const ACTIVE_ARTIFACT_FILE: &str = "CURRENT_ARTIFACT.md";
 pub const ASSISTANT_INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 pub(crate) const LIVE_TRANSCRIPT_GUIDANCE: &str = include_str!("live_transcript_guidance.md");
@@ -176,6 +183,8 @@ fn sync_assistant_skill_mirrors(workspace: &Path) -> Result<(), String> {
     replace_dir_contents(&opencode_root.join("skills"), &bundle.opencode_skills)?;
     replace_dir_contents(&opencode_root.join("commands"), &bundle.opencode_commands)?;
 
+    assistant_skills::sync_claude_skills(workspace, &bundle.agents_skills.join("minutes"))?;
+
     Ok(())
 }
 
@@ -221,8 +230,8 @@ pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
     // trees so Recall sees the same Minutes lifecycle skills as the repo.
     sync_assistant_skill_mirrors(&workspace)?;
 
-    // .claude is still user-owned. We keep the existing symlink layout
-    // intact and only refresh the app-managed .agents/.opencode mirrors.
+    // .claude stays user-owned, including legacy global-config symlinks.
+    // Claude loads the managed skill pack via --add-dir at terminal spawn.
 
     // git init on the assistant workspace (idempotent) so agent CLIs discover
     // repo-scoped instruction files like CLAUDE.md and AGENTS.md.
@@ -251,11 +260,7 @@ pub fn generate_meeting_context(meeting_path: &Path, config: &Config) -> Result<
     let fm: Frontmatter =
         serde_yaml::from_str(fm_str).map_err(|e| format!("Bad frontmatter: {}", e))?;
 
-    let content_type = match fm.r#type {
-        minutes_core::markdown::ContentType::Meeting => "meeting",
-        minutes_core::markdown::ContentType::Memo => "memo",
-        minutes_core::markdown::ContentType::Dictation => "dictation",
-    };
+    let content_type = fm.r#type.as_str();
 
     let mut md = String::with_capacity(4096);
     md.push_str("# Meeting Context\n\n");
@@ -579,8 +584,11 @@ pub fn write_deferred_assistant_context(workspace: &Path) -> Result<(), String> 
 You are running inside Minutes Recall. No meeting context has been loaded yet.\n\n\
 ## Deferred meeting context\n\n\
 Before answering every user question, check whether `{ACTIVE_MEETING_FILE}` exists in this directory. \
-If it exists, read it first and treat it as the current stored meeting focus. If it does not exist and \
-there is no `Live Transcript Active` section below, explain that Minutes has not shared stored meeting \
+If it exists, read it first and treat it as the current stored meeting focus. If it does not exist, check \
+whether `{ASSISTANT_CONTEXT_FILE}` exists: that is the general meeting-directory context Minutes writes after \
+verifying the provider, so read it and work in general assistant mode across all meetings without \
+announcing that no meeting is selected. Only when neither file exists, there is no `Live Transcript Active` \
+section below, and the question depends on stored meetings, say that Minutes has not shared meeting \
 context with this session yet.\n\n\
 `{ACTIVE_MEETING_FILE}` gates stored meeting context, not an active live transcript. If a \
 `Live Transcript Active` section exists and the user explicitly asks about the current call, use one \
@@ -639,6 +647,23 @@ pub fn write_active_artifact_context(workspace: &Path, artifact_path: &Path) -> 
     write_atomic(&workspace.join(ACTIVE_ARTIFACT_FILE), &md)
 }
 
+/// Write the general meeting-directory context for a Terminal session that has
+/// no selected meeting. Same gate as `write_active_meeting_context`: the caller
+/// has verified the provider and the user has submitted a real question.
+pub fn write_general_assistant_context(workspace: &Path, config: &Config) -> Result<(), String> {
+    let md = generate_assistant_context(config)?;
+    write_atomic(&workspace.join(ASSISTANT_CONTEXT_FILE), &md)
+}
+
+pub fn clear_general_assistant_context(workspace: &Path) -> Result<(), String> {
+    let path = workspace.join(ASSISTANT_CONTEXT_FILE);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to clear general assistant context: {}", e))?;
+    }
+    Ok(())
+}
+
 pub fn clear_active_meeting_context(workspace: &Path) -> Result<(), String> {
     let active_path = workspace.join(ACTIVE_MEETING_FILE);
     if active_path.exists() {
@@ -661,6 +686,7 @@ pub fn clear_active_artifact_context(workspace: &Path) -> Result<(), String> {
 pub fn cleanup_stale_workspaces() {
     let workspace = workspace_dir();
     clear_active_meeting_context(&workspace).ok();
+    clear_general_assistant_context(&workspace).ok();
     clear_active_artifact_context(&workspace).ok();
 
     if let Ok(entries) = std::fs::read_dir(&workspace) {
@@ -756,6 +782,8 @@ mod tests {
             let content = std::fs::read_to_string(workspace.path().join(file_name)).unwrap();
             assert!(content.contains(ACTIVE_MEETING_FILE));
             assert!(content.contains("No meeting context has been loaded yet"));
+            assert!(content.contains(ASSISTANT_CONTEXT_FILE));
+            assert!(content.contains("without announcing that no meeting is selected"));
             assert!(content.contains("gates stored meeting context, not an active live transcript"));
             assert!(content.contains("it does not mean the live transcript is unavailable"));
             assert!(content.contains("/login"));
@@ -763,6 +791,23 @@ mod tests {
             assert!(!content.contains("## Recent Meetings"));
             assert!(!content.contains("## Open Action Items"));
         }
+    }
+
+    #[test]
+    fn general_assistant_context_is_written_on_request_and_cleared() {
+        let (_corpus, config) = test_config();
+        let workspace = tempfile::tempdir().unwrap();
+
+        write_general_assistant_context(workspace.path(), &config).unwrap();
+        let path = workspace.path().join(ASSISTANT_CONTEXT_FILE);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("## Meeting Directory"));
+        assert!(content.contains(&config.output_dir.display().to_string()));
+
+        clear_general_assistant_context(workspace.path()).unwrap();
+        assert!(!path.exists());
+        // Clearing an absent file is not an error.
+        clear_general_assistant_context(workspace.path()).unwrap();
     }
 
     #[test]
@@ -885,5 +930,13 @@ mod tests {
         assert!(workspace
             .join(".opencode/commands/minutes-prep.md")
             .exists());
+        assert_eq!(
+            fs::read_to_string(
+                assistant_skills::claude_skill_directory(&workspace)
+                    .join(".claude/skills/minutes-prep/SKILL.md")
+            )
+            .unwrap(),
+            "codex prep"
+        );
     }
 }

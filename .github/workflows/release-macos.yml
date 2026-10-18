@@ -114,7 +114,7 @@ jobs:
           key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+        run: .github/scripts/install-tauri-cli.sh "${TAURI_CLI_VERSION}"
 
       - name: Validate signing and notarization secrets
         env:

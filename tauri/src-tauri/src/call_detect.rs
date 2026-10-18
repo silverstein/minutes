@@ -2,7 +2,11 @@
 //!
 //! Detection strategy: poll for known call-app processes while any audio input
 //! is actively capturing. Two signals together (process running + mic active)
-//! give high confidence with minimal false positives.
+//! give high confidence with minimal false positives. When CoreAudio can
+//! attribute the capture to a process, the mic signal is narrowed to the
+//! process family of the app (native binary or browser) being checked, so a
+//! dictation tool holding the mic does not validate an idle call app or a
+//! stale meeting tab (#244).
 //!
 //! Currently macOS-only. The detection functions (`running_process_names`,
 //! `is_mic_in_use`) use CoreAudio and `ps`. Windows/Linux would need
@@ -14,7 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use minutes_core::config::{CallDetectionConfig, Config};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+#[path = "call_auto_record.rs"]
+mod auto_record;
 
 fn log_call_detect_event(
     level: &str,
@@ -41,6 +48,7 @@ fn log_call_detect_event(
 /// State for the call detection background loop.
 pub struct CallDetector {
     config: Mutex<CallDetectionConfig>,
+    input_cache: Mutex<Option<CachedAudioInput>>,
     /// Last observed active call session. We still re-arm on call end/start,
     /// but we also re-notify the same active app after a short interval so
     /// back-to-back meetings and sticky Zoom states don't go silent forever.
@@ -54,12 +62,17 @@ pub struct CallDetector {
     browser_probe_backoff_until: Mutex<HashMap<String, Instant>>,
     /// Recent successful browser-based Meet detection. Prevents fast native-app
     /// polling from immediately relabeling the same active session as Slack.
-    recent_google_meet_until: Mutex<Option<Instant>>,
+    /// Remembers which browser produced the hit so the window only counts
+    /// while that browser holds input (see `browser_hit_has_active_input`).
+    recent_google_meet_until: Mutex<Option<BrowserSticky>>,
     /// Recent successful browser-based Teams detection. Same role as the Meet
     /// sticky field but for Microsoft Teams in a browser tab.
-    recent_teams_web_until: Mutex<Option<Instant>>,
+    recent_teams_web_until: Mutex<Option<BrowserSticky>>,
     /// Log mic-gate transitions once instead of spamming every poll.
     last_mic_live: Mutex<Option<bool>>,
+    /// Set once a poll is skipped because Live or dictation holds the mic
+    /// without input attribution, so the skip is logged once per stretch.
+    self_audio_skip_logged: AtomicBool,
 }
 
 /// Payload emitted to the frontend when a call is detected.
@@ -143,6 +156,43 @@ enum NoCallDecision {
     ClearIfStale,
 }
 
+/// What one detector poll does while Minutes itself may be holding audio.
+#[derive(Debug, PartialEq, Eq)]
+enum MinutesAudioPollPolicy {
+    /// Run normal detection, clearing and reminders.
+    Detect,
+    /// A recording owns the session: skip detection for this poll.
+    SkipForRecording,
+    /// Live transcript or dictation is holding the mic and per-process input
+    /// attribution is unavailable, so a hit could be Minutes' own audio. Skip
+    /// new detections but keep any call that was already detected: Live and
+    /// dictation capture only the microphone, so the user still needs the
+    /// call banner to record the other side (#1110).
+    SkipKeepingActiveCall,
+}
+
+fn decide_minutes_audio_poll_policy(
+    is_recording: bool,
+    minutes_audio_active: bool,
+    started_by_call_detect: bool,
+    stop_when_call_ends: bool,
+    input_attribution_available: bool,
+) -> MinutesAudioPollPolicy {
+    if is_recording {
+        if started_by_call_detect && stop_when_call_ends {
+            return MinutesAudioPollPolicy::Detect;
+        }
+        return MinutesAudioPollPolicy::SkipForRecording;
+    }
+    if minutes_audio_active && !input_attribution_available {
+        return MinutesAudioPollPolicy::SkipKeepingActiveCall;
+    }
+    // With per-process attribution, browser and native hits require the call
+    // app's own process family to hold input (#244, 1052ed06), so Minutes'
+    // own Live or dictation stream cannot fabricate a call.
+    MinutesAudioPollPolicy::Detect
+}
+
 fn decide_no_call_action(
     is_recording: bool,
     started_by_call_detect: bool,
@@ -201,19 +251,36 @@ fn detected_for(provider: MeetingProvider) -> DetectActiveCallResult {
     }
 }
 
-fn remember_sticky(sticky: &Mutex<Option<Instant>>, ttl: Duration) {
-    *sticky.lock().unwrap() = Some(Instant::now() + ttl);
+/// A browser-tab meeting hit that is still trusted between two probes.
+#[derive(Debug, Clone, Copy)]
+struct BrowserSticky {
+    until: Instant,
+    /// Browser whose tab produced the hit. The window only counts while this
+    /// browser, not any process, holds input (`browser_hit_has_active_input`).
+    browser: &'static BrowserSpec,
 }
 
-fn sticky_alive(sticky: &Mutex<Option<Instant>>) -> bool {
+fn remember_sticky(
+    sticky: &Mutex<Option<BrowserSticky>>,
+    ttl: Duration,
+    browser: &'static BrowserSpec,
+) {
+    *sticky.lock().unwrap() = Some(BrowserSticky {
+        until: Instant::now() + ttl,
+        browser,
+    });
+}
+
+/// The sticky hit while its window is open; clears the slot once expired.
+fn sticky_alive(sticky: &Mutex<Option<BrowserSticky>>) -> Option<BrowserSticky> {
     let mut guard = sticky.lock().unwrap();
     match *guard {
-        Some(until) if Instant::now() < until => true,
+        Some(hit) if Instant::now() < hit.until => Some(hit),
         Some(_) => {
             *guard = None;
-            false
+            None
         }
-        None => false,
+        None => None,
     }
 }
 
@@ -229,6 +296,12 @@ struct RunningProcess {
 }
 
 fn process_name_matches_config_app(config_app: &str, process_name: &str) -> bool {
+    // Teams changed its executable name; preserve existing configurations.
+    if minutes_core::config::auto_record_app_id(config_app) == Some("MSTeams")
+        && minutes_core::config::auto_record_app_id(process_name) == Some("MSTeams")
+    {
+        return true;
+    }
     let config_lower = config_app.to_lowercase();
     let process_lower = process_name.to_lowercase();
     // Exact match (most common) or the config name is a prefix/suffix of
@@ -237,6 +310,20 @@ fn process_name_matches_config_app(config_app: &str, process_name: &str) -> bool
     process_lower == config_lower
         || process_lower.starts_with(&format!("{}.", config_lower))
         || process_lower.starts_with(&format!("{} ", config_lower))
+}
+
+/// Add every descendant (through ppid, transitively) of the pids already in
+/// `family`.
+fn expand_process_family(family: &mut HashSet<u32>, processes: &[RunningProcess]) {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for process in processes {
+            if family.contains(&process.ppid) && family.insert(process.pid) {
+                changed = true;
+            }
+        }
+    }
 }
 
 fn native_app_candidate_process_pids(
@@ -248,17 +335,7 @@ fn native_app_candidate_process_pids(
         .filter(|process| process_name_matches_config_app(config_app, &process.name))
         .map(|process| process.pid)
         .collect();
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for process in processes {
-            if candidates.contains(&process.ppid) && candidates.insert(process.pid) {
-                changed = true;
-            }
-        }
-    }
-
+    expand_process_family(&mut candidates, processes);
     candidates
 }
 
@@ -273,9 +350,53 @@ fn native_app_has_active_input(
         .any(|pid| active_input_pids.contains(pid))
 }
 
+/// PIDs of the browser process family rooted at the processes whose binary
+/// name is exactly `root`, expanded through pid/ppid. Exact on purpose: the
+/// prefix matcher used for native apps would let "Google Chrome" absorb
+/// "Google Chrome Canary" and its whole tree, so Canary holding the mic would
+/// validate a stale Chrome sticky.
+fn browser_family_pids(root: &str, processes: &[RunningProcess]) -> HashSet<u32> {
+    let mut family: HashSet<u32> = processes
+        .iter()
+        .filter(|process| process.name.eq_ignore_ascii_case(root))
+        .map(|process| process.pid)
+        .collect();
+    expand_process_family(&mut family, processes);
+    family
+}
+
+/// Whether a browser-tab meeting hit (fresh probe result or open sticky
+/// window) is backed by input from the browser that produced it.
+///
+/// Attribution-gated when the browser has a dogfooded process-family root and
+/// per-process input attribution is available: some pid in that family must
+/// be capturing. Otherwise any live mic passes, which keeps the pre-#244
+/// behavior for Safari and for roots not dogfooded yet.
+fn browser_hit_has_active_input(
+    browser: &BrowserSpec,
+    mic_live: bool,
+    processes: Option<&[RunningProcess]>,
+    active_input_pids: Option<&HashSet<u32>>,
+) -> bool {
+    match (browser.attribution, processes, active_input_pids) {
+        (BrowserAttribution::ProcessFamily { root }, Some(processes), Some(active_input_pids)) => {
+            browser_family_pids(root, processes)
+                .iter()
+                .any(|pid| active_input_pids.contains(pid))
+        }
+        _ => mic_live,
+    }
+}
+
 enum BrowserMeetProbe {
-    Detected { provider: MeetingProvider },
-    PermissionDenied { browser_app: String },
+    Detected {
+        provider: MeetingProvider,
+        /// Browser whose tab matched; the hit is gated on its input.
+        browser: &'static BrowserSpec,
+    },
+    PermissionDenied {
+        browser_app: String,
+    },
     Error,
     NoBrowserProcesses,
     NoMatch,
@@ -291,13 +412,24 @@ impl CallDetector {
     pub fn new(config: CallDetectionConfig) -> Self {
         Self {
             config: Mutex::new(config),
+            input_cache: Mutex::new(None),
             active_call: Mutex::new(None),
             browser_probe_next_allowed_at: Mutex::new(None),
             browser_probe_backoff_until: Mutex::new(HashMap::new()),
             recent_google_meet_until: Mutex::new(None),
             recent_teams_web_until: Mutex::new(None),
             last_mic_live: Mutex::new(None),
+            self_audio_skip_logged: AtomicBool::new(false),
         }
+    }
+
+    /// Returns whether this stretch of self-audio skips was already logged.
+    fn note_self_audio_skip(&self) -> bool {
+        self.self_audio_skip_logged.swap(true, Ordering::Relaxed)
+    }
+
+    fn reset_self_audio_skip(&self) {
+        self.self_audio_skip_logged.store(false, Ordering::Relaxed);
     }
 
     fn current_config(&self) -> CallDetectionConfig {
@@ -340,12 +472,16 @@ impl CallDetector {
         );
 
         std::thread::spawn(move || {
+            let mut input_probe = AudioInputProbe::default();
             // Initial delay to let the app finish launching
             std::thread::sleep(Duration::from_secs(5));
 
+            let mut automatic_starts = auto_record::AutomaticStarts::default();
             loop {
                 let config = self.reload_config();
                 if !config.enabled {
+                    *self.input_cache.lock().unwrap() = None;
+                    input_probe.client = None;
                     if let Some(previous) = self.clear_active_call() {
                         log_call_detect_event(
                             "info",
@@ -371,34 +507,124 @@ impl CallDetector {
                     .recording_started_by_call_detect
                     .load(Ordering::Relaxed);
 
-                // Default behavior preserved: when something else is recording
-                // (manual `minutes record`, hotkey, dictation, live transcript), skip
-                // detection entirely. Only observe calls when the detector's own banner
-                // launched this recording AND the user opted into auto-stop.
-                if (is_recording || minutes_audio_active)
+                // When a recording owns the session (manual `minutes record`,
+                // hotkey), skip detection. Only observe calls when the
+                // detector's own banner launched this recording AND the user
+                // opted into auto-stop.
+                //
+                // Live transcript and dictation are different: they capture
+                // only the microphone. Clearing an already-detected call when
+                // they start (as 1a3c3d1e did) hid the only path that records
+                // the other side (#1110). Keep detecting when input attribution
+                // can rule out Minutes' own audio, and never drop a call that
+                // was detected before the session started.
+                // With auto-start disabled, skip owned recordings before any
+                // CoreAudio work. With auto-start enabled, observe calls so a
+                // manual stop cannot immediately re-arm automatic recording.
+                if is_recording
+                    && !config.auto_record
                     && !(started_by_call_detect && config.stop_when_call_ends)
                 {
-                    if minutes_audio_active {
-                        if let Some(previous) = self.clear_active_call() {
+                    continue;
+                }
+                let processes = running_processes();
+                let input = call_input_snapshot(
+                    &config,
+                    &processes,
+                    &mut self.input_cache.lock().unwrap(),
+                    Instant::now(),
+                    |attribution| input_probe.sample(attribution),
+                );
+                let input_attribution_available = input.active_input_pids.is_some();
+                match decide_minutes_audio_poll_policy(
+                    is_recording,
+                    minutes_audio_active,
+                    started_by_call_detect,
+                    config.stop_when_call_ends,
+                    input_attribution_available,
+                ) {
+                    MinutesAudioPollPolicy::Detect => {}
+                    MinutesAudioPollPolicy::SkipForRecording => {
+                        // Remember calls already covered by a manual recording.
+                        // Stopping that recording must not authorize an auto-start.
+                        if config.auto_record {
+                            match self.detect_active_call(&config, &processes, &input) {
+                                DetectActiveCallResult::Detected { process_name, .. } => {
+                                    automatic_starts.observe(&process_name, Instant::now(), true);
+                                }
+                                DetectActiveCallResult::None => {
+                                    automatic_starts.observe_no_call(Instant::now())
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                    MinutesAudioPollPolicy::SkipKeepingActiveCall => {
+                        if !self.note_self_audio_skip() {
                             log_call_detect_event(
                                 "info",
-                                "cleared",
+                                "minutes_audio_skip",
                                 None,
-                                Some(&previous),
+                                self.active_call_snapshot()
+                                    .as_ref()
+                                    .map(|(process, _, _)| process.as_str()),
                                 serde_json::json!({
-                                    "reason": "minutes audio session active"
+                                    "reason": "minutes audio active without input attribution; keeping any detected call",
                                 }),
                             );
                         }
+                        continue;
                     }
-                    continue;
                 }
+                self.reset_self_audio_skip();
 
-                match self.detect_active_call(&config) {
+                match self.detect_active_call(&config, &processes, &input) {
                     DetectActiveCallResult::Detected {
                         display_name,
                         process_name,
                     } => {
+                        // One attempt per observed call, including failed or blocked
+                        // starts. Reminders and manual Stop must never restart it.
+                        let should_attempt = automatic_starts.observe(
+                            &process_name,
+                            Instant::now(),
+                            config.auto_record_enabled_for(&process_name),
+                        );
+                        if should_attempt {
+                            let state = app.state::<crate::commands::AppState>();
+                            match crate::commands::start_automatic_call_recording(
+                                app.clone(),
+                                &state,
+                                &process_name,
+                            ) {
+                                Ok(()) => {
+                                    log_call_detect_event(
+                                        "info",
+                                        "auto_record_requested",
+                                        Some(&display_name),
+                                        Some(&process_name),
+                                        serde_json::json!({"source": "native_app_input", "capture": "native_only"}),
+                                    );
+                                    self.note_active_call(&process_name, &display_name);
+                                    continue;
+                                }
+                                Err(reason) => {
+                                    log_call_detect_event(
+                                        "warn",
+                                        "auto_record_skipped",
+                                        Some(&display_name),
+                                        Some(&process_name),
+                                        serde_json::json!({"source": "native_app_input", "reason": reason}),
+                                    );
+                                    crate::commands::show_user_notification(
+                                        &app,
+                                        "Automatic recording did not start",
+                                        &reason,
+                                    );
+                                }
+                            }
+                        }
                         // Call came back (same app): if the previous call
                         // already fired a countdown that the user dismissed
                         // with "Keep recording", clear the latch so a later
@@ -494,6 +720,7 @@ impl CallDetector {
                         );
                     }
                     DetectActiveCallResult::None => {
+                        automatic_starts.observe_no_call(Instant::now());
                         // A countdown already in flight owns the lifecycle.
                         // Without this guard any atomics flip mid-countdown
                         // (recording transiently going false, started_by
@@ -571,6 +798,11 @@ impl CallDetector {
                                             "reason": "no active call detected on current poll"
                                         }),
                                     );
+                                    // The banner is only hidden by user action or
+                                    // `call:ended`; without this a call that ended
+                                    // outside a recording left it (and Go Live's
+                                    // call routing) pointing at a stale call.
+                                    app.emit("call:cleared", ()).ok();
                                 }
                             }
                         }
@@ -738,25 +970,38 @@ impl CallDetector {
     }
 
     /// Check if any configured call app is active.
-    fn detect_active_call(&self, config: &CallDetectionConfig) -> DetectActiveCallResult {
-        let processes = running_processes();
-        let active_input_pids = active_input_process_pids();
-        let mic_live = active_input_pids
-            .as_ref()
-            .map(|pids| !pids.is_empty())
-            .unwrap_or_else(is_mic_in_use);
+    fn detect_active_call(
+        &self,
+        config: &CallDetectionConfig,
+        processes: &[RunningProcess],
+        input: &AudioInputSnapshot,
+    ) -> DetectActiveCallResult {
+        let mic_live = input.mic_live;
+        let active_input_pids = input.active_input_pids.as_ref();
         let mic_just_activated = self.note_mic_state(mic_live);
 
         self.detect_active_call_from_process_snapshot(
             config,
             mic_live,
-            &processes,
-            active_input_pids.as_ref(),
+            processes,
+            active_input_pids,
             mic_just_activated,
             |detector, running, has_google_meet, has_teams_web| {
                 if has_google_meet || has_teams_web {
                     detector.schedule_next_browser_probe();
-                    Some(detector.detect_browser_meeting(running, has_google_meet, has_teams_web))
+                    Some(detector.detect_browser_meeting(
+                        running,
+                        has_google_meet,
+                        has_teams_web,
+                        |browser| {
+                            browser_hit_has_active_input(
+                                browser,
+                                mic_live,
+                                Some(processes),
+                                active_input_pids,
+                            )
+                        },
+                    ))
                 } else {
                     None
                 }
@@ -833,11 +1078,20 @@ impl CallDetector {
             .filter(|app| app.as_str() != "google-meet" && app.as_str() != "teams-web")
             .collect();
 
-        if has_google_meet && mic_live && sticky_alive(&self.recent_google_meet_until) {
+        // A sticky only bridges probes while the browser that produced it is
+        // still the one holding input; a dictation tool grabbing the mic must
+        // not re-arm it (#244). A rejected sticky is left to expire on its own.
+        let sticky_gate = |sticky: &Mutex<Option<BrowserSticky>>| {
+            sticky_alive(sticky).is_some_and(|hit| {
+                browser_hit_has_active_input(hit.browser, mic_live, processes, active_input_pids)
+            })
+        };
+
+        if has_google_meet && sticky_gate(&self.recent_google_meet_until) {
             return detected_for(MeetingProvider::GoogleMeet);
         }
 
-        if has_teams_web && mic_live && sticky_alive(&self.recent_teams_web_until) {
+        if has_teams_web && sticky_gate(&self.recent_teams_web_until) {
             return detected_for(MeetingProvider::TeamsWeb);
         }
 
@@ -848,13 +1102,28 @@ impl CallDetector {
         if (has_google_meet || has_teams_web) && (force_browser_probe || self.browser_probe_due()) {
             if let Some(probe) = browser_probe(self, running, has_google_meet, has_teams_web) {
                 match probe {
-                    BrowserMeetProbe::Detected { provider } => {
-                        let sticky = match provider {
-                            MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
-                            MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
-                        };
-                        remember_sticky(sticky, provider.sticky_duration());
-                        return detected_for(provider);
+                    BrowserMeetProbe::Detected { provider, browser } => {
+                        // The production probe already skips browsers without
+                        // attributed input; gating here as well keeps the rule
+                        // in one place for fresh hits and stickies, and is
+                        // what the snapshot tests exercise.
+                        if browser_hit_has_active_input(
+                            browser,
+                            mic_live,
+                            processes,
+                            active_input_pids,
+                        ) {
+                            let sticky = match provider {
+                                MeetingProvider::GoogleMeet => &self.recent_google_meet_until,
+                                MeetingProvider::TeamsWeb => &self.recent_teams_web_until,
+                            };
+                            remember_sticky(sticky, provider.sticky_duration(), browser);
+                            return detected_for(provider);
+                        }
+                        // A matching tab in a browser that is not holding the
+                        // mic (stale tab plus a dictation tool, or another
+                        // browser on the call) is not a call. Fall through to
+                        // the native checks.
                     }
                     BrowserMeetProbe::PermissionDenied { browser_app } => {
                         return DetectActiveCallResult::PermissionWarning { browser_app };
@@ -1029,32 +1298,51 @@ impl CallDetector {
         );
     }
 
+    /// Probe the running browsers' tabs for a meeting. `browser_has_input`
+    /// decides, per browser and before any AppleScript runs, whether that
+    /// browser is a plausible mic holder right now. Browsers failing it are
+    /// skipped, so a stale Meet tab in an idle browser is never queried and
+    /// cannot shadow a live call in the next browser of the table.
     fn detect_browser_meeting(
         &self,
         running: &[String],
         want_meet: bool,
         want_teams: bool,
+        browser_has_input: impl Fn(&BrowserSpec) -> bool,
     ) -> BrowserMeetProbe {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
         let matched = browsers_to_probe(&running_lower);
         let saw_browser = !matched.is_empty();
 
-        for (app_name, kind) in matched {
+        for spec in matched {
+            let app_name = spec.app_name;
             if !self.browser_probe_allowed_for(app_name) {
                 continue;
             }
+            if !browser_has_input(spec) {
+                log_call_detect_event(
+                    "info",
+                    "browser_probe_skipped_no_attributed_input",
+                    None,
+                    Some(app_name),
+                    serde_json::json!({}),
+                );
+                continue;
+            }
 
-            match query_browser_tabs(app_name, kind) {
+            match query_browser_tabs(app_name, spec.kind) {
                 AppleScriptProbe::Tabs(tabs) => {
                     for tab in &tabs {
                         if want_meet && looks_like_google_meet_meeting_url(&tab.url) {
                             return BrowserMeetProbe::Detected {
                                 provider: MeetingProvider::GoogleMeet,
+                                browser: spec,
                             };
                         }
                         if want_teams && looks_like_teams_meeting_tab(&tab.url, &tab.title) {
                             return BrowserMeetProbe::Detected {
                                 provider: MeetingProvider::TeamsWeb,
+                                browser: spec,
                             };
                         }
                     }
@@ -1100,45 +1388,99 @@ fn display_name_for(process: &str) -> String {
     }
 }
 
+/// How active-input attribution applies to one browser of the probe table.
+#[derive(Debug, Clone, Copy)]
+enum BrowserAttribution {
+    /// Input is attributed to the process family rooted at the processes whose
+    /// binary name is exactly `root` (the main browser process), expanded
+    /// through pid/ppid. In the Chromium family the capturing pid is the
+    /// sandboxed Audio Service utility process, a direct child of the main
+    /// process. Only roots dogfooded on a real call are listed this way.
+    ProcessFamily { root: &'static str },
+    /// The hit is trusted whenever any process holds the mic. Used for Safari,
+    /// whose WebContent and GPU processes are reparented to launchd so
+    /// pid/ppid cannot attribute them without private SPI, and for Chromium
+    /// roots that have not been dogfooded yet.
+    GenericGate,
+}
+
+/// One row of the browser probe table.
+#[derive(Debug)]
+struct BrowserSpec {
+    /// Lowercased fragment matched against running process names.
+    fragment: &'static str,
+    /// AppleScript application name, also the key of the probe backoff map.
+    app_name: &'static str,
+    kind: BrowserKind,
+    /// Require a full process-name match instead of a substring hit. The probe
+    /// launches the app when it is not already running, so a substring hit on
+    /// an unrelated background process would open a browser the user never
+    /// started.
+    exact: bool,
+    attribution: BrowserAttribution,
+}
+
+const BROWSERS: &[BrowserSpec] = &[
+    BrowserSpec {
+        fragment: "google chrome",
+        app_name: "Google Chrome",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::ProcessFamily {
+            root: "Google Chrome",
+        },
+    },
+    // Canary, Chromium and Arc stay on the generic gate until each root has
+    // been dogfooded on a real call (#244). Enabling one is a table edit plus
+    // a snapshot test.
+    BrowserSpec {
+        fragment: "chrome canary",
+        app_name: "Google Chrome Canary",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    BrowserSpec {
+        fragment: "chromium",
+        app_name: "Chromium",
+        kind: BrowserKind::ChromeLike,
+        exact: false,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    // Arc's binary is exactly "Arc"; substring match would catch
+    // searchpartyd / searchpartyuseragent / TrialArchivingService.
+    BrowserSpec {
+        fragment: "arc",
+        app_name: "Arc",
+        kind: BrowserKind::ChromeLike,
+        exact: true,
+        attribution: BrowserAttribution::GenericGate,
+    },
+    // Safari's binary is exactly "Safari"; substring match would catch
+    // always-running system agents (SafariBookmarksSyncAgent,
+    // SafariLaunchAgent, com.apple.Safari.History, ...), so the probe
+    // would launch Safari even when the user never opened it.
+    BrowserSpec {
+        fragment: "safari",
+        app_name: "Safari",
+        kind: BrowserKind::Safari,
+        exact: true,
+        attribution: BrowserAttribution::GenericGate,
+    },
+];
+
 /// Select the browsers whose tabs the AppleScript meeting probe may inspect,
-/// given a lowercased snapshot of running process names. Entries flagged
-/// exact must match a process name in full: the probe launches the app when
-/// it is not already running, so a substring hit on an unrelated background
-/// process would open a browser the user never started.
-fn browsers_to_probe(running_lower: &[String]) -> Vec<(&'static str, BrowserKind)> {
-    const BROWSERS: &[(&str, &str, BrowserKind, bool)] = &[
-        (
-            "google chrome",
-            "Google Chrome",
-            BrowserKind::ChromeLike,
-            false,
-        ),
-        (
-            "chrome canary",
-            "Google Chrome Canary",
-            BrowserKind::ChromeLike,
-            false,
-        ),
-        ("chromium", "Chromium", BrowserKind::ChromeLike, false),
-        // Arc's binary is exactly "Arc"; substring match would catch
-        // searchpartyd / searchpartyuseragent / TrialArchivingService.
-        ("arc", "Arc", BrowserKind::ChromeLike, true),
-        // Safari's binary is exactly "Safari"; substring match would catch
-        // always-running system agents (SafariBookmarksSyncAgent,
-        // SafariLaunchAgent, com.apple.Safari.History, ...), so the probe
-        // would launch Safari even when the user never opened it.
-        ("safari", "Safari", BrowserKind::Safari, true),
-    ];
+/// given a lowercased snapshot of running process names.
+fn browsers_to_probe(running_lower: &[String]) -> Vec<&'static BrowserSpec> {
     BROWSERS
         .iter()
-        .filter(|(fragment, _, _, exact)| {
-            if *exact {
-                running_lower.iter().any(|p| p == fragment)
+        .filter(|spec| {
+            if spec.exact {
+                running_lower.iter().any(|p| p == spec.fragment)
             } else {
-                running_lower.iter().any(|p| p.contains(fragment))
+                running_lower.iter().any(|p| p.contains(spec.fragment))
             }
         })
-        .map(|(_, app_name, kind, _)| (*app_name, *kind))
         .collect()
 }
 
@@ -1499,58 +1841,213 @@ fn process_snapshots_from_ps_output(text: &str) -> Vec<RunningProcess> {
         .collect()
 }
 
-/// Check if any audio input is currently being used.
-///
-/// Uses a pre-compiled Swift helper that queries CoreAudio process input
-/// activity and falls back to scanning input-capable devices. This catches
-/// call apps that capture from a non-default input route.
-///
-/// Falls back to an inline `swift` invocation if the helper binary is missing.
-fn is_mic_in_use() -> bool {
-    // Try the pre-compiled helper first (fast: ~5ms)
-    let helper = find_mic_check_binary();
-    if let Some(path) = &helper {
-        if let Ok(out) = std::process::Command::new(path).output() {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return text == "1";
-            }
+/// Device state plus bounded attribution, shared by self-audio and detection.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioInputSnapshot {
+    mic_live: bool,
+    device_active: Option<bool>,
+    active_input_pids: Option<HashSet<u32>>,
+}
+
+impl AudioInputSnapshot {
+    fn inactive() -> Self {
+        Self {
+            mic_live: false,
+            device_active: Some(false),
+            // No candidate app needs attribution. This also lets a vanished
+            // call clear normally while Minutes is holding the microphone.
+            active_input_pids: Some(HashSet::new()),
         }
-    }
-
-    // Fallback: inline swift (slower: ~200ms, but always works)
-    let output = std::process::Command::new("swift")
-        .arg("-e")
-        .arg(include_str!("mic_check.swift"))
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() == "1",
-        _ => false,
     }
 }
 
-fn active_input_process_pids() -> Option<HashSet<u32>> {
-    let helper = find_mic_check_binary()?;
-    let out = std::process::Command::new(helper)
-        .arg("--active-input-pids")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+// Attribution can provoke TCC checks for every CoreAudio process object.
+// Keep device checks on the configured cadence, but bound that expensive
+// query to once per five seconds for an unchanged app process family.
+const INPUT_ATTRIBUTION_INTERVAL: Duration = Duration::from_secs(5);
+
+struct CachedAudioInput {
+    candidates: Vec<RunningProcess>,
+    sampled_at: Instant,
+    input: AudioInputSnapshot,
+}
+
+fn call_candidate_processes(
+    config: &CallDetectionConfig,
+    processes: &[RunningProcess],
+) -> Vec<RunningProcess> {
+    let mut pids = HashSet::new();
+    for app in &config.apps {
+        if !matches!(app.as_str(), "google-meet" | "teams-web") {
+            pids.extend(native_app_candidate_process_pids(app, processes));
+        }
+    }
+    if config
+        .apps
+        .iter()
+        .any(|app| matches!(app.as_str(), "google-meet" | "teams-web"))
+    {
+        let lower: Vec<String> = processes.iter().map(|p| p.name.to_lowercase()).collect();
+        for browser in browsers_to_probe(&lower) {
+            pids.extend(native_app_candidate_process_pids(
+                browser.app_name,
+                processes,
+            ));
+        }
+    }
+    let mut candidates: Vec<_> = processes
+        .iter()
+        .filter(|p| pids.contains(&p.pid))
+        .cloned()
+        .collect();
+    candidates.sort_by_key(|p| p.pid);
+    candidates
+}
+
+fn call_input_snapshot(
+    config: &CallDetectionConfig,
+    processes: &[RunningProcess],
+    cache: &mut Option<CachedAudioInput>,
+    now: Instant,
+    probe: impl FnOnce(bool) -> Option<AudioInputSnapshot>,
+) -> AudioInputSnapshot {
+    let candidates = call_candidate_processes(config, processes);
+    if candidates.is_empty() {
+        *cache = None;
+        return AudioInputSnapshot::inactive();
+    }
+    let attribution_due = cache.as_ref().is_none_or(|cached| {
+        cached.candidates != candidates
+            || now.duration_since(cached.sampled_at) >= INPUT_ATTRIBUTION_INTERVAL
+    });
+    let sampled = probe(attribution_due);
+    if attribution_due {
+        let input = sampled.unwrap_or_default();
+        *cache = (input.device_active != Some(false)).then(|| CachedAudioInput {
+            candidates,
+            sampled_at: now,
+            input: input.clone(),
+        });
+        return input;
+    }
+    if sampled
+        .as_ref()
+        .is_some_and(|input| input.device_active == Some(false))
+    {
+        // A definitely idle device ends a call immediately and invalidates
+        // attribution. The next active input gets a fresh sample, even
+        // inside the five-second window.
+        *cache = None;
+        return AudioInputSnapshot::inactive();
+    }
+    // Unknown device state does not invent a call end. Reuse only the
+    // bounded, unchanged-family sample, then retry attribution when due.
+    cache.as_ref().unwrap().input.clone()
+}
+
+/// A persistent CoreAudio client avoids the TCC checks caused by initializing
+/// a fresh helper every second. Requests and replies remain bounded: a stuck
+/// helper is killed after two seconds and a later poll may start a new one.
+#[derive(Default)]
+struct AudioInputProbe {
+    client: Option<AudioInputClient>,
+}
+
+struct AudioInputClient {
+    child: std::process::Child,
+    replies: std::sync::mpsc::Receiver<std::io::Result<String>>,
+}
+
+impl Drop for AudioInputClient {
+    fn drop(&mut self) {
+        // Only the child we spawned is in scope. Close stdin on app exit and
+        // kill on explicit disable, timeout, malformed reply, or transport EOF.
+        self.child.kill().ok();
+        self.child.wait().ok();
+    }
+}
+
+impl AudioInputProbe {
+    fn sample(&mut self, attribution: bool) -> Option<AudioInputSnapshot> {
+        let result = self.request(attribution);
+        if result.is_none() {
+            self.client = None;
+        }
+        result
     }
 
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = HashSet::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    fn request(&mut self, attribution: bool) -> Option<AudioInputSnapshot> {
+        use std::io::Write;
+        if self.client.is_none() {
+            self.client = Some(AudioInputClient::spawn()?);
         }
-        let pid = trimmed.parse().ok()?;
-        pids.insert(pid);
+        let client = self.client.as_mut()?;
+        let stdin = client.child.stdin.as_mut()?;
+        stdin
+            .write_all(if attribution { b"full\n" } else { b"device\n" })
+            .ok()?;
+        stdin.flush().ok()?;
+        let line = client
+            .replies
+            .recv_timeout(Duration::from_secs(2))
+            .ok()?
+            .ok()?;
+        if attribution {
+            serde_json::from_str(&line).ok()
+        } else {
+            match line.trim() {
+                "0" => Some(AudioInputSnapshot::inactive()),
+                "1" => Some(AudioInputSnapshot {
+                    mic_live: true,
+                    device_active: Some(true),
+                    active_input_pids: None,
+                }),
+                // Unknown device state preserves only the bounded previous
+                // attribution sample, and does not restart a healthy helper.
+                "unknown" => Some(AudioInputSnapshot::default()),
+                _ => None,
+            }
+        }
     }
-    Some(pids)
+}
+
+impl AudioInputClient {
+    fn spawn() -> Option<Self> {
+        let mut command = if let Some(helper) = find_mic_check_binary() {
+            std::process::Command::new(helper)
+        } else {
+            let mut command = std::process::Command::new("swift");
+            command
+                .arg("-e")
+                .arg(include_str!("mic_check.swift"))
+                .arg("--");
+            command
+        };
+        command.arg("--serve-call-input");
+        Self::spawn_command(&mut command)
+    }
+
+    fn spawn_command(command: &mut std::process::Command) -> Option<Self> {
+        use std::io::BufRead;
+        use std::process::Stdio;
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let stdout = child.stdout.take()?;
+        let (sender, replies) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Self { child, replies })
+    }
 }
 
 /// Find the pre-compiled mic_check binary.
@@ -1577,15 +2074,66 @@ fn find_mic_check_binary() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn teams_executable_alias_requires_its_own_input_family() {
+        let processes = vec![
+            RunningProcess {
+                pid: 10,
+                ppid: 1,
+                name: "MSTeams".into(),
+            },
+            RunningProcess {
+                pid: 11,
+                ppid: 10,
+                name: "TeamsAudioHelper".into(),
+            },
+            RunningProcess {
+                pid: 20,
+                ppid: 1,
+                name: "Dictation".into(),
+            },
+        ];
+        assert!(native_app_has_active_input(
+            "Microsoft Teams",
+            &processes,
+            &HashSet::from([11])
+        ));
+        assert!(!native_app_has_active_input(
+            "Microsoft Teams",
+            &processes,
+            &HashSet::from([20])
+        ));
+        assert!(!process_name_matches_config_app(
+            "Microsoft Teams",
+            "MSTeams impostor"
+        ));
+    }
+
     fn test_call_detection_config(apps: Vec<String>) -> CallDetectionConfig {
         CallDetectionConfig {
             enabled: true,
             poll_interval_secs: 1,
             cooldown_minutes: 5,
             apps,
+            auto_record: false,
+            auto_record_apps: vec!["MSTeams".into(), "zoom.us".into()],
             stop_when_call_ends: false,
             call_end_stop_countdown_secs: 30,
         }
+    }
+
+    fn browser_spec(app_name: &str) -> &'static BrowserSpec {
+        BROWSERS
+            .iter()
+            .find(|spec| spec.app_name == app_name)
+            .unwrap_or_else(|| panic!("no browser spec named {app_name}"))
+    }
+
+    fn probe_names(running: &[String]) -> Vec<(&'static str, BrowserKind)> {
+        browsers_to_probe(running)
+            .into_iter()
+            .map(|spec| (spec.app_name, spec.kind))
+            .collect()
     }
 
     #[test]
@@ -1608,10 +2156,7 @@ mod tests {
     #[test]
     fn safari_app_process_selects_safari_for_probe() {
         let running = vec!["safari".to_string()];
-        assert_eq!(
-            browsers_to_probe(&running),
-            vec![("Safari", BrowserKind::Safari)]
-        );
+        assert_eq!(probe_names(&running), vec![("Safari", BrowserKind::Safari)]);
     }
 
     #[test]
@@ -1620,7 +2165,7 @@ mod tests {
         // match is intentional for the ChromeLike entries.
         let running = vec!["google chrome helper (renderer)".to_string()];
         assert_eq!(
-            browsers_to_probe(&running),
+            probe_names(&running),
             vec![("Google Chrome", BrowserKind::ChromeLike)]
         );
     }
@@ -1676,7 +2221,7 @@ mod tests {
         let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
         let running: Vec<String> = vec!["Finder".into(), "launchd".into()];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -1755,15 +2300,19 @@ mod tests {
         remember_sticky(
             &detector.recent_google_meet_until,
             MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
-        assert!(sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
 
         {
             let mut sticky = detector.recent_google_meet_until.lock().unwrap();
-            *sticky = Some(Instant::now() - Duration::from_secs(1));
+            *sticky = Some(BrowserSticky {
+                until: Instant::now() - Duration::from_secs(1),
+                browser: browser_spec("Google Chrome"),
+            });
         }
 
-        assert!(!sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_none());
     }
 
     #[test]
@@ -1821,6 +2370,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -1847,6 +2397,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -2107,6 +2658,7 @@ mod tests {
                 assert!(!want_teams);
                 Some(BrowserMeetProbe::Detected {
                     provider: MeetingProvider::GoogleMeet,
+                    browser: browser_spec("Google Chrome"),
                 })
             },
         );
@@ -2125,7 +2677,7 @@ mod tests {
             "TrialArchivingService".into(),
         ];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoBrowserProcesses
         ));
     }
@@ -2141,7 +2693,7 @@ mod tests {
         // accidentally satisfy the check on its own.
         let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
         assert!(matches!(
-            detector.detect_browser_meeting(&running, true, false),
+            detector.detect_browser_meeting(&running, true, false, |_| true),
             BrowserMeetProbe::NoMatch
         ));
     }
@@ -2156,6 +2708,7 @@ mod tests {
         remember_sticky(
             &detector.recent_google_meet_until,
             MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
         let running = ["Safari".into()];
         let config = detector.current_config();
@@ -2176,7 +2729,7 @@ mod tests {
         });
 
         assert!(!native_detected);
-        assert!(sticky_alive(&detector.recent_google_meet_until));
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
     }
 
     #[test]
@@ -2217,10 +2770,312 @@ mod tests {
     }
 
     #[test]
+    fn no_candidate_never_probes_core_audio() {
+        let config = test_call_detection_config(vec!["zoom.us".into(), "google-meet".into()]);
+        for processes in [
+            vec![],
+            vec![process(1, 0, "com.apple.FaceTime.FTConversationService")],
+            vec![process(2, 0, "SafariBookmarksSyncAgent")],
+            vec![process(3, 0, "zoomish"), process(4, 0, "dictation-tool")],
+        ] {
+            let input = call_input_snapshot(&config, &processes, &mut None, Instant::now(), |_| {
+                panic!("unexpected audio probe")
+            });
+            assert!(!input.mic_live);
+            assert_eq!(input.active_input_pids, Some(HashSet::new()));
+        }
+    }
+
+    #[test]
+    fn browsers_only_trigger_audio_probe_for_enabled_web_providers() {
+        let chrome = vec![process(1, 0, "Google Chrome")];
+        let native_only = test_call_detection_config(vec!["zoom.us".into()]);
+        call_input_snapshot(&native_only, &chrome, &mut None, Instant::now(), |_| {
+            panic!("web detection is disabled")
+        });
+        for provider in ["google-meet", "teams-web"] {
+            let config = test_call_detection_config(vec![provider.into()]);
+            let calls = std::cell::Cell::new(0);
+            let input = call_input_snapshot(&config, &chrome, &mut None, Instant::now(), |_| {
+                calls.set(calls.get() + 1);
+                Some(AudioInputSnapshot::inactive())
+            });
+            assert_eq!(calls.get(), 1);
+            assert!(!input.mic_live);
+        }
+    }
+
+    #[test]
+    fn one_audio_probe_is_shared_with_live_and_native_detection() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let detector = CallDetector::new(config.clone());
+        let processes = vec![process(1, 0, "zoom.us"), process(2, 1, "audio-child")];
+        let calls = std::cell::Cell::new(0);
+        let input = call_input_snapshot(&config, &processes, &mut None, Instant::now(), |_| {
+            calls.set(calls.get() + 1);
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: Some(HashSet::from([2])),
+            })
+        });
+        assert_eq!(
+            decide_minutes_audio_poll_policy(
+                false,
+                true,
+                false,
+                false,
+                input.active_input_pids.is_some()
+            ),
+            MinutesAudioPollPolicy::Detect
+        );
+        assert_eq!(
+            detector.detect_active_call(&config, &processes, &input),
+            DetectActiveCallResult::Detected {
+                display_name: "Zoom".into(),
+                process_name: "zoom.us".into()
+            }
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn idle_device_sample_ends_detection_without_reusing_old_attribution() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let detector = CallDetector::new(config.clone());
+        let processes = vec![process(1, 0, "zoom.us")];
+        let active = AudioInputSnapshot {
+            mic_live: true,
+            device_active: Some(true),
+            active_input_pids: Some(HashSet::from([1])),
+        };
+        assert!(matches!(
+            detector.detect_active_call(&config, &processes, &active),
+            DetectActiveCallResult::Detected { .. }
+        ));
+        assert_eq!(
+            detector.detect_active_call(&config, &processes, &AudioInputSnapshot::inactive()),
+            DetectActiveCallResult::None
+        );
+    }
+
+    #[test]
+    fn failed_attribution_does_not_retry_or_validate_native_app() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let detector = CallDetector::new(config.clone());
+        let processes = vec![process(1, 0, "zoom.us")];
+        let calls = std::cell::Cell::new(0);
+        let input = call_input_snapshot(&config, &processes, &mut None, Instant::now(), |_| {
+            calls.set(calls.get() + 1);
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: None,
+            })
+        });
+        assert_eq!(
+            decide_minutes_audio_poll_policy(
+                false,
+                true,
+                false,
+                false,
+                input.active_input_pids.is_some()
+            ),
+            MinutesAudioPollPolicy::SkipKeepingActiveCall
+        );
+        assert_eq!(
+            detector.detect_active_call(&config, &processes, &input),
+            DetectActiveCallResult::None
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn unchanged_family_limits_attribution_to_once_per_five_seconds() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let processes = vec![process(1, 0, "zoom.us")];
+        let mut cache = None;
+        let now = Instant::now();
+        let mut full_queries = 0;
+        for seconds in 0..11 {
+            let input = call_input_snapshot(
+                &config,
+                &processes,
+                &mut cache,
+                now + Duration::from_secs(seconds),
+                |attribution| {
+                    if attribution {
+                        full_queries += 1;
+                    }
+                    Some(AudioInputSnapshot {
+                        mic_live: true,
+                        device_active: Some(true),
+                        active_input_pids: attribution.then(|| HashSet::from([1])),
+                    })
+                },
+            );
+            assert_eq!(input.active_input_pids, Some(HashSet::from([1])));
+        }
+        assert_eq!(full_queries, 3);
+    }
+
+    #[test]
+    fn changed_call_family_refreshes_but_unrelated_process_does_not() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let mut processes = vec![process(1, 0, "zoom.us")];
+        let mut cache = None;
+        let now = Instant::now();
+        call_input_snapshot(&config, &processes, &mut cache, now, |full| {
+            assert!(full);
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: Some(HashSet::from([1])),
+            })
+        });
+        processes.push(process(2, 0, "another-tool"));
+        call_input_snapshot(&config, &processes, &mut cache, now, |full| {
+            assert!(!full);
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: None,
+            })
+        });
+        processes.push(process(3, 1, "audio-child"));
+        call_input_snapshot(&config, &processes, &mut cache, now, |full| {
+            assert!(full);
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: Some(HashSet::from([3])),
+            })
+        });
+    }
+
+    #[test]
+    fn device_idle_invalidates_attribution_and_next_input_refreshes_immediately() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let processes = vec![process(1, 0, "zoom.us")];
+        let mut cache = None;
+        let now = Instant::now();
+        for active in [true, false, true] {
+            let had_cache = cache.is_some();
+            let input = call_input_snapshot(&config, &processes, &mut cache, now, |full| {
+                assert_eq!(full, !had_cache);
+                Some(if active {
+                    AudioInputSnapshot {
+                        mic_live: true,
+                        device_active: Some(true),
+                        active_input_pids: full.then(|| HashSet::from([1])),
+                    }
+                } else {
+                    AudioInputSnapshot::inactive()
+                })
+            });
+            assert_eq!(input.mic_live, active);
+            assert_eq!(cache.is_some(), active);
+        }
+        // An initially idle device also leaves no stale attribution behind.
+        cache = None;
+        call_input_snapshot(&config, &processes, &mut cache, now, |_| {
+            Some(AudioInputSnapshot::inactive())
+        });
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn unknown_device_state_keeps_only_a_bounded_sample_and_app_exit_clears_it() {
+        let config = test_call_detection_config(vec!["zoom.us".into()]);
+        let processes = vec![process(1, 0, "zoom.us")];
+        let mut cache = None;
+        let now = Instant::now();
+        call_input_snapshot(&config, &processes, &mut cache, now, |_| {
+            Some(AudioInputSnapshot {
+                mic_live: true,
+                device_active: Some(true),
+                active_input_pids: Some(HashSet::from([1])),
+            })
+        });
+        assert!(
+            call_input_snapshot(&config, &processes, &mut cache, now, |full| {
+                assert!(!full);
+                None
+            })
+            .mic_live
+        );
+        assert!(
+            !call_input_snapshot(
+                &config,
+                &processes,
+                &mut cache,
+                now + INPUT_ATTRIBUTION_INTERVAL,
+                |full| {
+                    assert!(full);
+                    None
+                }
+            )
+            .mic_live
+        );
+        call_input_snapshot(&config, &[], &mut cache, now, |_| panic!("no call app"));
+        assert!(cache.is_none());
+    }
+
+    #[cfg(unix)]
+    fn transport_probe(script: &str) -> AudioInputProbe {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", script]);
+        AudioInputProbe {
+            client: AudioInputClient::spawn_command(&mut command),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_helper_reuses_one_process_for_multiple_requests() {
+        let mut probe = transport_probe(
+            r#"while read mode; do
+            if [ "$mode" = full ]; then
+                printf '%s\n' '{"mic_live":true,"device_active":true,"active_input_pids":[42]}'
+            else printf '1\n'; fi
+        done"#,
+        );
+        let pid = probe.client.as_ref().unwrap().child.id();
+        for attribution in [true, false, true] {
+            let input = probe.sample(attribution).unwrap();
+            assert!(input.mic_live);
+            assert_eq!(input.active_input_pids.is_some(), attribution);
+            assert_eq!(probe.client.as_ref().unwrap().child.id(), pid);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_input_helper_is_killed_and_reaped_after_deadline() {
+        let mut probe = transport_probe("exec sleep 30");
+        let pid = probe.client.as_ref().unwrap().child.id();
+        let start = Instant::now();
+        assert!(probe.sample(true).is_none());
+        assert!(probe.client.is_none());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_input_reply_and_transport_eof_discard_client() {
+        for script in ["read mode; printf 'bad-json\\n'; exec sleep 30", "exit 0"] {
+            let mut probe = transport_probe(script);
+            assert!(probe.sample(true).is_none());
+            assert!(probe.client.is_none());
+        }
+    }
+
+    #[test]
     fn mic_check_does_not_panic() {
         // Just verify the function returns without crashing.
         // Will return false unless something is using the mic right now.
-        let _result = is_mic_in_use();
+        let _result = AudioInputProbe::default().sample(true);
     }
 
     #[test]
@@ -2452,6 +3307,59 @@ mod tests {
     }
 
     #[test]
+    fn live_session_keeps_detecting_calls_when_input_is_attributed() {
+        // #1110: a Meet call was detected, then Go Live started. The detector
+        // must keep observing the call instead of clearing it, because Live
+        // captures only the microphone.
+        assert_eq!(
+            decide_minutes_audio_poll_policy(false, true, false, true, true),
+            MinutesAudioPollPolicy::Detect
+        );
+    }
+
+    #[test]
+    fn live_session_without_attribution_skips_new_hits_but_keeps_the_call() {
+        assert_eq!(
+            decide_minutes_audio_poll_policy(false, true, false, true, false),
+            MinutesAudioPollPolicy::SkipKeepingActiveCall
+        );
+    }
+
+    #[test]
+    fn recordings_keep_their_existing_poll_policy() {
+        assert_eq!(
+            decide_minutes_audio_poll_policy(true, false, false, true, true),
+            MinutesAudioPollPolicy::SkipForRecording
+        );
+        assert_eq!(
+            decide_minutes_audio_poll_policy(true, true, false, false, false),
+            MinutesAudioPollPolicy::SkipForRecording
+        );
+        assert_eq!(
+            decide_minutes_audio_poll_policy(true, false, true, true, false),
+            MinutesAudioPollPolicy::Detect
+        );
+        assert_eq!(
+            decide_minutes_audio_poll_policy(false, false, false, false, false),
+            MinutesAudioPollPolicy::Detect
+        );
+    }
+
+    #[test]
+    fn self_audio_skip_logs_once_per_stretch() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        detector.note_active_call("google-meet", "Google Meet");
+
+        assert!(!detector.note_self_audio_skip());
+        assert!(detector.note_self_audio_skip());
+        // Skipping never touches the detected call.
+        assert!(detector.active_call_snapshot().is_some());
+
+        detector.reset_self_audio_skip();
+        assert!(!detector.note_self_audio_skip());
+    }
+
+    #[test]
     fn new_session_after_process_change_resets_call_end_fired() {
         // Ending Zoom, auto-stopping, then joining a Teams call must let the
         // Teams session auto-stop too. The "already fired" flag is per-session,
@@ -2561,14 +3469,272 @@ mod tests {
         remember_sticky(
             &detector.recent_teams_web_until,
             MeetingProvider::TeamsWeb.sticky_duration(),
+            browser_spec("Google Chrome"),
         );
-        assert!(sticky_alive(&detector.recent_teams_web_until));
+        assert!(sticky_alive(&detector.recent_teams_web_until).is_some());
 
         {
             let mut sticky = detector.recent_teams_web_until.lock().unwrap();
-            *sticky = Some(Instant::now() - Duration::from_secs(1));
+            *sticky = Some(BrowserSticky {
+                until: Instant::now() - Duration::from_secs(1),
+                browser: browser_spec("Google Chrome"),
+            });
         }
 
-        assert!(!sticky_alive(&detector.recent_teams_web_until));
+        assert!(sticky_alive(&detector.recent_teams_web_until).is_none());
+    }
+
+    // --- #244: browser-tab hits are gated on the browser that produced them ---
+
+    fn process(pid: u32, ppid: u32, name: &str) -> RunningProcess {
+        RunningProcess {
+            pid,
+            ppid,
+            name: name.into(),
+        }
+    }
+
+    /// Chrome with its sandboxed Audio Service child (the pid CoreAudio
+    /// attributes the capture to) plus a dictation tool.
+    fn chrome_and_dictation_tool() -> Vec<RunningProcess> {
+        vec![
+            process(100, 1, "Google Chrome"),
+            process(110, 100, "Google Chrome Helper"),
+            process(200, 1, "superwhisper"),
+        ]
+    }
+
+    fn meet_hit_from(
+        browser: &'static BrowserSpec,
+    ) -> impl FnMut(&CallDetector, &[String], bool, bool) -> Option<BrowserMeetProbe> {
+        move |_detector, _running, _want_meet, _want_teams| {
+            Some(BrowserMeetProbe::Detected {
+                provider: MeetingProvider::GoogleMeet,
+                browser,
+            })
+        }
+    }
+
+    fn no_probe(
+        _detector: &CallDetector,
+        _running: &[String],
+        _want_meet: bool,
+        _want_teams: bool,
+    ) -> Option<BrowserMeetProbe> {
+        None
+    }
+
+    #[test]
+    fn chrome_audio_service_input_with_meet_tab_detects_meet() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+        let active_input_pids = HashSet::from([110]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+        let sticky = sticky_alive(&detector.recent_google_meet_until).expect("sticky armed");
+        assert_eq!(sticky.browser.app_name, "Google Chrome");
+    }
+
+    #[test]
+    fn stale_meet_tab_with_dictation_tool_input_is_rejected_on_fresh_probe() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+        // superwhisper holds the mic; Chrome only has a leftover Meet tab.
+        let active_input_pids = HashSet::from([200]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_none());
+    }
+
+    #[test]
+    fn stale_meet_tab_with_dictation_tool_input_is_rejected_on_live_sticky() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
+        );
+        let processes = chrome_and_dictation_tool();
+        let active_input_pids = HashSet::from([200]);
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            no_probe,
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+        // The window is left to expire on its own; only the gate said no.
+        assert!(sticky_alive(&detector.recent_google_meet_until).is_some());
+    }
+
+    #[test]
+    fn arc_input_does_not_validate_a_chrome_tab_hit() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = vec![
+            process(100, 1, "Google Chrome"),
+            process(300, 1, "Arc"),
+            process(310, 300, "Arc Helper"),
+        ];
+        // Arc is on the call; the tab hit came from Chrome.
+        let active_input_pids = HashSet::from([310]);
+
+        let fresh = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+        assert_eq!(fresh, DetectActiveCallResult::None);
+
+        remember_sticky(
+            &detector.recent_google_meet_until,
+            MeetingProvider::GoogleMeet.sticky_duration(),
+            browser_spec("Google Chrome"),
+        );
+        let sticky = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            no_probe,
+        );
+        assert_eq!(sticky, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn meet_tab_hit_falls_back_to_generic_gate_without_attribution() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            None,
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
+    fn safari_webkit_input_follows_generic_gate() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        // WebKit content processes are reparented to launchd, so pid/ppid
+        // cannot tie the capture back to Safari; the generic gate applies.
+        let processes = vec![
+            process(500, 1, "Safari"),
+            process(501, 1, "com.apple.WebKit.WebContent"),
+        ];
+        let active_input_pids = HashSet::from([501]);
+
+        let live = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&active_input_pids),
+            false,
+            meet_hit_from(browser_spec("Safari")),
+        );
+        assert_eq!(live, detected_for(MeetingProvider::GoogleMeet));
+        assert_eq!(
+            sticky_alive(&detector.recent_google_meet_until)
+                .expect("sticky armed")
+                .browser
+                .app_name,
+            "Safari"
+        );
+
+        // Same sticky, mic released: the generic gate is the only gate.
+        let idle = detector.detect_active_call_from_process_snapshot(
+            &config,
+            false,
+            &processes,
+            Some(&HashSet::new()),
+            false,
+            no_probe,
+        );
+        assert_eq!(idle, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn chrome_family_root_does_not_absorb_canary() {
+        let processes = vec![
+            process(100, 1, "Google Chrome"),
+            process(400, 1, "Google Chrome Canary"),
+            process(410, 400, "Google Chrome Canary Helper"),
+        ];
+
+        assert_eq!(
+            browser_family_pids("Google Chrome", &processes),
+            HashSet::from([100])
+        );
+        assert_eq!(
+            browser_family_pids("Google Chrome Canary", &processes),
+            HashSet::from([400, 410])
+        );
+
+        // Consequence: Canary holding the mic does not validate a Chrome hit.
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([410])),
+            false,
+            meet_hit_from(browser_spec("Google Chrome")),
+        );
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn browser_probe_consults_the_input_gate_before_querying_tabs() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let running: Vec<String> = vec!["Google Chrome".into(), "Arc".into()];
+        let offered = std::cell::RefCell::new(Vec::new());
+
+        // Rejecting every browser must keep the probe away from AppleScript
+        // (which would launch the app) while still reporting that browsers
+        // were seen.
+        let result = detector.detect_browser_meeting(&running, true, false, |spec| {
+            offered.borrow_mut().push(spec.app_name);
+            false
+        });
+
+        assert!(matches!(result, BrowserMeetProbe::NoMatch));
+        assert_eq!(offered.into_inner(), vec!["Google Chrome", "Arc"]);
     }
 }

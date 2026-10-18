@@ -395,7 +395,7 @@ decisions:
 ## Capabilities For Agents
 
 1. Meeting recall — Search and retrieve past meetings, memos, and transcripts.
-2. Policy-bound people context — Build bounded live-source profiles, relationship rankings, losing-touch signals, and commitments.
+2. People memory — Who said what, what they committed to, and what you owe them, built only from meetings you let agents read.
 3. Decision and action-item tracking — Query structured decisions, commitments, and open follow-ups.
 4. Recording and live transcript control — Start or stop capture and read live transcript deltas.
 5. Local-first context — Audio processing happens on-device and the durable output is inspectable markdown.

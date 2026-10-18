@@ -4079,8 +4079,11 @@ describe("restricted content policy", () => {
       query: commonToken,
     });
     expect(common).toHaveLength(MCP_POLICY_MEETING_RESULT_MAX);
-    expect(common[0].path).toBe("/bounded-search/05000.md");
-    expect(common.some((entry) => entry.path.endsWith("00000.md"))).toBe(false);
+    // Relevance now precedes recency: the older source has a second literal
+    // occurrence of "synthetic", while equal-score peers keep date ordering.
+    expect(common[0].path).toBe("/bounded-search/00000.md");
+    expect(common[1].path).toBe("/bounded-search/05000.md");
+    expect(common.some((entry) => entry.path.endsWith("00001.md"))).toBe(false);
     expect(common.some((entry) => entry.path.includes("restricted"))).toBe(false);
   }, 15_000);
 
@@ -4156,7 +4159,8 @@ describe("restricted content policy", () => {
     expect(intents).toHaveLength(MCP_INTENT_RESULT_MAX);
     expect(intents.every((intent) => intent.what.length <= 2_048)).toBe(true);
 
-    const research = researchTopicProjection(meetings, long);
+    expect(() => researchTopicProjection(meetings, long)).toThrow(/query exceeds/i);
+    const research = researchTopicProjection(meetings, "xx");
     expect(research.meetings).toHaveLength(MCP_RESEARCH_MEETING_RESULT_MAX);
     expect(research.decisions).toHaveLength(MCP_RESEARCH_DECISION_RESULT_MAX);
     expect(research.openIntents).toHaveLength(MCP_INTENT_RESULT_MAX);
@@ -4549,6 +4553,25 @@ describe("restricted content policy", () => {
         )
       ).toBeNull();
     }
+  });
+
+  it("accepts note artifacts without weakening frontmatter policy", () => {
+    const note = [
+      "---",
+      "title: Launch Prep",
+      "type: note",
+      "date: 2026-09-15T10:00:00Z",
+      "---",
+      "",
+      "Launch checklist.",
+    ].join("\n");
+    expect(parsePolicyVerifiedMeeting(note, "launch-prep.md")?.frontmatter.type).toBe("note");
+    expect(
+      parsePolicyVerifiedMeeting(
+        note.replace("type: note", "type: private-note"),
+        "invalid-note.md"
+      )
+    ).toBeNull();
   });
 
   it("denies invalid UTF-8 policy bytes across exact, stable, research, and tool reads", async () => {
@@ -5727,6 +5750,19 @@ describe("agent trust readiness bridge", () => {
     expect((error as Error).message).toContain("needs v0.25.0 or newer");
     expect((error as Error).message).toContain("Minutes desktop app");
     expect((error as Error).message).not.toContain("PRIVATE");
+  });
+
+  it.each([
+    ["/PRIVATE-PATH/minutes: error while loading shared libraries: libpipewire-0.3.so.0: cannot open shared object file: No such file or directory", "audio runtime library"],
+    ["/PRIVATE-PATH/minutes: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by /PRIVATE-PATH/minutes)", "glibc 2.39"],
+  ])("explains Linux loader failures without exposing stderr: %s", async (stderr, expected) => {
+    const failure = Object.assign(new Error("PRIVATE-CONFIG-CANARY"), { stderr });
+    const runner = async () => { throw failure; };
+    const error = await readAgentTrustReadiness(runner, "linux").catch((error: Error) => error);
+    expect((error as Error).message).toContain(expected);
+    expect((error as Error).message).not.toContain("PRIVATE");
+    const otherPlatform = await readAgentTrustReadiness(runner, "darwin").catch((error: Error) => error);
+    expect((otherPlatform as Error).message).toBe("Minutes agent readiness could not be verified safely.");
   });
 
   it("keeps unexpected readiness failures opaque even when version probing would be possible", async () => {

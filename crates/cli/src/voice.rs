@@ -34,6 +34,7 @@ pub(crate) enum VoiceAction {
 
 struct CapturedClip {
     path: PathBuf,
+    cleanup_on_drop: bool,
 }
 
 impl CapturedClip {
@@ -47,16 +48,26 @@ impl CapturedClip {
         std::fs::create_dir_all(&directory)?;
         Ok(Self {
             path: directory.join("voice.wav"),
+            cleanup_on_drop: true,
         })
     }
 
     fn path(&self) -> &Path {
         &self.path
     }
+
+    fn retain_if_storage_is_retiring(&mut self, error: &minutes_core::error::CaptureError) {
+        if error.storage_is_retiring() {
+            self.cleanup_on_drop = false;
+        }
+    }
 }
 
 impl Drop for CapturedClip {
     fn drop(&mut self) {
+        if !self.cleanup_on_drop {
+            return;
+        }
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
@@ -67,15 +78,25 @@ fn capture_clip(seconds: u64, config: &Config) -> Result<CapturedClip> {
     if !(1..=MAX_CAPTURE_SECONDS).contains(&seconds) {
         anyhow::bail!("capture duration must be between 1 and {MAX_CAPTURE_SECONDS} seconds");
     }
-    let clip = CapturedClip::new()?;
+    let mut clip = CapturedClip::new()?;
     let stop = Arc::new(AtomicBool::new(false));
     let timer_stop = Arc::clone(&stop);
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(seconds));
         timer_stop.store(true, Ordering::Relaxed);
     });
-    minutes_core::capture::record_to_wav(clip.path(), stop, config)
-        .map_err(|error| anyhow::anyhow!(error))?;
+    if let Err(error) = minutes_core::capture::record_to_wav(clip.path(), stop, config) {
+        clip.retain_if_storage_is_retiring(&error);
+        if error.storage_is_retiring() {
+            return Err(anyhow::anyhow!(error)).with_context(|| {
+                format!(
+                    "partial voice recording retained at {}",
+                    clip.path().display()
+                )
+            });
+        }
+        return Err(anyhow::anyhow!(error));
+    }
     Ok(clip)
 }
 
@@ -311,6 +332,29 @@ pub(crate) fn run(action: VoiceAction, config: &Config) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn retiring_voice_storage_keeps_the_original_file_until_worker_finishes() {
+        let mut clip = CapturedClip::new().unwrap();
+        let path = clip.path().to_path_buf();
+        let mut writer = std::fs::File::create(&path).unwrap();
+        writer.write_all(b"header pending").unwrap();
+        clip.retain_if_storage_is_retiring(&minutes_core::error::CaptureError::StorageRetiring);
+        drop(clip);
+        writer.write_all(b" final tail").unwrap();
+        drop(writer);
+        assert_eq!(std::fs::read(&path).unwrap(), b"header pending final tail");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn completed_voice_clip_still_cleans_up_its_temporary_recording() {
+        let clip = CapturedClip::new().unwrap();
+        let path = clip.path().to_path_buf();
+        std::fs::write(&path, b"finished").unwrap();
+        drop(clip);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn voice_cli_parses_every_subcommand() {

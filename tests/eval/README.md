@@ -1,5 +1,12 @@
 # Minutes Eval v0.1
 
+**New:** [v0.2 evaluation infrastructure](v02/README.md) adds actual MCP stdio
+retrieval, exact source citation checks, explicit-decision currentness, identity
+and revocation probes, corpus-size latency measurements, and scoring of supplied
+consented/licensed speech. Its built-in 123 questions are public synthetic
+conformance fixtures, not blind-authored holdouts or production quality evidence.
+The v0.1 agent-with-files experiment below remains a separate evaluation surface.
+
 ## Diarization model-set comparison
 
 The diarization eval uses repository-owned one-speaker audio with a small

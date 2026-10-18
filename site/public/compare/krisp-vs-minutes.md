@@ -1,49 +1,64 @@
 # Minutes vs Krisp
 
-Last reviewed: 2026-07-11
+Last reviewed: 2026-10-07
 
-Krisp has real on-device credentials: its noise cancellation processes audio locally and never sends it anywhere. But its meeting-notes product is a different pipeline — summaries via Microsoft Azure, transcripts and recordings stored in Krisp Cloud once you enable notes (an explicit opt-in per Krisp's security page, but the only storage option outside Enterprise), and fully on-device storage gated to Enterprise. Minutes runs the entire pipeline on your machine for everyone.
+Krisp combines noise cancellation with meeting notes. Minutes focuses on keeping conversations as local files your assistant can search. Krisp also has on-device processing, so this comparison is about the features and data settings you choose, rather than a blanket local-versus-cloud distinction.
 
 ## Quick verdict
 
-- Choose **Krisp** if your primary problem is call audio quality — noise, echo, accents — and AI notes are a convenient add-on you're comfortable having in Krisp's cloud.
-- Choose **Minutes** if your primary problem is owning a private record of your conversations — as the default, not an Enterprise upgrade.
-
-## Where your conversation goes
-
-**Krisp** (hybrid): capture + denoise on-device (genuinely local) → transcribe on-device for English, Krisp servers for 15 other languages → AI notes in the cloud (Microsoft Azure) → transcripts/recordings stored in Krisp Cloud (US servers) once notes are enabled; on-device storage is an Enterprise feature. SOC 2 Type II, HIPAA BAA available (its security page references a legacy "Business tier"; pricing lists BAA under Enterprise), published DPA.
-
-**Minutes** (all local): capture device audio → transcribe + diarize on-device (sealed local whisper.cpp + pyannote) → markdown on your disk, 0600 permissions. The private configuration is the only configuration.
+- Choose **Krisp** if noise cancellation and a meeting-assistant workflow are your main priorities.
+- Choose **Minutes** if you want inspectable local records and a file-based archive your preferred assistant can search.
 
 ## At a glance
 
-- Capture — Krisp: botless by default, optional bot mode; Minutes: always botless, in-person too
-- Noise cancellation — Krisp: best in category, on-device; Minutes: optional local RNNoise denoising, not the headline
-- Transcription — Krisp: on-device English, server-side for 15 languages; Minutes: on-device always, ~99 languages
-- AI notes — Krisp: cloud (Azure); Minutes: local structure; LLM only if you configure one
-- Transcript storage — Krisp: Krisp Cloud (US) once notes are enabled, Enterprise for on-device; Minutes: your disk, everyone
-- Open source — Krisp: no; Minutes: MIT
-- Platforms — Krisp: macOS + Windows; Minutes: macOS app + CLI (open source)
-- Pricing — Krisp: free plan per its help center (2 AI notes/day; pricing page currently shows a 7-day trial), Core $16/$8, Advanced $30/$15, Enterprise custom; Minutes: free
+| Topic | Krisp | Minutes |
+| --- | --- | --- |
+| Workflow | Noise cancellation and AI meeting notes | Local conversation archive and agent recall |
+| Transcription | On-device speech-to-text described in its security documentation | On-device engines available for your platform and build |
+| Summaries | Cloud AI through Microsoft Azure | Optional local or cloud AI, configured separately |
+| Record storage | Cloud storage with Meeting Notes enabled and consent; Enterprise offers private on-device options | Markdown and YAML on your disk |
+| Noise cancellation | Core product capability | Does not replace a system-wide noise-cancellation tool |
+| Pricing | Core $16 and Advanced $30 per user/month when billed monthly; annual discounts | Free MIT software; optional provider usage is separate |
 
-## Where Krisp wins
+## Where Krisp helps
 
-- Best-in-category noise cancellation, genuinely on-device, works across every app
-- Accent conversion and real-time voice AI — no notetaker (including Minutes) offers these
-- Windows support; enterprise trust stack (SOC 2 Type II, HIPAA BAA, PCI-DSS, DPA)
+Krisp provides noise cancellation alongside meeting notes.
 
-## Where Minutes wins
+Its Enterprise plans include private transcription and recording options. Check the plan and settings rather than assuming every mode has the same data flow.
 
-- Private-by-architecture for every user, free — Krisp gates on-device transcript storage to Enterprise (and its on-device transcription covers English only)
-- Real memory layer: diarized speakers, YAML action items/decisions, months of meetings queryable via MCP/CLI/SDK
-- Open source: "audio has no network path" is verifiable in source
+## Where Minutes helps
 
-## They compose
+Minutes writes the primary conversation record as Markdown with YAML metadata.
 
-Krisp can clean your microphone signal while Minutes captures and transcribes locally. People who care about both audio quality and data ownership run exactly that stack.
+Its open-source desktop, CLI, SDK, and MCP surfaces work over the same authorized corpus. The desktop app supports macOS and Windows; Linux has a CLI.
+
+## Workflow and data boundaries
+
+You can use a noise-cancellation tool alongside Minutes. Minutes stores the resulting conversation locally; a cloud assistant or summarizer remains a separate choice. Compare each enabled processing stage, including storage, before using either product for sensitive work.
+
+Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.
+
+## How to choose
+
+Choose the workflow you will use every day. Try one conversation, inspect the saved record, and ask your assistant to retrieve a specific decision with its source.
+
+Check provider settings, retention, sync, and assistant permissions separately. Local transcription alone does not establish where every later step runs.
+
+## When Minutes may not fit
+
+Minutes may require more setup if you want a managed team workspace, centralized administration, or ready-made CRM integrations.
+
+A local archive does not establish regulatory compliance. Assess your configuration and obligations before recording sensitive conversations.
+
+## How this was evaluated
+
+Official product, pricing, security, and developer documentation was reviewed on October 7, 2026. This is a maintainer-written comparison, not a hands-on accuracy or reliability benchmark.
+
+The Minutes side reflects its published documentation and source. Optional cloud AI and user-configured sync are separate from local capture and transcription.
 
 ## Sources
 
-- https://krisp.ai/ · https://krisp.ai/ai-meeting-assistant/ · https://krisp.ai/pricing/
-- https://krisp.ai/security-for-ai-meeting-assistant/ · https://krisp.ai/security/
-- https://useminutes.app/for-agents · https://useminutes.app/security
+- [Krisp meeting-assistant security](https://krisp.ai/security-for-ai-meeting-assistant/)
+- [Krisp pricing and private options](https://krisp.ai/pricing/)
+- [Minutes security and data flow](https://useminutes.app/security)
+- [Minutes proof and limitations](https://useminutes.app/proof)

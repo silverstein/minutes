@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "package": "minutes-core",
+  "manifest": "crates/core/Cargo.toml",
+  "library": "crates/core/src/lib.rs",
+  "scope": "Feature-gated out-of-line root modules in minutes-core. Discovers module names from Rust, resolves features from Cargo, and checks the executing workflow steps. Native hardware/model quality is qualified separately.",
+  "profiles": {
+    "streaming": {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "test",
+      "features": ["streaming"],
+      "selection": "all",
+      "platforms": ["linux", "macos", "windows"]
+    },
+    "speech": {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "test",
+      "features": ["streaming", "whisper"],
+      "selection": "feature-modules",
+      "platforms": ["linux", "macos", "windows"]
+    },
+    "optional-engines": {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "test",
+      "features": ["streaming-diarize", "vad-ort", "engine-sherpa"],
+      "selection": "feature-modules",
+      "platforms": ["linux", "macos", "windows"]
+    },
+    "pocketstation": {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "test",
+      "features": ["pocketstation-capture"],
+      "selection": "all",
+      "platforms": ["linux", "windows"]
+    },
+    "voice-live": {
+      "workflow": ".github/workflows/voice-continuity.yml",
+      "job": "runtime",
+      "features": ["voice-live"],
+      "selection": "feature-modules",
+      "platforms": ["linux", "macos", "windows"]
+    }
+  }
+}

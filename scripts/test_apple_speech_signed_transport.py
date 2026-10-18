@@ -479,6 +479,11 @@ def emit_failure_diagnostics(
     sys.stderr.flush()
 
 
+def runtime_os_supported(runtime: bool, os_major: int) -> bool:
+    """Transport-only mode works on hosted macOS 15; analyzer mode needs 26+."""
+    return not runtime or os_major >= 26
+
+
 def main() -> int:
     args = parse_args()
     if re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha) is None:
@@ -495,7 +500,7 @@ def main() -> int:
         )
         .stdout.split(".", 1)[0]
     )
-    if os_major < 26:
+    if not runtime_os_supported(args.runtime, os_major):
         raise RuntimeError("signed Apple Speech runtime acceptance requires macOS 26+")
 
     shared_temp = user_temp_root()

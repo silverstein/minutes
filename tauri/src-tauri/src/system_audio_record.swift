@@ -285,7 +285,9 @@ private final class FixedFormatStemWriter {
     private var file: AVAudioFile?
     private var converter: AVAudioConverter?
     private var converterInputFormat: AVAudioFormat?
+    private var resumeOffsetSeconds: Double?
     private(set) var framesSilenced: UInt64 = 0
+    private(set) var framesWritten: UInt64 = 0
 
     /// One converter per (input format → stem format). Recreating it per buffer
     /// discards the resampler's filter state at every buffer boundary and
@@ -320,6 +322,14 @@ private final class FixedFormatStemWriter {
             file = try AVAudioFile(forWriting: url, settings: buffer.format.settings)
         }
         guard let file else { return 0 }
+        if let offset = resumeOffsetSeconds {
+            let target = UInt64((offset * file.processingFormat.sampleRate).rounded())
+            while framesWritten < target {
+                let count = AVAudioFrameCount(min(target - framesWritten, 4096))
+                try writeSilence(sourceFrameCount: count, sourceSampleRate: file.processingFormat.sampleRate)
+            }
+            resumeOffsetSeconds = nil
+        }
 
         let output: AVAudioPCMBuffer
         if buffer.format.sampleRate == file.processingFormat.sampleRate {
@@ -332,6 +342,7 @@ private final class FixedFormatStemWriter {
             )
         }
         try file.write(from: output)
+        framesWritten += UInt64(output.frameLength)
         return output.frameLength
     }
 
@@ -361,11 +372,18 @@ private final class FixedFormatStemWriter {
         samples.initialize(repeating: 0, count: Int(frameCount))
         try file.write(from: silence)
         framesSilenced += UInt64(frameCount)
+        framesWritten += UInt64(frameCount)
         return frameCount
     }
 
     func close() {
         file = nil
+        converter = nil
+        converterInputFormat = nil
+    }
+
+    func resume(atElapsedSeconds seconds: Double) {
+        resumeOffsetSeconds = max(0, seconds)
         converter = nil
         converterInputFormat = nil
     }
@@ -528,6 +546,7 @@ private func runPCMDecoderSelfTest() -> Bool {
         let silenceSpanPassed = silenceAudio.frameLength == 200
             && silencedFrames == 80
             && silenceWriter.framesSilenced == 80
+            && silenceWriter.framesWritten == 200
             && (silenceAudio.floatChannelData.map { channels in
                 (120..<200).allSatisfy { abs(channels[0][$0]) < tolerance }
             } ?? false)
@@ -552,8 +571,288 @@ private func runPCMDecoderSelfTest() -> Bool {
     return passed
 }
 
+// The recording output may finish after an involuntary stream stop. A finished
+// file is not evidence that the user requested the end of capture.
+private final class CaptureLifecycle {
+    private let lock = NSLock()
+    private var stopRequested = false
+    private var interrupted = false
+    private var recovering = false
+    private var failed = false
+    private var attempt = 0
+    private var recentAttempts: [Double] = []
+
+    @discardableResult
+    func requestStop() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopRequested else { return false }
+        stopRequested = true
+        return true
+    }
+
+    func recordInterruption() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopRequested, !interrupted else { return false }
+        interrupted = true
+        return true
+    }
+
+    var isStopping: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopRequested
+    }
+
+    var isRecovering: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return recovering
+    }
+
+    func beginRecovery() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopRequested, !recovering, !failed else { return false }
+        interrupted = true
+        recovering = true
+        return true
+    }
+
+    func nextRecoveryAttempt(now: Double) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopRequested, recovering else { return nil }
+        recentAttempts.removeAll { now - $0 >= 60 }
+        guard recentAttempts.count < 3, attempt < 64 else {
+            recovering = false
+            failed = true
+            return nil
+        }
+        recentAttempts.append(now)
+        attempt += 1
+        return attempt
+    }
+
+    func canResume(attempt candidate: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !stopRequested && recovering && attempt == candidate
+    }
+
+    func resume(attempt candidate: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopRequested, recovering, attempt == candidate else { return false }
+        recovering = false
+        interrupted = false
+        return true
+    }
+
+    func fail() {
+        lock.lock(); defer { lock.unlock() }
+        failed = true
+        recovering = false
+        interrupted = true
+    }
+
+    func completionExitStatus() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopRequested && !interrupted && !failed ? 0 : 1
+    }
+}
+
+private func runCaptureLifecycleSelfTest() -> Bool {
+    let unexpected = CaptureLifecycle()
+    let requested = CaptureLifecycle()
+    requested.requestStop()
+    let interrupted = CaptureLifecycle()
+    let firstInterruption = interrupted.recordInterruption()
+    let duplicateInterruption = interrupted.recordInterruption()
+    interrupted.requestStop()
+    let passed = unexpected.completionExitStatus() == 1
+        && requested.completionExitStatus() == 0
+        && !requested.recordInterruption()
+        && firstInterruption && !duplicateInterruption
+        && interrupted.completionExitStatus() == 1
+    emitJSON([
+        "event": "capture_lifecycle_self_test",
+        "status": passed ? "ok" : "failed",
+        "cases": 4,
+    ])
+    return passed
+}
+
 @available(macOS 15.0, *)
-final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput {
+private func runCaptureRecoverySelfTest() async -> Bool {
+    var checks: [Bool] = []
+    let lifecycle = CaptureLifecycle()
+    checks.append(lifecycle.beginRecovery())
+    checks.append(!lifecycle.beginRecovery())
+    checks.append(lifecycle.nextRecoveryAttempt(now: 0) == 1)
+    checks.append(lifecycle.resume(attempt: 1))
+    checks.append(lifecycle.beginRecovery())
+    checks.append(lifecycle.nextRecoveryAttempt(now: 1) == 2)
+    checks.append(!lifecycle.resume(attempt: 1))
+    checks.append(lifecycle.requestStop())
+    checks.append(!lifecycle.canResume(attempt: 2))
+    checks.append(!lifecycle.resume(attempt: 2))
+    checks.append(lifecycle.nextRecoveryAttempt(now: 2) == nil)
+
+    let burst = CaptureLifecycle()
+    for index in 1...3 {
+        checks.append(burst.beginRecovery())
+        checks.append(burst.nextRecoveryAttempt(now: Double(index)) == index)
+        checks.append(burst.resume(attempt: index))
+    }
+    checks.append(burst.beginRecovery())
+    checks.append(burst.nextRecoveryAttempt(now: 4) == nil)
+    burst.requestStop()
+    checks.append(burst.completionExitStatus() == 1)
+
+    let repeated = CaptureLifecycle()
+    for index in 1...5 {
+        checks.append(repeated.beginRecovery())
+        checks.append(repeated.nextRecoveryAttempt(now: Double(index) * 61) == index)
+        checks.append(repeated.resume(attempt: index))
+    }
+    repeated.requestStop()
+    checks.append(repeated.completionExitStatus() == 0)
+
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("minutes-recovery-test-\(UUID().uuidString)")
+    do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stemURL = directory.appendingPathComponent("continuous.wav")
+        let writer = FixedFormatStemWriter(url: stemURL)
+        let first = monoFloatBuffer(samples: Array(repeating: 0.25, count: 8000), sampleRate: 16_000)!
+        let second = monoFloatBuffer(samples: Array(repeating: -0.25, count: 8000), sampleRate: 16_000)!
+        try writer.write(first)
+        writer.resume(atElapsedSeconds: 2)
+        try writer.write(second)
+        writer.close()
+        let file = try AVAudioFile(forReading: stemURL)
+        // Inspect the finalized PCM bytes, including the final sample. Some
+        // AVAudioFile reader paths return a shorter packet-aligned first read.
+        let bytes = [UInt8](try Data(contentsOf: stemURL))
+        func u32(_ at: Int) -> UInt32 {
+            UInt32(bytes[at]) | UInt32(bytes[at+1]) << 8 | UInt32(bytes[at+2]) << 16 | UInt32(bytes[at+3]) << 24
+        }
+        var offset = 12
+        var payload: Int?
+        while offset + 8 <= bytes.count {
+            let size = Int(u32(offset + 4))
+            if String(bytes: bytes[offset..<offset+4], encoding: .ascii) == "data" {
+                payload = offset + 8
+                break
+            }
+            offset += 8 + size + size % 2
+        }
+        guard let payload, payload + 40_000 * 4 <= bytes.count else { throw CocoaError(.fileReadCorruptFile) }
+        let samples = (0..<40_000).map { Float(bitPattern: u32(payload + $0 * 4)) }
+        checks.append(file.length == 40_000)
+        checks.append(abs(samples[0] - 0.25) < 0.001 && abs(samples[7999] - 0.25) < 0.001)
+        checks.append((8000..<32_000).allSatisfy { samples[$0] == 0 })
+        checks.append(abs(samples[32_000] + 0.25) < 0.001 && abs(samples[39_999] + 0.25) < 0.001)
+
+        let sourceURL = directory.appendingPathComponent("part.wav")
+        let partWriter = FixedFormatStemWriter(url: sourceURL)
+        try partWriter.write(first)
+        partWriter.close()
+        let a = directory.appendingPathComponent("a.mov")
+        let b = directory.appendingPathComponent("b.mov")
+        for url in [a, b] {
+            let exporter = AVAssetExportSession(asset: AVURLAsset(url: sourceURL), presetName: AVAssetExportPresetPassthrough)!
+            try await exporter.export(to: url, as: .mov)
+        }
+        try await consolidateCaptureMedia([CaptureMediaPart(url: a, offset: 0), CaptureMediaPart(url: b, offset: 1.5)], outputURL: a)
+        let duration = try await AVURLAsset(url: a).load(.duration)
+        checks.append(abs(CMTimeGetSeconds(duration) - 2) < 0.02)
+        checks.append(!FileManager.default.fileExists(atPath: b.path))
+        let beforeFailure = try Data(contentsOf: a)
+        let invalid = directory.appendingPathComponent("invalid.mov")
+        try Data("invalid test container".utf8).write(to: invalid)
+        do {
+            try await consolidateCaptureMedia([CaptureMediaPart(url: a, offset: 0), CaptureMediaPart(url: invalid, offset: 3)], outputURL: a)
+            checks.append(false)
+        } catch { checks.append(true) }
+        checks.append(try Data(contentsOf: a) == beforeFailure)
+        checks.append(FileManager.default.fileExists(atPath: invalid.path))
+    } catch {
+        fputs("capture recovery self-test failed: \(error)\n", stderr)
+        checks.append(false)
+    }
+    let passed = checks.allSatisfy { $0 }
+    emitJSON(["event": "capture_recovery_self_test", "status": passed ? "ok" : "failed", "checks": checks.count,
+        "failed_checks": checks.enumerated().filter { !$0.element }.map { $0.offset }])
+    return passed
+}
+
+private struct CaptureMediaPart {
+    let url: URL
+    let offset: Double
+}
+
+@available(macOS 15.0, *)
+private func consolidateCaptureMedia(_ parts: [CaptureMediaPart], outputURL: URL) async throws {
+    guard parts.count > 1 else { return }
+    let composition = AVMutableComposition()
+    var destinations: [AVMutableCompositionTrack] = []
+    for part in parts {
+        let asset = AVURLAsset(url: part.url)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !tracks.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        let offset = max(part.offset, CMTimeGetSeconds(composition.duration))
+        for (index, track) in tracks.enumerated() {
+            if index == destinations.count {
+                guard let destination = composition.addMutableTrack(withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid) else { throw CocoaError(.fileWriteUnknown) }
+                destinations.append(destination)
+            }
+            let range = try await track.load(.timeRange)
+            // A later start offset represents missing capture as a gap,
+            // never by compressing the elapsed meeting timeline.
+            try destinations[index].insertTimeRange(range, of: track,
+                at: CMTime(seconds: offset, preferredTimescale: 48_000))
+        }
+    }
+    let temporary = outputURL.deletingPathExtension().appendingPathExtension("joined-\(UUID().uuidString).mov")
+    guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    do {
+        try await exporter.export(to: temporary, as: .mov)
+        // Replacing happens only after export completed. A failed export
+        // leaves the first container and every source part intact.
+        _ = try FileManager.default.replaceItemAt(outputURL, withItemAt: temporary)
+    } catch {
+        try? FileManager.default.removeItem(at: temporary)
+        throw error
+    }
+    for part in parts where part.url != outputURL {
+        try? FileManager.default.removeItem(at: part.url)
+    }
+}
+
+
+@available(macOS 15.0, *)
+private final class CaptureSegment {
+    let stream: SCStream
+    let output: SCRecordingOutput
+    let url: URL
+    let attempt: Int
+    var offset: Double
+    var started = false
+    var finished = false
+
+    init(stream: SCStream, output: SCRecordingOutput, url: URL, attempt: Int, offset: Double) {
+        self.stream = stream
+        self.output = output
+        self.url = url
+        self.attempt = attempt
+        self.offset = offset
+    }
+}
+
+@available(macOS 15.0, *)
+final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private let outputURL: URL
@@ -575,6 +874,19 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private var lastReportedSourceFormats: [String: String] = [:]
     private var reportedDecodeFailures = Set<String>()
     private var reportedStemWriteFailures = Set<String>()
+    private let captureLifecycle = CaptureLifecycle()
+    private let stateLock = NSRecursiveLock()
+    private var segments: [CaptureSegment] = []
+    private var recoveryTask: Task<Void, Never>?
+    private var interruptedStream: SCStream?
+    private var originUptime = ProcessInfo.processInfo.systemUptime
+    private var interruptionUptime: Double?
+    private var lastCaptureUptime: Double?
+    private var readyEmitted = false
+    private var readyToFinalize = false
+    private var finalizing = false
+    // Accessed on sampleQueue, never reset when a stream is replaced.
+    private var sourceAttempts: [String: Int] = [:]
 
     // Per-source stem writers
     private var voiceStemWriter: FixedFormatStemWriter?
@@ -606,7 +918,30 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         NotificationCenter.default.removeObserver(self)
     }
 
+    private func withState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    private var elapsedSeconds: Double {
+        max(0, ProcessInfo.processInfo.systemUptime - withState { originUptime })
+    }
+
     func start() async throws {
+        let baseName = outputURL.deletingPathExtension().lastPathComponent
+        let stemDir = outputURL.deletingLastPathComponent()
+        voiceStemURL = stemDir.appendingPathComponent("\(baseName).voice.wav")
+        systemStemURL = stemDir.appendingPathComponent("\(baseName).system.wav")
+        voiceStemWriter = voiceStemURL.map { FixedFormatStemWriter(url: $0) }
+        systemStemWriter = systemStemURL.map { FixedFormatStemWriter(url: $0) }
+        withState { originUptime = ProcessInfo.processInfo.systemUptime }
+        try await startStream(attempt: 0)
+        startMonitoring()
+    }
+
+    private func startStream(attempt: Int) async throws {
+        guard !captureLifecycle.isStopping else { throw CancellationError() }
         let shareableContent = try await SCShareableContent.excludingDesktopWindows(
             false,
             onScreenWindowsOnly: true
@@ -664,28 +999,34 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
 
         if let microphone {
             configuration.microphoneCaptureDeviceID = microphone.uniqueID
-            selectedMicrophoneID = microphone.uniqueID
-            selectedMicrophoneName = microphone.localizedName
-            if let deviceASBD = CMAudioFormatDescriptionGetStreamBasicDescription(
+            let deviceRate = CMAudioFormatDescriptionGetStreamBasicDescription(
                 microphone.activeFormat.formatDescription
-            )?.pointee {
-                selectedMicrophoneDeviceSampleRate = deviceASBD.mSampleRate
+            )?.pointee.mSampleRate
+            sampleQueue.sync {
+                selectedMicrophoneID = microphone.uniqueID
+                selectedMicrophoneName = microphone.localizedName
+                selectedMicrophoneDeviceSampleRate = deviceRate
             }
-            if requestedMicrophoneName != nil {
+            if requestedMicrophoneName != nil && attempt == 0 {
                 NotificationCenter.default.addObserver(
                     self,
                     selector: #selector(microphoneWasDisconnected(_:)),
                     name: AVCaptureDevice.wasDisconnectedNotification,
-                    object: microphone
+                    object: nil
                 )
             }
         }
 
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
         try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: sampleQueue)
         let recordingConfiguration = SCRecordingOutputConfiguration()
-        recordingConfiguration.outputURL = outputURL
+        let segmentURL = attempt == 0 ? outputURL : outputURL.deletingPathExtension()
+            .appendingPathExtension("recovery-\(attempt).mov")
+        guard !FileManager.default.fileExists(atPath: segmentURL.path) else {
+            throw CocoaError(.fileWriteFileExists)
+        }
+        recordingConfiguration.outputURL = segmentURL
         recordingConfiguration.outputFileType = .mov
         recordingConfiguration.videoCodecType = .h264
 
@@ -695,44 +1036,38 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         )
 
         try stream.addRecordingOutput(recordingOutput)
-
-        // Derive stem paths BEFORE startCapture to avoid race with early samples
-        let baseName = outputURL.deletingPathExtension().lastPathComponent
-        let stemDir = outputURL.deletingLastPathComponent()
-        voiceStemURL = stemDir.appendingPathComponent("\(baseName).voice.wav")
-        systemStemURL = stemDir.appendingPathComponent("\(baseName).system.wav")
-        if let voiceStemURL {
-            voiceStemWriter = FixedFormatStemWriter(url: voiceStemURL)
+        let segment = CaptureSegment(stream: stream, output: recordingOutput,
+            url: segmentURL, attempt: attempt, offset: attempt == 0 ? 0 : elapsedSeconds)
+        withState {
+            segments.append(segment)
+            self.stream = stream
+            interruptedStream = nil
+            self.recordingOutput = recordingOutput
         }
-        if let systemStemURL {
-            systemStemWriter = FixedFormatStemWriter(url: systemStemURL)
+        do {
+            guard !captureLifecycle.isStopping else { throw CancellationError() }
+            try await stream.startCapture()
+        } catch {
+            withState {
+                if !segment.started { segment.finished = true }
+            }
+            try? await stream.stopCapture()
+            throw error
         }
-
-        try await stream.startCapture()
-
-        startMonitoring()
-
-        self.stream = stream
-        self.recordingOutput = recordingOutput
     }
 
     @objc private func microphoneWasDisconnected(_ notification: Notification) {
-        guard let device = notification.object as? AVCaptureDevice,
-              device.uniqueID == selectedMicrophoneID else {
-            return
-        }
-        let payload: [String: Any] = [
-            "event": "microphone_disconnected",
-            "name": selectedMicrophoneName ?? device.localizedName,
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: payload),
-           let json = String(data: data, encoding: .utf8) {
-            print(json)
-            fflush(stdout)
+        guard let device = notification.object as? AVCaptureDevice else { return }
+        let identifier = device.uniqueID
+        let name = device.localizedName
+        sampleQueue.async {
+            guard identifier == self.selectedMicrophoneID else { return }
+            emitJSON(["event": "microphone_disconnected", "name": self.selectedMicrophoneName ?? name])
         }
     }
 
     func stop() async {
+        guard captureLifecycle.requestStop() else { return }
         // Spin up the finalize heartbeat BEFORE the sampleQueue.sync block so
         // the Rust parent sees stdout activity throughout the entire stop
         // sequence. Long captures (1h+) take tens of seconds to write the
@@ -741,7 +1076,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         // See issue #216.
         let finalizeStart = Date()
         self.finalizeStart = finalizeStart
-        let heartbeatTask = Task { [finalizeStart] in
+        Task { [finalizeStart] in
             while !Task.isCancelled {
                 let elapsedMs = Int(Date().timeIntervalSince(finalizeStart) * 1000)
                 let payload: [String: Any] = [
@@ -757,6 +1092,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             }
         }
 
+        // Cancel reconnect, seal the writers, then join the task before
+        // finalization. A late start cannot resurrect capture after Stop.
+        let pendingRecovery = withState { recoveryTask }
+        let stoppingDuringRecovery = captureLifecycle.isRecovering
+        pendingRecovery?.cancel()
+
         // Flush and close stem files on the sample queue to serialize
         // with any in-flight writeStemSamples calls. Without this,
         // nil'ing on the main thread races with writes on sampleQueue.
@@ -766,17 +1107,28 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             systemStemWriter?.close()
         }
 
-        guard let stream else {
-            heartbeatTask.cancel()
-            exit(0)
+        if stoppingDuringRecovery {
+            // Framework startup/teardown can fail to return even after task
+            // cancellation. The stems are sealed above, so a stuck reconnect
+            // cannot hold Stop forever or resurrect the writers.
+            Task {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                if !withState({ readyToFinalize }) {
+                    emitJSON(["event": "capture_recovery_failed", "reason": "stop_timeout"])
+                    exit(1)
+                }
+            }
         }
+        await pendingRecovery?.value
 
-        do {
-            try await stream.stopCapture()
-        } catch {
-            heartbeatTask.cancel()
-            fputs("stopCapture failed: \(error)\n", stderr)
-            exit(1)
+        let activeStream = withState { stream }
+        if let activeStream {
+            // An interrupted stream may already be stopped while its output
+            // is still finalizing. Do not exit and truncate that output.
+            do { try await activeStream.stopCapture() }
+            catch {
+                emitJSON(["event": "stop_capture_error", "error_code": (error as NSError).code])
+            }
         }
 
         // Emit elapsed timing on successful stopCapture return. This is the
@@ -796,12 +1148,87 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             fflush(stdout)
         }
 
-        // stopCapture() returns when the framework has been told to stop, but
-        // the moov atom may still be in flight: the actual finalize completes
-        // when `recordingOutputDidFinishRecording` fires and calls exit(0).
-        // Keep the heartbeat alive across that window so the Rust parent
-        // doesn't see 30s of silence and SIGKILL us before the .mov is on
-        // disk. The heartbeat Task dies naturally when the process exits.
+        withState { readyToFinalize = true }
+        finishIfReady()
+    }
+
+    private func recoverCapture() async {
+        while !captureLifecycle.isStopping, !Task.isCancelled {
+            guard let attempt = captureLifecycle.nextRecoveryAttempt(now: ProcessInfo.processInfo.systemUptime) else {
+                if !captureLifecycle.isStopping { await recoveryFailed() }
+                return
+            }
+            emitJSON(["event": "capture_recovery_attempt", "attempt": attempt])
+            do {
+                try Task.checkCancellation()
+                try await startStream(attempt: attempt)
+                let deadline = ProcessInfo.processInfo.systemUptime + 8
+                while captureLifecycle.canResume(attempt: attempt),
+                      ProcessInfo.processInfo.systemUptime < deadline, !Task.isCancelled {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                if !captureLifecycle.isRecovering { return }
+            } catch {
+                if captureLifecycle.isStopping { return }
+            }
+            // An earlier reconnect task cannot retire a newer stream after
+            // a second interruption arrived during its final scheduling turn.
+            guard captureLifecycle.canResume(attempt: attempt) else { return }
+            let candidate = withState { stream }
+            if let candidate { try? await candidate.stopCapture() }
+            if captureLifecycle.isStopping || Task.isCancelled { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    // Opt-in signed Dev acceptance hook. This stops only this helper's own
+    // stream, never invokes system cache cleanup, and explicitly labels the
+    // injected error so it cannot be mistaken for a natural reproduction.
+    func injectTestInterruption() async {
+        guard !captureLifecycle.isStopping, !captureLifecycle.isRecovering,
+              let active = withState({ stream }) else { return }
+        emitJSON(["event": "capture_test_interruption", "injected": true])
+        self.stream(active, didStopWithError: NSError(
+            domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: -3821))
+        try? await active.stopCapture()
+    }
+
+    private func recoveryFailed() async {
+        captureLifecycle.fail()
+        emitJSON(["event": "capture_recovery_failed", "reason": "retry_limit"])
+        // Do not join this task from itself. stop() joins only a previously
+        // running reconnect operation.
+        withState { recoveryTask = nil }
+        await stop()
+    }
+
+    private func finishIfReady() {
+        let shouldFinish = withState {
+            guard readyToFinalize, !finalizing, segments.allSatisfy({ $0.finished }) else { return false }
+            finalizing = true
+            return true
+        }
+        guard shouldFinish else { return }
+        Task {
+            do { try await consolidateSegments() }
+            catch {
+                captureLifecycle.fail()
+                emitJSON(["event": "capture_recovery_failed", "reason": "container_finalize"])
+                // Never delete parts on an export failure. The continuous
+                // PCM stems also remain available to the recovery queue.
+            }
+            if let start = finalizeStart {
+                emitJSON(["event": "finalize_complete", "elapsed_ms": Int(Date().timeIntervalSince(start) * 1000)])
+            }
+            exit(captureLifecycle.completionExitStatus())
+        }
+    }
+
+    private func consolidateSegments() async throws {
+        let parts = withState {
+            segments.filter { $0.started }.map { CaptureMediaPart(url: $0.url, offset: $0.offset) }
+        }
+        try await consolidateCaptureMedia(parts, outputURL: outputURL)
     }
 
     private func startMonitoring() {
@@ -819,8 +1246,8 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 self.latestMicLevel = 0
             }
 
-            let shouldEmit = systemLive || micLive || systemLive != self.lastReportedSystemLive || micLive != self.lastReportedMicLive
-            guard shouldEmit else { return }
+            // Emit even when both inputs stop delivering buffers. The parent
+            // distinguishes a healthy timer from actual successful stem writes.
 
             self.lastReportedSystemLive = systemLive
             self.lastReportedMicLive = micLive
@@ -830,6 +1257,8 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 "mic_live": micLive,
                 "call_audio_level": self.latestSystemLevel,
                 "mic_level": self.latestMicLevel,
+                "mic_frames_written": self.voiceStemWriter?.framesWritten ?? 0,
+                "system_frames_written": self.systemStemWriter?.framesWritten ?? 0,
                 "mic_frames_silenced": self.voiceStemWriter?.framesSilenced ?? 0,
                 "system_frames_silenced": self.systemStemWriter?.framesSilenced ?? 0,
             ]
@@ -847,6 +1276,18 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer) else {
             return
         }
+        guard let attempt = withState({
+            self.stream === stream && interruptedStream !== stream
+                ? segments.first(where: { $0.stream === stream })?.attempt : nil
+        }), !stemsClosed else { return }
+        let sourceKey = outputType == .microphone ? "microphone" : "system"
+        let writer = outputType == .microphone ? voiceStemWriter : systemStemWriter
+        if sourceAttempts[sourceKey] != attempt {
+            sourceAttempts[sourceKey] = attempt
+            if attempt > 0 { writer?.resume(atElapsedSeconds: elapsedSeconds) }
+        }
+        let framesBefore = writer?.framesWritten ?? 0
+        let silenceBefore = writer?.framesSilenced ?? 0
         let now = Date()
         switch outputType {
         case .audio:
@@ -857,6 +1298,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             writeStemSamples(sampleBuffer, source: .microphone)
         default:
             break
+        }
+        let wroteAudio = (writer?.framesWritten ?? 0) - framesBefore > (writer?.framesSilenced ?? 0) - silenceBefore
+        if wroteAudio { withState { lastCaptureUptime = ProcessInfo.processInfo.systemUptime } }
+        if attempt > 0, wroteAudio, captureLifecycle.resume(attempt: attempt) {
+            let gap = withState { interruptionUptime.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0 }
+            emitJSON(["event": "capture_resumed", "attempt": attempt, "gap_ms": Int(max(0, gap) * 1000)])
         }
     }
 
@@ -1156,6 +1603,16 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     }
 
     func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
+        let first = withState {
+            guard let segment = segments.first(where: { $0.output === recordingOutput }) else { return false }
+            segment.started = true
+            if segment.attempt > 0 { segment.offset = elapsedSeconds }
+            if readyEmitted { return false }
+            originUptime = ProcessInfo.processInfo.systemUptime
+            readyEmitted = true
+            return true
+        }
+        guard first else { return }
         print("ready")
         fflush(stdout)
 
@@ -1188,31 +1645,82 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         }
     }
 
-    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        // Emit elapsed time from the start of stop() to actual .mov finalize.
-        // Pair with `stopCapture_returned` to size the moov-write tail (#216
-        // / #236).
-        if let start = finalizeStart {
-            let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-            let payload: [String: Any] = [
-                "event": "finalize_complete",
-                "elapsed_ms": elapsedMs,
-            ]
-            if let data = try? JSONSerialization.data(withJSONObject: payload),
-               let json = String(data: data, encoding: .utf8) {
-                print(json)
-                fflush(stdout)
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        guard withState({ self.stream === stream }), !captureLifecycle.isStopping else { return }
+        let nativeError = error as NSError
+        let retryable = nativeError.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain"
+            && nativeError.code == -3821
+        if captureLifecycle.isRecovering { return }
+        if retryable {
+            guard captureLifecycle.beginRecovery() else { return }
+            withState {
+                interruptionUptime = lastCaptureUptime ?? ProcessInfo.processInfo.systemUptime
+                interruptedStream = stream
             }
+            sampleQueue.async {
+                self.lastSystemAudioSampleAt = nil
+                self.lastMicSampleAt = nil
+                self.latestSystemLevel = 0
+                self.latestMicLevel = 0
+            }
+        } else {
+            guard captureLifecycle.recordInterruption() else { return }
+            captureLifecycle.fail()
         }
-        exit(0)
+        // Do not emit localized descriptions or userInfo: they can include
+        // unrelated application/window information. Domain and code suffice.
+        emitJSON([
+            "event": "capture_interrupted",
+            "reason": "stream_error",
+            "error_domain": nativeError.domain,
+            "error_code": nativeError.code,
+            "observed_at": ISO8601DateFormatter().string(from: Date()),
+            "will_retry": retryable,
+            "attempt": withState { segments.first(where: { $0.stream === stream })?.attempt ?? 0 },
+        ])
+        if retryable {
+            // Register under the same lock stop() uses to take the task. If
+            // Stop wins this race, no reconnect is launched; otherwise Stop
+            // must join the task before permitting finalization.
+            withState {
+                guard !captureLifecycle.isStopping else { return }
+                recoveryTask = Task { await self.recoverCapture() }
+            }
+        } else {
+            Task { await self.stop() }
+        }
+    }
+
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
+        let isCurrent = withState {
+            guard let segment = segments.first(where: { $0.output === recordingOutput }) else { return false }
+            segment.finished = true
+            return self.recordingOutput === recordingOutput
+        }
+        if isCurrent, !captureLifecycle.isRecovering, captureLifecycle.recordInterruption() {
+            emitJSON([
+                "event": "capture_interrupted",
+                "reason": "unexpected_output_finish",
+                "observed_at": ISO8601DateFormatter().string(from: Date()),
+                "will_retry": false,
+            ])
+            captureLifecycle.fail()
+            Task { await self.stop() }
+        }
+        finishIfReady()
     }
 
     func recordingOutput(
         _ recordingOutput: SCRecordingOutput,
         didFailWithError error: Error
     ) {
-        fputs("recordingOutput failed: \(error)\n", stderr)
-        exit(1)
+        let segmentStream = withState {
+            let segment = segments.first(where: { $0.output === recordingOutput })
+            segment?.finished = true
+            return segment?.stream
+        }
+        if let segmentStream { self.stream(segmentStream, didStopWithError: error) }
+        finishIfReady()
     }
 }
 
@@ -1221,6 +1729,7 @@ struct NativeCallRecordMain {
     // Keep the signal source alive after `run()` returns so the SIGTERM handler
     // remains installed for the lifetime of the helper.
     nonisolated(unsafe) static var retainedStopSource: DispatchSourceSignal?
+    nonisolated(unsafe) static var retainedTestSource: DispatchSourceSignal?
 
     static func main() {
         Task {
@@ -1231,6 +1740,10 @@ struct NativeCallRecordMain {
 
     static func run() async {
         if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--self-test-capture-lifecycle" {
+            exit(runCaptureLifecycleSelfTest() ? 0 : 1)
+        }
+        if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--self-test-pcm-decoder" {
             exit(runPCMDecoderSelfTest() ? 0 : 1)
         }
@@ -1238,6 +1751,11 @@ struct NativeCallRecordMain {
         guard #available(macOS 15.0, *) else {
             fputs("ScreenCaptureKit recording output requires macOS 15.0 or newer.\n", stderr)
             exit(1)
+        }
+
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--self-test-capture-recovery" {
+            exit(await runCaptureRecoverySelfTest() ? 0 : 1)
         }
 
         if CommandLine.arguments.count == 2,
@@ -1281,6 +1799,14 @@ struct NativeCallRecordMain {
         }
         stopSource.resume()
         NativeCallRecordMain.retainedStopSource = stopSource
+
+        if CommandLine.arguments.contains("--enable-recovery-test-signal") {
+            signal(SIGUSR1, SIG_IGN)
+            let testSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+            testSource.setEventHandler { Task { await recorder.injectTestInterruption() } }
+            testSource.resume()
+            NativeCallRecordMain.retainedTestSource = testSource
+        }
 
         do {
             try await recorder.start()

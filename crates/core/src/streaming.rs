@@ -246,6 +246,7 @@ pub struct AudioStream {
     _stream: cpal::Stream,
     stop: Arc<AtomicBool>,
     err_flag: Arc<AtomicBool>,
+    diagnostics: Arc<crate::resample::InputStreamDiagnostics>,
     /// Receive audio chunks from this channel.
     pub receiver: Receiver<AudioChunk>,
     /// The sample rate of output chunks (always 16000).
@@ -270,7 +271,7 @@ impl AudioStream {
 
         let mut accumulator = ChunkAccumulator::new();
 
-        let (stream, device_name, _config) = crate::resample::build_resampled_input_stream(
+        let (stream, device_name, config) = crate::resample::build_resampled_input_stream(
             &device,
             &stop,
             &err_flag,
@@ -296,6 +297,7 @@ impl AudioStream {
             _stream: stream,
             stop,
             err_flag,
+            diagnostics: config.diagnostics,
             receiver: rx,
             sample_rate: 16000,
             device_name,
@@ -304,6 +306,7 @@ impl AudioStream {
 
     /// Returns true if the audio stream has encountered an error.
     pub fn has_error(&self) -> bool {
+        self.diagnostics.report_pending();
         self.err_flag.load(Ordering::Relaxed)
     }
 
@@ -316,6 +319,7 @@ impl AudioStream {
 impl Drop for AudioStream {
     fn drop(&mut self) {
         self.stop();
+        self.diagnostics.report_pending();
     }
 }
 

@@ -1,5 +1,7 @@
 use crate::config::Config;
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, types::Type, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -712,6 +714,18 @@ fn now_timestamp() -> String {
     chrono::Local::now().to_rfc3339()
 }
 
+fn embedding_dimension_from_row(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<usize> {
+    let value: i64 = row.get(column)?;
+    usize::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))
+    })
+}
+
+fn embedding_dimension_for_sql(value: usize) -> Result<i64, VoiceError> {
+    i64::try_from(value)
+        .map_err(|_| VoiceError::Other("voice embedding dimension exceeds SQLite INTEGER".into()))
+}
+
 fn mean_embedding(samples: &[&StoredSample]) -> Vec<f32> {
     let embedding_dim = samples[0].embedding_dim;
     let mut mean = vec![0.0; embedding_dim];
@@ -753,7 +767,7 @@ fn rebuild_active_profile_in_transaction(
                 id: row.get(0)?,
                 name: row.get(1)?,
                 embedding: bytes_to_embedding(&blob),
-                embedding_dim: row.get(3)?,
+                embedding_dim: embedding_dimension_from_row(row, 3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -836,6 +850,7 @@ fn rebuild_active_profile_in_transaction(
         .clone();
     let sample_count = u32::try_from(accepted.len())
         .map_err(|_| VoiceError::Other("voice sample count exceeds u32".to_string()))?;
+    let embedding_dim_sql = embedding_dimension_for_sql(embedding_dim)?;
     let updated_at = now_timestamp();
     conn.execute(
         "INSERT INTO voice_active_profiles
@@ -852,7 +867,7 @@ fn rebuild_active_profile_in_transaction(
             model_id,
             name,
             embedding_to_bytes(&embedding),
-            embedding_dim,
+            embedding_dim_sql,
             sample_count,
             updated_at,
         ],
@@ -875,6 +890,7 @@ pub fn insert_voice_sample(
 ) -> Result<i64, VoiceError> {
     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let created_at = sample.created_at.clone().unwrap_or_else(now_timestamp);
+    let embedding_dim_sql = embedding_dimension_for_sql(sample.embedding.len())?;
     transaction.execute(
         "INSERT INTO voice_samples (
             person_slug, name, embedding, embedding_dim, model_id, normalization,
@@ -889,7 +905,7 @@ pub fn insert_voice_sample(
             sample.person_slug,
             sample.name,
             embedding_to_bytes(&sample.embedding),
-            sample.embedding.len(),
+            embedding_dim_sql,
             sample.model_id,
             sample.trust_class.as_str(),
             sample.meeting_path,
@@ -953,7 +969,7 @@ fn active_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivePr
         model_id: row.get(1)?,
         name: row.get(2)?,
         embedding: bytes_to_embedding(&blob),
-        embedding_dim: row.get(4)?,
+        embedding_dim: embedding_dimension_from_row(row, 4)?,
         sample_count: row.get(5)?,
     })
 }
@@ -1362,6 +1378,8 @@ pub fn migrate_legacy_profiles(conn: &Connection) -> Result<usize, VoiceError> {
 
         if !current_sample_matches {
             let revoked_at = now_timestamp();
+            let embedding_dim_sql =
+                embedding_dimension_for_sql(embedding.len() / std::mem::size_of::<f32>())?;
             let mut affected_models = std::collections::BTreeSet::new();
             for (id, _, _, migrated_model_id, _) in &migrated_samples {
                 transaction.execute(
@@ -1379,7 +1397,7 @@ pub fn migrate_legacy_profiles(conn: &Connection) -> Result<usize, VoiceError> {
                     slug,
                     name,
                     embedding,
-                    embedding.len() / std::mem::size_of::<f32>(),
+                    embedding_dim_sql,
                     model_id,
                     source,
                     LEGACY_PROFILE_MIGRATION_QUALITY_JSON,
@@ -1659,6 +1677,27 @@ mod tests {
                 "expected {expected}, got {actual}"
             );
         }
+    }
+
+    #[test]
+    fn sqlite_embedding_dimensions_reject_negative_values() {
+        let conn = Connection::open_in_memory().unwrap();
+        let error = conn
+            .query_row("SELECT -1", [], |row| embedding_dimension_from_row(row, 0))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Integer, _)
+        ));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn sqlite_embedding_dimensions_reject_values_above_i64() {
+        assert!(matches!(
+            embedding_dimension_for_sql(usize::MAX),
+            Err(VoiceError::Other(_))
+        ));
     }
 
     #[test]
@@ -2232,7 +2271,7 @@ mod tests {
         .unwrap();
         assert_eq!(revoke_voice_person(&conn, "mat").unwrap(), 1);
         assert!(active_profile(&conn, "mat", "model-a").unwrap().is_none());
-        let revoked: usize = conn
+        let revoked: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM voice_samples WHERE revoked_at IS NOT NULL",
                 [],

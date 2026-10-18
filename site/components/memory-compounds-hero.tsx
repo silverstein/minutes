@@ -121,7 +121,7 @@ signups get monthly.`}</code>
         </div>
         <div className="memory-artifact memory-recall">
           <div className="memory-recall-header">
-            <span>Ambient context</span>
+            <span>Any MCP client</span>
             <span>Minutes</span>
           </div>
           <p className="memory-prompt">
@@ -229,7 +229,7 @@ export function MemoryCompoundsHero() {
 
         <div id="memory-flow" className="marketing-hero-product">
           <p className="marketing-product-kicker">
-            One conversation. One durable file. Reliable recall.
+            One conversation. One durable file. Recall with a source.
           </p>
           <MemorySequence />
         </div>

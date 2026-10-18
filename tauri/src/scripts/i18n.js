@@ -10,8 +10,9 @@
 // Safety: only strings present in the catalog are ever touched, so user data
 // (meeting titles, transcript text, names) is never mistranslated. Switching
 // language is lossless because each translated node remembers its English
-// source. The catalog lives in a separate file (locales/zh-CN.js) loaded before
-// this script; adding a translation is a data-only edit.
+// source. Catalogs live in separate files (locales/<tag>.js) loaded before this
+// script; adding a translation is a data-only edit, and adding a language means
+// a new catalog file plus its tag in SUPPORTED below.
 //
 // Exposes window.MinutesI18n = { setLocale, getLocale, t }.
 (function () {
@@ -29,34 +30,54 @@
   var nodeState = new WeakMap(); // textNode -> { en, lead, trail, rendered }
   var attrState = new WeakMap(); // element  -> { [attr]: { en, rendered } }
 
+  // Every non-English locale that ships a catalog. 'en' is implicit (identity).
+  var SUPPORTED = ['zh-CN', 'pt-BR'];
+  // Locales whose script needs a CJK font fallback appended to the Latin stack.
+  var CJK_LOCALES = { 'zh-CN': 1 };
+
   var currentLocale = 'en';
-  var exactMap = new Map();      // English -> Chinese (exact)
-  var patterns = [];             // [{ re: RegExp, to: string }] for interpolated strings
+  var catalogs = {};             // tag -> { exact: Map, patterns: [{re, to}] }
+
+  function isSupported(locale) { return locale === 'en' || SUPPORTED.indexOf(locale) !== -1; }
 
   // ── Catalog ────────────────────────────────────────────────────────────
   function buildCatalog() {
     var all = window.__MINUTES_I18N || {};
-    var zh = all['zh-CN'] || {};
-    var strings = zh.strings || {};
-    Object.keys(strings).forEach(function (k) { exactMap.set(k, strings[k]); });
-    (zh.patterns || []).forEach(function (p) {
-      try { patterns.push({ re: new RegExp(p.re), to: p.to }); } catch (_) { /* skip bad rule */ }
+    SUPPORTED.forEach(function (tag) {
+      var entry = all[tag] || {};
+      var exact = new Map();
+      var pats = [];
+      var strings = entry.strings || {};
+      Object.keys(strings).forEach(function (k) { exact.set(k, strings[k]); });
+      (entry.patterns || []).forEach(function (p) {
+        try { pats.push({ re: new RegExp(p.re), to: p.to }); } catch (_) { /* skip bad rule */ }
+      });
+      catalogs[tag] = { exact: exact, patterns: pats };
     });
   }
 
-  // Does this English string have any (exact or pattern) translation?
+  // Does this English string have a translation in ANY shipped catalog?
+  //
+  // Capture is locale-independent on purpose: a node captured while the UI is
+  // in English must still be translatable after the user switches language
+  // without a reload, so the test has to be the union across catalogs.
   function hasTranslation(s) {
-    if (exactMap.has(s)) return true;
-    for (var i = 0; i < patterns.length; i++) { if (patterns[i].re.test(s)) return true; }
+    for (var i = 0; i < SUPPORTED.length; i++) {
+      var c = catalogs[SUPPORTED[i]];
+      if (!c) continue;
+      if (c.exact.has(s)) return true;
+      for (var j = 0; j < c.patterns.length; j++) { if (c.patterns[j].re.test(s)) return true; }
+    }
     return false;
   }
 
   // Render an English source string in the given locale (identity for 'en').
   function valueFor(locale, en) {
-    if (locale !== 'zh-CN') return en;
-    if (exactMap.has(en)) return exactMap.get(en);
-    for (var i = 0; i < patterns.length; i++) {
-      if (patterns[i].re.test(en)) return en.replace(patterns[i].re, patterns[i].to);
+    var c = catalogs[locale];
+    if (!c) return en;
+    if (c.exact.has(en)) return c.exact.get(en);
+    for (var i = 0; i < c.patterns.length; i++) {
+      if (c.patterns[i].re.test(en)) return en.replace(c.patterns[i].re, c.patterns[i].to);
     }
     return en;
   }
@@ -198,16 +219,16 @@
 
   function updateFontClass() {
     if (document.body) {
-      document.body.classList.toggle(FONT_CLASS, currentLocale === 'zh-CN');
+      document.body.classList.toggle(FONT_CLASS, !!CJK_LOCALES[currentLocale]);
     }
   }
 
   function apply(locale) {
     currentLocale = locale;
     if (document.documentElement) {
-      document.documentElement.lang = (locale === 'zh-CN') ? 'zh-CN' : 'en';
+      document.documentElement.lang = isSupported(locale) ? locale : 'en';
     }
-    if (locale === 'zh-CN') ensureCjkFontRule();
+    if (CJK_LOCALES[locale]) ensureCjkFontRule();
     updateFontClass();
     walk(document.documentElement);
   }
@@ -239,10 +260,12 @@
   function initialLocale() {
     try {
       var saved = localStorage.getItem(LS_KEY);
-      if (saved === 'en' || saved === 'zh-CN') return saved;
+      if (isSupported(saved)) return saved;
     } catch (_) { /* ignore */ }
     var nav = (navigator.language || '').toLowerCase();
-    return nav.indexOf('zh') === 0 ? 'zh-CN' : 'en';
+    if (nav.indexOf('zh') === 0) return 'zh-CN';
+    if (nav.indexOf('pt') === 0) return 'pt-BR';
+    return 'en';
   }
 
   function refreshFromBackend() {
@@ -250,7 +273,7 @@
       var core = window.__TAURI__ && window.__TAURI__.core;
       if (!core || !core.invoke) return;
       core.invoke('cmd_get_ui_language').then(function (loc) {
-        if (loc !== 'en' && loc !== 'zh-CN') return;
+        if (!isSupported(loc)) return;
         try { localStorage.setItem(LS_KEY, loc); } catch (_) { /* ignore */ }
         if (loc !== currentLocale) apply(loc);
       }).catch(function () { /* command may not exist yet — English fallback */ });
@@ -263,7 +286,7 @@
     // want it remembered across sessions should also persist via the backend
     // command cmd_set_ui_language).
     setLocale: function (locale) {
-      if (locale !== 'en' && locale !== 'zh-CN') return;
+      if (!isSupported(locale)) return;
       try { localStorage.setItem(LS_KEY, locale); } catch (_) { /* ignore */ }
       apply(locale);
     },

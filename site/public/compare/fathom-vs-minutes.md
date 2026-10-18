@@ -1,52 +1,65 @@
 # Minutes vs Fathom
 
-Last reviewed: 2026-07-11
+Last reviewed: 2026-10-07
 
-Fathom is the strongest free offer in cloud meeting notes — unlimited recording at $0, polished summaries, CRM sync, and now a bot-free capture option (in beta). Minutes draws the line somewhere Fathom doesn't: recording, transcription, and storage all happen on your own machine, and your audio is never uploaded.
+Fathom offers hosted meeting recordings, summaries, and team integrations. Minutes keeps a local conversation archive for your existing assistant. Both expose MCP; the useful distinction is the workflow and storage behind that connection.
 
 ## Quick verdict
 
-- Choose **Fathom** if you want excellent free meeting summaries with CRM workflows and you're comfortable with recordings living in a US cloud, processed by major AI providers under no-training contracts.
-- Choose **Minutes** if your conversations must never leave your machine and you want inspectable markdown your own agents query locally.
-
-## Where your conversation goes
-
-**Fathom** (leaves your device): capture (bot in the call, or bot-free via desktop app, beta) → transcribe + summarize in Fathom's cloud (AI via Anthropic/OpenAI/Google) → store on Fathom's US servers, indefinitely by default (auto-delete rules are Business+). SOC 2 Type II, published blanket HIPAA BAA, no-training contracts with LLM subprocessors — a serious cloud posture, but a cloud posture. Fathom improves its own models on de-identified customer data unless you opt out.
-
-**Minutes** (stays on device): capture device audio (no bot, works offline/in person) → transcribe + diarize on-device (sealed local whisper.cpp + pyannote) → store markdown on your disk (0600 permissions). Nothing is uploaded by default — the only network traffic is one-time model downloads, plus transcript text if you explicitly configure an LLM summarizer (local via Ollama, or a provider you choose). See https://useminutes.app/security for the complete list.
+- Choose **Fathom** if you want hosted meeting notes, shared recordings, or CRM workflows.
+- Choose **Minutes** if you want inspectable local records and a file-based archive your preferred assistant can search.
 
 ## At a glance
 
-- Capture — Fathom: bot, or bot-free via desktop app (beta), Zoom/Meet/Teams/Slack Huddles; Minutes: always botless, in-person too
-- Processing — Fathom: cloud; Minutes: on-device (audio never uploaded)
-- Storage — Fathom: US servers, indefinite default retention; Minutes: your disk
-- Data residency — Fathom: US only; Minutes: moot
-- Model training — Fathom: subprocessors barred, internal de-identified training with opt-out; Minutes: no vendor exists
-- Compliance — Fathom: SOC 2 Type II, published blanket BAA (pricing lists HIPAA BAA under Enterprise); Minutes: no vendor in the loop
-- Open source — Fathom: no; Minutes: MIT
-- API/MCP — Fathom: public API + first-party MCP over its cloud; Minutes: MCP (34 tools) + CLI + SDK over local files
-- Pricing — Fathom: Free (unlimited recording), Premium $20, Team $19, Business $34/user/mo billed monthly ($16/$15/$25 annually), Enterprise custom; Minutes: free, open source
+| Topic | Fathom | Minutes |
+| --- | --- | --- |
+| Workflow | Hosted meeting assistant with recordings and team integrations | Local conversation records across meetings, memos, and dictation |
+| Capture | Meeting bot or bot-free Mac capture in beta | Device capture without a meeting bot; support depends on platform |
+| Record storage | Hosted recordings and notes; retained until deleted | Markdown and YAML on your disk |
+| AI processing | Hosted summaries and assistance | Local transcription; optional local or cloud AI |
+| Agent access | Public API and first-party MCP server | MCP, CLI, SDK, and portable skills over authorized local records |
+| Pricing | Free recording and transcription; paid individual and team plans | Free MIT software; optional provider usage is separate |
 
-## Where Fathom wins
+## Where Fathom helps
 
-- Genuinely exceptional free tier: unlimited recordings, transcription, storage at $0 — nobody matches it, including us
-- Real sales/CRM depth: HubSpot/Salesforce sync, coaching metrics, scorecards
-- Good agent citizenship: public API + first-party MCP; bot-free capture option (beta)
+Fathom offers unlimited recording and transcription on its free tier.
 
-## Where Minutes wins
+Its paid plans add team and CRM workflows around shared meeting records.
 
-- Your audio never leaves your machine — Fathom's bot-free mode still uploads to its cloud; Minutes' capture-to-storage pipeline has no upload step
-- No vendor retention to audit: Fathom keeps recordings by default until deleted; Minutes' only copy is yours
-- Open source, free forever, and captures in-person conversations and voice memos — no meeting link required
+## Where Minutes helps
 
-## When Minutes is not the right fit
+Minutes writes the primary conversation record as Markdown with YAML metadata.
 
-- Maximum polish for zero dollars on video calls — Fathom's free tier is unbeatable on that axis
-- CRM-feeding sales workflows — Fathom's tooling has no Minutes equivalent
+Its open-source desktop, CLI, SDK, and MCP surfaces work over the same authorized corpus. The desktop app supports macOS and Windows; Linux has a CLI.
+
+## Workflow and data boundaries
+
+Fathom can provide hosted meeting context through its API and MCP. Minutes exposes local files through its own tools. Test the retrieval and permission model you will actually use rather than treating MCP availability as a quality benchmark.
+
+Minutes captures, transcribes, and stores conversation records locally. Engine availability depends on your platform, build, and installed models. If you choose a cloud summarizer or connect a cloud assistant, authorized meeting context can reach that provider. File sync and backups you configure are separate data boundaries.
+
+## How to choose
+
+Choose the workflow you will use every day. Try one conversation, inspect the saved record, and ask your assistant to retrieve a specific decision with its source.
+
+Check provider settings, retention, sync, and assistant permissions separately. Local transcription alone does not establish where every later step runs.
+
+## When Minutes may not fit
+
+Minutes may require more setup if you want a managed team workspace, centralized administration, or ready-made CRM integrations.
+
+A local archive does not establish regulatory compliance. Assess your configuration and obligations before recording sensitive conversations.
+
+## How this was evaluated
+
+Official product, pricing, security, and developer documentation was reviewed on October 7, 2026. This is a maintainer-written comparison, not a hands-on accuracy or reliability benchmark.
+
+The Minutes side reflects its published documentation and source. Optional cloud AI and user-configured sync are separate from local capture and transcription.
 
 ## Sources
 
-- https://fathom.ai/ · https://fathom.ai/pricing · https://www.fathom.ai/baa
-- https://help.fathom.video/en/articles/296512 (security) · /5291265 (HIPAA) · /296448 (retention)
-- https://developers.fathom.ai/mcp-docs
-- https://useminutes.app/for-agents · https://useminutes.app/docs/mcp/tools · https://useminutes.app/security
+- [Fathom plans and capture](https://www.fathom.ai/pricing)
+- [Fathom MCP](https://developers.fathom.ai/mcp-docs)
+- [Fathom recording storage](https://help.fathom.video/en/articles/296448)
+- [Minutes security and data flow](https://useminutes.app/security)
+- [Minutes proof and limitations](https://useminutes.app/proof)

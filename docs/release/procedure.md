@@ -312,6 +312,19 @@ tap, so the postcondition covers the cask's `sha256` and not just the version
 string: a cask carrying a correct version with a wrong hash fails every
 install, and a version comparison would call it fine.
 
+**The formula stages a second pinned asset.** Since silverstein/homebrew-tap#5
+the formula compiles the CLI with `engine-sherpa` and installs the signed
+plugin from that release's `minutes-macos-arm64-sherpa.tar.gz`, pinned by URL
+and `sha256`. The bump script moves that pin with the tag and the verifier
+checks it, so this needs no manual step. It is called out because the failure
+is quiet: a formula whose version line is correct can still stage the previous
+release's plugin, and the mismatch surfaces at transcription time as a loader
+that refuses, not at install time.
+
+If a release does not publish that archive, the workflow warns and leaves the
+pin where it was rather than failing the release. Read that warning: it means
+`brew install` is building a new CLI against an older plugin.
+
 If `HOMEBREW_TAP_TOKEN` is missing the workflow warns and exits 0 rather than
 turning a good release red, so a green release does not by itself prove the tap
 moved. Check the run, or:

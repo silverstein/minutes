@@ -77,6 +77,29 @@ The MCP surface currently includes recording control, meeting search/retrieval, 
 
 **Interactive dashboard (Claude Desktop):** tools render an inline interactive UI via [MCP Apps](https://modelcontextprotocol.io/specification/2025-03-26/server/utilities/apps) — meeting list with filter/search, detail view with fullscreen + "Send to Claude" context injection, bounded relationship maps, and consistency reports. Text-only clients see the same data as plain text.
 
+### Claude Code inside the Minutes desktop app
+
+Opening the assistant Terminal automatically exposes the bundled Minutes skills,
+including `/minutes-brief`, `/minutes-prep`, `/minutes-search`, and
+`/minutes-weekly`. No marketplace installation is required inside the app.
+
+Minutes refreshes a managed project-skill directory at
+`~/.minutes/assistant/.minutes-skill-pack/.claude/skills` from the generated
+portable pack, including its scripts and references. It passes the pack's root
+to Claude Code with `--add-dir`. Helpers resolve from the assistant workspace's
+`.agents/skills/minutes` mirror. Your workspace and global `.claude` settings,
+custom skills, and legacy configuration symlinks remain user-owned.
+
+This uses Claude Code's documented [additional-directory skill discovery](https://code.claude.com/docs/en/skills#load-skills-from-a-directory-outside-the-project).
+The pack does not register another MCP server or enable plugin hooks. Private
+Recall Chat retains its separate provider isolation. To use Minutes in Claude
+Code outside the desktop app, install the [Minutes plugin](agent-integrations.md).
+
+After upgrading from a version affected by missing skills, end the assistant
+session and open a new Terminal session once so it receives the added directory.
+If your configured Claude arguments exclude the `project` setting source or
+enable safe/bare mode, Claude intentionally does not load project skills.
+
 ### OpenCode CLI
 
 Minutes now ships a project-local OpenCode integration layer:

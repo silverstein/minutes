@@ -327,6 +327,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Recover a native WAV/RF64/BW64 stem into lossless, processable WAV parts
+    RecoverStem {
+        /// Original stem file (preserved unchanged)
+        path: PathBuf,
+        /// New output directory; existing directories are refused
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Duration of each part, at most four hours
+        #[arg(long, default_value_t = 3600)]
+        chunk_secs: u64,
+    },
     /// Start recording audio (foreground process, Ctrl-C or `minutes stop` to finish)
     Record {
         /// Optional title for this recording
@@ -416,6 +427,40 @@ enum Commands {
         /// Annotate an existing meeting file instead of the current recording
         #[arg(short, long)]
         meeting: Option<PathBuf>,
+    },
+
+    /// Talk to Minutes by voice: a spoken assistant over your meeting memory (RFC 0007).
+    /// Requires `[voice_live] enabled = true`, `allow_cloud = true`, and the provider API key
+    /// in the environment variable named by `api_key_env` (default GEMINI_API_KEY).
+    #[cfg(feature = "voice-live")]
+    Talk {
+        /// Local checkpoint shell only: no microphone, provider, credentials or agents.
+        #[arg(long, conflicts_with_all = ["ptt", "open_mic", "device", "mute"])]
+        local_work: bool,
+
+        /// Push-to-talk: press Enter to start talking and Enter again to stop.
+        /// The default on platforms without echo cancellation, because open mic
+        /// there hears the assistant through the speakers and interrupts itself.
+        #[arg(long)]
+        ptt: bool,
+
+        /// Open mic using the provider's voice activity detection. The default
+        /// on macOS. Elsewhere it needs headphones.
+        #[arg(long = "open-mic", conflicts_with = "ptt")]
+        open_mic: bool,
+
+        /// Audio input device name. Use `minutes devices` to list available devices.
+        /// Overrides the [recording] device setting in config.toml.
+        #[arg(short = 'D', long)]
+        device: Option<String>,
+
+        /// Do not play the assistant's speech; print transcripts only.
+        #[arg(long)]
+        mute: bool,
+
+        /// Print every session event except audio levels as one JSON object per line.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Stop recording and process the audio
@@ -963,6 +1008,10 @@ enum Commands {
         /// Download the sherpa-onnx parakeet-v3 model for the opt-in `engine-sherpa` engine (~670 MB)
         #[arg(long)]
         sherpa: bool,
+
+        /// Download and select a verified model for the sherpa engine (~672 MB)
+        #[arg(long, value_parser = ["orukeet"], conflicts_with_all = ["sherpa", "parakeet", "model", "vad", "list", "diarization", "demo"])]
+        sherpa_model: Option<String>,
 
         /// Install the bundled 5-meeting fixture corpus for demoing search, graph, and MCP flows
         #[arg(long)]
@@ -1895,6 +1944,10 @@ fn main() -> Result<()> {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    #[cfg(feature = "voice-live")]
+    if let Some(result) = local_work_fast_path() {
+        return result;
+    }
     let mut cli = Cli::parse();
     let verbose = cli.verbose;
     // This must remain the first action after parsing. In particular, do not
@@ -1902,6 +1955,16 @@ fn main() -> Result<()> {
     // above the fd claim.
     let mut claimed_authorized_process_input = claim_authorized_process_input(&mut cli.command)?;
     install_authorized_process_containment(claimed_authorized_process_input.is_some())?;
+
+    #[cfg(feature = "voice-live")]
+    if let Commands::Talk {
+        local_work: true,
+        json,
+        ..
+    } = &cli.command
+    {
+        return cmd_local_work(*json);
+    }
 
     // Initialize logging.
     //
@@ -1949,6 +2012,16 @@ fn main() -> Result<()> {
     minutes_core::logging::rotate_logs().ok();
 
     let result = match cli.command {
+        Commands::RecoverStem {
+            path,
+            output_dir,
+            chunk_secs,
+        } => {
+            let receipt = minutes_core::stem_recovery::recover_stem(&path, &output_dir, chunk_secs)
+                .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
         Commands::Record {
             title,
             context,
@@ -2032,6 +2105,21 @@ fn main() -> Result<()> {
             }
         }
         Commands::Note { text, meeting } => cmd_note(&text, meeting.as_deref(), &config),
+        #[cfg(feature = "voice-live")]
+        Commands::Talk {
+            local_work,
+            ptt,
+            open_mic,
+            device,
+            mute,
+            json,
+        } => {
+            if local_work {
+                cmd_local_work(json)
+            } else {
+                cmd_talk(&config, ptt, open_mic, device, mute, json)
+            }
+        }
         Commands::Stop => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
@@ -2385,6 +2473,7 @@ fn main() -> Result<()> {
             parakeet,
             parakeet_model,
             sherpa,
+            sherpa_model,
             demo,
         } => {
             if vad {
@@ -2393,6 +2482,8 @@ fn main() -> Result<()> {
                 cmd_setup_demo()
             } else if parakeet {
                 cmd_setup_parakeet(&parakeet_model)
+            } else if sherpa_model.is_some() {
+                cmd_setup_orukeet(&config)
             } else if sherpa {
                 cmd_setup_sherpa(&config, true)
             } else if list {
@@ -2565,6 +2656,343 @@ fn main() -> Result<()> {
 
     minutes_core::parakeet_sidecar::shutdown_global_parakeet_sidecar();
     result
+}
+
+#[cfg(feature = "voice-live")]
+fn local_work_fast_path() -> Option<Result<()>> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let is_local_work = args.iter().any(|arg| arg.to_str() == Some("talk"))
+        && args.iter().any(|arg| arg.to_str() == Some("--local-work"));
+    if !is_local_work {
+        return None;
+    }
+    if std::env::var_os("MINUTES_MCP_OUTER_PROCESS_GROUP").is_some() {
+        return Some(Err(anyhow::anyhow!(
+            "local work mode cannot run inside authorized process containment"
+        )));
+    }
+    Some(cmd_local_work(
+        args.iter().any(|arg| arg.to_str() == Some("--json")),
+    ))
+}
+
+/// Offline counterpart using the exact same checkpoint store as Voice Live.
+#[cfg(feature = "voice-live")]
+fn cmd_local_work(json: bool) -> Result<()> {
+    let mut work = minutes_core::voice_live::LocalWork::new();
+    eprintln!("Offline work mode. /work new GOAL, /work debrief WORDS, /work park, /work list, /work resume ID, /work show; q exits. Nothing is shared.");
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    loop {
+        let mut line = String::new();
+        let count = std::io::Read::by_ref(&mut input)
+            .take(16_385)
+            .read_line(&mut line)?;
+        if count == 0 {
+            break;
+        }
+        if count > 16_384 {
+            anyhow::bail!("local command exceeds 16384 bytes");
+        }
+        let line = line.trim();
+        if matches!(line, "q" | "quit" | "exit") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let result = work.command(line);
+        if json {
+            println!(
+                "{}",
+                match result {
+                    Ok(text) => serde_json::json!({"type":"local", "text":text}),
+                    Err(error) => serde_json::json!({"type":"local_error", "error":error}),
+                }
+            );
+        } else {
+            match result {
+                Ok(text) => println!("{text}"),
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `minutes talk`: run one Voice Live session in the terminal.
+/// (`minutes voice` is speaker enrollment, so the assistant uses a different verb.)
+///
+/// Stdin drives the session: an empty line toggles push-to-talk (in `--ptt` mode),
+/// any other line is sent to the model as typed text, and `q` ends the session.
+/// Ctrl-C ends it too. Events print to stdout; instructions print to stderr.
+#[cfg(feature = "voice-live")]
+fn cmd_talk(
+    config: &Config,
+    ptt: bool,
+    open_mic: bool,
+    device: Option<String>,
+    mute: bool,
+    json: bool,
+) -> Result<()> {
+    use minutes_core::voice_live::{
+        self, SessionOptions, TalkMode, VoiceLiveEvent, VoiceLiveState,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    voice_live::preflight(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mode = if ptt {
+        TalkMode::PushToTalk
+    } else if open_mic {
+        TalkMode::OpenMic
+    } else {
+        voice_live::default_talk_mode(config)
+    };
+    if mode == TalkMode::OpenMic && !voice_live::echo_cancellation_available(config) {
+        eprintln!(
+            "Open mic without echo cancellation. Use headphones, or the assistant hears itself through the speakers and interrupts mid-sentence. `--ptt` avoids this."
+        );
+    }
+    let closed = Arc::new(AtomicBool::new(false));
+    let closed_in_events = Arc::clone(&closed);
+    let render_state = Arc::new(Mutex::new(VoiceEventRenderState::default()));
+    let render_state_in_events = Arc::clone(&render_state);
+    // Shared with the event callback so the meter only draws while a press is
+    // in progress. Without any visible sign of input, a session waiting for the
+    // user is indistinguishable from a microphone that is not working, which
+    // has already cost one debugging session.
+    let holding = Arc::new(AtomicBool::new(false));
+    let holding_in_events = Arc::clone(&holding);
+    let session = voice_live::start(
+        config,
+        SessionOptions {
+            mode,
+            device,
+            mute_playback: mute,
+            // The terminal has a key to hold, so if echo cancellation turns out
+            // to be unavailable the session may fall back to plain capture and
+            // say so, rather than refusing the way the tray does.
+            require_open_mic: false,
+        },
+        move |event| {
+            // Level arrives many times a second. It is the only evidence the
+            // microphone is live, so draw it while the user is holding the key
+            // and stay silent otherwise.
+            if let VoiceLiveEvent::Level { rms } = event {
+                if !json && holding_in_events.load(Ordering::SeqCst) {
+                    eprint!("\r  {}", input_meter(rms));
+                    let _ = std::io::stderr().flush();
+                }
+                return;
+            }
+            if json {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    println!("{line}");
+                }
+            } else {
+                let mut render_state = render_state_in_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                print_voice_event(&event, &mut render_state);
+            }
+            if matches!(event, VoiceLiveEvent::Closed { .. }) {
+                closed_in_events.store(true, Ordering::SeqCst);
+            }
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    eprintln!("Local work commands: /help, /work new GOAL, /work park, /work resume ID, /work share. /cancel stops queued calls. Requests that need review display their approval command here.");
+    if let Some(path) = &session.log_path {
+        eprintln!("Session log: {}", path.display());
+    }
+    match mode {
+        TalkMode::PushToTalk => {
+            eprintln!("Push-to-talk. Enter: start talking, Enter again: stop. Type text to send it. q: quit.")
+        }
+        TalkMode::OpenMic => {
+            eprintln!("Open mic. Just talk; speaking over the assistant interrupts it. Type text to send it. q: quit.")
+        }
+    }
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupted_in_handler = Arc::clone(&interrupted);
+    ctrlc::set_handler(move || {
+        if interrupted_in_handler.swap(true, Ordering::SeqCst) {
+            // Same rule as the other interrupt paths: leave C++ static
+            // teardown unrun (#998). Talk transcribes remotely today, so no
+            // whisper context is live here, but a force-quit is the wrong
+            // place to depend on that staying true.
+            minutes_core::exit_without_cxx_teardown(130);
+        }
+    })?;
+
+    // Stdin on its own thread so Ctrl-C and a remote close are noticed promptly.
+    let (lines_tx, lines_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    if lines_tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut talking = false;
+    loop {
+        if interrupted.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) {
+            break;
+        }
+        if !session.is_running() {
+            break;
+        }
+        match lines_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) => {
+                let text = line.trim();
+                if text.eq_ignore_ascii_case("q")
+                    || text.eq_ignore_ascii_case("quit")
+                    || text.eq_ignore_ascii_case("exit")
+                {
+                    break;
+                }
+                if text.is_empty() {
+                    if mode == TalkMode::PushToTalk {
+                        if talking {
+                            session.ptt_end();
+                            talking = false;
+                            holding.store(false, Ordering::SeqCst);
+                            if !json {
+                                // Wipe the meter before writing under it.
+                                eprintln!("\r{:width$}\r(sent)", "", width = METER_LINE_WIDTH);
+                            }
+                        } else {
+                            session.ptt_start();
+                            talking = true;
+                            holding.store(true, Ordering::SeqCst);
+                            if !json {
+                                eprintln!("(listening, Enter to send)");
+                            }
+                        }
+                    }
+                    continue;
+                }
+                session.send_text(text);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let _ = VoiceLiveState::Closed;
+    session.stop();
+    if !json {
+        eprintln!("Voice session ended.");
+    }
+    Ok(())
+}
+
+/// Width to clear when wiping the meter line.
+#[cfg(feature = "voice-live")]
+const METER_LINE_WIDTH: usize = 32;
+
+/// A small live input meter, so a held key visibly differs from a dead mic.
+///
+/// Speech sits far below full scale, so the bar is scaled for the quiet end
+/// rather than linearly: at a linear scale ordinary talking barely moves it and
+/// the meter answers the wrong question.
+#[cfg(feature = "voice-live")]
+fn input_meter(rms: f32) -> String {
+    const BARS: usize = 20;
+    let level = (rms.max(0.0).sqrt() * 2.2).min(1.0);
+    let filled = ((level * BARS as f32).round() as usize).min(BARS);
+    let mut out = String::with_capacity(BARS + 12);
+    out.push('[');
+    for i in 0..BARS {
+        out.push(if i < filled { '=' } else { ' ' });
+    }
+    out.push(']');
+    if filled == 0 {
+        out.push_str(" quiet");
+    }
+    out
+}
+
+/// Human-readable rendering of one Voice Live event for `minutes talk`.
+#[cfg(feature = "voice-live")]
+#[derive(Default)]
+struct VoiceEventRenderState {
+    last_state: Option<minutes_core::voice_live::VoiceLiveState>,
+    printed_ready: bool,
+}
+
+#[cfg(feature = "voice-live")]
+fn print_voice_event(
+    event: &minutes_core::voice_live::VoiceLiveEvent,
+    render_state: &mut VoiceEventRenderState,
+) {
+    use minutes_core::voice_live::{VoiceLiveEvent, VoiceLiveState};
+    match event {
+        VoiceLiveEvent::State { state } => {
+            if render_state.last_state == Some(*state) {
+                return;
+            }
+            render_state.last_state = Some(*state);
+            let label = match state {
+                VoiceLiveState::Connecting => "connecting",
+                VoiceLiveState::Ready if !render_state.printed_ready => {
+                    render_state.printed_ready = true;
+                    "ready"
+                }
+                VoiceLiveState::Ready | VoiceLiveState::Listening => return,
+                VoiceLiveState::Thinking => "thinking",
+                VoiceLiveState::Speaking => "speaking",
+                VoiceLiveState::Closed => "closed",
+            };
+            println!("[{label}]");
+        }
+        VoiceLiveEvent::Status { text } => println!("  {text}"),
+        VoiceLiveEvent::Local { text } => println!("[local] {text}"),
+        VoiceLiveEvent::Review { proposal } => {
+            // JSON escaping prevents terminal control sequences in untrusted
+            // document/email bodies from controlling the terminal.
+            println!(
+                "[review] {}\nType /approve {} to execute these exact details, or /reject.",
+                serde_json::to_string_pretty(proposal).unwrap_or_default(),
+                proposal.id
+            );
+        }
+        VoiceLiveEvent::UserTranscript { text, partial } => {
+            if !partial {
+                println!("you: {text}");
+            }
+        }
+        VoiceLiveEvent::AssistantTranscript { text, partial } => {
+            if !partial {
+                println!("minutes: {text}");
+            }
+        }
+        VoiceLiveEvent::ToolCall { name, args } => {
+            let args = serde_json::to_string(args).unwrap_or_default();
+            println!("  -> {name} {args}");
+        }
+        VoiceLiveEvent::ToolResult {
+            name,
+            ms,
+            chars,
+            error,
+        } => {
+            let flag = if *error { " (error)" } else { "" };
+            println!("  <- {name} {ms} ms, {chars} chars{flag}");
+        }
+        VoiceLiveEvent::Level { .. } => {}
+        VoiceLiveEvent::Closed { reason } => println!("[closed] {reason}"),
+    }
 }
 
 fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {
@@ -2928,6 +3356,13 @@ fn cmd_record(
     if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
+    // Same reason for a voice session: it holds the microphone for a live
+    // conversation, and `minutes talk` can be running in another terminal or
+    // inside the menu-bar app.
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — close it before recording");
+    }
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;
 
@@ -3032,7 +3467,9 @@ fn cmd_record(
             &stop_clone,
             "Stopping recording... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -3756,17 +4193,11 @@ fn cmd_paths(json: bool, config: &Config) -> Result<()> {
 }
 
 #[derive(Serialize)]
-struct CleanupError {
-    path: PathBuf,
-    error: String,
-}
-
-#[derive(Serialize)]
 struct CleanupReport {
     plan: minutes_core::retention::RetentionPlan,
     applied: bool,
     removed: Vec<PathBuf>,
-    errors: Vec<CleanupError>,
+    errors: Vec<minutes_core::retention::RetentionRemovalError>,
 }
 
 fn cmd_storage(json: bool, config: &Config) -> Result<()> {
@@ -3801,19 +4232,9 @@ fn cmd_cleanup(apply: bool, older_than: Option<&str>, json: bool, config: &Confi
     };
 
     if apply {
-        for item in
-            report.plan.items.iter().filter(|item| {
-                item.action == minutes_core::retention::RetentionAction::DeleteCandidate
-            })
-        {
-            match std::fs::remove_file(&item.path) {
-                Ok(()) => report.removed.push(item.path.clone()),
-                Err(error) => report.errors.push(CleanupError {
-                    path: item.path.clone(),
-                    error: error.to_string(),
-                }),
-            }
-        }
+        let removal = minutes_core::retention::apply_audio_retention(&report.plan);
+        report.removed = removal.removed;
+        report.errors = removal.errors;
     }
 
     if json {
@@ -4254,11 +4675,7 @@ where
 
     for (index, snapshot) in authorized.iter().enumerate() {
         let frontmatter = &snapshot.frontmatter;
-        let content_type = match frontmatter.r#type {
-            ContentType::Meeting => "meeting",
-            ContentType::Memo => "memo",
-            ContentType::Dictation => "dictation",
-        };
+        let content_type = frontmatter.r#type.as_str();
         let date = frontmatter.date.to_rfc3339();
         let path = snapshot.path.display().to_string();
         // This is the final source-policy action before the row sink. Never
@@ -6250,12 +6667,24 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
     let result = minutes_core::transcribe::transcribe(path, config)
         .map_err(|e| anyhow::anyhow!("transcription failed: {}", e))?;
 
-    if !output_json {
-        // Plain-text mode: emit the cleaned transcript unchanged
-        print!("{}", result.text.trim_end());
-        println!();
-        return Ok(());
-    }
+    let output = format_transcribe_result(&result, output_json, do_diarize, config, || {
+        minutes_core::diarize::diarize(path, config)
+    })?;
+    println!("{output}");
+    Ok(())
+}
+
+/// Keep optional diarization on the shared execution path for both renderers.
+/// The injected operation lets regressions prove text mode actually runs it,
+/// without loading a model or requiring an audio device in the CLI test suite.
+fn format_transcribe_result(
+    result: &minutes_core::transcribe::TranscribeResult,
+    output_json: bool,
+    do_diarize: bool,
+    config: &Config,
+    diarize: impl FnOnce() -> Option<minutes_core::diarize::DiarizationResult>,
+) -> Result<String> {
+    let diarization = if do_diarize { diarize() } else { None };
 
     let duration_ms = (result.stats.audio_duration_secs * 1000.0) as u64;
 
@@ -6269,40 +6698,26 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
         .unwrap_or_else(|| "unknown".to_string());
 
     // Build output segments from the core result (real timestamps, no scraping).
-    let segments: Vec<TranscribeSegmentOutput> = if do_diarize {
-        let diarize_result = minutes_core::diarize::diarize(path, config);
-        if let Some(dr) = diarize_result {
-            result
-                .segments
-                .iter()
-                .map(|seg| {
-                    // Attribute this segment to the diarization speaker whose
-                    // window best overlaps [seg.start, seg.end].
-                    let speaker = dr
-                        .segments
-                        .iter()
-                        .find(|s| s.start < seg.end && s.end > seg.start)
-                        .map(|s| s.speaker.clone());
-                    TranscribeSegmentOutput {
-                        start: seg.start,
-                        end: seg.end,
-                        text: seg.text.clone(),
-                        speaker,
-                    }
-                })
-                .collect()
-        } else {
-            result
-                .segments
-                .iter()
-                .map(|seg| TranscribeSegmentOutput {
+    let segments: Vec<TranscribeSegmentOutput> = if let Some(dr) = diarization {
+        result
+            .segments
+            .iter()
+            .map(|seg| {
+                // Preserve JSON's first-overlapping-window attribution in
+                // both formats; no overlap means no speaker label.
+                let speaker = dr
+                    .segments
+                    .iter()
+                    .find(|s| s.start < seg.end && s.end > seg.start)
+                    .map(|s| s.speaker.clone());
+                TranscribeSegmentOutput {
                     start: seg.start,
                     end: seg.end,
                     text: seg.text.clone(),
-                    speaker: None,
-                })
-                .collect()
-        }
+                    speaker,
+                }
+            })
+            .collect()
     } else {
         result
             .segments
@@ -6315,6 +6730,30 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
             })
             .collect()
     };
+
+    if !output_json {
+        if !do_diarize || segments.is_empty() {
+            return Ok(result.text.trim_end().to_owned());
+        }
+        return Ok(segments
+            .iter()
+            .map(|segment| {
+                let seconds = segment.start.max(0.0) as u64;
+                let prefix = segment
+                    .speaker
+                    .as_ref()
+                    .map(|speaker| format!("{speaker}: "))
+                    .unwrap_or_default();
+                format!(
+                    "[{}:{:02}] {prefix}{}",
+                    seconds / 60,
+                    seconds % 60,
+                    segment.text.trim()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
 
     // data.text: segment texts joined with newlines (clean, no [m:ss] prefixes).
     // Falls back to result.text when segments are empty (e.g. parakeet engine).
@@ -6349,9 +6788,7 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
         duration_ms,
     };
     let envelope = json_envelope("transcribe", data);
-    println!("{}", serde_json::to_string_pretty(&envelope)?);
-
-    Ok(())
+    Ok(serde_json::to_string_pretty(&envelope)?)
 }
 
 fn cmd_process(
@@ -7204,7 +7641,9 @@ fn cmd_watch(dir: Option<&Path>, config: &Config) -> Result<()> {
         // Release the watch lock before exiting
         let lock_path = minutes_core::watch::lock_path();
         std::fs::remove_file(&lock_path).ok();
-        std::process::exit(0);
+        // Skip C++ static teardown: a transcription may still hold a live
+        // whisper context on the worker thread (#998).
+        minutes_core::exit_without_cxx_teardown(0);
     })?;
 
     // Run watcher directly (blocks until interrupted)
@@ -7221,9 +7660,10 @@ fn cmd_devices() -> Result<()> {
         for d in &devices {
             eprintln!("  {}", d);
         }
-        let json = serde_json::to_string_pretty(&devices)?;
-        println!("{}", json);
     }
+    // Headless callers still need valid JSON, not an empty stdout stream.
+    let json = serde_json::to_string_pretty(&devices)?;
+    println!("{}", json);
 
     // Platform-specific virtual audio hints
     #[cfg(target_os = "macos")]
@@ -7384,10 +7824,26 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
         eprintln!("Speaker diarization:");
         eprintln!("  --diarization   34 MB   (pyannote-rs: segmentation + speaker embedding)");
         eprintln!();
-        eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
-        eprintln!(
-            "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
-        );
+        // #1000: this listing used to recommend sherpa unconditionally, including
+        // on builds that cannot run it, which is how a bilingual user on the
+        // Homebrew build was sent to `--sherpa`.
+        if cfg!(feature = "engine-sherpa") {
+            eprintln!("Sherpa engine (recommended for multilingual / SOTA, --sherpa):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (in-process, no Python; `minutes setup --sherpa` downloads + enables it)"
+            );
+        } else {
+            eprintln!("Sherpa engine (not available in this build):");
+            eprintln!(
+                "  parakeet-tdt-0.6b-v3-int8  ~670 MB   (needs a build with `--features engine-sherpa`;"
+            );
+            eprintln!(
+                "                                       `brew install` does not include it. For multilingual"
+            );
+            eprintln!(
+                "                                       audio on this build, use `--model large-v3`.)"
+            );
+        }
         eprintln!();
         eprintln!("Parakeet.cpp (currently unavailable in Minutes):");
         eprintln!("  --parakeet is retained for CLI compatibility but installs nothing until");
@@ -7411,6 +7867,14 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
     let config = Config::load_strict().map_err(anyhow::Error::msg)?;
     let model_dir = &config.transcription.model_path;
     std::fs::create_dir_all(model_dir)?;
+
+    // MCP clients can start several server processes at once. Each one may
+    // discover the same missing model and invoke setup concurrently. Keep the
+    // entire setup transaction behind one cross-process lock so those callers
+    // re-check the final model after the first download completes instead of
+    // truncating each other's shared `.partial` file. The lock also covers the
+    // shared VAD download and config update below.
+    let _setup_lock = acquire_model_setup_lock(model_dir)?;
 
     let dest = model_dir.join(format!("ggml-{}.bin", model));
     let expected_min_bytes = minutes_core::transcribe::expected_whisper_model_size_bytes(model);
@@ -7506,6 +7970,22 @@ fn cmd_setup(model: &str, list: bool, diarization: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn acquire_model_setup_lock(model_dir: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+
+    let lock_path = model_dir.join(".minutes-model-setup.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open model setup lock at {}", lock_path.display()))?;
+    lock.lock_exclusive()
+        .with_context(|| format!("failed to lock model setup at {}", lock_path.display()))?;
+    Ok(lock)
 }
 
 fn cmd_setup_vad() -> Result<()> {
@@ -7859,11 +8339,105 @@ fn cmd_setup_parakeet(model: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download a file from a URL to a destination path, with progress reporting.
+/// Install and select the verified Orukeet release for the sherpa engine.
+fn cmd_setup_orukeet(config: &Config) -> Result<()> {
+    cmd_setup_orukeet_with(
+        config,
+        &Config::config_path(),
+        minutes_core::orukeet::install,
+    )
+}
+
+fn cmd_setup_orukeet_with(
+    config: &Config,
+    config_path: &Path,
+    install: impl FnOnce(&Path) -> std::result::Result<PathBuf, String>,
+) -> Result<()> {
+    let dir = install(&config.transcription.model_path).map_err(anyhow::Error::msg)?;
+    // Reload after the long download, preserving edits made by the desktop app.
+    // A malformed config must remain untouched rather than be replaced by defaults.
+    let mut selected = Config::load_strict_from(config_path).map_err(anyhow::Error::msg)?;
+    selected.transcription.engine = "sherpa".to_string();
+    selected.transcription.sherpa_model_dir = dir.to_string_lossy().into_owned();
+    selected.save_to(config_path)?;
+    eprintln!("Orukeet ready in {}", dir.display());
+    if !cfg!(feature = "engine-sherpa") {
+        eprintln!(
+            "This build needs --features engine-sherpa and the sherpa plugin to use Orukeet."
+        );
+    }
+    Ok(())
+}
+
+fn ensure_legacy_sherpa_target(dir: &Path) -> Result<()> {
+    let mut managed = dir
+        .file_name()
+        .is_some_and(|name| name == minutes_core::orukeet::MODEL_DIRECTORY);
+    match dir.canonicalize() {
+        Ok(resolved) => {
+            managed |= resolved
+                .file_name()
+                .is_some_and(|name| name == minutes_core::orukeet::MODEL_DIRECTORY);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for marker in ["manifest.json", ".install.lock"] {
+        match std::fs::symlink_metadata(dir.join(marker)) {
+            Ok(_) => managed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if managed {
+        anyhow::bail!(
+            "Refusing an unverified sherpa download into manifest-managed directory {}. \
+             Repair Orukeet with `minutes setup --sherpa-model orukeet`, or choose a separate \
+             transcription.sherpa_model_dir for the stock Parakeet model.",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Download the sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model for the opt-in
 /// `engine-sherpa` transcription engine into the resolved model directory.
 fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
+    // Protecting a managed install comes first. It reads the target directory
+    // and writes nothing, so it is free to run even on a build that cannot use
+    // sherpa, and pointing `--sherpa` at an orukeet install must keep saying so
+    // rather than being swallowed by the capability refusal below.
     let dir = minutes_core::sherpa_engine::model_dir(config);
+    ensure_legacy_sherpa_target(&dir)?;
+
+    // Issue #1000. `--sherpa` used to download the model and write
+    // `engine = "sherpa"` first, then print a note that this build cannot run
+    // sherpa. On the Homebrew install path that is the default outcome: the
+    // formula builds without `--features engine-sherpa`, `setup --list`
+    // recommends sherpa for multilingual work, and following that advice left a
+    // reporter with 639 MB of unusable model and a config value the binary
+    // silently ignores from then on.
+    //
+    // Refuse before spending either. Writing a config value the running binary
+    // knows it cannot honor is what turns a missing feature into a silent wrong
+    // result, and the only downstream trace was a `processing_warnings` entry
+    // in each meeting's frontmatter.
+    //
+    // This gates the explicit `--sherpa` request only. Plain `setup` reaches
+    // here through `setup_plan`, which already checks the same capability and
+    // sets `install_sherpa` accordingly.
+    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+        anyhow::bail!(
+            "This build of Minutes was compiled without the sherpa engine, so it cannot run \
+             Parakeet v3. Nothing was downloaded and your config was not changed.\n\n\
+             The Homebrew formula builds without it today, so `brew install` produces such a \
+             build. To use sherpa, install the signed desktop app or \
+             `minutes-macos-arm64-sherpa.tar.gz` from a release, or build from source with \
+             `cargo install --path crates/cli --features engine-sherpa`.\n\n\
+             Whisper handles multilingual audio in the meantime: `minutes setup --model large-v3`."
+        );
+    }
+
     eprintln!("Installing sherpa-onnx parakeet-tdt-0.6b-v3 (int8) model");
     eprintln!("  Dir: {}", dir.display());
     std::fs::create_dir_all(&dir)
@@ -7906,20 +8480,64 @@ fn cmd_setup_sherpa(config: &Config, select_sherpa: bool) -> Result<()> {
             ),
         }
     }
-    if select_sherpa && !cfg!(feature = "engine-sherpa") {
+    // Reaching here with `--sherpa` means the feature is compiled in, so the
+    // only remaining gap is the plugin dylib, which is installable without a
+    // rebuild. That case stays a note rather than a refusal.
+    #[cfg(feature = "engine-sherpa")]
+    if select_sherpa && !minutes_core::sherpa_plugin::plugin_available() {
         eprintln!(
-            "Note: this build lacks the sherpa engine, so transcription falls back to whisper \
-             until you build with `--features engine-sherpa`."
+            "Note: the sherpa plugin library is not installed, so transcription falls back to \
+             whisper until it is. Install `minutes-macos-arm64-sherpa.tar.gz` or the signed \
+             desktop app, or build `crates/sherpa-plugin`."
         );
     }
     Ok(())
 }
 
+/// Absolute ceiling for any model download, used when the server declares no
+/// length. Deliberately far above the largest thing we fetch, which is a
+/// multi-gigabyte whisper model: the point is to bound a runaway response, not
+/// to second-guess a legitimate one.
+const MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+// clippy::assertions_on_constants fires on a runtime assert! comparing two
+// compile-time constants; a const-block check reads the same and quiets it.
+const _: () = assert!(MAX_DOWNLOAD_BYTES > 3 * 1024 * 1024 * 1024);
+
+/// How many bytes a download is allowed to write.
+///
+/// A declared length is treated as a limit rather than a hint. Without one
+/// there is nothing to bound the body, so the ceiling applies. A declared
+/// length above the ceiling is not trusted either.
+///
+/// This exists because `std::io::copy`-shaped download loops read until EOF and
+/// only check the length afterwards, so a response that never ends writes until
+/// the disk is full. #1027 fixed the same shape in the Orukeet installer, which
+/// inherited it from here; that one bounds to the exact manifest-declared size,
+/// which this generic helper cannot do because it has no manifest.
+fn download_byte_cap(content_length: Option<u64>) -> u64 {
+    match content_length {
+        Some(declared) if declared <= MAX_DOWNLOAD_BYTES => declared,
+        _ => MAX_DOWNLOAD_BYTES,
+    }
+}
+
+/// Download a file from a URL to a destination path, with progress reporting.
 fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     eprintln!("  From: {}", url);
     eprintln!("  To:   {}", dest.display());
 
-    let response = ureq::get(url)
+    // Bound connecting and reading the response head, but not the body: a
+    // model download legitimately takes minutes on a slow link, and a global
+    // timeout would cancel it partway. The byte cap below is what bounds a
+    // body that never ends.
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .build(),
+    );
+    let response = agent
+        .get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("download failed: {}. Check your internet connection.", e))?;
 
@@ -7928,6 +8546,7 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    let cap = download_byte_cap(content_length);
 
     let mut reader = response.into_body().into_reader();
     let tmp_dest = dest.with_extension("partial");
@@ -7941,8 +8560,18 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
         if n == 0 {
             break;
         }
-        std::io::Write::write_all(&mut file, &buf[..n])?;
         downloaded += n as u64;
+        if downloaded > cap {
+            drop(file);
+            std::fs::remove_file(&tmp_dest).ok();
+            anyhow::bail!(
+                "download aborted: {} sent more than the {} bytes it declared. \
+                 Nothing was saved.",
+                url,
+                cap
+            );
+        }
+        std::io::Write::write_all(&mut file, &buf[..n])?;
 
         if last_report.elapsed().as_millis() > 500 {
             if let Some(total) = content_length {
@@ -8857,9 +9486,126 @@ fn cmd_logs(errors: bool, lines: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, feature = "voice-live"))]
+mod input_meter_tests {
+    use super::input_meter;
+
+    fn bars(rms: f32) -> usize {
+        input_meter(rms).chars().filter(|c| *c == '=').count()
+    }
+
+    #[test]
+    fn silence_reads_as_quiet_and_shows_nothing() {
+        let quiet = input_meter(0.0);
+        assert_eq!(bars(0.0), 0);
+        assert!(quiet.contains("quiet"), "{quiet}");
+    }
+
+    #[test]
+    fn ordinary_speech_moves_the_meter_well_off_the_floor() {
+        // Conversational speech sits far below full scale. A meter that barely
+        // twitches at these levels answers the wrong question, since the point
+        // is telling a live microphone from a dead one.
+        assert!(bars(0.02) >= 4, "quiet speech showed {} bars", bars(0.02));
+        assert!(bars(0.05) >= 8, "normal speech showed {} bars", bars(0.05));
+        assert!(bars(0.2) >= 15, "loud speech showed {} bars", bars(0.2));
+    }
+
+    #[test]
+    fn it_never_overflows_or_goes_backwards() {
+        assert_eq!(bars(1.0), 20);
+        assert_eq!(bars(5.0), 20, "clamped above full scale");
+        assert_eq!(bars(-1.0), 0, "clamped below zero");
+        let mut last = 0;
+        for step in 0..=40 {
+            let now = bars(step as f32 / 40.0);
+            assert!(now >= last, "meter went backwards at {step}");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn the_bar_is_a_fixed_width_so_redrawing_leaves_no_debris() {
+        for rms in [0.0f32, 0.01, 0.3, 1.0] {
+            let drawn = input_meter(rms);
+            let inside = drawn.chars().filter(|c| *c == '=' || *c == ' ').count();
+            // The trailing word only appears at silence, so measure the bracket.
+            let bracketed = drawn.split(']').next().unwrap_or_default().len() - 1;
+            assert_eq!(bracketed, 20, "{drawn}");
+            assert!(inside >= 20);
+            assert!(
+                drawn.len() <= super::METER_LINE_WIDTH,
+                "{drawn} exceeds the wipe width"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
+
+    /// Issue #1000: `--sherpa` must not spend 639 MB and rewrite the engine on a
+    /// build that cannot run sherpa. This asserts the guard exists and refuses
+    /// before either side effect, rather than warning after both.
+    ///
+    /// The needle is assembled at runtime so this test cannot match itself.
+    #[test]
+    fn setup_sherpa_refuses_before_downloading_on_a_build_without_the_feature() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let guard = format!(
+            "{}{}",
+            "if select_sherpa && !cfg!(feature = ", "\"engine-sherpa\") {"
+        );
+        let position = source
+            .find(&guard)
+            .expect("the --sherpa build-capability guard is gone");
+
+        let download = source
+            .find("Installing sherpa-onnx parakeet-tdt-0.6b-v3")
+            .expect("the download banner moved; update this guard");
+        let write = source
+            .find(&format!(
+                "{}{}",
+                "cfg.transcription.engine = ", "\"sherpa\".to_string();"
+            ))
+            .expect("the engine write moved; update this guard");
+
+        assert!(
+            position < download,
+            "the guard must refuse before anything is downloaded"
+        );
+        assert!(
+            position < write,
+            "the guard must refuse before the engine is written to config"
+        );
+    }
+
+    /// The same listing that recommended sherpa is what sent the reporter to
+    /// `--sherpa` in the first place, so it has to be capability-aware too.
+    #[test]
+    fn setup_list_does_not_recommend_sherpa_on_a_build_without_it() {
+        let source: String = include_str!("main.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            source.contains("Sherpa engine (not available in this build):"),
+            "the listing no longer has a branch for builds that cannot run sherpa"
+        );
+        assert!(
+            source.contains(&format!(
+                "{}{}",
+                "if cfg!(feature = ", "\"engine-sherpa\") { eprintln!(\"Sherpa engine (recommended"
+            )) || source.contains("Sherpa engine (recommended for multilingual / SOTA, --sherpa):"),
+            "the recommended-sherpa line is missing entirely"
+        );
+    }
     /// Parse CLI args on a thread with a generous stack. `Commands` has
     /// ~70 variants and clap's derive parser builds large temporaries in
     /// debug builds; on Windows the default test-thread stack overflowed
@@ -9483,6 +10229,222 @@ life (qmd://life/)
         }
     }
 
+    /// A declared length is a limit, not a hint, and its absence is not
+    /// permission to write forever. Without this, a response that never ends
+    /// writes until the disk is full, because the loop reads to EOF and checks
+    /// the length afterwards.
+    #[test]
+    fn a_download_is_bounded_whether_or_not_a_length_is_declared() {
+        // Declared and plausible: that is the limit.
+        assert_eq!(download_byte_cap(Some(1_867)), 1_867);
+        assert_eq!(
+            download_byte_cap(Some(3 * 1024 * 1024 * 1024)),
+            3 * 1024 * 1024 * 1024
+        );
+
+        // Nothing declared: the ceiling applies rather than no limit at all.
+        assert_eq!(download_byte_cap(None), MAX_DOWNLOAD_BYTES);
+
+        // Declared above the ceiling is not trusted either.
+        assert_eq!(download_byte_cap(Some(u64::MAX)), MAX_DOWNLOAD_BYTES);
+        assert_eq!(
+            download_byte_cap(Some(MAX_DOWNLOAD_BYTES + 1)),
+            MAX_DOWNLOAD_BYTES
+        );
+
+        // A zero-length body is legal and must not become the ceiling.
+        assert_eq!(download_byte_cap(Some(0)), 0);
+    }
+
+    #[test]
+    fn setup_sherpa_model_is_explicit_and_rejects_other_model_selectors() {
+        let parsed = parse_cli(["minutes", "setup", "--sherpa-model", "orukeet"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Setup { sherpa_model: Some(model), .. } if model == "orukeet"
+        ));
+        let parsed = parse_cli(["minutes", "setup"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Commands::Setup {
+                sherpa_model: None,
+                ..
+            }
+        ));
+        for other in [
+            "--sherpa",
+            "--parakeet",
+            "--vad",
+            "--list",
+            "--diarization",
+            "--demo",
+        ] {
+            assert!(parse_cli(["minutes", "setup", "--sherpa-model", "orukeet", other]).is_err());
+        }
+        assert!(parse_cli([
+            "minutes",
+            "setup",
+            "--sherpa-model",
+            "orukeet",
+            "--model",
+            "small"
+        ])
+        .is_err());
+        assert!(parse_cli(["minutes", "setup", "--sherpa-model", "unknown"]).is_err());
+        assert!(parse_cli(["minutes", "setup", "--sherpa-model"]).is_err());
+        assert!(parse_cli(["minutes", "setup", "--orukeet"]).is_err());
+    }
+
+    #[test]
+    fn setup_orukeet_preserves_config_edits_made_during_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let original = Config::default();
+        original.save_to(&path).unwrap();
+        let installed = temp.path().join("verified-model");
+
+        cmd_setup_orukeet_with(&original, &path, |_| {
+            let mut edited = Config::load_strict_from(&path).unwrap();
+            edited.transcription.language = Some("fr".into());
+            edited.transcription.model = "large-v3".into();
+            edited.save_to(&path).unwrap();
+            Ok(installed.clone())
+        })
+        .unwrap();
+
+        let saved = Config::load_strict_from(&path).unwrap();
+        assert_eq!(saved.transcription.language.as_deref(), Some("fr"));
+        assert_eq!(saved.transcription.model, "large-v3");
+        assert_eq!(saved.transcription.engine, "sherpa");
+        assert_eq!(Path::new(&saved.transcription.sherpa_model_dir), installed);
+    }
+
+    #[test]
+    fn setup_orukeet_does_not_overwrite_config_damaged_during_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let original = Config::default();
+        original.save_to(&path).unwrap();
+        let damaged = b"[transcription\n";
+
+        let result = cmd_setup_orukeet_with(&original, &path, |_| {
+            std::fs::write(&path, damaged).unwrap();
+            Ok(temp.path().join("verified-model"))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), damaged);
+    }
+
+    #[test]
+    fn setup_sherpa_refuses_managed_custom_directory_without_changing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("my-selected-model");
+        std::fs::create_dir(&dir).unwrap();
+        let mut config = Config::default();
+        config.transcription.engine = "sherpa".into();
+        config.transcription.sherpa_model_dir = dir.to_string_lossy().into_owned();
+        // A damaged encoder would trigger the legacy download/repair path.
+        std::fs::write(dir.join("encoder.int8.onnx"), b"truncated").unwrap();
+        std::fs::write(dir.join("tokens.txt"), b"verified tokens").unwrap();
+
+        // The manifest protects a copied install; the lock alone also protects
+        // an interrupted installation before the manifest has been published.
+        for marker in ["manifest.json", ".install.lock"] {
+            std::fs::write(dir.join(marker), b"managed").unwrap();
+            let error = cmd_setup_sherpa(&config, true).unwrap_err().to_string();
+            assert!(error.contains("setup --sherpa-model orukeet"));
+            assert_eq!(std::fs::read(dir.join(marker)).unwrap(), b"managed");
+            assert_eq!(
+                std::fs::read(dir.join("encoder.int8.onnx")).unwrap(),
+                b"truncated"
+            );
+            assert_eq!(
+                std::fs::read(dir.join("tokens.txt")).unwrap(),
+                b"verified tokens"
+            );
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+            std::fs::remove_file(dir.join(marker)).unwrap();
+        }
+    }
+
+    #[test]
+    fn setup_sherpa_keeps_stock_targets_but_reserves_orukeet_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let stock = temp.path().join("custom-stock-model");
+        ensure_legacy_sherpa_target(&stock).unwrap();
+        std::fs::create_dir(&stock).unwrap();
+        ensure_legacy_sherpa_target(&stock).unwrap();
+        let reserved = temp.path().join(minutes_core::orukeet::MODEL_DIRECTORY);
+        assert!(ensure_legacy_sherpa_target(&reserved).is_err());
+        assert!(!reserved.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_sherpa_refuses_symlink_to_reserved_directory_without_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let reserved = temp.path().join(minutes_core::orukeet::MODEL_DIRECTORY);
+        std::fs::create_dir(&reserved).unwrap();
+        let alias = temp.path().join("selected-alias");
+        std::os::unix::fs::symlink(&reserved, &alias).unwrap();
+        let mut config = Config::default();
+        config.transcription.sherpa_model_dir = alias.to_string_lossy().into_owned();
+        assert!(cmd_setup_sherpa(&config, true).is_err());
+        assert_eq!(std::fs::read_dir(reserved).unwrap().count(), 0);
+    }
+
+    /// Enrollment must persist the name where `Config` will read it back.
+    ///
+    /// The old code resolved the file itself and only wrote when it already
+    /// existed, so on a fresh machine the user typed their name, saw nothing,
+    /// and was asked again on the next run.
+    #[test]
+    fn enrollment_creates_the_config_when_none_exists_yet() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested").join("config.toml");
+        assert!(!path.exists(), "precondition: no config file yet");
+
+        persist_identity_name("Mat", &path).unwrap();
+
+        assert!(path.exists(), "the name must be persisted, not dropped");
+        assert_eq!(
+            Config::load_from(&path).identity.name.as_deref(),
+            Some("Mat")
+        );
+    }
+
+    /// And it must not discard the rest of the file, including sections this
+    /// build does not know about.
+    #[test]
+    fn enrollment_preserves_the_existing_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let mut existing = Config::default();
+        existing.transcription.model = "large-v3".into();
+        existing.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("{raw}\n[some_future_section]\nkept = true\n"),
+        )
+        .unwrap();
+
+        persist_identity_name("Mat", &path).unwrap();
+
+        let saved = Config::load_from(&path);
+        assert_eq!(saved.identity.name.as_deref(), Some("Mat"));
+        assert_eq!(
+            saved.transcription.model, "large-v3",
+            "unrelated settings survive"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("some_future_section"),
+            "a section this build does not know must survive the write"
+        );
+    }
+
     #[test]
     fn setup_vad_flag_parses_with_default_and_explicit_models() {
         let parsed = parse_cli(["minutes", "setup", "--vad"]).expect("setup --vad must parse");
@@ -9529,6 +10491,26 @@ life (qmd://life/)
         let fallback = setup_plan_for(None, false, false);
         assert_eq!(fallback.whisper_model, "small");
         assert!(!fallback.install_sherpa);
+    }
+
+    #[test]
+    fn model_setup_lock_excludes_a_second_process_handle() {
+        use fs2::FileExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let first = acquire_model_setup_lock(temp.path()).unwrap();
+        let lock_path = temp.path().join(".minutes-model-setup.lock");
+        let second = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+
+        assert!(second.try_lock_exclusive().is_err());
+        drop(first);
+        second
+            .try_lock_exclusive()
+            .expect("the next setup process can continue after the first finishes");
     }
 
     #[test]
@@ -10745,6 +11727,86 @@ life (qmd://life/)
             assert_eq!(second.total_fixtures, 5);
             assert_eq!(second.updated_fixtures, 0);
         });
+    }
+
+    /// #1001 fixed the Ctrl-C abort in #998 by skipping C++ static teardown on
+    /// every interrupt path. #1008 then reverted all four call sites without
+    /// mentioning it, because it was built on a stale copy of this file, and
+    /// nothing caught the revert: `exit_without_cxx_teardown` is `pub`, so its
+    /// disappearance from here raised no dead-code warning, and no test named
+    /// the call sites. The reporter of #998 kept crashing against a `main` that
+    /// had quietly lost its own fix.
+    ///
+    /// A plain `exit()` here runs `__cxa_finalize`, which tears down ggml's
+    /// Metal device while an interrupted transcription may still hold a live
+    /// whisper context, and the process dies on SIGABRT instead of exiting.
+    ///
+    /// Works on lines rather than byte offsets: slicing a byte window out of
+    /// UTF-8 source panics if the edge lands mid-character, and this file has
+    /// plenty of non-ASCII in its strings.
+    #[test]
+    fn every_interrupt_path_skips_cxx_teardown() {
+        let source = std::fs::read_to_string(format!("{}/src/main.rs", env!("CARGO_MANIFEST_DIR")))
+            .expect("failed to read main.rs");
+        let lines: Vec<&str> = source.lines().collect();
+
+        // Needles built from halves so they never appear whole in this file.
+        // Spelled literally, the guard matches its own source and fails on
+        // itself, which is how the first draft of this test behaved.
+        let force_quit = format!(
+            "{}{}",
+            "InterruptAction::ForceExit(code) = ", "handle_graceful_interrupt("
+        );
+        let watch_banner = format!("{}{}", "Stopping ", "watcher...");
+        let safe_exit = format!("{}{}", "exit_without_", "cxx_teardown");
+        let plain_exit = format!("{}{}", "std::process::", "exit(");
+
+        // Asserting the exact count, not just "some", is the point. A rename
+        // or a reshaped handler that stops matching would otherwise drop a
+        // call site out of this guard silently, which is the same way #1008
+        // removed them in the first place.
+        let force_quit_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(force_quit.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            force_quit_sites.len(),
+            3,
+            "expected three force-quit interrupt paths (record, dictate, live transcript); \
+             the shape changed, so update this guard deliberately rather than deleting it"
+        );
+
+        let watch_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(watch_banner.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            watch_sites.len(),
+            1,
+            "expected exactly one watch interrupt handler; update this guard"
+        );
+
+        // Every one of the four reaches the teardown-skipping exit, and does
+        // not reach a plain exit on the way there.
+        for site in force_quit_sites.into_iter().chain(watch_sites) {
+            let window = &lines[site..lines.len().min(site + 20)];
+            let safe = window.iter().position(|l| l.contains(safe_exit.as_str()));
+            let plain = window.iter().position(|l| l.contains(plain_exit.as_str()));
+            match (safe, plain) {
+                (Some(_), None) => {}
+                (Some(s), Some(p)) if s < p => {}
+                _ => panic!(
+                    "the interrupt path at line {} does not reach {} first; a plain exit here \
+                     runs C++ static destructors while a whisper context may still be live (#998)",
+                    site + 1,
+                    safe_exit
+                ),
+            }
+        }
     }
 
     #[test]
@@ -12427,6 +13489,107 @@ life (qmd://life/)
             "speaker field must be omitted when None, got: {}",
             json
         );
+    }
+
+    fn transcribe_render_fixture() -> minutes_core::transcribe::TranscribeResult {
+        use minutes_core::transcribe::{FilterStats, TranscribeResult, TranscriptSegment};
+        TranscribeResult {
+            text: "[0:00] First turn.\n[0:12] Second turn.\n[0:15] Unmatched.\n".into(),
+            stats: FilterStats {
+                audio_duration_secs: 17.0,
+                ..Default::default()
+            },
+            segments: vec![
+                TranscriptSegment {
+                    start: 0.0,
+                    end: 4.0,
+                    text: "First turn.".into(),
+                },
+                TranscriptSegment {
+                    start: 12.0,
+                    end: 15.0,
+                    text: "Second turn.".into(),
+                },
+                TranscriptSegment {
+                    start: 15.0,
+                    end: 17.0,
+                    text: "Unmatched.".into(),
+                },
+            ],
+            detected_language: Some("en".into()),
+        }
+    }
+
+    #[test]
+    fn transcribe_diarization_runs_in_text_and_json_with_matching_speakers() {
+        use minutes_core::diarize::{DiarizationResult, SpeakerSegment};
+        let result = transcribe_render_fixture();
+        for output_json in [false, true] {
+            let mut calls = 0;
+            let output =
+                format_transcribe_result(&result, output_json, true, &Config::default(), || {
+                    calls += 1;
+                    Some(DiarizationResult {
+                        segments: vec![
+                            SpeakerSegment {
+                                start: 0.0,
+                                end: 4.0,
+                                speaker: "SPEAKER_1".into(),
+                            },
+                            SpeakerSegment {
+                                start: 12.0,
+                                end: 15.0,
+                                speaker: "SPEAKER_2".into(),
+                            },
+                        ],
+                        num_speakers: 2,
+                        ..Default::default()
+                    })
+                })
+                .unwrap();
+            assert_eq!(calls, 1, "requested diarization must run in either format");
+            if output_json {
+                let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(json["data"]["segments"][0]["speaker"], "SPEAKER_1");
+                assert_eq!(json["data"]["segments"][1]["speaker"], "SPEAKER_2");
+                assert!(json["data"]["segments"][2].get("speaker").is_none());
+                assert_eq!(json["data"]["duration_ms"], 17000);
+            } else {
+                assert_eq!(output, "[0:00] SPEAKER_1: First turn.\n[0:12] SPEAKER_2: Second turn.\n[0:15] Unmatched.");
+            }
+        }
+    }
+
+    #[test]
+    fn transcribe_without_diarization_preserves_text_and_skips_the_engine() {
+        let result = transcribe_render_fixture();
+        let output = format_transcribe_result(&result, false, false, &Config::default(), || {
+            panic!("diarization was not requested")
+        })
+        .unwrap();
+        assert_eq!(output, result.text.trim_end());
+    }
+
+    #[test]
+    fn transcribe_unavailable_diarization_does_not_invent_speaker_labels() {
+        let result = transcribe_render_fixture();
+        let output =
+            format_transcribe_result(&result, false, true, &Config::default(), || None).unwrap();
+        assert_eq!(output, result.text.trim_end());
+    }
+
+    #[test]
+    fn transcribe_without_timed_segments_preserves_text_after_requested_diarization() {
+        let mut result = transcribe_render_fixture();
+        result.segments.clear();
+        let mut called = false;
+        let output = format_transcribe_result(&result, false, true, &Config::default(), || {
+            called = true;
+            Some(Default::default())
+        })
+        .unwrap();
+        assert!(called);
+        assert_eq!(output, result.text.trim_end());
     }
 }
 
@@ -16991,7 +18154,9 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping dictation... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })?;
 
@@ -17050,6 +18215,14 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         |result| {
             if stdout {
                 println!("{}", result.text);
+                // Flush at the write, not at exit. Piped stdout is block
+                // buffered, and a force quit takes `_exit` on macOS, which
+                // discards the buffer: a completed utterance the user already
+                // saw the app finish would never reach the pipe. Flushing here
+                // also makes `minutes dictate --stdout | ...` stream per
+                // utterance instead of arriving in one lump at the end.
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
             }
             if let Some(ref path) = result.file_path {
                 eprintln!("[minutes] Saved: {}", path.display());
@@ -17106,6 +18279,23 @@ fn cmd_dictate(_stdout: bool, _note_only: bool, _config: &Config) -> Result<()> 
     ))
 }
 
+/// Write the user's name into the config file the rest of Minutes reads.
+///
+/// Takes the path rather than resolving it so the behavior is testable without
+/// mutating process-global environment.
+fn persist_identity_name(name: &str, config_path: &Path) -> Result<()> {
+    // `load_from` returns defaults for a missing file, which is what makes the
+    // first enrollment on a fresh machine persist instead of silently doing
+    // nothing, and it preserves unknown sections on the way back out.
+    let mut saved = Config::load_from(config_path);
+    saved.identity.name = Some(name.to_string());
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    saved.save_to(config_path)?;
+    Ok(())
+}
+
 fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()> {
     use minutes_core::voice;
 
@@ -17127,22 +18317,24 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
             if name.is_empty() {
                 return Err(anyhow::anyhow!("Name is required for voice enrollment."));
             }
-            // Save to config file
-            let config_path = dirs::config_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-                .join("minutes/config.toml");
-            if config_path.exists() {
-                let mut content = std::fs::read_to_string(&config_path)?;
-                if content.contains("[identity]") {
-                    // Add name under existing [identity] section
-                    content =
-                        content.replace("[identity]", &format!("[identity]\nname = \"{}\"", name));
-                } else {
-                    content.push_str(&format!("\n[identity]\nname = \"{}\"\n", name));
-                }
-                std::fs::write(&config_path, content)?;
-                eprintln!("Saved to {}", config_path.display());
-            }
+            // Save through the same path and writer the rest of Minutes uses.
+            //
+            // This previously resolved the file with `dirs::config_dir()`, which
+            // is `~/Library/Application Support` on macOS while `Config` reads
+            // `~/.config`, so the name was written where nothing would read it.
+            // It also ignored `MINUTES_CONFIG_PATH`.
+            //
+            // It also only wrote when the file already existed, so on a machine
+            // with no config yet the name was silently dropped after being
+            // typed, and the next run asked again.
+            //
+            // And it edited the file as text, replacing the first `[identity]`
+            // it found anywhere, including inside a comment or a string value.
+            // Reloading and saving keeps unknown sections intact without
+            // guessing at the document's shape.
+            let config_path = Config::config_path();
+            persist_identity_name(&name, &config_path)?;
+            eprintln!("Saved your name to {}", config_path.display());
             name
         }
     };
@@ -17165,6 +18357,9 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
     );
     eprintln!();
 
+    // Keep the exact temporary file capability through enrollment. Error
+    // paths preserve it: a timed-out capture writer may still be retiring.
+    let mut captured_clip = None;
     let audio_path = if let Some(path) = file {
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", path.display()));
@@ -17194,16 +18389,33 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         );
         eprintln!();
 
-        let tmp_dir = std::env::temp_dir().join("minutes-enroll");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let tmp_path = tmp_dir.join("enroll-sample.wav");
+        let tmp_dir = std::env::temp_dir()
+            .canonicalize()?
+            .join(format!("minutes-enroll-{}", std::process::id()));
+        let directory =
+            minutes_core::policy_fs::BoundRecoveryDirectory::prepare_owner_private(&tmp_dir)?;
+        let reservation = directory.create_random_private_control_file("enroll", &[])?;
+        let mut wav_name = reservation
+            .display_path()
+            .file_name()
+            .context("enrollment reservation has no filename")?
+            .to_os_string();
+        wav_name.push(".wav");
+        let reservation = directory.rename_bound_no_replace(reservation, &wav_name)?;
+        let tmp_path = reservation.display_path().to_path_buf();
+        captured_clip = Some((directory, reservation));
         let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag_clone = stop_flag.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(duration * 1000));
             flag_clone.store(true, std::sync::atomic::Ordering::Relaxed);
         });
-        minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config)?;
+        minutes_core::capture::record_to_wav(&tmp_path, stop_flag, config).with_context(|| {
+            format!(
+                "Enrollment capture failed; its private sample is retained at {}",
+                tmp_path.display()
+            )
+        })?;
         eprintln!("  \x1b[1;32m✓\x1b[0m Recording captured.");
         tmp_path
     };
@@ -17289,8 +18501,10 @@ fn cmd_enroll(file: Option<&Path>, duration: u64, config: &Config) -> Result<()>
         eprintln!("  \x1b[2m›\x1b[0m Run \x1b[33mminutes voices\x1b[0m to see your profile");
     }
 
-    if file.is_none() {
-        std::fs::remove_file(&audio_path).ok();
+    if let Some((directory, sample)) = captured_clip {
+        if let Err(error) = directory.remove_owned_private_file(sample) {
+            tracing::warn!(%error, path = %audio_path.display(), "enrollment succeeded but private sample cleanup failed");
+        }
     }
     Ok(())
 }
@@ -17504,7 +18718,9 @@ fn cmd_live(config: &Config) -> Result<()> {
             &stop_clone,
             "Stopping gracefully... (Ctrl+C again to force quit)",
         ) {
-            std::process::exit(code);
+            // Skip C++ static teardown: the interrupted work may still hold a
+            // live whisper context on another thread (#998).
+            minutes_core::exit_without_cxx_teardown(code);
         }
     })
     .ok();
@@ -17542,7 +18758,7 @@ fn cmd_live(config: &Config) -> Result<()> {
         minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
         "standalone",
     );
-    let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
+    let capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
         minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
         Some(partial_subscriber),
     ) {
@@ -17565,11 +18781,16 @@ fn cmd_live(config: &Config) -> Result<()> {
         }
     };
 
-    match minutes_core::live_transcript::run_with_partials(
+    // Hand capture ownership back as soon as listening stops, not after the
+    // meeting pipeline: a desktop recording started right after Live stops
+    // (Go Live switching to both-sides call capture) would otherwise be
+    // refused as "already owns capture" for the whole processing time (#1110).
+    match minutes_core::live_transcript::run_with_partials_releasing_capture(
         stop,
         config,
         live_context_session_id,
         Some(partial_publisher),
+        Box::new(move || drop(capture_relay)),
     ) {
         Ok((lines, duration, path)) => {
             eprintln!("\nLive transcript complete:");
@@ -17609,6 +18830,9 @@ struct LiveEvidenceSnapshotV1 {
     current_draft: Option<minutes_core::copilot::RelayCurrentDraft>,
     draft_state: minutes_core::copilot::RelayDraftState,
     capture_relay: Option<TranscriptCaptureRelayProjection>,
+    transcript_status: minutes_core::live_transcript::SessionStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture_relay_error: Option<String>,
     gap: bool,
 }
 
@@ -17743,8 +18967,8 @@ fn cmd_transcript(
 
     if include_current {
         let session = minutes_core::live_transcript::session_status();
-        let (capture_relay, draft) = match read_current_speech_replay() {
-            Ok((relay, draft)) => (Some(relay), draft),
+        let (capture_relay, draft, capture_relay_error) = match read_current_speech_replay() {
+            Ok((relay, draft)) => (Some(relay), draft, None),
             Err(minutes_core::copilot::CaptureRelayError::NotFound) if !session.active => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
@@ -17752,14 +18976,16 @@ fn cmd_transcript(
                     draft_state: minutes_core::copilot::RelayDraftState::None,
                     gap: false,
                 },
+                None,
             ),
-            Err(_) => (
+            Err(error) => (
                 None,
                 minutes_core::copilot::RelayDraftSnapshot {
                     current_draft: None,
                     draft_state: minutes_core::copilot::RelayDraftState::Unavailable,
                     gap: false,
                 },
+                Some(error.to_string()),
             ),
         };
         let active = session.active || capture_relay.is_some();
@@ -17770,6 +18996,8 @@ fn cmd_transcript(
             current_draft: draft.current_draft,
             draft_state: draft.draft_state,
             capture_relay,
+            transcript_status: session,
+            capture_relay_error,
             gap: draft.gap,
         };
         if format == "json" {

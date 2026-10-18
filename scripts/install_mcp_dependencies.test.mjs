@@ -50,10 +50,15 @@ async function makeFixture(t, dependency, integrity = "sha512-fixture") {
   await writeFile(
     npmShim,
     `#!/usr/bin/env node
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 const args = process.argv.slice(2);
 await appendFile(process.env.NPM_TEST_LOG, args.join(" ") + " @ " + process.cwd() + "\\n");
+if (args[0] === "ci" && args.includes("--cache")) {
+  const lock = JSON.parse(await readFile("package-lock.json", "utf8"));
+  await appendFile(process.env.NPM_TEST_LOG, "installed-integrity=" + lock.packages["node_modules/minutes-sdk"].integrity + "\\n");
+  if (process.env.NPM_TEST_FAIL_INSTALL === "1") process.exit(42);
+}
 if (args[0] === "pack") {
   const destination = args[args.indexOf("--pack-destination") + 1];
   await mkdir(destination, { recursive: true });
@@ -67,7 +72,7 @@ if (args[0] === "pack") {
   return { root, tools, log };
 }
 
-function runFixture(fixture, args = []) {
+function runFixture(fixture, args = [], env = {}) {
   return spawnSync(process.execPath, [path.join(fixture.root, "scripts", "install_mcp_dependencies.mjs"), ...args], {
     cwd: fixture.root,
     encoding: "utf8",
@@ -75,6 +80,10 @@ function runFixture(fixture, args = []) {
       ...process.env,
       PATH: `${fixture.tools}${path.delimiter}${process.env.PATH}`,
       NPM_TEST_LOG: fixture.log,
+      // Do not inherit the developer's strict-install policy or failure injection.
+      MINUTES_MCP_REQUIRE_PUBLISHED_SDK: "0",
+      NPM_TEST_FAIL_INSTALL: "0",
+      ...env,
     },
   });
 }
@@ -102,13 +111,45 @@ test("seeds npm from the exact local SDK when the release pin is unpublished", a
   assert.match(log, /ci --cache .* @ .*crates\/mcp/);
 });
 
-test("refuses a local SDK whose tarball differs from the committed lock", async (t) => {
+test("strict published policy refuses mismatched SDK without changing the lock", async (t) => {
   const fixture = await makeFixture(t, "1.2.3", "sha512-different");
-  const result = runFixture(fixture, ["--sdk-ready"]);
+  const lockPath = path.join(fixture.root, "crates/mcp/package-lock.json");
+  const originalLock = await readFile(lockPath, "utf8");
+  const result = runFixture(fixture, ["--sdk-ready"], { MINUTES_MCP_REQUIRE_PUBLISHED_SDK: "1" });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /integrity does not match the MCP lockfile/);
   const log = await readFile(fixture.log, "utf8");
   assert.doesNotMatch(log, /ci --cache .*crates\/mcp/);
+  assert.equal(await readFile(lockPath, "utf8"), originalLock);
+});
+
+test("local SDK policy installs changed source and restores the exact committed lock", async (t) => {
+  const fixture = await makeFixture(t, "1.2.3", "sha512-different");
+  const lockPath = path.join(fixture.root, "crates/mcp/package-lock.json");
+  const originalLock = await readFile(lockPath, "utf8");
+  const result = runFixture(fixture, ["--sdk-ready"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /using its archive integrity for this install only/);
+  assert.match(await readFile(fixture.log, "utf8"), /installed-integrity=sha512-fixture/);
+  assert.equal(await readFile(lockPath, "utf8"), originalLock);
+});
+
+test("failed local SDK installation still restores the exact committed lock", async (t) => {
+  const fixture = await makeFixture(t, "1.2.3", "sha512-different");
+  const lockPath = path.join(fixture.root, "crates/mcp/package-lock.json");
+  const originalLock = await readFile(lockPath, "utf8");
+  const result = runFixture(fixture, ["--sdk-ready"], { NPM_TEST_FAIL_INSTALL: "1" });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /failed with exit code 42/);
+  assert.match(await readFile(fixture.log, "utf8"), /installed-integrity=sha512-fixture/);
+  assert.equal(await readFile(lockPath, "utf8"), originalLock);
+});
+
+test("strict published policy accepts a matching SDK archive", async (t) => {
+  const fixture = await makeFixture(t, "1.2.3");
+  const result = runFixture(fixture, ["--sdk-ready"], { MINUTES_MCP_REQUIRE_PUBLISHED_SDK: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(await readFile(fixture.log, "utf8"), /installed-integrity=sha512-fixture/);
 });
 
 test("release bundle installs the SDK from the exact checkout", async () => {

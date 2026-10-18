@@ -8,8 +8,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::markdown::ContentType;
-
 // ──────────────────────────────────────────────────────────────
 // Event log: append-only JSONL at ~/.minutes/events.jsonl.
 //
@@ -438,6 +436,7 @@ fn with_event_log_lock<T>(f: impl FnOnce() -> std::io::Result<T>) -> std::io::Re
         fs::create_dir_all(parent)?;
     }
 
+    #[cfg(unix)]
     let creating = !path.exists();
     let file = OpenOptions::new()
         .create(true)
@@ -656,6 +655,7 @@ fn append_event_inner(envelope: &EventEnvelope) -> std::io::Result<EventEnvelope
             fs::create_dir_all(parent)?;
         }
 
+        #[cfg(unix)]
         let creating = !path.exists();
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
@@ -1256,11 +1256,7 @@ pub fn audio_processed_event(
     result: &crate::markdown::WriteResult,
     source_path: &str,
 ) -> MinutesEvent {
-    let content_type = match result.content_type {
-        ContentType::Meeting => "meeting".to_string(),
-        ContentType::Memo => "memo".to_string(),
-        ContentType::Dictation => "dictation".to_string(),
-    };
+    let content_type = result.content_type.as_str().to_string();
 
     MinutesEvent::AudioProcessed {
         path: result.path.display().to_string(),
@@ -1276,11 +1272,7 @@ pub fn recording_completed_event(
     result: &crate::markdown::WriteResult,
     duration: &str,
 ) -> MinutesEvent {
-    let content_type = match result.content_type {
-        ContentType::Meeting => "meeting".to_string(),
-        ContentType::Memo => "memo".to_string(),
-        ContentType::Dictation => "dictation".to_string(),
-    };
+    let content_type = result.content_type.as_str().to_string();
 
     MinutesEvent::RecordingCompleted {
         path: result.path.display().to_string(),

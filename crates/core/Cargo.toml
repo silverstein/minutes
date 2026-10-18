@@ -26,6 +26,7 @@ hipblas = ["whisper-rs/hipblas"]
 metal = ["whisper-rs/metal"]
 vulkan = ["whisper-rs/vulkan"]
 streaming = ["dep:crossbeam-channel"]
+pocketstation-capture = ["streaming", "dep:pocketstation"]
 denoise = ["dep:nnnoiseless"]
 # Streaming Silero VAD via ort. Implies streaming because every consumer
 # (recording sidecar) needs streaming audio. ort + ndarray are already
@@ -46,8 +47,15 @@ vad-ort = ["streaming", "dep:ort", "dep:ndarray"]
 # answers. Without it that fallback returns a diagnostic placeholder as if it
 # were a transcript, which is worse than either engine failing honestly.
 engine-sherpa = ["dep:libloading", "whisper"]
+# Voice Live: push-to-talk spoken assistant over a realtime speech model (RFC 0007).
+# Implies `streaming` for the 16 kHz mic stream. Blocking WebSocket (tungstenite +
+# rustls) so core stays tokio-free. Off by default: it is a cloud provider.
+voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:objc2-core-audio-types", "dep:tiny_http"]
 
 [dependencies]
+regex = "1"
+unicode-normalization = "0.1"
+tiny_http = { version = "0.12", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -76,9 +84,10 @@ knf-rs = { version = "0.3.2", optional = true }
 ort = { workspace = true, optional = true }
 libloading = { workspace = true, optional = true }
 ndarray = { workspace = true, optional = true }
-whisper-guard = { path = "../whisper-guard", version = "0.3.0" }
+whisper-guard = { path = "../whisper-guard", version = "0.3.1" }
 nnnoiseless = { workspace = true, optional = true }
-base64 = "0.22"
+base64 = "0.23"
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 rusqlite = { workspace = true }
 sys-locale = { workspace = true }
 tempfile = "3"
@@ -91,12 +100,25 @@ zeroize = "1"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Voice Live echo cancellation through the VoiceProcessingIO unit (already in the
+# tree via cpal). Optional: only the voice-live feature pulls it in.
+coreaudio-rs = { version = "0.14", optional = true }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"], optional = true }
+# Only for the AudioUnit property constants coreaudio-rs does not re-export.
+# Already in the tree transitively via cpal; declared here so voice-live builds explicitly.
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "bitflags",
+    "AUComponent",
+    "AudioUnitProperties",
+], optional = true }
 block2 = "0.6"
-cidre = { version = "0.20.2", default-features = false, features = ["at", "av", "cat", "cf", "cm", "core_audio", "macos_14_4", "ns"] }
+cidre = { version = "0.22.1", default-features = false, features = ["at", "av", "cat", "cf", "cm", "core_audio", "macos_14_4", "ns"] }
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "libc"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "NSPasteboard", "NSPasteboardItem", "libc"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["alloc", "NSString", "NSArray", "NSData", "NSProcessInfo"] }
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
-mach2 = "0.6"
+mach2 = "0.7"
 # Static sherpa-onnx on macOS so opt-in engine-sherpa builds produce apps/CLIs
 # with no dangling @rpath dylib refs (the #369 packaging blocker; verified by
 # real launch + transcription). `default-features = false` drops upstream `tts`.
@@ -104,6 +126,7 @@ mach2 = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5.14.0"
+pocketstation = { version = "=1.1.10", default-features = false, features = ["native-capture"], optional = true }
 # sherpa-rs moved to crates/sherpa-plugin (#685).
 
 # Native hotkey (CGEventTap) uses raw FFI — no extra crate deps needed.
@@ -111,11 +134,13 @@ zbus = "5.14.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_Pipes", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+pocketstation = { version = "=1.1.10", default-features = false, features = ["native-capture"], optional = true }
 # Dynamic on Windows, as before the macOS static fix (CI builds this gate on
 # all three platforms; static archives are only wired up for macOS).
 # sherpa-rs moved to crates/sherpa-plugin (#685).
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 hound = { workspace = true }
 dirs = { workspace = true }
 insta = { version = "1", features = ["json"] }

@@ -25,6 +25,12 @@ model = "small"           # whisper: tiny (75MB), base, small (466MB), medium, l
 # vad_model = "silero-v6.2.0"     # Silero VAD model (auto-downloaded by setup). Empty = disable.
                                    # Prevents whisper hallucination loops on non-English/noisy audio.
 
+[calendar]
+enabled = true
+# use_event_title_for_meeting_title = true  # Use the matching calendar event's title
+# ignore_title_contains = ["focus time", "lunch"]  # Case-insensitive title exclusions
+# require_attendees_or_url = true          # Skip events with neither attendees nor a meeting URL
+
 [summarization]
 engine = "none"           # Default: Claude summarizes conversationally via MCP
                           # "auto" = auto-detect an installed agent CLI for pipeline summaries
@@ -57,6 +63,60 @@ engine = "auto"           # "auto" (default — uses pyannote-rs if models downl
 # match_threshold = 0.65  # Cosine similarity threshold for voice matching (higher = stricter).
                           # If using embedding_model = "cam++-lm", lower this to ~0.1–0.2.
 
+[voice_live]
+# Spoken assistant over your meeting memory, run with `minutes talk` (RFC 0007).
+# Off by default: it sends microphone audio and tool results to a cloud realtime model.
+# enabled = true
+# allow_cloud = true              # Required acknowledgement of that egress
+# provider = "gemini"             # Only provider today
+# model = "gemini-3.8-live"
+# api_key_env = "GEMINI_API_KEY"  # Name of the env var holding the key. The key itself never goes in this file.
+# language = "en-US"
+# voice_name = "Sulafat"          # Optional warmer voice; voice selection is separate from persona
+# persona = "morris"              # Optional concise, dry chief-of-staff personality
+# brain_search = true             # Expose knowledge base search/read when [knowledge].path is set
+# log_sessions = true             # Write each session transcript to ~/.minutes/voice-sessions/
+# echo_cancellation = true        # macOS: cancel the speaker signal out of the mic so open mic does not hear itself
+# proactive_audio = true          # Let it stay silent when speech was not meant for it.
+#                                 # Turns open mic from something you talk to into something
+#                                 # you can leave running. Ignored in push-to-talk.
+# speech_start_sensitivity = "low"  # Provider speech detection on open mic: "low" or "high"
+# speech_end_sensitivity = "low"
+# prep_artifacts = true           # Let voice read your /minutes-prep and /minutes-brief files
+# calendar = true                 # Let voice read upcoming calendar events
+# screen_on_request = true        # Let voice take ONE frame of your screen when you ask. Sends that image to the provider.
+# clipboard = true                # Explicit plain-text read/copy requests only; no monitoring
+# text_input = true               # Named-app selection reads and verified text insertion; never Send/Submit
+#                                 # Optional text_input_apps overrides the exact bundle-ID allowlist.
+#                                 # See docs/voice-text-transfer.md for safeguards and supported-editor limits.
+# ask_agent = true                # Let voice relay a question to your local coding agent (see [assistant] agent).
+#                                 # Off by default. Pair it with delegate_agent_args to bound what it can do.
+# delegate_agent = ""             # Override which agent. Empty follows [assistant] agent.
+# delegate_timeout_secs = 120
+# delegate_agent_args = []        # Empty follows [assistant] agent_args. The relayed agent
+#                                 # has no terminal, so it needs flags that let it run without
+#                                 # stopping to ask permission, or the call just times out.
+# delegate_cwd = "~/Sites"        # Where the relayed agent starts looking
+# desktop_control = true          # Let it open apps and files, control playback, add reminders
+# desktop_outward = true          # Also let it send an iMessage or email. Every send is read
+#                                 # back to you and requires the displayed local host review.
+# music = true                    # Labs toy: generate and play music, sung or instrumental,
+#                                 # steered by a meeting or a prep. Refuses while recording.
+# music_max_secs = 0             # 0 plays the whole piece; set a number to cap it
+# delegate_writes = false         # Let the relayed agent change things. Off by default:
+#                                 # a misheard sentence should not open an issue or edit a file.
+
+# Reach tools Minutes does not implement. Each server is launched as a child
+# process and its tools appear to the voice assistant as `name__tool`.
+# Secrets never go here: the server inherits your environment and reads the
+# variable it already expects.
+# [[voice_live.mcp_servers]]
+# name = "hubspot"
+# command = "npx"
+# args = ["-y", "@hubspot/mcp-server"]
+# tools = ["search_contacts"]     # Allowlist. Omit to take up to max_tools.
+# max_tools = 8                   # Voice context is small; keep this low.
+
 [search]
 engine = "builtin"        # builtin (regex) or qmd (semantic)
 
@@ -74,7 +134,7 @@ keep_after_summary = false # Delete screenshots after summarization (default: cl
 
 [call_detection]
 enabled = true            # macOS-only today
-poll_interval_secs = 1
+poll_interval_secs = 1     # device/app checks; input attribution refreshes every 5s
 cooldown_minutes = 5
 # Default apps stay conservative:
 # apps = ["zoom.us", "Microsoft Teams", "Webex"]

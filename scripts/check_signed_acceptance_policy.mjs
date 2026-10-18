@@ -9,9 +9,9 @@ import { readFileSync } from "node:fs";
 const EXPECTED_SIGNING_JOB_SHA256 =
   "903c7c962b5eac067fbe423699943969b0405cec732306299366f172f5037894";
 const EXPECTED_POST_SIGNING_BOUNDARY_SHA256 =
-  "e0a1feef44fa29000affee57a51a55156c232d677307181a68e9cc2341594807";
+  "42f9fe50b25336d3325004b003bd02088d5be580dbe075e5ec1f7661e6f445f4";
 const EXPECTED_PRE_SIGNING_BOUNDARY_SHA256 =
-  "1ddf57258d26c54dab346639d179a4cce64e6d3e333bb92982b38706ac7fe333";
+  "977da49592f810fb3560b8df836f093c3b1f903167e4390ff2666d88402ed87e";
 const EXPECTED_TRIGGER_BLOCK = `on:
   workflow_dispatch:
     inputs:
@@ -19,6 +19,14 @@ const EXPECTED_TRIGGER_BLOCK = `on:
         description: Full SHA protected by the matching acceptance-<sha> tag
         required: true
         type: string
+      architecture:
+        description: Native build and acceptance architecture
+        required: true
+        type: choice
+        default: arm64
+        options:
+          - arm64
+          - x86_64
 `;
 const SECRET_CONTEXT_EXPRESSION =
   /\$\{\{(?:(?!\}\})[\s\S])*?\bsecrets\b(?:(?!\}\})[\s\S])*?\}\}/i;

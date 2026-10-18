@@ -10,11 +10,11 @@ const EXPECTED_SOURCE_SHA256 = {
   worker: "65e487ed419c22dab849c7017db222c430c9fceb86f85e6cf25001653f890f08",
   xpc: "bfe9dfc1f015e6825adc02212305af52efe0f2faeff0d79c736cdce4e4c4d2aa",
   swift: "77310730cfa46ac8301c1a65622681005ebf00f0c699f24fdca757e2e02fcef4",
-  main: "6c931ff9bac4e041ed2bcb48024313632b8972708c53eee7471808c5a72edc9b",
+  main: "a0ba344c2ba426712d65576332914498a4b8e03cf94498c5998526ffe6cd5a53",
   acceptanceWorkflow:
-    "8ae35943181c6d0f248f580587b894c53db9c30257f307c5aa5264a83f13969d",
+    "16340f6b0a1aa4002e3c9f449c40b7212f4122f94a57c4174a58f756f671a217",
   acceptanceHarness:
-    "454e9eab87dba92a492f8e85d84db81b1f6bf6e6c38b330e8592fa16cf95dc9c",
+    "bcb7900e80cff2446d66aaae0937e779552ea77f6cb555cf158e5016d936d43d",
 };
 
 const files = {
@@ -47,6 +47,7 @@ const files = {
   // rpaths are load-bearing and must not silently regress.
   coreBuild: readFileSync("crates/core/build.rs", "utf8"),
   cliBuild: readFileSync("crates/cli/build.rs", "utf8"),
+  tauriBuild: readFileSync("tauri/src-tauri/build.rs", "utf8"),
 };
 
 
@@ -193,6 +194,11 @@ function validate(candidate, checkGoldens = true) {
     activeCode(candidate.coreBuild),
     "cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift",
     "minutes-core's own targets must add the Swift Concurrency runtime rpath",
+  );
+  requireText(
+    activeCode(candidate.tauriBuild),
+    "cargo:rustc-link-arg-bin=minutes-app=-Wl,-rpath,/usr/lib/swift",
+    "the desktop app must add the Swift runtime rpath to its own binary",
   );
 
   for (const value of [
@@ -462,6 +468,11 @@ if (process.argv.includes("--self-test")) {
       value.replace(
         '"cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift"',
         '// "cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift"',
+      ), false],
+    ["desktop app Concurrency rpath commented out", "tauriBuild", (value) =>
+      value.replace(
+        '"cargo:rustc-link-arg-bin=minutes-app=-Wl,-rpath,/usr/lib/swift"',
+        '// "cargo:rustc-link-arg-bin=minutes-app=-Wl,-rpath,/usr/lib/swift"',
       ), false],
     ["xpc_main aliased to a block declaration", "xpc", (value) =>
       value.replace(

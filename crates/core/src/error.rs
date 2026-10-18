@@ -39,8 +39,20 @@ pub enum CaptureError {
     #[error("recording produced empty audio (0 bytes)")]
     EmptyRecording,
 
+    /// The audio worker still owns its exact WAV handle after the stop deadline.
+    /// Callers must leave that file in place: copying or deleting it can lose
+    /// the final header and buffered tail when the worker eventually retires.
+    #[error("recording storage is still finishing after the stop deadline; partial audio remains at its original path")]
+    StorageRetiring,
+
     #[error("audio I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl CaptureError {
+    pub fn storage_is_retiring(&self) -> bool {
+        matches!(self, Self::StorageRetiring)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -268,6 +280,9 @@ pub enum DictationError {
     #[error("live transcript in progress — stop it before dictating")]
     LiveTranscriptActive,
 
+    #[error("a voice session is open — close it before dictating")]
+    VoiceActive,
+
     #[error("dictation already active (PID: {0})")]
     AlreadyActive(u32),
 
@@ -294,6 +309,9 @@ pub enum LiveTranscriptError {
 
     #[error("dictation in progress — stop dictation before starting live transcript")]
     DictationActive,
+
+    #[error("a voice session is open — close it before starting live transcript")]
+    VoiceActive,
 
     #[error("live transcript already active (PID: {0})")]
     AlreadyActive(u32),

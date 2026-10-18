@@ -27,6 +27,7 @@ So `minutes record --device "MacBook Pro Microphone"` always wins over `[recordi
 | `language` | auto-detect | BCP-47 tag (e.g. `"en"`, `"es"`) to force a specific language |
 | `noise_reduction` | `true` | RNNoise pre-filter (requires `denoise` feature) |
 | `vad_model` | `"silero-v6.2.0"` | Silero VAD model name; empty string disables |
+| `vad_engine` | `"whisper-silero"` | Recording sidecar VAD. `"ort-silero"` is opt-in and needs a build with the `vad-ort` feature plus `silero-vad-v6.2.0.onnx` in `model_path`; otherwise it falls back to whisper-silero with a warning |
 | `min_words` | `3` | Drop utterances with fewer than this many words |
 | `parakeet_binary` | `"parakeet"` | PATH lookup or absolute path to the parakeet binary |
 | `parakeet_sidecar_enabled` | auto | Records future warm-sidecar intent. The current pathname-only process cannot receive Minutes' anonymous/sealed private-audio capability, so Linux, macOS, and Windows all use Whisper. Auto/`true` cannot bypass this gate; `"off"` forces off. A legacy bool `false` is treated as auto (pre-0.18.8 saves wrote it into every config) (#295). |
@@ -151,18 +152,24 @@ session cadence and confidence gates. See
 | `min_disk_space_mb` | `500` | Auto-stop when free disk space drops below this; 0 = off |
 | `auto_call_intent` | `false` | Infer call intent from process detection (high false-positive rate) |
 | `allow_degraded_call_capture` | `false` | Allow call capture when selected input isn't a system-audio route |
-| `capture_backend` | `"cpal"` | System-audio backend: `"cpal"` for loopback devices, or opt-in `"core-audio-tap"` on macOS 14.4+ |
+| `capture_backend` | `"cpal"` | `"cpal"` for loopback devices, `"core-audio-tap"` on macOS 14.4+, or opt-in `"pocketstation"` application capture on Windows and Linux |
 
 ### `[recording.sources]` — multi-source capture
 
 | key | default | meaning |
 |---|---|---|
 | `voice` | unset | Voice (mic) device name, or `"default"` |
-| `call` | unset | Call (system audio) device name, or `"auto"` to detect loopback |
+| `call` | unset | Call audio device, or `"auto"` to detect loopback. PocketStation accepts an application name, application ID, or `pid:<process id>` |
 
 When `capture_backend = "core-audio-tap"`, set `call = "auto"`. The backend
 captures the default macOS system output via Core Audio Process Tap instead of
 opening a named loopback input device.
+
+When `capture_backend = "pocketstation"`, choose the application in `call`.
+Minutes then records that application and the selected microphone as separate
+stems on Windows or Linux. See
+[PocketStation capture](pocketstation-capture.md) for build and configuration
+instructions.
 
 ### `[consent]` — recording disclosure aid
 
@@ -328,11 +335,13 @@ Dictation clipboard behavior is platform-specific:
 | key | default | meaning |
 |---|---|---|
 | `enabled` | `true` | Detect active calls automatically |
-| `poll_interval_secs` | `1` | How often to check for active calls |
+| `poll_interval_secs` | `1` | How often to check apps and input devices. Process input attribution refreshes at most once per five seconds for an unchanged app process family. |
 | `cooldown_minutes` | `5` | Wait before re-triggering after a hangup |
 | `apps` | `["zoom.us","Microsoft Teams","Webex"]` | App names to recognize |
 | `stop_when_call_ends` | `false` | Show an auto-stop countdown when the call ends |
 | `call_end_stop_countdown_secs` | `30` | Seconds before auto-stop fires |
+
+Call detection keeps one audio-check helper alive between polls and skips audio queries when no configured call app or supported browser is running. The helper checks all input-capable devices before requesting process attribution. For an unchanged app process family, a microphone ownership change can take up to five seconds to appear. App exits and definitely idle input devices are checked on the configured poll interval. Per-app input attribution still prevents an unrelated dictation tool from validating an idle call app. A stuck helper is discarded after a two-second response deadline and retried by a later poll.
 
 ### `[palette]` — command palette
 
@@ -370,6 +379,59 @@ hotkey_keycode = 57   # Caps Lock (macOS) — requires Input Monitoring
 |---|---|---|
 | `enabled` | `true` | Learn voices across recordings |
 | `match_threshold` | `0.65` | Cosine similarity cutoff for voice enrollment matching |
+
+### `[voice_live]` spoken assistant (RFC 0007)
+
+Push-to-talk conversation with a realtime speech model over your meeting memory, run with `minutes talk` (built with the `voice-live` Cargo feature). Every fact it speaks comes from a tool call into minutes-core. It is a cloud provider: microphone audio and tool results leave the device, so it stays off until both `enabled` and `allow_cloud` are set. It never touches recording state and refuses to start while a recording is active. The existing `[voice]` section is speaker identification and is unrelated.
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | Master switch for the CLI command and, later, the desktop shortcut |
+| `allow_cloud` | `false` | Explicit acknowledgement that microphone audio and tool results go to the provider |
+| `provider` | `"gemini"` | Realtime provider. Only `"gemini"` today |
+| `model` | `"gemini-3.8-live"` | Model id |
+| `api_key_env` | `"GEMINI_API_KEY"` | Name of the environment variable holding the API key. The key itself is never stored in config |
+| `language` | `"en-US"` | BCP-47 language for transcription and speech |
+| `tool_scheduling` | `"when_idle"` | Deliver async tool results after the model finishes speaking (`"when_idle"`) or immediately (`"interrupt"`) |
+| `max_tool_chars` | `12000` | Per-tool-result character budget so one transcript cannot fill the voice context |
+| `known_people` | `200` | How many known names to inject as spelling bias |
+| `brain_search` | `true` | Expose knowledge base search and read when `[knowledge].path` is set |
+| `screen_on_request` | `false` | Expose `look_at_screen`, which captures one frame and sends it to the provider. Off by default because a screen frame is the most sensitive thing this feature can transmit. Pull-only: the model cannot take a frame Mat did not ask for |
+| `prep_artifacts` | `true` | Expose the prep and brief files written by the `/minutes-prep` and `/minutes-brief` skills under `~/.minutes` |
+| `calendar` | `true` | Expose upcoming calendar events. Also requires `[calendar] enabled` |
+| `ask_agent` | `false` | Expose `ask_agent`, which relays one question to a local coding agent. Off by default. Only its answer travels onward, but the agent runs with whatever permissions it was given and Minutes cannot constrain it once asked, so `delegate_agent_args` is the control that matters |
+| `delegate_agent` | `""` | Which agent CLI to relay to. Empty follows `[assistant] agent`, then the first agent CLI installed |
+| `delegate_timeout_secs` | `120` | How long to wait for that agent |
+| `delegate_agent_args` | `[]` | Launch flags for the relayed agent. Empty follows `[assistant] agent_args`. A relayed agent has no terminal, so it must not stop to ask for tool-use permission: nothing can answer the prompt and the call burns its whole timeout looking like a hang |
+| `delegate_cwd` | `""` | Directory the relayed agent starts in. Empty uses the Minutes process directory, which for a desktop launch is not where any code lives |
+| `desktop_control` | `false` | Let the assistant act on the Mac through a fixed catalogue of verbs: open an app or a page, reveal a file, control playback, add a reminder. The model picks a verb and fills typed parameters; it never writes AppleScript, and parameters reach the interpreter as `argv` rather than as source, so there is no injection to reason about |
+| `desktop_outward` | `false` | Also allow the verbs that leave the machine, sending an iMessage or an email. Each is two-phase: the first call performs nothing and returns a sentence to read out loud plus a single-use token bound to those exact arguments, and only a second call carrying that token acts. Enforced in code, because a prompt asking the model to confirm is the control that already failed |
+| `music` | `false` | Labs toy. Generate and play music, sung or instrumental, steered by what the assistant knows about a conversation. The model writes any lyrics itself and returns them alongside the audio. Deliberately separate from the memory features and off by default. Refuses while a recording is running, because music through the speakers reaches the microphone and then the transcript |
+| `music_model` | `"lyria-3.5"` | Music model id |
+| `music_max_secs` | `0` | Ceiling on how much of a piece to play, in seconds. `0` plays all of it. Music and speech share one output queue, which is what lets the echo canceller keep the music out of the microphone; the cost is that unprompted speech waits behind queued music, though talking flushes it. Every piece is kept whole under `~/.minutes/music` |
+| `delegate_writes` | `false` | Let the relayed agent change things. Off by default: the caller is a cloud speech model deciding on its own when to relay, from audio it may have misheard, with nobody reviewing the request. RFC 0007 holds phase 1 to a single write, `add_note`, for that reason. Note this instructs the agent; narrowing its own tool access through `delegate_agent_args` is the enforcing control |
+| `screen_settle_ms` | `150` | Spacing between closing the screen tool call and sending the frame that answers it |
+| `mcp_servers` | `[]` | MCP servers to launch for a session, as `[[voice_live.mcp_servers]]` tables |
+
+#### `[[voice_live.mcp_servers]]` connected services
+
+Minutes publishes an MCP server; this is the other direction. Each entry launches a server as a child process, speaks newline-delimited JSON-RPC to it over stdio, and merges its `tools/list` into the voice tool surface as `name__tool`. A server that fails to start is reported and skipped, never fatal to a session.
+
+| key | default | meaning |
+|---|---|---|
+| `name` | required | Short name prefixing every tool from this server |
+| `command` | required | Executable to launch. Resolved like the agent CLI, so a bare `npx` works from a GUI bundle |
+| `args` | `[]` | Arguments for it |
+| `tools` | `[]` | Allowlist of tool names. Empty takes what fits under `max_tools` |
+| `max_tools` | `8` | Cap on tools from this server. Voice context is small and tool choice degrades quickly, so keep it low |
+
+Secrets are never named here. A server inherits the Minutes process environment and reads whatever variable it already expects.
+| `log_sessions` | `true` | Write a `0600` markdown transcript of each session to `~/.minutes/voice-sessions/` |
+| `echo_cancellation` | `true` | Also decides the default talk mode: open mic where cancellation exists, push-to-talk everywhere else, so no platform self-interrupts by default. |
+| | | Run mic and speaker through one voice-processing unit so the speaker signal is cancelled out of the mic. macOS only today; elsewhere plain capture, so `minutes talk` defaults to push-to-talk and `--open-mic` warns |
+| `proactive_audio` | `false` | Let the model decide not to answer. Open mic otherwise treats everything it hears as addressed to it, so a half sentence to someone else, or noise a transcriber turns into words, becomes a prompt. Ignored in push-to-talk, where the user has already said every turn is for it. Off by default because an unsupported setup field fails the whole session |
+| `speech_start_sensitivity` | `"low"` | Provider speech-start detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
+| `speech_end_sensitivity` | `"low"` | Provider speech-end detection on open mic: `"low"`, `"high"`, or `""` for the provider default |
 
 ### `[screen_context]` — recording-time screenshots
 
@@ -455,6 +517,21 @@ For real desktop validation of the Windows and Linux collectors, use
 |---|---|---|
 | `enabled` | `true` | Read upcoming meetings from the system calendar |
 | `use_event_title_for_meeting_title` | `false` | When a recording overlaps a scheduled calendar event, use that event's title as the meeting title instead of the AI-generated one (skips the LLM title refine for that meeting) |
+| `ignore_title_contains` | `[]` | Exclude events whose titles contain any listed substring, ignoring case. Empty strings are ignored. |
+| `require_attendees_or_url` | `false` | Exclude events that have neither attendees nor a recognized meeting URL. Invited in-person meetings still qualify. |
+
+For example, skip focus blocks and personal reminders:
+
+```toml
+[calendar]
+ignore_title_contains = ["focus time", "lunch"]
+require_attendees_or_url = true
+```
+
+Both filters are opt-in. They apply to upcoming meeting reminders and calendar
+matching for recordings. Title exclusions take precedence even when an event
+has attendees or a meeting URL. Recognized URLs include Zoom, Google Meet,
+Teams and Webex; an arbitrary website link does not count as a meeting URL.
 
 ### `output_dir` — top-level
 

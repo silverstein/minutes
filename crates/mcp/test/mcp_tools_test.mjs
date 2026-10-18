@@ -19,13 +19,35 @@
  */
 
 import { execFileSync, spawnSync } from "child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { validatePathInDirectory } from "../dist/paths.js";
 
 let passed = 0;
 let failed = 0;
+
+// Every native/MCP child uses a disposable profile, including an existing
+// empty corpus. Tests must neither depend on nor inspect a developer's data.
+const testProfile = mkdtempSync(join(tmpdir(), "minutes-mcp-tools-"));
+function isolatedProfileEnv(profile) {
+  mkdirSync(join(profile, "meetings"), { recursive: true });
+  mkdirSync(join(profile, ".minutes"), { recursive: true });
+  mkdirSync(join(profile, ".config", "minutes"), { recursive: true });
+  return {
+    ...process.env,
+    HOME: profile,
+    USERPROFILE: profile,
+    XDG_CONFIG_HOME: join(profile, ".config"),
+    MINUTES_CONFIG_PATH: join(profile, ".config", "minutes", "config.toml"),
+    MINUTES_DATA_DIR: join(profile, ".minutes"),
+    MINUTES_HOME: join(profile, ".minutes"),
+    MINUTES_MCP_AUTO_SETUP: "0",
+    RUST_LOG: "error",
+  };
+}
+const testEnv = isolatedProfileEnv(testProfile);
+process.on("exit", () => rmSync(testProfile, { recursive: true, force: true }));
 
 function test(name, fn) {
   try {
@@ -84,7 +106,7 @@ function minutesCli(args) {
       // larger production authorization envelope.
       timeout: 30000,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, RUST_LOG: "error" },
+      env: testEnv,
     });
     return result.trim();
   } catch (e) {
@@ -140,7 +162,7 @@ test("stdio initialize negotiates the Claude Desktop protocol version", () => {
     encoding: "utf-8",
     input: `${JSON.stringify(initialize)}\n`,
     timeout: 15000,
-    env: { ...process.env, RUST_LOG: "error" },
+    env: testEnv,
   });
 
   assert(!child.error, `initialize process failed: ${child.error?.message}`);
@@ -195,7 +217,7 @@ test("minutes setup --list shows models", () => {
   execFileSync(
     join(import.meta.dirname, "..", "..", "..", "target", "debug", "minutes"),
     ["setup", "--list"],
-    { encoding: "utf-8", timeout: 5000 }
+    { encoding: "utf-8", timeout: 5000, env: testEnv }
   );
 });
 
@@ -204,7 +226,11 @@ test("minutes devices returns JSON array", () => {
   const output = minutesCli(["devices"]);
   const devices = JSON.parse(output);
   assert(Array.isArray(devices), "devices should return an array");
-  assert(devices.length > 0, "should find at least one audio device");
+  // Hosted/headless machines legitimately expose no input devices. Physical
+  // microphone availability is a native acceptance check, not a CLI contract.
+  for (const device of devices) {
+    assert(typeof device === "string", "device name should be a string");
+  }
 });
 
 // ── Test 5b: minutes paths exposes effective directories ──
@@ -214,6 +240,9 @@ test("minutes paths --json returns output_dir", () => {
   assert(typeof paths.data?.output_dir === "string", "output_dir should be a string");
   assert(typeof paths.data?.minutes_dir === "string", "minutes_dir should be a string");
   assert(typeof paths.data?.config_path === "string", "config_path should be a string");
+  assertEqual(paths.data.output_dir, join(testProfile, "meetings"), "corpus must be isolated");
+  assertEqual(paths.data.minutes_dir, testEnv.MINUTES_DATA_DIR, "state must be isolated");
+  assertEqual(paths.data.config_path, testEnv.MINUTES_CONFIG_PATH, "config must be isolated");
 });
 
 // ── Test 6: minutes note without recording fails gracefully ──
@@ -222,7 +251,7 @@ test("minutes note fails gracefully without recording", () => {
     execFileSync(
       join(import.meta.dirname, "..", "..", "..", "target", "debug", "minutes"),
       ["note", "test note"],
-      { encoding: "utf-8", timeout: 5000 }
+      { encoding: "utf-8", timeout: 5000, env: testEnv }
     );
     throw new Error("should have failed");
   } catch (e) {
@@ -244,9 +273,8 @@ test("MCP TypeScript compiles", () => {
 });
 
 // ── Test 8: MCP index.ts exports are valid ──
-test("MCP server module loads without error", async () => {
+test("MCP server build output exists", () => {
   // Just verify the file is syntactically valid by checking tsc passed above
-  const { existsSync } = await import("fs");
   const dist = join(import.meta.dirname, "..", "dist", "index.js");
   assert(existsSync(dist), "dist/index.js should exist after build");
 });
@@ -261,7 +289,7 @@ test("MCP server module loads without error", async () => {
 // sync test() harness. An async callback would resolve its Promise after
 // the runner returned PASS.
 test("minutes get --json applies speaker overlay from confirm", () => {
-  const sandbox = mkdtempSync(join(tmpdir(), "minutes-get-overlay-"));
+  const sandbox = join(testProfile, "overlay");
   const meetingsDir = join(sandbox, "meetings");
   mkdirSync(meetingsDir, { recursive: true });
   const meetingPath = join(meetingsDir, "2026-04-24-overlay-smoke.md");
@@ -292,7 +320,7 @@ test("minutes get --json applies speaker overlay from confirm", () => {
   writeFileSync(meetingPath, rawMarkdown);
 
   const bin = join(import.meta.dirname, "..", "..", "..", "target", "debug", "minutes");
-  const env = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, RUST_LOG: "error" };
+  const env = isolatedProfileEnv(sandbox);
 
   // Confirm via CLI — same overlay path the desktop app now uses.
   execFileSync(

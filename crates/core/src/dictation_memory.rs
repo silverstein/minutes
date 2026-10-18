@@ -5,16 +5,23 @@ use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::io::Read;
 #[cfg(any(all(feature = "streaming", feature = "whisper"), test))]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const SCHEMA_VERSION: u32 = 1;
-const MAX_HISTORY_RECORDS: usize = 100;
+pub const MAX_HISTORY_RECORDS: usize = 100;
+const MAX_PREVIEW_AUDIO_BYTES: u64 = 16 * 1024 * 1024;
+static HISTORY_WRITE: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationMemoryRecord {
+    /// The first transcript before a user accepted retranscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_transcript: Option<OriginalDictationTranscript>,
     pub schema_version: u32,
     pub id: String,
     pub captured_at: DateTime<Local>,
@@ -40,6 +47,15 @@ pub struct DictationMemoryRecord {
     /// needs recovery. Successful routine dictation retires this file.
     #[serde(default)]
     pub recovery_audio_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginalDictationTranscript {
+    pub raw_text: String,
+    pub cleaned_text: String,
+    pub engine_id: String,
+    pub insertion: DictationInsertionMemory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,6 +95,17 @@ pub struct DictationMemoryInput {
 }
 
 impl DictationMemoryRecord {
+    pub fn preserve_original_from(&mut self, before: &Self) {
+        self.original_transcript = before.original_transcript.clone().or_else(|| {
+            Some(OriginalDictationTranscript {
+                raw_text: before.raw_text.clone(),
+                cleaned_text: before.cleaned_text.clone(),
+                engine_id: before.engine_id.clone(),
+                insertion: before.insertion.clone(),
+            })
+        });
+    }
+
     pub fn new(input: DictationMemoryInput) -> Self {
         let captured_at = Local::now();
         Self::from_parts(captured_at, input)
@@ -92,6 +119,7 @@ impl DictationMemoryRecord {
             &input.engine_id,
         );
         Self {
+            original_transcript: None,
             schema_version: SCHEMA_VERSION,
             id,
             captured_at,
@@ -262,7 +290,6 @@ fn validate_recovery_audio_path_in(root: &Path, path: &Path) -> io::Result<PathB
             "dictation recovery audio is not a regular file",
         ));
     }
-    crate::policy_fs::ensure_owner_only_file(path)?;
     let canonical_root = root.canonicalize()?;
     let canonical_path = path.canonicalize()?;
     if !canonical_path.starts_with(&canonical_root) {
@@ -271,6 +298,7 @@ fn validate_recovery_audio_path_in(root: &Path, path: &Path) -> io::Result<PathB
             "dictation recovery audio is outside the private recovery folder",
         ));
     }
+    crate::policy_fs::ensure_owner_only_file(&canonical_path)?;
     Ok(canonical_path)
 }
 
@@ -314,12 +342,82 @@ pub fn find_record(id: &str) -> io::Result<Option<DictationMemoryRecord>> {
 }
 
 pub fn append_record(record: DictationMemoryRecord) -> io::Result<()> {
+    let _guard = HISTORY_WRITE
+        .lock()
+        .map_err(|_| io::Error::other("history write unavailable"))?;
     append_record_managed(
         &history_path(),
         &recovery_audio_root(),
         record,
         MAX_HISTORY_RECORDS,
     )
+}
+
+/// Save an explicitly accepted preview only if its source is still current.
+/// Serialize with capture/history writes; model work never holds this lock.
+pub fn replace_record_if_unchanged(
+    expected: &DictationMemoryRecord,
+    record: DictationMemoryRecord,
+) -> io::Result<()> {
+    let _guard = HISTORY_WRITE
+        .lock()
+        .map_err(|_| io::Error::other("history write unavailable"))?;
+    replace_record_at(&history_path(), &recovery_audio_root(), expected, record)
+}
+fn replace_record_at(
+    path: &Path,
+    recovery_root: &Path,
+    expected: &DictationMemoryRecord,
+    record: DictationMemoryRecord,
+) -> io::Result<()> {
+    let current = load_recent_from(path, MAX_HISTORY_RECORDS)?
+        .into_iter()
+        .find(|item| item.id == expected.id);
+    if record.id != expected.id || current.as_ref() != Some(expected) {
+        return Err(io::Error::other(
+            "This dictation changed. Refresh it and preview recovery again.",
+        ));
+    }
+    append_record_managed(path, recovery_root, record, MAX_HISTORY_RECORDS)
+}
+
+/// Read only an owned, bounded recovery WAV. No general asset/file access is enabled.
+pub fn read_recovery_audio_preview(path: &Path) -> io::Result<Vec<u8>> {
+    read_recovery_audio_preview_in(&recovery_audio_root(), path)
+}
+fn read_recovery_audio_preview_in(recovery_root: &Path, path: &Path) -> io::Result<Vec<u8>> {
+    let safe_path = validate_recovery_audio_path_in(recovery_root, path)?;
+    let root = cap_std::fs::Dir::open_ambient_dir(recovery_root, cap_std::ambient_authority())?;
+    let name = safe_path
+        .file_name()
+        .ok_or_else(|| io::Error::other("Invalid recovery file"))?;
+    if !root.symlink_metadata(name)?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Recovery audio changed.",
+        ));
+    }
+    // Capability-relative open prevents a swapped symlink from escaping the recovery root.
+    let file = root.open(name)?;
+    if file.metadata()?.len() > MAX_PREVIEW_AUDIO_BYTES {
+        return Err(io::Error::other("This recording is too large for inline playback. Its audio is still saved for recovery."));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PREVIEW_AUDIO_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PREVIEW_AUDIO_BYTES {
+        return Err(io::Error::other(
+            "Recovery audio grew beyond the playback limit.",
+        ));
+    }
+    let reader = hound::WavReader::new(std::io::Cursor::new(&bytes)).map_err(io::Error::other)?;
+    if reader.spec().channels != 1 || reader.spec().sample_rate != 16_000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Recovery audio is not16 kHz mono WAV.",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn append_record_managed(
@@ -612,5 +710,114 @@ mod tests {
         append_record_managed(&history, &root, recoverable, 10).unwrap();
         assert!(!recovery_path.exists());
         assert_eq!(load_recent_from(&history, 10).unwrap().len(), 1);
+    }
+    #[test]
+    fn all_retained_history_and_legacy_original_are_available() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("history.json");
+        for n in 0..100 {
+            append_record_to(
+                &path,
+                sample_record(n, &format!("entry{n}")),
+                MAX_HISTORY_RECORDS,
+            )
+            .unwrap();
+        }
+        let records = load_recent_from(&path, MAX_HISTORY_RECORDS).unwrap();
+        assert_eq!(records.len(), 100);
+        assert_eq!(records.last().unwrap().cleaned_text, "entry0");
+        let legacy: DictationMemoryRecord =
+            serde_json::from_value(serde_json::to_value(&records[0]).unwrap()).unwrap();
+        assert!(legacy.original_transcript.is_none());
+    }
+    #[test]
+    fn repeated_recovery_preserves_the_first_transcript_and_delivery() {
+        let first = sample_record(0, "first");
+        let mut second = first.clone();
+        second.cleaned_text = "second".into();
+        second.preserve_original_from(&first);
+        let mut third = second.clone();
+        third.cleaned_text = "third".into();
+        third.preserve_original_from(&second);
+        assert_eq!(third.original_transcript.unwrap().cleaned_text, "first");
+    }
+    #[test]
+    fn stale_preview_cannot_replace_newer_text() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("history.json");
+        let root = dir.path().join("audio");
+        let before = sample_record(0, "first");
+        append_record_managed(&path, &root, before.clone(), 100).unwrap();
+        let mut newer = before.clone();
+        newer.cleaned_text = "newer".into();
+        append_record_managed(&path, &root, newer.clone(), 100).unwrap();
+        let mut candidate = before.clone();
+        candidate.cleaned_text = "candidate".into();
+        assert!(replace_record_at(&path, &root, &before, candidate).is_err());
+        assert_eq!(load_recent_from(&path, 100).unwrap(), vec![newer]);
+    }
+    #[test]
+    fn accepted_preview_keeps_id_original_and_other_records() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("history.json");
+        let root = dir.path().join("audio");
+        let before = sample_record(0, "first");
+        append_record_managed(&path, &root, before.clone(), 100).unwrap();
+        append_record_managed(&path, &root, sample_record(1, "other"), 100).unwrap();
+        let mut candidate = before.clone();
+        candidate.cleaned_text = "candidate".into();
+        candidate.preserve_original_from(&before);
+        replace_record_at(&path, &root, &before, candidate).unwrap();
+        let records = load_recent_from(&path, 100).unwrap();
+        assert_eq!(records.len(), 2);
+        let accepted = records.iter().find(|item| item.id == before.id).unwrap();
+        assert_eq!(accepted.cleaned_text, "candidate");
+        assert_eq!(
+            accepted.original_transcript.as_ref().unwrap().cleaned_text,
+            "first"
+        );
+    }
+    #[test]
+    fn audio_preview_reads_owned_wav_without_deleting_it() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("audio");
+        let mut capture = DictationRecoveryCapture::create_in(&root).unwrap();
+        capture.append_samples(&[0.25; 1600]).unwrap();
+        let path = capture.finish().unwrap();
+        let bytes = read_recovery_audio_preview_in(&root, &path).unwrap();
+        assert!(bytes.starts_with(b"RIFF"));
+        assert!(path.exists());
+    }
+    #[test]
+    fn audio_preview_rejects_oversize_files_before_reading() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("audio");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.wav");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_PREVIEW_AUDIO_BYTES + 1)
+            .unwrap();
+        assert!(read_recovery_audio_preview_in(&root, &path).is_err());
+        assert!(path.exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn audio_preview_rejects_outside_and_symlink_without_changing_outside_permissions() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("audio");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.wav");
+        fs::write(&outside, b"private other data").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_recovery_audio_preview_in(&root, &outside).is_err());
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let link = root.join("link.wav");
+        symlink(&outside, &link).unwrap();
+        assert!(read_recovery_audio_preview_in(&root, &link).is_err());
     }
 }

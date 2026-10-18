@@ -103,7 +103,7 @@ jobs:
 
       - name: Install Tauri CLI
         shell: bash
-        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+        run: .github/scripts/install-tauri-cli.sh "${TAURI_CLI_VERSION}"
 
       - name: Configure portable Windows CPU baseline
         shell: bash

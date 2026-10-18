@@ -20,6 +20,16 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
+# GitHub's Ubuntu image ships third-party apt sources (Google Chrome, Microsoft
+# Edge) whose mirrors intermittently answer `apt-get update` with "Hash Sum
+# mismatch" and take the whole update down with them; on 2026-09-09 that
+# failed every Linux job across four pull requests three attempts in a row.
+# Nothing this repo installs comes from those sources, so drop them first.
+sudo rm -f /etc/apt/sources.list.d/google-chrome*.list \
+  /etc/apt/sources.list.d/google-chrome*.sources \
+  /etc/apt/sources.list.d/microsoft-edge*.list \
+  /etc/apt/sources.list.d/microsoft-edge*.sources
+
 # Sized so all three attempts fit inside the twenty minute step backstop:
 # 3 x (120 + 240) seconds of work plus 45 seconds of pauses is 18m45s. Without
 # that the backstop would fire mid-retry and the third attempt would never run,

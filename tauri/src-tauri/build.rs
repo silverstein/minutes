@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    link_swift_runtime_rpath();
     compile_mic_check_helper();
     compile_system_audio_helper();
     compile_calendar_helper();
@@ -10,6 +11,16 @@ fn main() {
     stage_assistant_skill_bundle();
     stage_msvc_runtime();
     tauri_build::build()
+}
+
+/// The core crate links Swift Foundation/AVFoundation symbols into the
+/// downstream desktop binary. Cargo link arguments emitted by `crates/core`
+/// apply only to that crate's own targets, so the app must carry its own
+/// runtime search path for macOS's Swift libraries.
+fn link_swift_runtime_rpath() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg-bin=minutes-app=-Wl,-rpath,/usr/lib/swift");
+    }
 }
 
 /// Copy the MSVC runtime next to the app so Windows bundles carry it.

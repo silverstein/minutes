@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "contract": "literal-and-prefix-v1",
+  "cases": [
+    {
+      "id": "separated",
+      "title": "Pricing plan",
+      "body": "The roadmap is approved",
+      "query": "pricing roadmap",
+      "matches": true
+    },
+    {
+      "id": "prefix",
+      "title": "Pricing plan",
+      "body": "The roadmap is approved",
+      "query": "pricing road",
+      "matches": true
+    },
+    {
+      "id": "no-implicit-substring",
+      "title": "Planning",
+      "body": "The plans are ready",
+      "query": "ann",
+      "matches": false
+    },
+    {
+      "id": "literal-and",
+      "title": "Terms",
+      "body": "AND pricing are literal words",
+      "query": "AND pricing",
+      "matches": true
+    },
+    {
+      "id": "literal-not",
+      "title": "Pricing",
+      "body": "Revenue is growing",
+      "query": "pricing NOT revenue",
+      "matches": false
+    },
+    {
+      "id": "literal-or",
+      "title": "OR options",
+      "body": "Choose options",
+      "query": "OR",
+      "matches": true
+    },
+    {
+      "id": "punctuation",
+      "title": "X1: Wealth",
+      "body": "Strategy update",
+      "query": "x1: wealth",
+      "matches": true
+    },
+    {
+      "id": "accent",
+      "title": "Café",
+      "body": "résumé approved",
+      "query": "cafe resume",
+      "matches": true
+    },
+    {
+      "id": "decomposed",
+      "title": "Café",
+      "body": "resumé approved",
+      "query": "café résumé",
+      "matches": true
+    },
+    {
+      "id": "single",
+      "title": "Plan A",
+      "body": "Option a wins",
+      "query": "a",
+      "matches": true
+    },
+    {
+      "id": "single-no-prefix",
+      "title": "Annual plan",
+      "body": "Annual renewal",
+      "query": "a",
+      "matches": false
+    },
+    {
+      "id": "unicode",
+      "title": "東京",
+      "body": "決定 を 確認",
+      "query": "東京 決定",
+      "matches": true
+    },
+    {
+      "id": "apostrophe",
+      "title": "Ryan's plan",
+      "body": "Ship soon",
+      "query": "Ryan's",
+      "matches": true
+    },
+    {
+      "id": "no-stemming",
+      "title": "Running",
+      "body": "The team runs weekly",
+      "query": "runner",
+      "matches": false
+    },
+    {
+      "id": "all-punctuation",
+      "title": "Anything",
+      "body": "Everything",
+      "query": "---",
+      "matches": false
+    },
+    {
+      "id": "empty",
+      "title": "Anything",
+      "body": "Everything",
+      "query": "",
+      "matches": false
+    },
+    {
+      "id": "readme",
+      "title": "Pricing reversal",
+      "body": "Decision: reverse monthly billing",
+      "query": "monthly billing decision",
+      "matches": true
+    },
+    {
+      "id": "missing-term",
+      "title": "Pricing",
+      "body": "Monthly billing",
+      "query": "monthly billing decision",
+      "matches": false
+    },
+    {
+      "id": "simple-score",
+      "title": "Pricing",
+      "body": "pricing",
+      "query": "pricing",
+      "matches": true,
+      "score": 10
+    },
+    {
+      "id": "korean-decomposition",
+      "title": "한국",
+      "body": "회의",
+      "query": "한국",
+      "matches": true
+    },
+    {
+      "id": "greek-accent",
+      "title": "άλφα καφές",
+      "body": "",
+      "query": "αλφα καφες",
+      "matches": true
+    },
+    {
+      "id": "greek-context-free-lowercase",
+      "title": "ΟΣ",
+      "body": "",
+      "query": "οσ",
+      "matches": true
+    },
+    {
+      "id": "circled-letter-is-delimiter",
+      "title": "Ⓐ alpha",
+      "body": "beta ⓑ gamma",
+      "query": "ⓐ",
+      "matches": false
+    }
+  ]
+}

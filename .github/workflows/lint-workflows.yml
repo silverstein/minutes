@@ -110,3 +110,35 @@ jobs:
               exit 1
             fi
           done
+
+  intel-swift-bridge:
+    name: Swift bridge (Intel macOS 15)
+    runs-on: macos-15-intel
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Type-check the production bridge with the required SDK
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun swiftc -typecheck -parse-as-library \
+            -target x86_64-apple-macos11.0 \
+            crates/core/src/macos_graph_xpc_authority.swift \
+            crates/core/src/macos_apple_speech_bridge.swift
+
+  dev-app-signing:
+    name: Development bundle signing (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Verify native nested signing and damaged-seal refusal
+        run: python3 scripts/test_dev_app_signing.py

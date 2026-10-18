@@ -97,6 +97,14 @@ minutes service restart        # Restart all services (e.g. after upgrading the 
 > **Upgrading?** `minutes service install` is idempotent. Re-running it after a binary
 > upgrade rewrites all plists/units and reloads with the new binary path.
 
+### Sync-folder reliability
+
+The watcher subscribes before its initial scan and periodically reconciles each configured folder, so a missed native filesystem event or a file that is still syncing gets another chance. Small folders are checked every 30 seconds while the watcher is available. Larger backlogs are scanned in bounded pages, with processing continuing between pages. Native events still trigger immediate admission checks.
+
+Repeated events and scan overlap are deduplicated before processing. The same stability, extension, container and source-ownership checks apply to both routes. The watcher skips `.icloud` placeholders and symlinks, and does not recurse into `processed/` or `failed/`. Successfully processed sources are archived through the existing move path. New arrivals wait while a previous processing batch is running.
+
+If manual `minutes process` works but an arrival remains untouched, verify the watcher service is using the expected version and config path. Keep the original and collect the watcher log. A running service alone does not prove it has admitted that file. Real iCloud/FileProvider verification is separate from the cross-platform reconciliation tests.
+
 ### How it works
 
 ```

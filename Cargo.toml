@@ -19,7 +19,7 @@ exclude = ["crates/sherpa-plugin"]
 resolver = "2"
 
 [workspace.package]
-version = "0.26.0"
+version = "0.30.2"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]
@@ -65,7 +65,7 @@ thiserror = "2"
 anyhow = "1"
 
 # Filesystem
-dirs = "6"
+dirs = "7"
 walkdir = "2"
 which = "8"
 cap-std = "4.0.2"
@@ -93,7 +93,7 @@ schemars = { version = "1", features = ["derive", "chrono04"] }
 symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "wav", "isomp4"] }
 
 # Noise reduction (pure Rust RNNoise port)
-nnnoiseless = "0.5"
+nnnoiseless = { version = "0.5", default-features = false }
 
 # Channels (for streaming audio)
 crossbeam-channel = "0.5"
@@ -118,7 +118,7 @@ libloading = "0.9"
 ndarray = "0.16"
 
 # SQLite (relationship graph index)
-rusqlite = { version = "0.33", features = ["bundled", "hooks", "limits"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "limits"] }
 
 # System locale detection (UI language "auto" resolution — see crate::i18n)
 sys-locale = "0.3"

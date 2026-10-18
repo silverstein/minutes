@@ -868,13 +868,26 @@ pub(crate) fn stable_active_corpus_revision_with_budget_and_snapshot_hook(
     })
 }
 
-/// Content types for output files.
+/// Content types for corpus artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentType {
     Meeting,
     Memo,
     Dictation,
+    Note,
+}
+
+impl ContentType {
+    /// Stable value used in Markdown frontmatter and derived indexes.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Meeting => "meeting",
+            Self::Memo => "memo",
+            Self::Dictation => "dictation",
+            Self::Note => "note",
+        }
+    }
 }
 
 /// Output status markers.
@@ -1141,7 +1154,7 @@ impl RecordingHealth {
     }
 }
 
-/// Frontmatter for a meeting/memo markdown file.
+/// Frontmatter for a corpus Markdown file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Frontmatter {
     pub title: String,
@@ -1431,6 +1444,10 @@ pub struct ActionItem {
 ///   a documented supersession rather than an unresolved contradiction.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Decision {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_date: Option<String>,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic: Option<String>,
@@ -1476,7 +1493,7 @@ pub struct WriteResult {
     pub content_type: ContentType,
 }
 
-fn render_markdown(
+pub(crate) fn render_markdown(
     frontmatter: &Frontmatter,
     transcript: &str,
     summary: Option<&str>,
@@ -1595,6 +1612,7 @@ fn write_with_retry_policy(
         ContentType::Memo => config.output_dir.join("memos"),
         ContentType::Meeting => config.output_dir.clone(),
         ContentType::Dictation => config.output_dir.join("dictations"),
+        ContentType::Note => config.output_dir.clone(),
     };
 
     // Ensure output directory exists
@@ -1607,27 +1625,21 @@ fn write_with_retry_policy(
         frontmatter.date,
         frontmatter.recorded_by.as_deref(),
     );
-    let path = resolve_collision(&output_dir, &slug);
-    let retry_audio_path = if omit_retry_path {
-        None
-    } else {
-        Some(retry_audio_path.unwrap_or(&path))
-    };
-    let content = render_markdown(
-        frontmatter,
-        transcript,
-        summary,
-        user_notes,
-        retry_audio_path,
-    )?;
-
-    // Write file with appropriate permissions
-    fs::write(&path, &content)?;
     let mode = match frontmatter.visibility {
         Some(Visibility::Team) => 0o640,
         _ => 0o600,
     };
-    set_permissions(&path, mode)?;
+    // Render and publish through a private staging file. The final rename is
+    // no-replace, so concurrent imports with the same title cannot clobber one
+    // another between an existence check and file creation.
+    let path = publish_new_markdown(&output_dir, &slug, mode, |path| {
+        let retry = if omit_retry_path {
+            None
+        } else {
+            Some(retry_audio_path.unwrap_or(path))
+        };
+        render_markdown(frontmatter, transcript, summary, user_notes, retry)
+    })?;
 
     let word_count = transcript.split_whitespace().count();
     tracing::info!(
@@ -1671,6 +1683,7 @@ pub fn rewrite_with_retry_path(
         user_notes,
         retry_audio_path,
         false,
+        None,
     )
 }
 
@@ -1690,9 +1703,53 @@ pub(crate) fn rewrite_without_retry_path(
         user_notes,
         None,
         true,
+        None,
     )
 }
 
+/// Rewrite only the revision used to produce an enrichment result.
+pub fn rewrite_with_retry_path_guarded(
+    path: &Path,
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    retry_audio_path: Option<&Path>,
+    expected_current: &str,
+) -> Result<WriteResult, MarkdownError> {
+    rewrite_with_retry_policy(
+        path,
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        retry_audio_path,
+        false,
+        Some(expected_current),
+    )
+}
+
+pub(crate) fn rewrite_without_retry_path_guarded(
+    path: &Path,
+    frontmatter: &Frontmatter,
+    transcript: &str,
+    summary: Option<&str>,
+    user_notes: Option<&str>,
+    expected_current: &str,
+) -> Result<WriteResult, MarkdownError> {
+    rewrite_with_retry_policy(
+        path,
+        frontmatter,
+        transcript,
+        summary,
+        user_notes,
+        None,
+        true,
+        Some(expected_current),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn rewrite_with_retry_policy(
     path: &Path,
     frontmatter: &Frontmatter,
@@ -1701,6 +1758,7 @@ fn rewrite_with_retry_policy(
     user_notes: Option<&str>,
     retry_audio_path: Option<&Path>,
     omit_retry_path: bool,
+    expected_current: Option<&str>,
 ) -> Result<WriteResult, MarkdownError> {
     let retry_audio_path = if omit_retry_path {
         None
@@ -1714,18 +1772,11 @@ fn rewrite_with_retry_policy(
         user_notes,
         retry_audio_path,
     )?;
-    let tmp = path.with_extension("md.tmp");
-    let mut file = File::create(&tmp)?;
-    file.write_all(content.as_bytes())?;
     let mode = match frontmatter.visibility {
         Some(Visibility::Team) => 0o640,
         _ => 0o600,
     };
-    set_permissions(&tmp, mode)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path)?;
-    sync_markdown_directory(path)?;
+    atomic_rewrite_transaction(path, &content, expected_current, None, Some(mode), || {})?;
 
     let word_count = transcript.split_whitespace().count();
     Ok(WriteResult {
@@ -1734,22 +1785,6 @@ fn rewrite_with_retry_policy(
         word_count,
         content_type: frontmatter.r#type,
     })
-}
-
-#[cfg(unix)]
-fn sync_markdown_directory(path: &Path) -> Result<(), MarkdownError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| MarkdownError::Io(std::io::Error::other("markdown path has no parent")))?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_markdown_directory(_path: &Path) -> Result<(), MarkdownError> {
-    // The exact file is flushed above. std does not offer a portable parent
-    // directory fsync on Windows.
-    Ok(())
 }
 
 /// Rename an existing meeting markdown file in place.
@@ -1776,13 +1811,11 @@ fn sync_markdown_directory(_path: &Path) -> Result<(), MarkdownError> {
 ///    in the frontmatter text. If zero matches or more than one,
 ///    refuse.
 /// 6. Replace that single line with `title: "<escaped-new-title>"`.
-/// 7. Write the result to a tmp sibling and rename atomically over
-///    the original path.
-/// 8. **Parse the written file** to confirm the resulting frontmatter
-///    is still valid YAML. If parse fails, restore the backup that
-///    was written before the change and return an error.
-/// 9. If the new title produces a different slug, rename the file
-///    using `resolve_collision`. Returns the final path.
+/// 7. Stage the result in an exclusive sibling, validate and sync it,
+///    then atomically replace the unchanged original revision.
+/// 8. If the new title produces a different slug, publish the exact
+///    updated file using a no-replace rename and retry name collisions.
+///    Returns the final path.
 ///
 /// Errors are returned as `MarkdownError::RenameRefused` for the
 /// safety-policy refusals and as `MarkdownError::Io` for filesystem
@@ -1908,44 +1941,9 @@ pub fn rename_meeting(path: &Path, new_title: &str) -> Result<PathBuf, MarkdownE
         .unwrap_or(original.len());
     let new_content = format!("---\n{}\n---\n{}", new_fm_text, &original[body_start..]);
 
-    // Step 7: atomic write through a tmp sibling. Preserve the
-    // ORIGINAL file's permissions instead of forcing 0o600 — the
-    // user may have chmod'd the file to 0o644 for Obsidian sync, a
-    // local webserver preview, or any other workflow that needs
-    // group-readable. Forcing 0o600 on every rename would silently
-    // break those setups (claude pass 3 P3).
-    let tmp_path = path.with_extension("md.rename.tmp");
-    fs::write(&tmp_path, &new_content)?;
-    let original_mode = preserved_file_mode(path);
-    if let Err(e) = set_permissions(&tmp_path, original_mode) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    // Step 8: parse-after-write validation. Read back what we just
-    // wrote and confirm the frontmatter still parses. If it doesn't,
-    // delete the tmp and refuse the rename — the original file is
-    // unchanged.
-    let written = match fs::read_to_string(&tmp_path) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(MarkdownError::Io(e));
-        }
-    };
-    let (written_fm, _) = split_frontmatter(&written);
-    if let Err(e) = serde_yaml::from_str::<Frontmatter>(written_fm) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(MarkdownError::RenameRefused(format!(
-            "post-write validation failed; original file unchanged: {}",
-            e
-        )));
-    }
-
-    // Commit: atomically replace the original file with the new
-    // content. After this point the meeting markdown reflects the new
-    // title; only the file *name* may still need to change.
-    fs::rename(&tmp_path, path)?;
+    // Share the same unique staging, durable write and revision check used by
+    // enrichment and resummarization. A concurrent edit is never overwritten.
+    atomic_rewrite_preserving_mode_guarded(path, &new_content, Some(&original), None)?;
 
     // Step 9: rename the file itself if the slug changes. We use the
     // parsed frontmatter (parsed before the title edit) for the date
@@ -1955,9 +1953,46 @@ pub fn rename_meeting(path: &Path, new_title: &str) -> Result<PathBuf, MarkdownE
     let final_path = if path.file_name().and_then(|n| n.to_str()) == Some(new_slug.as_str()) {
         path.to_path_buf()
     } else {
-        let target = resolve_collision(parent, &new_slug);
-        fs::rename(path, &target)?;
-        target
+        let canonical_parent = fs::canonicalize(parent)?;
+        let directory = crate::policy_fs::BoundRecoveryDirectory::bind_existing(&canonical_parent)?;
+        let source_name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "artifact path has no filename",
+            )
+        })?;
+        let source = directory.bind_exact_file(source_name)?;
+        if !source.try_lock_exclusive()? {
+            return Err(MarkdownError::ConcurrentModification);
+        }
+        let mut file = source.try_clone_exact_file()?;
+        let mut current = String::new();
+        file.read_to_string(&mut current)?;
+        if current != new_content {
+            return Err(MarkdownError::ConcurrentModification);
+        }
+        let mut renamed = None;
+        for attempt in 0..1000 {
+            source.attest_visible_identity()?;
+            let name = collision_filename(&new_slug, attempt);
+            match directory.rename_bound_no_replace(
+                directory.bind_exact_file(source_name)?,
+                std::ffi::OsStr::new(&name),
+            ) {
+                Ok(_) => {
+                    renamed = Some(parent.join(name));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        renamed.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "artifact filename collision limit reached",
+            )
+        })?
     };
 
     Ok(final_path)
@@ -2032,6 +2067,7 @@ fn generate_slug(title: &str, date: DateTime<Local>, recorded_by: Option<&str>) 
 }
 
 /// Resolve filename collisions by appending -2, -3, etc.
+#[cfg(test)]
 fn resolve_collision(dir: &Path, filename: &str) -> PathBuf {
     let path = dir.join(filename);
     if !path.exists() {
@@ -2090,192 +2126,235 @@ where
 
     let new_content = format!("---\n{}\n---\n{}", new_fm_text, body);
 
-    // Atomic write through a tmp sibling, preserving the original file mode.
-    let tmp_path = path.with_extension("md.fmupdate.tmp");
-    if let Err(e) = fs::write(&tmp_path, &new_content) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(MarkdownError::Io(e));
-    }
-    let original_mode = preserved_file_mode(path);
-    if let Err(e) = set_permissions(&tmp_path, original_mode) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    // Parse-after-write validation: confirm the result still parses before swapping.
-    match fs::read_to_string(&tmp_path) {
-        Ok(written) => {
-            let (wfm, _) = split_frontmatter(&written);
-            if wfm.is_empty() || serde_yaml::from_str::<Frontmatter>(wfm).is_err() {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(MarkdownError::SerializationError(
-                    "post-write frontmatter validation failed".into(),
-                ));
-            }
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(MarkdownError::Io(e));
-        }
-    }
-
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(MarkdownError::Io(e));
-    }
-    Ok(())
+    atomic_rewrite_preserving_mode_guarded(path, &new_content, Some(&original), None)
 }
 
 /// Atomically replace an artifact's full content, preserving its file mode
 /// (modes are not uniformly 0600 — `Visibility::Team` files are 0640).
 ///
-/// Same write discipline as [`update_frontmatter`] (#384): tmp-sibling write,
-/// mode copy, parse-after-write validation of the frontmatter, then rename.
-/// On any failure the original file is untouched.
+/// Shares exclusive staging, mode preservation, read-back validation and file
+/// syncing with [`update_frontmatter`]. Pre-publication failures preserve the
+/// original; a directory-sync error after publication reports uncertain crash
+/// durability without attempting a destructive rollback.
 ///
 /// When `expected_current` is given, the target file is re-read and compared
 /// twice: once before the backup copy and once **immediately before the
 /// rename**. A concurrent editor save that lands during the backup copy still
 /// aborts the swap with
 /// [`MarkdownError::ConcurrentModification`] with the smallest
-/// copy-free check-to-rename window a plain filesystem allows (it cannot be
-/// zero without OS-level file locking).
+/// copy-free check-to-rename window a plain filesystem allows. Advisory
+/// locking serializes cooperating writers, but cannot eliminate the last
+/// compare-to-rename race with editors that do not participate in the lock.
 ///
-/// When `backup_to` is given, the current file is copied there (via
-/// [`fs::copy`], which carries the source mode) **after** the guard passes
-/// and before the rename — so a conflicted or failed run never disturbs a
-/// backup left by an earlier successful one.
+/// When `backup_to` is given, a durable copy of the exact locked revision is
+/// published without replacement after the early guard passes. An existing
+/// backup is never overwritten. A late conflict may leave this valid backup
+/// and private staging for recovery.
 pub fn atomic_rewrite_preserving_mode_guarded(
     path: &Path,
     new_content: &str,
     expected_current: Option<&str>,
     backup_to: Option<&Path>,
 ) -> Result<(), MarkdownError> {
-    // Unique tmp name (pid + clock nanos): two concurrent runs must not
-    // stage into — or rename — each other's file.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let tmp_path = path.with_extension(format!(
-        "md.resummarize.{}.{}.tmp",
-        std::process::id(),
-        nanos
-    ));
-    // Create with the artifact's final mode from the first byte. OpenOptions'
-    // mode is umask-masked (so it may under-permission, never over-permission),
-    // then the exact mode is enforced on the open handle before any content
-    // byte is written.
-    let original_mode = preserved_file_mode(path);
-    let mut open_opts = fs::OpenOptions::new();
-    open_opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open_opts.mode(original_mode);
-    }
-    #[cfg(not(unix))]
-    let _ = original_mode;
-    let write_result = open_opts.open(&tmp_path).and_then(|mut file| {
+    atomic_rewrite_transaction(path, new_content, expected_current, backup_to, None, || {})
+}
+
+/// An unpublished, exclusive artifact. Failed staging is left under a hidden
+/// random name: cleanup must never unlink a pathname another process replaced.
+/// Hidden staging is excluded from every active-corpus reader.
+struct StagedMarkdown {
+    directory: crate::policy_fs::BoundRecoveryDirectory,
+    name: std::ffi::OsString,
+    file: File,
+}
+
+impl StagedMarkdown {
+    fn new(parent: &Path, mode: u32) -> Result<Self, MarkdownError> {
+        let parent = fs::canonicalize(parent)?;
+        let directory = crate::policy_fs::BoundRecoveryDirectory::bind_existing(&parent)?;
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|error| std::io::Error::other(format!("artifact staging nonce: {error}")))?;
+        let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let name = std::ffi::OsString::from(format!(".minutes-artifact-{nonce}.tmp"));
+        #[cfg(windows)]
+        let file = crate::overlays::create_owner_only_staged_file(&parent.join(&name))?;
+        #[cfg(not(windows))]
+        let file = directory.create_new_exact_file(&name)?;
         #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(original_mode))?;
-        use std::io::Write;
-        file.write_all(new_content.as_bytes())
-    });
-    if let Err(e) = write_result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(MarkdownError::Io(e));
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        #[cfg(not(unix))]
+        let _ = mode;
+        directory.attest_for_source_cleanup()?;
+        let staged = Self {
+            directory,
+            name,
+            file,
+        };
+        staged.bind()?;
+        Ok(staged)
     }
 
-    match fs::read_to_string(&tmp_path) {
-        Ok(written) => {
-            let (wfm, _) = split_frontmatter(&written);
-            if wfm.is_empty() || serde_yaml::from_str::<Frontmatter>(wfm).is_err() {
-                let _ = fs::remove_file(&tmp_path);
-                return Err(MarkdownError::SerializationError(
-                    "post-write frontmatter validation failed".into(),
-                ));
-            }
+    fn path(&self) -> PathBuf {
+        self.directory.display_path().join(&self.name)
+    }
+
+    fn bind(&self) -> Result<crate::policy_fs::BoundRecoveryFile, MarkdownError> {
+        let bound = self.directory.bind_exact_file(&self.name)?;
+        if !crate::policy_fs::open_file_identity_matches(&self.file, &bound.try_clone_exact_file()?)
+        {
+            return Err(MarkdownError::ConcurrentModification);
         }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(MarkdownError::Io(e));
+        Ok(bound)
+    }
+
+    fn write(&mut self, content: &str) -> Result<(), MarkdownError> {
+        validate_artifact_content(content)?;
+        self.bind()?;
+        self.file.rewind()?;
+        self.file.set_len(0)?;
+        self.file.write_all(content.as_bytes())?;
+        self.file.sync_all()?;
+        self.file.rewind()?;
+        let mut written = String::new();
+        self.file.read_to_string(&mut written)?;
+        if written != content {
+            return Err(MarkdownError::ConcurrentModification);
+        }
+        self.bind()?;
+        Ok(())
+    }
+}
+
+fn validate_artifact_content(content: &str) -> Result<(), MarkdownError> {
+    let (frontmatter, _) = split_frontmatter(content);
+    if frontmatter.is_empty() || serde_yaml::from_str::<Frontmatter>(frontmatter).is_err() {
+        return Err(MarkdownError::SerializationError(
+            "artifact frontmatter validation failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn collision_filename(filename: &str, attempt: usize) -> String {
+    if attempt == 0 {
+        filename.to_string()
+    } else {
+        format!("{}-{}.md", filename.trim_end_matches(".md"), attempt + 1)
+    }
+}
+
+fn publish_new_markdown(
+    parent: &Path,
+    filename: &str,
+    mode: u32,
+    render: impl Fn(&Path) -> Result<String, MarkdownError>,
+) -> Result<PathBuf, MarkdownError> {
+    let mut staged = StagedMarkdown::new(parent, mode)?;
+    for attempt in 0..1000 {
+        let name = collision_filename(filename, attempt);
+        let path = parent.join(&name);
+        staged.write(&render(&path)?)?;
+        match staged
+            .directory
+            .rename_bound_no_replace(staged.bind()?, std::ffi::OsStr::new(&name))
+        {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
         }
     }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "artifact filename collision limit reached; no existing file was overwritten",
+    )
+    .into())
+}
+
+fn atomic_rewrite_transaction(
+    path: &Path,
+    new_content: &str,
+    expected_current: Option<&str>,
+    backup_to: Option<&Path>,
+    mode: Option<u32>,
+    before_commit: impl FnOnce(),
+) -> Result<(), MarkdownError> {
+    validate_artifact_content(new_content)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent)?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "artifact path has no filename",
+        )
+    })?;
+    let directory = crate::policy_fs::BoundRecoveryDirectory::bind_existing(&parent)?;
+    let original = directory.bind_exact_file(name)?;
+    // A concurrent writer is a conflict, not an unbounded wait on a filesystem
+    // lock. The exact inode is re-attested after acquiring the lease.
+    if !original.try_lock_exclusive()? {
+        return Err(MarkdownError::ConcurrentModification);
+    }
+    original
+        .attest_visible_identity()
+        .map_err(|_| MarkdownError::ConcurrentModification)?;
+    let mut original_file = original.try_clone_exact_file()?;
+    let mut original_content = String::new();
+    original_file.rewind()?;
+    original_file.read_to_string(&mut original_content)?;
+    if expected_current.is_some_and(|expected| expected != original_content) {
+        return Err(MarkdownError::ConcurrentModification);
+    }
+    #[cfg(unix)]
+    let original_mode = original_file.metadata()?.permissions().mode() & 0o7777;
+    #[cfg(not(unix))]
+    let original_mode = 0o600;
+    let mut staged = StagedMarkdown::new(&parent, mode.unwrap_or(original_mode))?;
+    staged.write(new_content)?;
 
     let compare_current = || -> Result<(), MarkdownError> {
-        if let Some(expected) = expected_current {
-            match fs::read_to_string(path) {
-                Ok(current) if current != expected => {
-                    return Err(MarkdownError::ConcurrentModification);
-                }
-                Ok(_) => {}
-                Err(e) => return Err(MarkdownError::Io(e)),
-            }
+        original
+            .attest_visible_identity()
+            .map_err(|_| MarkdownError::ConcurrentModification)?;
+        let mut file = original.try_clone_exact_file()?;
+        file.rewind()?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        if content != original_content {
+            return Err(MarkdownError::ConcurrentModification);
         }
         Ok(())
     };
-
-    // Cheap early guard: do not create a backup for a stale snapshot.
-    if let Err(e) = compare_current() {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-
-    // Backup only once the guard has passed: a conflicted run must never
-    // clobber the backup of an earlier successful run. `fs::copy` carries
-    // the source file's mode, so the backup is never umask-readable.
-    let mut created_backup = None;
+    compare_current()?;
     if let Some(backup) = backup_to {
-        if let Err(e) = fs::copy(path, backup) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(MarkdownError::Io(e));
-        }
-        created_backup = Some(backup);
+        // The source remains the exact locked revision, rather than a path
+        // that could now identify a concurrent editor's replacement.
+        let backup_parent = backup.parent().unwrap_or_else(|| Path::new("."));
+        let backup_name = backup.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "backup path has no filename",
+            )
+        })?;
+        let mut backup_stage = StagedMarkdown::new(backup_parent, original_mode)?;
+        backup_stage.write(&original_content)?;
+        backup_stage
+            .directory
+            .rename_bound_no_replace(backup_stage.bind()?, backup_name)?;
     }
-
-    // Guard compare again immediately before the swap. If the file changed
-    // during backup creation, that backup belongs only to this failed run.
-    if let Err(e) = compare_current() {
-        let _ = fs::remove_file(&tmp_path);
-        if let Some(backup) = created_backup {
-            let _ = fs::remove_file(backup);
-        }
-        return Err(e);
-    }
-
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(MarkdownError::Io(e));
-    }
+    before_commit();
+    compare_current()?;
+    staged.bind()?;
+    directory.attest_for_source_cleanup()?;
+    // External editors do not participate in our advisory lock. Their saves
+    // are checked immediately before rename, but POSIX provides no general
+    // compare-and-swap rename; this last syscall-sized race remains explicit.
+    fs::rename(staged.path(), parent.join(name))?;
+    directory.sync()?;
     Ok(())
-}
-
-/// Set file permissions to the given mode (Unix only; no-op on Windows).
-fn set_permissions(_path: &Path, _mode: u32) -> Result<(), MarkdownError> {
-    #[cfg(unix)]
-    {
-        let perms = fs::Permissions::from_mode(_mode);
-        fs::set_permissions(_path, perms)?;
-    }
-    Ok(())
-}
-
-/// Read the existing file's mode bits so a rewrite can preserve
-/// permissions the user may have set deliberately. Returns `0o600`
-/// (the Minutes default) on Windows or if the metadata read fails.
-/// Used by `rename_meeting` to avoid clobbering user-chosen modes.
-fn preserved_file_mode(_path: &Path) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(_path) {
-            // Mask off the file-type bits, keep only the permission
-            // bits (rwxrwxrwx + setuid/setgid/sticky).
-            return meta.permissions().mode() & 0o7777;
-        }
-    }
-    0o600
 }
 
 // ── Frontmatter parsing utilities (shared across modules) ────
@@ -3536,6 +3615,24 @@ mod tests {
     }
 
     #[test]
+    fn update_frontmatter_preserves_decision_identity_and_effective_date() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("decision.md");
+        let original = "---\ntitle: Plan\ntype: meeting\ndate: 2026-04-07T10:00:00-07:00\nduration: 0\ndecisions:\n  - id: price-v1\n    text: Annual only\n    topic: pricing\n    effective_date: 2030-01-01\n---\n## Transcript\nOriginal source.\n";
+        std::fs::write(&path, original).unwrap();
+        update_frontmatter(&path, |fm| fm.title = "Updated".into()).unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let (yaml, body) = split_frontmatter(&updated);
+        let fm: Frontmatter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(fm.decisions[0].id.as_deref(), Some("price-v1"));
+        assert_eq!(
+            fm.decisions[0].effective_date.as_deref(),
+            Some("2030-01-01")
+        );
+        assert_eq!(body, split_frontmatter(original).1);
+    }
+
+    #[test]
     fn update_frontmatter_preserves_body_with_glued_closing_fence() {
         // Regression (#384): a closing fence glued to body text with no newline
         // anywhere after it. `split_frontmatter` keeps the trailing bytes; the
@@ -3957,6 +4054,148 @@ mod tests {
 
         assert!(matches!(err, MarkdownError::ConcurrentModification));
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn concurrent_artifact_publication_never_replaces_a_neighbor() {
+        let dir = TempDir::new().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let content =
+            render_markdown(&test_frontmatter(), "original transcript", None, None, None).unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|index| {
+                let parent = dir.path().to_path_buf();
+                let barrier = Arc::clone(&barrier);
+                let content =
+                    content.replace("original transcript", &format!("transcript {index}"));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let path = publish_new_markdown(&parent, "same-title.md", 0o600, |_| {
+                        Ok(content.clone())
+                    })
+                    .unwrap();
+                    (path, content)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let unique: std::collections::HashSet<_> = results.iter().map(|(path, _)| path).collect();
+        assert_eq!(unique.len(), 8);
+        for (path, content) in results {
+            assert_eq!(fs::read_to_string(path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn rewrite_refuses_an_editor_save_during_staging() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meeting.md");
+        let original = render_markdown(&test_frontmatter(), "original", None, None, None).unwrap();
+        let edited = original.replace("original", "user edit");
+        fs::write(&path, &original).unwrap();
+        let result = atomic_rewrite_transaction(
+            &path,
+            &original.replace("original", "generated"),
+            Some(&original),
+            None,
+            None,
+            || {
+                let replacement = path.with_extension("editor-save");
+                fs::write(&replacement, &edited).unwrap();
+                fs::rename(replacement, &path).unwrap();
+            },
+        );
+        assert!(matches!(result, Err(MarkdownError::ConcurrentModification)));
+        assert_eq!(fs::read_to_string(path).unwrap(), edited);
+    }
+
+    #[test]
+    fn concurrent_rewrites_of_one_revision_have_only_one_winner() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meeting.md");
+        let original = render_markdown(&test_frontmatter(), "original", None, None, None).unwrap();
+        fs::write(&path, &original).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|index| {
+                let path = path.clone();
+                let original = original.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    atomic_rewrite_preserving_mode_guarded(
+                        &path,
+                        &original.replace("original", &format!("winner {index}")),
+                        Some(&original),
+                        None,
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(MarkdownError::ConcurrentModification)))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_staging_is_private_before_first_content_and_refuses_symlink_rewrite() {
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new().unwrap();
+        let mut staged = StagedMarkdown::new(dir.path(), 0o600).unwrap();
+        assert_eq!(
+            staged.file.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let content = render_markdown(&test_frontmatter(), "private", None, None, None).unwrap();
+        staged.write(&content).unwrap();
+        assert_eq!(
+            fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let target = dir.path().join("target.md");
+        let link = dir.path().join("link.md");
+        fs::write(&target, &content).unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(atomic_rewrite_preserving_mode_guarded(
+            &link,
+            &content.replace("private", "wrong"),
+            None,
+            None
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(target).unwrap(), content);
+    }
+
+    #[test]
+    fn rewrite_never_clobbers_a_previous_backup() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meeting.md");
+        let backup = dir.path().join("earlier.bak");
+        let content = render_markdown(&test_frontmatter(), "original", None, None, None).unwrap();
+        fs::write(&path, &content).unwrap();
+        fs::write(&backup, "existing backup").unwrap();
+        assert!(atomic_rewrite_preserving_mode_guarded(
+            &path,
+            &content.replace("original", "new"),
+            Some(&content),
+            Some(&backup)
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), content);
+        assert_eq!(fs::read_to_string(backup).unwrap(), "existing backup");
     }
 
     #[cfg(unix)]

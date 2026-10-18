@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::diarize::SpeakerAttribution;
 use crate::markdown::{
     is_inactive_corpus_dir_name, read_stable_active_markdown_with_budget, split_frontmatter,
-    ActiveCorpusReadBudget, ContentType, EntityRef, Frontmatter, IntentKind, Sensitivity,
+    ActiveCorpusReadBudget, EntityRef, Frontmatter, IntentKind, Sensitivity,
     StableMarkdownSnapshot, ACTIVE_CORPUS_AUTHORIZATION_DEADLINE,
 };
 use crate::overlays;
@@ -1463,7 +1463,7 @@ mod windows_graph_journal {
             let next = u32::from_le_bytes(buffer[offset..offset + 4].try_into().ok()?) as usize;
             let name_bytes =
                 u32::from_le_bytes(buffer[offset + 8..offset + 12].try_into().ok()?) as usize;
-            if name_bytes == 0 || name_bytes % 2 != 0 {
+            if name_bytes == 0 || !name_bytes.is_multiple_of(2) {
                 return None;
             }
             let name_end = header_end.checked_add(name_bytes)?;
@@ -1487,7 +1487,7 @@ mod windows_graph_journal {
             if next == 0 {
                 break;
             }
-            if next < name_end - offset || next % 4 != 0 {
+            if next < name_end - offset || !next.is_multiple_of(4) {
                 return None;
             }
             offset = offset.checked_add(next)?;
@@ -2824,7 +2824,7 @@ fn rebuild_in_memory_projection_with_hook(
     conn.progress_handler(
         1_000,
         Some(move || progress_budget.check_deadline().is_err()),
-    );
+    )?;
     populate_projection_with_hook(
         config,
         conn,
@@ -2949,7 +2949,7 @@ pub(crate) fn populate_policy_projection_from_stream(
     conn.progress_handler(
         1_000,
         Some(move || progress_budget.check_deadline().is_err()),
-    );
+    )?;
     let corrections = GraphCorrectionSnapshot {
         vocabulary_people,
         speaker_overlays: overlays::StableSpeakerOverlaySnapshot::empty(),
@@ -3038,11 +3038,7 @@ fn populate_projection_from_sources(
         }
         source_revision_entries.push((file_path.clone(), source.content_sha256));
 
-        let content_type_str = match frontmatter.r#type {
-            ContentType::Meeting => "meeting",
-            ContentType::Memo => "memo",
-            ContentType::Dictation => "dictation",
-        };
+        let content_type_str = frontmatter.r#type.as_str();
         let date_str = frontmatter.date.to_rfc3339();
         let duration_secs = parse_duration_secs(&frontmatter.duration);
         let speakers = extract_speakers_from_transcript(body, budget, derived_budget)?;

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-02T17:52:02.976Z",
+  "generated_at": "2026-09-29T11:21:29.311Z",
   "source": {
     "plugin_json": ".claude/plugins/minutes/plugin.json",
     "packs_dir": ".claude/plugins/minutes/packs"
@@ -362,6 +362,19 @@
       "pack_ids": [],
       "role_fit": [],
       "source_path": "skills/minutes-x1-closeout/SKILL.md"
+    },
+    {
+      "skill_name": "minutes-x1-send-meeting",
+      "title": "x1 send meeting",
+      "description": "Send one of the user's own Minutes meetings to their X1 household for review. Use when the user wants a meeting's summary, decisions, action items, and open questions to reach X1 so they can confirm what belongs in their household record. X1 asks the user to approve the send, and nothing reaches the household record until they confirm each item. Never use it for a restricted meeting, a transcript, or someone else's meeting.",
+      "category": "lifecycle",
+      "surface_support": [
+        "claude-code-plugin"
+      ],
+      "installable_via": "claude-code-plugin",
+      "pack_ids": [],
+      "role_fit": [],
+      "source_path": "skills/minutes-x1-send-meeting/SKILL.md"
     }
   ]
 }

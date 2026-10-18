@@ -74,7 +74,7 @@ import { access, mkdir, readFile, rm, stat, writeFile } from "fs/promises";
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import * as reader from "minutes-sdk";
 import {
@@ -810,13 +810,14 @@ export function parsePolicyVerifiedMeeting(
   const { yaml } = reader.splitFrontmatter(content);
   if (!yaml) return null;
 
+  let parsedFrontmatter: Record<string, unknown>;
   try {
     const parsed = parseYaml(yaml);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     if (typeof parsed.title !== "string" || parsed.title.trim() === "") return null;
     if (
       typeof parsed.type !== "string" ||
-      !["meeting", "memo", "dictation"].includes(parsed.type)
+      !["meeting", "memo", "dictation", "note"].includes(parsed.type)
     ) {
       return null;
     }
@@ -830,11 +831,29 @@ export function parsePolicyVerifiedMeeting(
     ) {
       return null;
     }
+    parsedFrontmatter = parsed as Record<string, unknown>;
   } catch {
     return null;
   }
 
-  return reader.parseFrontmatter(content, filePath);
+  const sdkParsed = reader.parseFrontmatter(content, filePath);
+  if (sdkParsed || parsedFrontmatter.type !== "note") return sdkParsed;
+
+  // The MCP package is tested against the last published SDK, which can lag
+  // this repository by one release. Preserve that parser's normalization and
+  // fail-closed checks while adapting only the newly valid discriminator.
+  const { body } = reader.splitFrontmatter(content);
+  const sdkCompatibleContent = [
+    "---",
+    stringifyYaml({ ...parsedFrontmatter, type: "meeting" }).trimEnd(),
+    "---",
+    body,
+  ].join("\n");
+  const note = reader.parseFrontmatter(sdkCompatibleContent, filePath);
+  if (!note) return null;
+  note.frontmatter.type = "note";
+  note.body = body;
+  return note;
 }
 
 type PolicyVerifiedMeeting = NonNullable<
@@ -1248,16 +1267,18 @@ export async function policySearchMeetings(
     "policy search"
   );
   if (!query) return [];
-  const needle = query.toLowerCase();
   return policyMatchingSnapshotOperation(
     dir,
     includeRestricted,
-    (meeting) =>
-      meeting.frontmatter.title.toLowerCase().includes(needle) ||
-      meeting.body.toLowerCase().includes(needle),
+    (meeting) => reader.lexicalMatch(meeting.frontmatter.title, meeting.body, query) !== null,
     (snapshots) => {
       const results: PolicyVerifiedMeeting[] = [];
-      for (const snapshot of newestPolicySnapshots(snapshots)) {
+      const ranked = snapshots.map((snapshot) => ({ snapshot, score: reader.lexicalMatch(snapshot.meeting.frontmatter.title, snapshot.meeting.body, query)?.score ?? 0 }));
+      ranked.sort((a, b) => reader.compareSearchMatches(
+        { score: a.score, date: a.snapshot.meeting.frontmatter.date, path: a.snapshot.path },
+        { score: b.score, date: b.snapshot.meeting.frontmatter.date, path: b.snapshot.path }
+      ));
+      for (const { snapshot } of ranked) {
         results.push(snapshot.meeting);
         if (results.length >= boundedLimit) break;
       }
@@ -1293,15 +1314,9 @@ function meetingMatchesSince(meeting: PolicyVerifiedMeeting, since?: string): bo
 }
 
 function meetingMatchesPerson(meeting: PolicyVerifiedMeeting, person?: string): boolean {
-  if (!person) return true;
-  const needle = person.trim().toLowerCase();
-  if (!needle) return true;
-  const people = [
-    ...meeting.frontmatter.attendees,
-    ...meeting.frontmatter.people,
-    ...(meeting.frontmatter.attendees_raw || "").split(/[,;\n]/),
-  ];
-  return people.some((entry) => entry.trim().toLowerCase().includes(needle));
+  if (person === undefined) return true;
+  const identity = reader.resolvePersonIdentity([meeting], person);
+  return !!identity && reader.meetingMentionsPerson(meeting, identity);
 }
 
 function normalizedPersonSelector(value?: string): string {
@@ -1355,7 +1370,7 @@ export function policyIntentResults(
     const queryFields = includeMeetingTitleInQuery
       ? [what, who || "", meeting.frontmatter.title]
       : [what, who || ""];
-    if (needle && !queryFields.some((value) => value.toLowerCase().includes(needle))) return false;
+    if (needle && !reader.lexicalMatch("", queryFields.join(" "), query)) return false;
     if (ownerNeedle && !ownerMatchesExactSelector(who, ownerNeedle)) return false;
     results.push(boundedPolicyIntentResult({
       date: meeting.frontmatter.date,
@@ -1520,10 +1535,7 @@ function meetingMatchesToolSearch(
       1
     ).length > 0;
   }
-  const needle = filter.query.trim().toLowerCase();
-  return needle.length > 0 &&
-    (meeting.frontmatter.title.toLowerCase().includes(needle) ||
-      meeting.body.toLowerCase().includes(needle));
+  return reader.lexicalMatch(meeting.frontmatter.title, meeting.body, filter.query) !== null;
 }
 
 export function collectPolicyToolSearchSnapshots(
@@ -1531,23 +1543,34 @@ export function collectPolicyToolSearchSnapshots(
   includeRestricted: boolean,
   filter: PolicyToolSearchFilter
 ): PolicyVerifiedMeetingSnapshot[] {
-  return newestPolicySnapshots(
-    collectPolicyVerifiedMeetingSnapshots(
-      snapshot,
-      includeRestricted,
-      (meeting) => meetingMatchesToolSearch(meeting, filter)
-    )
-  );
+  const matches: PolicyVerifiedMeetingSnapshot[] = [];
+  for (const file of snapshot.files) {
+    if (!isActiveCorpusMeetingPath(file.path, snapshot.canonicalRoot)) continue;
+    const meeting = parsePolicyVerifiedMeeting(file.content, file.path);
+    if (!meeting || (!includeRestricted && meetingSensitivity(meeting) === "restricted")) continue;
+    if (!meetingMatchesToolSearch(meeting, filter)) continue;
+    meeting.retrieval = reader.lexicalMatch(meeting.frontmatter.title, meeting.body, filter.query) ?? undefined;
+    matches.push({ path: file.path, content: file.content, meeting });
+  }
+  return matches.sort((a, b) => reader.compareSearchMatches(
+    { score: a.meeting.retrieval?.score ?? 0, date: a.meeting.frontmatter.date, path: a.path },
+    { score: b.meeting.retrieval?.score ?? 0, date: b.meeting.frontmatter.date, path: b.path }
+  )).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
 }
 
 async function policyToolSearchMeetings(
   dir: string,
   includeRestricted: boolean,
-  filter: PolicyToolSearchFilter
+  filter: PolicyToolSearchFilter,
+  limit: number = MCP_MEETING_RESULT_MAX
 ): Promise<PolicyVerifiedMeeting[]> {
   return withStableCorpusLease(dir, (snapshot) =>
     collectPolicyToolSearchSnapshots(snapshot, includeRestricted, filter)
-      .map((entry) => entry.meeting)
+      .slice(0, limit)
+      .map((entry) => ({ ...entry.meeting, evidence: reader.buildSourceEvidence({
+        path: entry.path, content: entry.content, body: entry.meeting.body,
+        speakerMap: entry.meeting.frontmatter.speaker_map,
+      }, { query: filter.query, limit: 3 }) }))
   );
 }
 
@@ -1930,9 +1953,7 @@ export function researchTopicProjection(
     for (const decision of meeting.frontmatter.decisions) {
       if (
         !needle ||
-        ![decision.text, decision.topic || ""].some((value) =>
-          value.toLowerCase().includes(needle)
-        )
+        !reader.lexicalMatch(decision.topic || "", decision.text, query)
       ) {
         continue;
       }
@@ -1955,7 +1976,7 @@ export function researchTopicProjection(
   const topicCounts = new Map<string, number>();
   for (const meeting of meetings) {
     for (const rawTag of meeting.frontmatter.tags) {
-      if (!needle || !rawTag.toLowerCase().includes(needle)) continue;
+      if (!needle || !reader.lexicalMatch(rawTag, "", query)) continue;
       const topic = boundedMcpField(rawTag) ?? "";
       if (!topic) continue;
       const current = topicCounts.get(topic);
@@ -2222,7 +2243,7 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.26.0";
+const MCP_SERVER_VERSION = "0.30.2";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
@@ -3651,6 +3672,26 @@ async function oldCliReadinessGuidance(
   }
 }
 
+function linuxLoaderGuidance(error: unknown, platform: NodeJS.Platform): string | null {
+  if (platform !== "linux") return null;
+  const stderr = (error as { stderr?: unknown })?.stderr;
+  if (typeof stderr !== "string") return null;
+  // These are loader failures before Minutes can run, not policy diagnostics.
+  // Never echo stderr or paths; recognize only known runtime prerequisites.
+  if (/error while loading shared libraries: (?:libpipewire-0\.3|libasound)\.so\.[0-9]+: cannot open shared object file/.test(stderr)) {
+    return "The Minutes Linux engine cannot start because an audio runtime library is missing. " +
+      "On Ubuntu 24.04, install libasound2t64 and libpipewire-0.3-0t64, then restart the MCP host. " +
+      "These libraries are required even for read-only tools. " +
+      "See https://github.com/silverstein/minutes/blob/main/docs/install.md#linux";
+  }
+  if (/version [`']GLIBC_2\.[0-9]{1,2}' not found/.test(stderr)) {
+    return "The downloaded Minutes Linux engine requires glibc 2.39 or newer (Ubuntu 24.04). " +
+      "On an older distribution such as Debian 12, build minutes-cli from source on that machine. " +
+      "See https://github.com/silverstein/minutes/blob/main/docs/install.md#linux";
+  }
+  return null;
+}
+
 export async function readAgentTrustReadiness(
   runner: MinutesRunner = runMinutes,
   platform: NodeJS.Platform = process.platform
@@ -3665,6 +3706,8 @@ export async function readAgentTrustReadiness(
     // the capture tools, and withholding it leaves a Claude Desktop user with
     // "could not be verified safely" and nothing to do about it (#774).
     if (error?.cliMissing) throw error;
+    const loaderGuidance = linuxLoaderGuidance(error, platform);
+    if (loaderGuidance) throw new Error(loaderGuidance);
     if (rejectedUnknownSubcommand(error, "agent-readiness")) {
       const guidance = await oldCliReadinessGuidance(runner, platform);
       if (guidance) throw new Error(guidance);
@@ -3703,7 +3746,7 @@ export async function requireAgentTrustReadiness(
   if (!readiness.ready) {
     throw new Error(
       readiness.remediation ||
-        "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed. Make sure `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes."
+        "This machine shows a Minutes-owned QMD registration that qmd could not confirm was removed, so agent memory stays disabled until it can. With the Minutes CLI installed, check that `qmd` runs (`qmd collection list`), then run `minutes qmd cleanup` and restart Minutes. The desktop app cannot perform this repair on its own yet, so on a desktop-only install this needs the CLI; if you are seeing this on a machine that never had it, please report it, because the check should not be firing there at all."
     );
   }
   return readiness;
@@ -4145,7 +4188,10 @@ async function liveCopilotFingerprint(): Promise<string> {
 async function spawnCopilotCli(
   goal: string,
   surface: "stdout" | "tui"
-): Promise<CopilotObserverSession> {
+): Promise<{
+  session: CopilotObserverSession;
+  exitedSuccessfully: () => boolean;
+}> {
   const paths = copilotObserverPaths();
   await mkdir(paths.root, { recursive: true });
   await Promise.all([
@@ -4156,6 +4202,7 @@ async function spawnCopilotCli(
   const stdoutFd = openSync(paths.nudges, "a");
   const stderrFd = openSync(paths.stderr, "a");
   let child: ReturnType<typeof spawn>;
+  let exitCode: number | null | undefined;
   try {
     child = spawn(
       MINUTES_BIN,
@@ -4166,6 +4213,7 @@ async function spawnCopilotCli(
         env: mcpCliChildEnv({ RUST_LOG: "info" }),
       }
     );
+    child.once("exit", (code) => { exitCode = code; });
   } finally {
     closeSync(stdoutFd);
     closeSync(stderrFd);
@@ -4197,7 +4245,7 @@ async function spawnCopilotCli(
     }
     throw error;
   }
-  return session;
+  return { session, exitedSuccessfully: () => exitCode === 0 };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -5338,10 +5386,11 @@ registerDocsAppTool(
         intentKind: intent_kind,
         owner,
         intentsOnly: intents_only,
-      }
+      },
+      intentMode ? MCP_POLICY_MEETING_RESULT_MAX : boundedLimit
     );
 
-      let results: Array<PolicyIntentResult | ReturnType<typeof meetingSearchItem> & { snippet: string }>;
+      let results: Array<PolicyIntentResult | ReturnType<typeof meetingSearchItem> & { snippet: string; evidence?: reader.EvidenceBundle; retrieval?: reader.LexicalMatch }>;
       if (intentMode) {
         results = policyIntentResults(
           meetings,
@@ -5351,11 +5400,13 @@ registerDocsAppTool(
           boundedLimit
         );
       } else {
-        const matches: Array<ReturnType<typeof meetingSearchItem> & { snippet: string }> = [];
+        const matches: Array<ReturnType<typeof meetingSearchItem> & { snippet: string; evidence?: reader.EvidenceBundle; retrieval?: reader.LexicalMatch }> = [];
         for (const meeting of meetings) {
             matches.push({
               ...meetingSearchItem(meeting),
-              snippet: liveMeetingSnippet(meeting.body, query),
+              snippet: meeting.evidence?.segments[0]?.quote ?? liveMeetingSnippet(meeting.body, query),
+              retrieval: meeting.retrieval,
+              evidence: meeting.evidence,
             });
             if (matches.length >= boundedLimit) break;
         }
@@ -5604,6 +5655,17 @@ registerDocsAppTool(
   }
 );
 
+/** Temporal projection consumes only the exact authorized corpus snapshot. */
+export function policyDecisionHistory(snapshot: StableCorpusSnapshot): reader.DecisionHistoryEntry[] {
+  const sources = snapshot.files.flatMap((file) => {
+    if (!isActiveCorpusMeetingPath(file.path, snapshot.canonicalRoot)) return [];
+    const meeting = parsePolicyVerifiedMeeting(file.content, file.path);
+    return !meeting || meetingSensitivity(meeting) === "restricted"
+      ? [] : [{ ...meeting, content: file.content }];
+  });
+  return reader.buildDecisionHistory(sources);
+}
+
 // ── Tool: consistency_report ───────────────────────────────
 
 // ── Tool: get_screen_context ───────────────────────────────
@@ -5782,14 +5844,18 @@ registerDocsAppTool(
     _meta: { ui: { resourceUri: UI_RESOURCE_URI } },
   },
   async ({ owner, stale_after_days }) => {
+    const meetingsDir = await getEffectiveMeetingsDir();
     if (!(await isCliAvailable())) {
-      return { content: [{ type: "text" as const, text: `Consistency reports require the full CLI for structured intent analysis.\n\n${CLI_INSTALL_MSG}` }] };
+      const decisionHistory = await withStableCorpusLease(meetingsDir, policyDecisionHistory);
+      return {
+        content: [{ type: "text" as const, text: `Decision history: ${decisionHistory.length} sourced records. Full stale-commitment analysis requires the Minutes CLI.` }],
+        structuredContent: { decision_conflicts: [], stale_commitments: [], decision_history: decisionHistory, analysis_available: false, view: "report" },
+      };
     }
     const capabilities = await ensureCliCapabilities(["consistency_corpus_root_v1"]);
     if (capabilities.kind !== "report" || !hasFeature(capabilities, "consistency_corpus_root_v1")) {
       throw new Error("Consistency reports require a Minutes CLI that supports the selected meeting folder. Update Minutes, then try again.");
     }
-    const meetingsDir = await getEffectiveMeetingsDir();
     const args = ["consistency", "--dir", meetingsDir, "--stale-after-days", String(stale_after_days)];
     if (owner) args.push("--owner", owner);
 
@@ -5799,6 +5865,8 @@ registerDocsAppTool(
     if (!report || typeof report !== "object") {
       return { content: [{ type: "text" as const, text: stderr || stdout }] };
     }
+
+    const decisionHistory = await withStableCorpusLease(meetingsDir, policyDecisionHistory);
 
     const decisionConflicts = Array.isArray(report.decision_conflicts)
       ? report.decision_conflicts
@@ -5810,7 +5878,7 @@ registerDocsAppTool(
     if (decisionConflicts.length === 0 && staleCommitments.length === 0) {
       return {
         content: [{ type: "text" as const, text: "No consistency issues found." }],
-        structuredContent: { decision_conflicts: [], stale_commitments: [], view: "report" },
+        structuredContent: { decision_conflicts: [], stale_commitments: [], decision_history: decisionHistory, view: "report" },
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "report" },
       };
     }
@@ -5841,7 +5909,7 @@ registerDocsAppTool(
 
     return {
       content: [{ type: "text" as const, text: sections.join("\n\n") }],
-      structuredContent: { decision_conflicts: decisionConflicts, stale_commitments: staleCommitments, view: "report" },
+      structuredContent: { decision_conflicts: decisionConflicts, stale_commitments: staleCommitments, decision_history: decisionHistory, view: "report" },
       _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "report" },
     };
   }
@@ -5961,15 +6029,15 @@ registerTool(
         MCP_POLICY_MEETING_RESULT_MAX,
         include_restricted
       );
+    const identity = attendee === undefined ? undefined : reader.resolvePersonIdentity(sourceMeetings, attendee);
     const meetings: PolicyVerifiedMeeting[] = [];
     if (needle.length > 0) {
       for (const meeting of sourceMeetings) {
         if (
           (contentType && meeting.frontmatter.type !== contentType) ||
           !meetingMatchesSince(meeting, since) ||
-          !meetingMatchesPerson(meeting, attendee) ||
-          (!meeting.frontmatter.title.toLowerCase().includes(needle) &&
-            !meeting.body.toLowerCase().includes(needle))
+          (attendee !== undefined && (!identity || !reader.meetingMentionsPerson(meeting, identity))) ||
+          !reader.lexicalMatch(meeting.frontmatter.title, meeting.body, query)
         ) {
           continue;
         }
@@ -6093,10 +6161,13 @@ registerDocsAppTool(
         }
       }
 
-      let structuredOut: Record<string, unknown> = structured;
+      let structuredOut: Record<string, unknown> = {
+        ...structured,
+        evidence: reader.buildSourceEvidence({ path: resolved, content: rawContent, body: rawParsed.body, speakerMap: rawParsed.frontmatter.speaker_map }),
+      };
       if (include_restricted && meetingSensitivity(sensitivityParsed) === "restricted") {
         structuredOut = {
-          ...structured,
+          ...structuredOut,
           sensitivity: "restricted",
           sensitivity_override: { applied: true, logged: "durable-jsonl" },
         };
@@ -8687,7 +8758,7 @@ if (COPILOT_SUPPORTED) {
       }
 
       try {
-        const observerSession = await spawnCopilotCli(goal, surface);
+        const { session: observerSession, exitedSuccessfully } = await spawnCopilotCli(goal, surface);
         const status = await waitForCopilotStatus(
           (candidate) => candidate.active || !processIsAlive(observerSession.pid),
           5000
@@ -8726,6 +8797,18 @@ if (COPILOT_SUPPORTED) {
               text:
                 "Copilot start is still arming and has not published active status yet. " +
                 "The independent CLI process is running; use copilot_status to follow startup.",
+            }],
+            structuredContent: snapshot,
+          };
+        }
+
+        if (status.available && status.setup_needed && exitedSuccessfully()) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                "Coach needs a local AI model before it can start. " +
+                "Run `minutes coach setup`, then start Coach again. No recording was opened.",
             }],
             structuredContent: snapshot,
           };

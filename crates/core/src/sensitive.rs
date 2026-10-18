@@ -330,6 +330,8 @@ fn write_artifact(
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
         .map(|text| Decision {
+            id: None,
+            effective_date: None,
             text,
             topic: None,
             authority: None,

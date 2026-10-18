@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "cli_install_detection.rs"]
+mod cli_install_detection;
+
+use self::cli_install_detection::{
+    executable_candidates, find_homebrew, homebrew_owns_binary, known_install_method,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
@@ -224,16 +230,7 @@ fn resolve_minutes_in_user_shell() -> Vec<PathBuf> {
         .args(args)
         .output()
         .ok()
-        .map(|o| {
-            let mut seen = std::collections::HashSet::new();
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .filter(|p| seen.insert(p.clone()))
-                .collect()
-        })
+        .map(|output| executable_candidates(&output))
         .unwrap_or_default();
 
     if !lines.is_empty() {
@@ -288,14 +285,9 @@ fn detect_install_method(path_binary: Option<&PathBuf>) -> String {
         }
     }
 
-    let s = p.to_string_lossy();
-    let method = if s.contains(".cargo/bin") {
-        "cargo".to_string()
-    } else if s.contains("/Minutes.app/") || s.contains("/Minutes Dev.app/") {
-        "bundled".to_string()
-    } else {
-        probe_brew_with_timeout(p)
-    };
+    let method = known_install_method(p)
+        .map(str::to_owned)
+        .unwrap_or_else(|| probe_brew_with_timeout(p));
 
     if let Ok(mut guard) = DETECT_CACHE.lock() {
         *guard = Some(CachedDetect {
@@ -307,17 +299,20 @@ fn detect_install_method(path_binary: Option<&PathBuf>) -> String {
     method
 }
 
-fn probe_brew_with_timeout(_path: &Path) -> String {
+fn probe_brew_with_timeout(path: &Path) -> String {
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
+    let path = path.to_path_buf();
     std::thread::spawn(move || {
-        let r = std::process::Command::new("brew")
-            .args(["list", "silverstein/tap/minutes"])
-            .output();
-        let _ = tx.send(r);
+        // LaunchServices omits Homebrew from PATH. Probe the standard install
+        // locations as well as PATH, then verify the selected binary belongs
+        // to the formula (an installed cask or unrelated CLI cannot qualify).
+        let owns_binary = find_homebrew(which::which("brew").ok())
+            .is_some_and(|brew| homebrew_owns_binary(&brew, &path));
+        let _ = tx.send(owns_binary);
     });
     match rx.recv_timeout(BREW_PROBE_TIMEOUT) {
-        Ok(Ok(out)) if out.status.success() => "brew".into(),
+        Ok(true) => "brew".into(),
         Ok(_) => "other".into(),
         Err(_) => "unknown".into(),
     }

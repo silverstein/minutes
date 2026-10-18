@@ -5,12 +5,13 @@ use crate::markdown::ContentType;
 use crate::pipeline::BackgroundPipelineContext;
 use crate::pipeline::{self, SidecarMetadata};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::fs::{self, File};
+use std::collections::HashSet;
+use std::fs::{self, File, ReadDir};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct WatchCandidate {
@@ -241,6 +242,7 @@ fn wait_for_settle(path: &Path, delay_ms: u64) -> bool {
     true
 }
 
+#[cfg(any(not(windows), test))]
 fn atomic_noreplace_unavailable(
     source: &Path,
     destination: &Path,
@@ -973,11 +975,7 @@ pub fn compressed_audio_ffmpeg_guidance() -> &'static str {
 }
 
 fn content_type_label(content_type: ContentType) -> &'static str {
-    match content_type {
-        ContentType::Meeting => "meeting",
-        ContentType::Memo => "memo",
-        ContentType::Dictation => "dictation",
-    }
+    content_type.as_str()
 }
 
 #[cfg(feature = "parakeet")]
@@ -1127,32 +1125,177 @@ fn process_parakeet_memo_batch(
     )))
 }
 
+const WATCH_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+const WATCH_SCAN_CONTINUATION: Duration = Duration::from_secs(5);
+const WATCH_EVENT_QUEUE_CAPACITY: usize = 256;
+const WATCH_EVENTS_PER_TURN: usize = 16;
+const WATCH_PATHS_PER_TURN: usize = 32;
+const WATCH_SCAN_ENTRIES_PER_TURN: usize = 128;
+const WATCH_SCAN_PATHS_PER_TURN: usize = 16;
+
+struct FolderScan {
+    path: PathBuf,
+    entries: Option<ReadDir>,
+    finished: bool,
+}
+
+/// Retain directory cursors so a large folder is scanned in bounded pages.
+/// Roots get equal turns, including roots that are temporarily unavailable.
+/// A new full pass retries unstable files and finds arrivals missed by notify.
+struct FolderReconciler {
+    scans: Vec<FolderScan>,
+    next_root: usize,
+    next_scan: Instant,
+}
+
+impl FolderReconciler {
+    fn new(dirs: &[PathBuf], now: Instant) -> Self {
+        Self {
+            scans: dirs
+                .iter()
+                .map(|path| FolderScan {
+                    path: path.clone(),
+                    entries: None,
+                    finished: false,
+                })
+                .collect(),
+            next_root: 0,
+            next_scan: now,
+        }
+    }
+
+    fn scan_due(&mut self, now: Instant, config: &Config) -> Vec<PathBuf> {
+        if now < self.next_scan {
+            return Vec::new();
+        }
+        if self.scans.is_empty() {
+            self.next_scan = now + WATCH_RESCAN_INTERVAL;
+            return Vec::new();
+        }
+        if self.scans.iter().all(|scan| scan.finished) {
+            for scan in &mut self.scans {
+                scan.finished = false;
+            }
+        }
+        let mut paths = Vec::new();
+        for _ in 0..WATCH_SCAN_ENTRIES_PER_TURN {
+            let index = self.next_root;
+            self.next_root = (self.next_root + 1) % self.scans.len();
+            let scan = &mut self.scans[index];
+            if scan.finished {
+                continue;
+            }
+            if scan.entries.is_none() {
+                match fs::read_dir(&scan.path) {
+                    Ok(entries) => scan.entries = Some(entries),
+                    Err(error) => {
+                        tracing::warn!(dir = %scan.path.display(), %error, "watch folder reconciliation could not read directory; will retry");
+                        scan.finished = true;
+                        continue;
+                    }
+                }
+            }
+            let entry = scan.entries.as_mut().and_then(Iterator::next);
+            match entry {
+                Some(Ok(entry)) => {
+                    let path = entry.path();
+                    // Never recurse into processed/failed or follow symlinks.
+                    // build_candidate rechecks all admission conditions later.
+                    if entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && has_valid_extension(&path, config)
+                        && !is_icloud_stub(&path)
+                    {
+                        paths.push(path);
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(dir = %scan.path.display(), %error, "watch reconciliation could not read entry")
+                }
+                None => {
+                    scan.entries = None;
+                    scan.finished = true;
+                }
+            }
+            if paths.len() >= WATCH_SCAN_PATHS_PER_TURN {
+                break;
+            }
+        }
+        self.next_scan = now
+            + if self.scans.iter().all(|scan| scan.finished) {
+                WATCH_RESCAN_INTERVAL
+            } else {
+                WATCH_SCAN_CONTINUATION
+            };
+        paths
+    }
+}
+
+/// Combine one bounded event burst with the scheduled reconciliation page.
+/// Reconciliation is checked even under continuous events. Dedup before settle,
+/// routing or processing so create/modify/rename/rescan overlap admits one file.
+fn collect_watch_candidates(
+    first_event: Option<Event>,
+    rx: &mpsc::Receiver<Event>,
+    reconciler: &mut FolderReconciler,
+    config: &Config,
+    now: Instant,
+) -> Vec<WatchCandidate> {
+    let mut paths = reconciler.scan_due(now, config);
+    let mut seen: HashSet<PathBuf> = paths.iter().cloned().collect();
+    for event in first_event
+        .into_iter()
+        .chain(rx.try_iter().take(WATCH_EVENTS_PER_TURN - 1))
+    {
+        if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+            continue;
+        }
+        for path in event.paths.into_iter().take(WATCH_PATHS_PER_TURN) {
+            if paths.len() >= WATCH_PATHS_PER_TURN {
+                break;
+            }
+            // A rename out of a watched root is not a new approved arrival.
+            // All subscribed roots were canonicalized before native watching.
+            if reconciler
+                .scans
+                .iter()
+                .any(|scan| path.parent() == Some(scan.path.as_path()))
+                && seen.insert(path.clone())
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter_map(|path| handle_file_event(&path, config.watch.settle_delay_ms, config))
+        .collect()
+}
+
 /// Run the folder watcher. Blocks until interrupted (Ctrl-C).
 pub fn run(watch_dir: Option<&Path>, config: &Config) -> Result<(), WatchError> {
-    let dirs: Vec<PathBuf> = if let Some(dir) = watch_dir {
+    let mut dirs: Vec<PathBuf> = if let Some(dir) = watch_dir {
         vec![dir.to_path_buf()]
     } else {
         config.watch.paths.clone()
     };
 
-    // Validate directories
-    for dir in &dirs {
+    for dir in &mut dirs {
         if !dir.exists() {
-            fs::create_dir_all(dir)?;
+            fs::create_dir_all(&*dir)?;
             tracing::info!(dir = %dir.display(), "created watch directory");
         }
-        // Create processed/ and failed/ subdirs
         fs::create_dir_all(dir.join("processed"))?;
         fs::create_dir_all(dir.join("failed"))?;
+        // Native event paths are absolute. Normalize approved roots once and
+        // avoid duplicate subscriptions/scans through lexical path aliases.
+        *dir = dir.canonicalize()?;
     }
+    let mut unique_dirs = HashSet::new();
+    dirs.retain(|dir| unique_dirs.insert(dir.clone()));
 
-    // Acquire lock
     acquire_lock()?;
     tracing::info!("watcher lock acquired");
-
-    // Set up cleanup on exit
     let _guard = LockGuard;
-
     eprintln!(
         "Watching {} for audio files... (Ctrl-C to stop)",
         dirs.iter()
@@ -1161,93 +1304,48 @@ pub fn run(watch_dir: Option<&Path>, config: &Config) -> Result<(), WatchError> 
             .join(", ")
     );
 
-    // Process any existing files first
-    for dir in &dirs {
-        process_existing_files(dir, config);
-    }
-
-    // Set up file watcher
-    let (tx, rx) = mpsc::channel();
+    // Subscribe BEFORE the initial reconciliation, closing the startup gap.
+    // notify's poll_interval does not make the native RecommendedWatcher poll.
+    // Drop overflow without blocking its callback; reconciliation finds it.
+    let (tx, rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
     let mut watcher = RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                tx.send(event).ok();
+        move |res: Result<Event, notify::Error>| match res {
+            Ok(mut event) => {
+                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
+                    event.paths.truncate(WATCH_PATHS_PER_TURN);
+                    event.paths.shrink_to_fit();
+                    let _ = tx.try_send(event);
+                }
             }
+            Err(error) => tracing::warn!(%error, "native watch notification failed; folder reconciliation remains active"),
         },
-        notify::Config::default().with_poll_interval(Duration::from_secs(2)),
-    )
-    .map_err(|e| WatchError::NotifyError(e.to_string()))?;
-
+        notify::Config::default(),
+    ).map_err(|e| WatchError::NotifyError(e.to_string()))?;
     for dir in &dirs {
         watcher
             .watch(dir, RecursiveMode::NonRecursive)
             .map_err(|e| WatchError::NotifyError(e.to_string()))?;
     }
 
-    // Event loop
-    let settle_delay = config.watch.settle_delay_ms;
+    let mut reconciler = FolderReconciler::new(&dirs, Instant::now());
     loop {
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(event) => {
-                let mut candidates = Vec::new();
-                if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                    for path in event.paths {
-                        if let Some(candidate) = handle_file_event(&path, settle_delay, config) {
-                            candidates.push(candidate);
-                        }
-                    }
-                }
-                while let Ok(event) = rx.try_recv() {
-                    if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                        for path in event.paths {
-                            if let Some(candidate) = handle_file_event(&path, settle_delay, config)
-                            {
-                                candidates.push(candidate);
-                            }
-                        }
-                    }
-                }
-                process_candidates(candidates, config);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Normal timeout — continue watching
-            }
+        let wait = reconciler
+            .next_scan
+            .saturating_duration_since(Instant::now())
+            .min(WATCH_SCAN_CONTINUATION);
+        let first_event = match rx.recv_timeout(wait) {
+            Ok(event) => Some(event),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 tracing::info!("watcher channel disconnected, exiting");
                 break;
             }
-        }
+        };
+        let candidates =
+            collect_watch_candidates(first_event, &rx, &mut reconciler, config, Instant::now());
+        process_candidates(candidates, config);
     }
-
     Ok(())
-}
-
-/// Process files that already exist in the watch directory.
-fn process_existing_files(dir: &Path, config: &Config) {
-    let entries: Vec<_> = match fs::read_dir(dir) {
-        Ok(entries) => entries.filter_map(|e| e.ok()).collect(),
-        Err(_) => return,
-    };
-
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let path = entry.path();
-        // Reject symlinks — prevents traversal attacks
-        if path
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-        {
-            tracing::warn!(path = %path.display(), "skipping symlink in existing files");
-            continue;
-        }
-        if path.is_file() && has_valid_extension(&path, config) {
-            tracing::info!(path = %path.display(), "processing existing file");
-            if let Some(candidate) = build_candidate(&path, config.watch.settle_delay_ms, config) {
-                candidates.push(candidate);
-            }
-        }
-    }
-    process_candidates(candidates, config);
 }
 
 fn build_candidate(path: &Path, settle_delay: u64, config: &Config) -> Option<WatchCandidate> {
@@ -1357,6 +1455,260 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    fn reconciliation_config() -> Config {
+        let mut config = Config::default();
+        config.watch.settle_delay_ms = 0;
+        config.watch.dictation_threshold_secs = 0;
+        config
+    }
+
+    fn write_reconciliation_wav(path: &Path) {
+        let mut writer = hound::WavWriter::create(
+            path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..160 {
+            writer.write_sample(1_000_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn empty_watch_roots_keep_a_future_deadline_instead_of_busy_polling() {
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[], start);
+        assert!(reconciler
+            .scan_due(start, &reconciliation_config())
+            .is_empty());
+        assert_eq!(reconciler.next_scan, start + WATCH_RESCAN_INTERVAL);
+    }
+
+    #[test]
+    fn reconciliation_finds_an_arrival_without_any_native_event() {
+        let dir = TempDir::new().unwrap();
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (_tx, rx) = mpsc::channel();
+        assert!(collect_watch_candidates(None, &rx, &mut reconciler, &config, start).is_empty());
+        let audio = dir.path().join("synced.wav");
+        write_reconciliation_wav(&audio);
+        let due = start + WATCH_RESCAN_INTERVAL;
+        assert!(collect_watch_candidates(
+            None,
+            &rx,
+            &mut reconciler,
+            &config,
+            due - Duration::from_millis(1)
+        )
+        .is_empty());
+        let candidates = collect_watch_candidates(None, &rx, &mut reconciler, &config, due);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, audio);
+    }
+
+    #[test]
+    fn reconciliation_retries_a_syncing_file_without_a_second_event() {
+        let dir = TempDir::new().unwrap();
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (_tx, rx) = mpsc::channel();
+        let audio = dir.path().join("downloading.wav");
+        fs::write(&audio, []).unwrap();
+        assert!(collect_watch_candidates(None, &rx, &mut reconciler, &config, start).is_empty());
+        write_reconciliation_wav(&audio);
+        let candidates = collect_watch_candidates(
+            None,
+            &rx,
+            &mut reconciler,
+            &config,
+            start + WATCH_RESCAN_INTERVAL,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, audio);
+    }
+
+    #[test]
+    fn event_and_reconciliation_overlap_admits_one_file_then_archive_prevents_retry() {
+        use notify::event::{CreateKind, ModifyKind, RenameMode};
+        let dir = TempDir::new().unwrap();
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (tx, rx) = mpsc::channel();
+        let audio = dir.path().join("arrival.wav");
+        write_reconciliation_wav(&audio);
+        tx.send(
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To))).add_path(audio.clone()),
+        )
+        .unwrap();
+        let first = Event::new(EventKind::Create(CreateKind::File)).add_path(audio.clone());
+        let candidates =
+            collect_watch_candidates(Some(first), &rx, &mut reconciler, &config, start);
+        assert_eq!(candidates.len(), 1);
+        let archived = archive_successful_candidate(&candidates[0].path).unwrap();
+        assert!(archived.exists());
+        assert!(!audio.exists());
+        // Stale queued events and repeated scans cannot re-admit archived audio.
+        for round in 1..=3 {
+            let stale = Event::new(EventKind::Create(CreateKind::File)).add_path(audio.clone());
+            assert!(collect_watch_candidates(
+                Some(stale),
+                &rx,
+                &mut reconciler,
+                &config,
+                start + WATCH_RESCAN_INTERVAL * round
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn bounded_scan_pages_cover_large_backlogs_and_give_quiet_roots_a_turn() {
+        let busy = TempDir::new().unwrap();
+        let quiet = TempDir::new().unwrap();
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(
+            &[busy.path().to_path_buf(), quiet.path().to_path_buf()],
+            start,
+        );
+        for index in 0..(WATCH_SCAN_ENTRIES_PER_TURN + 17) {
+            write_reconciliation_wav(&busy.path().join(format!("{index}.wav")));
+        }
+        let quiet_audio = quiet.path().join("quiet.wav");
+        write_reconciliation_wav(&quiet_audio);
+        let (_tx, rx) = mpsc::channel();
+        let mut admitted = HashSet::new();
+        for round in 0..40 {
+            let candidates = collect_watch_candidates(
+                None,
+                &rx,
+                &mut reconciler,
+                &config,
+                start + WATCH_RESCAN_INTERVAL * round,
+            );
+            assert!(candidates.len() <= WATCH_SCAN_PATHS_PER_TURN);
+            if round == 0 {
+                assert!(candidates
+                    .iter()
+                    .any(|candidate| candidate.path == quiet_audio));
+            }
+            for candidate in candidates {
+                assert!(
+                    admitted.insert(candidate.path.clone()),
+                    "a completed source must not be admitted twice"
+                );
+                archive_successful_candidate(&candidate.path).unwrap();
+            }
+        }
+        assert_eq!(admitted.len(), WATCH_SCAN_ENTRIES_PER_TURN + 18);
+    }
+
+    #[test]
+    fn reconciliation_keeps_running_during_continuous_native_events() {
+        use notify::event::CreateKind;
+        let dir = TempDir::new().unwrap();
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (_tx, rx) = mpsc::channel();
+        assert!(collect_watch_candidates(None, &rx, &mut reconciler, &config, start).is_empty());
+        let audio = dir.path().join("unreported.wav");
+        write_reconciliation_wav(&audio);
+        let noise = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(dir.path().join("ignored.txt"));
+        let candidates = collect_watch_candidates(
+            Some(noise),
+            &rx,
+            &mut reconciler,
+            &config,
+            start + WATCH_RESCAN_INTERVAL,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, audio);
+    }
+
+    #[test]
+    fn reconciliation_retries_an_unavailable_root_and_does_not_recurse() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("cloud");
+        let config = reconciliation_config();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(std::slice::from_ref(&root), start);
+        let (_tx, rx) = mpsc::channel();
+        assert!(collect_watch_candidates(None, &rx, &mut reconciler, &config, start).is_empty());
+        fs::create_dir_all(root.join("processed")).unwrap();
+        fs::create_dir_all(root.join("failed")).unwrap();
+        write_reconciliation_wav(&root.join("processed/old.wav"));
+        write_reconciliation_wav(&root.join("failed/bad.wav"));
+        fs::write(root.join(".waiting.wav.icloud"), []).unwrap();
+        let audio = root.join("ready.wav");
+        write_reconciliation_wav(&audio);
+        let candidates = collect_watch_candidates(
+            None,
+            &rx,
+            &mut reconciler,
+            &config,
+            start + WATCH_RESCAN_INTERVAL,
+        );
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, audio);
+    }
+
+    #[test]
+    fn rename_events_cannot_admit_files_outside_the_watched_roots() {
+        use notify::event::{ModifyKind, RenameMode};
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let audio = outside.path().join("removed-from-inbox.wav");
+        write_reconciliation_wav(&audio);
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (_tx, rx) = mpsc::channel();
+        let renamed_out = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(dir.path().join("old.wav"))
+            .add_path(audio.clone());
+        assert!(collect_watch_candidates(
+            Some(renamed_out),
+            &rx,
+            &mut reconciler,
+            &reconciliation_config(),
+            start
+        )
+        .is_empty());
+        assert!(audio.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconciliation_rejects_symlink_audio() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let audio = outside.path().join("private.wav");
+        write_reconciliation_wav(&audio);
+        std::os::unix::fs::symlink(&audio, dir.path().join("alias.wav")).unwrap();
+        let start = Instant::now();
+        let mut reconciler = FolderReconciler::new(&[dir.path().to_path_buf()], start);
+        let (_tx, rx) = mpsc::channel();
+        assert!(collect_watch_candidates(
+            None,
+            &rx,
+            &mut reconciler,
+            &reconciliation_config(),
+            start
+        )
+        .is_empty());
+        assert!(audio.exists());
     }
 
     #[test]

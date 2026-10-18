@@ -341,6 +341,23 @@
     "userInvocable": true
   },
   {
+    "name": "minutes-x1-send-meeting",
+    "displayName": "Minutes to X1 Meeting Send",
+    "category": "Lifecycle",
+    "shortDescription": "Send a meeting's outcomes to your X1 review queue after you approve it in X1.",
+    "description": "Send one of the user's own Minutes meetings to their X1 household for review. Use when the user wants a meeting's summary, decisions, action items, and open questions to reach X1 so they can confirm what belongs in their household record. X1 asks the user to approve the send, and nothing reaches the household record until they confirm each item. Never use it for a restricted meeting, a transcript, or someone else's meeting.",
+    "bestFor": "Get a meeting's decisions and follow-ups into your X1 household review queue without pasting a transcript or letting the agent write your record.",
+    "example": "/minutes-x1-send-meeting estate plan review with our attorney",
+    "triggers": [
+      "send this meeting to X1",
+      "add my meeting with my CPA to X1",
+      "put these meeting notes in X1",
+      "share my meeting with my X1 household"
+    ],
+    "phase": null,
+    "userInvocable": true
+  },
+  {
     "name": "minutes-weekly",
     "displayName": "Minutes Weekly",
     "category": "Lifecycle",

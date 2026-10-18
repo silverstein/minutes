@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-09-05
+> Last generated: 2026-10-17
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 68
+- Visible actionable errors: 71
 - Hidden low-signal wrappers: 17
 
 # CaptureError
@@ -112,6 +112,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-captureerror-emptyrecording
+
+<a id="error-captureerror-storageretiring"></a>
+
+## `CaptureError::StorageRetiring`
+
+Exact message:
+
+> recording storage is still finishing after the stop deadline; partial audio remains at its original path
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-captureerror-storageretiring
 
 # TranscribeError
 
@@ -653,6 +665,18 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-dictationerror-livetranscriptactive
 
+<a id="error-dictationerror-voiceactive"></a>
+
+## `DictationError::VoiceActive`
+
+Exact message:
+
+> a voice session is open — close it before dictating
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-dictationerror-voiceactive
+
 <a id="error-dictationerror-alreadyactive"></a>
 
 ## `DictationError::AlreadyActive`
@@ -738,6 +762,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-dictationactive
+
+<a id="error-livetranscripterror-voiceactive"></a>
+
+## `LiveTranscriptError::VoiceActive`
+
+Exact message:
+
+> a voice session is open — close it before starting live transcript
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-voiceactive
 
 <a id="error-livetranscripterror-alreadyactive"></a>
 

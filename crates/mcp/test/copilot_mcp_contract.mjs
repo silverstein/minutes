@@ -24,6 +24,7 @@ const transport = new StdioClientTransport({
     HOME: tempHome,
     USERPROFILE: tempHome,
     RUST_LOG: "error",
+    MINUTES_MCP_AUTO_SETUP: "0",
   },
   stderr: "pipe",
 });
@@ -143,6 +144,10 @@ try {
     console.log("PASS: engine-active control path (local fast model present)");
   } else {
     // Guided-setup degradation: no local model in this environment.
+    assert(
+      started.isError !== true,
+      "a setup-needed start_copilot must return guided setup without an error"
+    );
     assert(
       started.structuredContent?.active === false,
       "a model-less start_copilot must report active=false, never a phantom-active engine"

@@ -15,6 +15,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Standard for CI: incremental data is never reused between runs. It did
+  # not measurably shrink the cached target/ directories (#1109).
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Detect which areas of the repo changed so heavy Rust/Tauri jobs can
@@ -85,6 +88,13 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - 'tooling/test-coverage.json'
+              - 'scripts/test_coverage.py'
+              # The Windows desktop installer job installs the Tauri CLI with this.
+              - '.github/scripts/install-tauri-cli.sh'
+              # This file defines the Rust jobs and their caches, so editing it
+              # has to run them, and the main push that lands it seeds the caches.
+              - '.github/workflows/ci.yml'
               # Workspace lint policy (disallowed-methods). `cargo clippy --all
               # -- -D warnings` runs only inside the filtered test job, so
               # without this a PR editing lint policy skipped every Rust job and
@@ -141,14 +151,19 @@ jobs:
         shell: bash
         run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
 
-      - name: Cache cargo
-        uses: actions/cache@v6
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-noincr-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test macOS call-detection device and attribution boundary
+        if: runner.os == 'macOS'
+        run: python3 scripts/test_mic_check.py
 
       - name: Build core (no whisper)
         run: cargo build -p minutes-core --no-default-features
@@ -171,6 +186,19 @@ jobs:
         # breakage here only surfaces when Prompter next runs cargo build.
         run: cargo build -p minutes-core --no-default-features --features streaming
 
+      - name: Build PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo build -p minutes-core --no-default-features --features pocketstation-capture
+
+      - name: Test PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: python scripts/test_coverage.py run pocketstation
+        timeout-minutes: 15
+
+      - name: Clippy PocketStation capture (Windows and Linux)
+        if: runner.os == 'Windows' || runner.os == 'Linux'
+        run: cargo clippy -p minutes-core --no-default-features --features pocketstation-capture -- -D warnings
+
       - name: Build core with parakeet (cross-platform)
         # Guards against Linux-parakeet breakage that today only surfaces
         # at tag push via release-cli.yml. The parakeet feature compiles
@@ -179,6 +207,28 @@ jobs:
         # compile error in parakeet_sidecar or related code stays invisible
         # on non-macOS until release.
         run: cargo build -p minutes-core --no-default-features --features parakeet
+
+      - name: Test whisper-guard with the whisper feature (abort callback shim)
+        # The only tests that exercise whisper_guard::params::set_abort_callback.
+        # Every other test job runs --no-default-features, which is how the
+        # whisper-rs set_abort_callback_safe regression (every live sidecar
+        # pass aborted, v0.25.4 through v0.26.1) shipped through three
+        # releases unseen. whisper-rs is already compiled by the parakeet
+        # build above, so this adds little time.
+        run: cargo test -p whisper-guard --features whisper --lib -- --test-threads=1
+
+      - name: Test dictation and live speech (whisper + streaming)
+        # live_transcript.rs and streaming_whisper.rs are gated on
+        # all(streaming, whisper), so the --no-default-features test run
+        # below compiles none of their tests: the whisper-rs abort callback
+        # regression (#951) and the always-healthy status file (#952) both
+        # lived in exactly this code and shipped through three releases with
+        # green CI. No model is required; tests that need one are #[ignore].
+        # whisper-rs is already compiled by the parakeet build above.
+        # Derive the filters from the enabled feature-gated modules; a new
+        # module cannot compile successfully while silently running zero tests.
+        run: python scripts/test_coverage.py run speech
+        timeout-minutes: 10
 
       - name: Ensure cmake for sherpa-rs (Linux)
         if: runner.os == 'Linux'
@@ -200,6 +250,12 @@ jobs:
         run: |
           cargo check -p minutes-core --no-default-features --features diarize,engine-sherpa
           cargo check -p minutes-core --no-default-features --features vad-ort,engine-sherpa
+
+      - name: Test optional engine and streaming-diarization contracts
+        # Loader/IPC and synthetic VAD tests only; no model or audio device.
+        # These dependencies are already compiled by the feature builds above.
+        run: python scripts/test_coverage.py run optional-engines
+        timeout-minutes: 10
 
       - name: Build and test the isolated sherpa plugin
         # Every platform, not just macOS: the plugin declares per-target sherpa
@@ -265,7 +321,7 @@ jobs:
         # streaming only" and then never executed. That covered the dual-source
         # chunking invariants in streaming.rs and the mic-mute tests. Run the
         # same suite once more with the feature on.
-        run: cargo test -p minutes-core --no-default-features --features streaming --lib -- --test-threads=1 --nocapture
+        run: python scripts/test_coverage.py run streaming
         timeout-minutes: 15
 
       - name: Copilot attach, routing, and window-contract tests
@@ -303,7 +359,15 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test -p minutes-core --no-default-features --test integration -- --test-threads=1
         timeout-minutes: 10
-        continue-on-error: true
+
+      - name: Upload executed feature-test inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: feature-test-inventory-${{ runner.os }}
+          path: target/test-coverage/*.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Clippy (macOS only — full workspace)
         if: runner.os == 'macOS'
@@ -318,6 +382,18 @@ jobs:
       - name: Check desktop capture-relay integration (macOS)
         if: runner.os == 'macOS'
         run: cargo check -p minutes-app --tests
+
+      - name: Save cargo cache
+        # Only main saves. PRs restore main's entry and never write their own,
+        # which used to fill the 10 GB cache and evict main's entries within hours.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   install:
     name: Install CLI (${{ matrix.os }})
@@ -347,8 +423,9 @@ jobs:
         shell: bash
         run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
 
-      - name: Cache cargo
-        uses: actions/cache@v6
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -365,6 +442,18 @@ jobs:
       - name: Verify minutes --version
         run: minutes --version
 
+      - name: Save cargo cache
+        # Only main saves. PRs restore main's entry and never write their own,
+        # which used to fill the 10 GB cache and evict main's entries within hours.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   linux_full_build:
     # Catches whisper+Linux regressions at PR time instead of waiting for the
     # release-cli.yml workflow at tag push. Builds the CLI with default features
@@ -375,6 +464,10 @@ jobs:
     # whisper.cpp / ort / pyannote-rs are vanishingly rare and the time savings
     # (~5 min vs ~15 min cold) compound across every PR. release-cli.yml still
     # does the release build at tag time as the final gate.
+    #
+    # Deliberately uncached. Its 1.2 GB entry pushed main's caches past the
+    # repository's 10 GB limit, and a cold debug build still finishes long
+    # before the Windows test job, which sets the wall-clock time.
     name: Build CLI (ubuntu-latest, default features)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -400,23 +493,6 @@ jobs:
         run: |
           .github/scripts/apt-install.sh \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      # Per-image cache scope (ImageOS + ImageVersion); see the test job comment.
-      # These are runner-injected vars absent from the ${{ env }} context, so we
-      # expose the value as a step output for the cache key below.
-      - name: Resolve runner image for cache scope
-        id: runner-image
-        shell: bash
-        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
-
-      - name: Cache cargo
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cli-fullbuild-debug-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build CLI debug (whisper + diarize)
         run: cargo build -p minutes-cli
@@ -446,14 +522,15 @@ jobs:
         shell: bash
         run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
 
-      - name: Cache cargo
-        uses: actions/cache@v6
+      - name: Restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-desktop-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-desktop-noincr-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Clean stale Windows native build cache
         shell: bash
@@ -464,14 +541,16 @@ jobs:
             target/debug/build/knf-rs-sys-* \
             target/release/build/knf-rs-sys-*
 
-      - name: Cache ONNX Runtime binaries
-        uses: actions/cache@v6
+      - name: Restore ONNX Runtime binaries cache
+        id: ort-cache
+        uses: actions/cache/restore@v6
         with:
           path: ~/AppData/Local/dfbin
           key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-ort-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "2.10.1" --locked
+        shell: bash
+        run: .github/scripts/install-tauri-cli.sh 2.10.1
 
       - name: Configure portable Windows CPU baseline
         shell: bash
@@ -542,6 +621,27 @@ jobs:
           }
           Write-Host 'every runtime import is staged for packaging'
 
+      - name: Save cargo cache
+        # Only main saves. PRs restore main's entry and never write their own,
+        # which used to fill the 10 GB cache and evict main's entries within hours.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      - name: Save ONNX Runtime binaries cache
+        # Only main saves. PRs restore main's entry and never write their own,
+        # which used to fill the 10 GB cache and evict main's entries within hours.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/AppData/Local/dfbin
+          key: ${{ steps.ort-cache.outputs.cache-primary-key }}
+
   mcp:
     name: MCP Server
     runs-on: ubuntu-latest
@@ -553,8 +653,36 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install MCP dependencies
-        run: node scripts/install_mcp_dependencies.mjs
+      - name: Install Rust for process-level MCP contracts
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install audio headers for the model-free CLI
+        timeout-minutes: 20
+        run: .github/scripts/apt-install.sh libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: Cache MCP contract CLI build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: mcp-process-contracts
+
+      - name: Build actual CLI for process-level MCP contracts
+        run: cargo build -p minutes-cli --no-default-features
+        timeout-minutes: 15
+
+      - name: Install and build SDK, then install MCP dependencies
+        # The SDK suite also runs when MCP deliberately pins a different
+        # published SDK version, so install its own dependencies explicitly.
+        run: |
+          npm --prefix crates/sdk ci
+          npm --prefix crates/sdk run build
+          node scripts/install_mcp_dependencies.mjs --sdk-ready
+
+      - name: Test memory evaluation metrics and harness
+        run: python3 -m unittest discover -s tests/eval/v02 -p 'test_*.py' -v
+
+      - name: SDK full unit suite
+        run: node scripts/run_corpus_test_harness.mjs npm --prefix crates/sdk test
+        timeout-minutes: 10
 
       - name: TypeScript check
         working-directory: crates/mcp
@@ -580,6 +708,28 @@ jobs:
         working-directory: crates/mcp
         run: npm run build
 
+      - name: MCP process, transport and first-recall integration contracts
+        working-directory: crates/mcp
+        env:
+          MINUTES_MCP_AUTO_SETUP: '0'
+        run: node ../../scripts/run_corpus_test_harness.mjs npm run test:integration
+        timeout-minutes: 10
+
+      - name: Evaluate memory contracts through actual MCP stdio
+        # Public deterministic fixtures are a conformance gate, not a
+        # production-quality or state-of-the-art benchmark claim.
+        run: python3 tests/eval/v02/mcp_eval.py --cli target/debug/minutes --sizes 100 --repeats 1 --output tests/eval/results/mcp-v02.json
+        timeout-minutes: 10
+
+      - name: Upload memory conformance report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: memory-conformance-mcp
+          path: tests/eval/results/mcp-v02.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Install mcpb CLI
         run: npm install -g @anthropic-ai/mcpb
 
@@ -591,6 +741,48 @@ jobs:
 
       - name: Handshake smoke test
         run: ./scripts/smoke_mcpb_handshake.sh minutes.mcpb
+
+  desktop_recall:
+    name: Desktop Recall Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install SDK toolchain for typed Recall boundary
+        run: npm --prefix crates/sdk ci
+
+      - name: Check generated Recall contract and typed decoder
+        run: |
+          node scripts/check_recall_chunk_contract.mjs
+          node crates/sdk/node_modules/typescript/bin/tsc -p tauri/tsconfig.recall.json
+
+      - name: Install pinned browser harness
+        run: |
+          node -e "require('node:fs').mkdirSync('target/recall-browser', { recursive: true }); require('node:fs').writeFileSync('target/recall-browser/package.json', JSON.stringify({ private: true }))"
+          npm --prefix target/recall-browser install --no-save --package-lock=false --no-audit --no-fund playwright@1.62.1
+          node target/recall-browser/node_modules/playwright/cli.js install --with-deps chromium --only-shell
+        timeout-minutes: 10
+
+      - name: Test Recall in Chromium with the production DOM and renderer
+        # Tauri IPC is stubbed; native permissions and capture remain a
+        # separate signed-desktop acceptance gate.
+        env:
+          MINUTES_DESKTOP_SCREENSHOT: target/desktop-contracts/recall.png
+        run: node scripts/desktop/recall-rendered.test.mjs
+        timeout-minutes: 5
+
+      - name: Upload rendered Recall evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-recall-rendered
+          path: target/desktop-contracts/recall.png
+          if-no-files-found: warn
+          retention-days: 14
 
   # The lockfile is generated from a clean tree with Node 22/npm 10 so its v3
   # package graph retains every platform-specific optional dependency.
@@ -687,6 +879,17 @@ jobs:
       - name: Test CI rust filter guard
         run: node --test scripts/check_ci_rust_filter.test.mjs
 
+      - name: Install workflow parser for feature-test coverage audit
+        run: python -m pip install --quiet pyyaml
+
+      - name: Verify executing feature-test coverage and negative controls
+        run: |
+          python scripts/test_test_coverage.py
+          python scripts/test_coverage.py check
+
+      - name: Test local and published SDK install policies
+        run: node --test scripts/install_mcp_dependencies.test.mjs
+
       - name: Test Windows CPU-baseline release guard
         run: node --test scripts/check_windows_cpu_baseline.test.mjs
 
@@ -740,8 +943,17 @@ jobs:
       - name: Verify Recall terminal input privacy contract
         run: node --test scripts/check_recall_terminal_input_contract.test.mjs
 
+      - name: Verify meeting draft editing and source preservation
+        run: node --test scripts/test_meeting_drafts.mjs
+
       - name: Test design-token checker
         run: node --test scripts/check_design_tokens.test.mjs
+
+      - name: Test shipped dictation controllers
+        run: |
+          node scripts/test_dictation_readiness.mjs
+          node scripts/test_dictation_overlay.mjs
+          node scripts/test_dictation_history.mjs
 
   skills_compiler:
     name: Skills Compiler

@@ -121,3 +121,6 @@ tooling/skills/goldens/commands/minutes-seo-wave.md
 .logs/
 ISSUE_*.md
 PLAN.ia-*.md
+
+# Output of scripts/check_voice_continuity.py lint. Regenerated on every run.
+continuity-clippy.jsonl

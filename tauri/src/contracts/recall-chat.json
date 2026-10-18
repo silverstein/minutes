@@ -1,0 +1,11 @@
+{
+  "description": "Recall wire contract. Explicit local-provider emissions are checked against Rust; Claude passthrough frames are validated at runtime.",
+  "variants": {
+    "text": { "text": "string" },
+    "thinking": {},
+    "stream_event": { "event": "object" },
+    "assistant": { "message": "object" },
+    "result": { "result?": "string", "subtype?": "string", "error?": "string" }
+  },
+  "ignoredProviderTypes": ["system", "user", "rate_limit_event", "keep_alive"]
+}

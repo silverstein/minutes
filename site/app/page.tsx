@@ -1,12 +1,14 @@
 import { CopyButton } from "@/components/copy-button";
 import { DemoPlayer } from "@/components/demo-player";
 import { MemoryCompoundsHero } from "@/components/memory-compounds-hero";
-import { APPLE_SILICON_DOWNLOAD_PATH } from "@/lib/downloads";
+import {
+  APPLE_SILICON_DOWNLOAD_PATH,
+  WINDOWS_INSTALLER_DOWNLOAD_URL,
+} from "@/lib/downloads";
 import {
   MINUTES_MCP_TOOL_COUNT,
   MINUTES_RELEASE_VERSION,
   MINUTES_TEST_COUNT,
-  WINDOWS_SETUP_EXE,
 } from "@/lib/release";
 import { organizationSchema, softwareApplicationSchema } from "@/lib/schema";
 import { NumberedSectionLabel as SectionLabel } from "@/components/section-label";
@@ -14,9 +16,9 @@ import { NumberedSectionLabel as SectionLabel } from "@/components/section-label
 const featureGrid = [
   {
     label: "For agents",
-    title: "Local audio context",
+    title: "Searchable local context",
     description:
-      `${MINUTES_MCP_TOOL_COUNT} MCP tools, live transcript reads, and structured markdown let Claude, Codex, Gemini CLI, and Cowork work from what was actually said.`,
+      `${MINUTES_MCP_TOOL_COUNT} MCP tools, live transcript reads, and policy-aware search across meetings and notes let Claude, Codex, Gemini CLI, and Cowork work from what was actually said.`,
   },
   {
     label: "For developers",
@@ -40,7 +42,7 @@ const featureGrid = [
     label: "For daily work",
     title: "Dictation that stays useful",
     description:
-      "Hold the hotkey, speak, release. Minutes inserts the text where you are working, keeps a clipboard copy, and saves it to your daily note.",
+      "Speak, correct yourself, and get usable text. Choose natural cleanup or literal transcription, then insert it where you are working or recover it from recent dictations.",
   },
   {
     label: "For recall",
@@ -68,7 +70,7 @@ const capabilityColumns = [
       ],
       [
         "Dictation mode",
-        "Clipboard + daily note flow for short-form thoughts and commands.",
+        "Natural or literal text, clipboard recovery, and a daily note for short thoughts and commands.",
       ],
     ],
   },
@@ -80,16 +82,16 @@ const capabilityColumns = [
         "Action items, decisions, and commitments become queryable markdown.",
       ],
       [
-        "Policy-bound people context",
-        "Build bounded policy-safe person profiles, topic research, relationship rankings, and commitments.",
+        "People memory",
+        "Who said what, what they committed to, and what you owe them, built only from meetings you let agents read.",
       ],
       [
         "Cross-meeting search",
-        "Search policy-authorized history or ask your assistant to pull the thread for you.",
+        "Search your own history, or ask your assistant to pull the thread across months of meetings.",
       ],
       [
         "Voice memo pipeline",
-        "iPhone recordings arrive on Mac and join the same policy-safe search corpus.",
+        "iPhone recordings land on your Mac and join the same searchable folder.",
       ],
     ],
   },
@@ -116,10 +118,12 @@ const capabilityColumns = [
   },
 ] as const;
 
-// Public product documentation reviewed September 5, 2026. See linked comparisons.
+// Homepage storage and agent-access rows spot-checked October 16, 2026.
+// Sources: granola.ai/security, docs.granola.ai/help-center/sharing/integrations/mcp,
+// otter.ai/pricing, anarlog.so/security and github.com/fastrepl/anarlog.
 const comparisons = [
   ["Product", "Hosted meeting notepad", "Hosted meeting assistant", "Local meeting notepad", "Local conversation memory"],
-  ["Agent access", "Hosted MCP", "Hosted integrations", "CLI + MCP", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
+  ["Agent access", "Hosted MCP", "Hosted MCP and integrations", "CLI + MCP", `Files + ${MINUTES_MCP_TOOL_COUNT} MCP tools`],
   ["Primary storage", "Hosted workspace", "Hosted workspace", "Local SQLite + files", "Local Markdown + YAML"],
   ["Local AI", "Cloud transcription", "Cloud transcription", "With local providers", "Local transcription; AI provider of your choice"],
 ] as const;
@@ -350,7 +354,7 @@ export default function Home() {
           The product, in motion
         </p>
         <h2 className="mx-auto max-w-[680px] font-serif text-[36px] leading-[1.02] tracking-[-0.04em] text-[var(--text)] sm:text-[48px]">
-          The interface is the evidence.
+          Watch it transcribe a meeting. Then read the file it wrote.
         </h2>
         <p className="mx-auto mt-5 max-w-[650px] text-[15px] leading-7 text-[var(--text-secondary)] sm:text-[16px]">
           Minutes captures locally, writes one inspectable Markdown file, and
@@ -367,14 +371,14 @@ export default function Home() {
         </div>
 
         <p className="mx-auto mt-4 max-w-[560px] text-[14px] leading-6 text-[var(--text-secondary)]">
-          Minutes keeps the raw transcript visible. The structure is the
-          interface: timestamps, speakers, action items, and decisions stay
-          readable even before an assistant touches them.
+          Minutes keeps the raw transcript visible. Timestamps, speakers,
+          action items, and decisions stay readable even before an assistant
+          touches them.
         </p>
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          keeps consistency reports in the meeting folder you selected and lets you try sample recall without downloading speech models. On Apple Silicon, automatic transcription can use Parakeet when its plugin and model are ready.{" "}
+          improves background live transcription and current-speech reads.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
@@ -409,7 +413,7 @@ export default function Home() {
             Mac (Apple Silicon)
           </a>
           <a
-            href={WINDOWS_SETUP_EXE}
+            href={WINDOWS_INSTALLER_DOWNLOAD_URL}
             data-download-target="windows"
             className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
           >
@@ -572,9 +576,9 @@ export default function Home() {
           How it works
         </h2>
         <pre className="mt-6 overflow-x-auto rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 font-mono text-[13px] leading-7 text-[var(--text-secondary)] shadow-[var(--shadow-panel)]">
-{`Audio -> Transcribe -> Diarize -> Summarize -> Markdown -> Policy-safe Search
-       (local)      (local)    (your LLM)  (decisions,   (live authorized,
-      speech model  pyannote   Claude /     action items) bounded reads)
+{`Audio -> Transcribe -> Diarize -> Summarize -> Markdown -> Recall
+       (local)      (local)    (your LLM)  (decisions,   (agents read
+      speech model  pyannote   Claude /     action items)  what you allow)
                                 Ollama`}
         </pre>
         <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
@@ -772,9 +776,9 @@ export default function Home() {
               Next
             </p>
             <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Retention rules the corpus enforces on its own audio, and
-              enforcement of the sensitivity contract across every agent
-              surface, not just the debrief path.
+              Retention rules the folder enforces on its own audio, and the
+              same restrictions applied everywhere an agent reads, not just in
+              one command.
             </p>
           </div>
           <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
@@ -783,8 +787,8 @@ export default function Home() {
             </p>
             <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
               Sensitivity metadata your agents are required to respect: a
-              restricted meeting is excluded from default agent search,
-              bounded profiles, and anything an agent assembles.
+              restricted meeting is excluded from agent search, people
+              profiles, and anything an agent assembles.
             </p>
           </div>
         </div>

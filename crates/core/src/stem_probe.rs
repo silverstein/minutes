@@ -111,6 +111,7 @@ struct WavLayout {
     data_offset: u64,
     declared_data_size: u32,
     actual_data_size: u64,
+    large_container: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +188,10 @@ pub(crate) fn probe_and_repair(path: &Path) -> Result<StemProbe, String> {
         ParsedStem::Wav(layout) => layout,
     };
 
+    if layout.large_container {
+        return Err(format!("{} uses RF64/BW64; preserve the original and run minutes recover-stem with a new output directory before processing", path.display()));
+    }
+
     if layout.actual_data_size == 0 {
         return Ok(StemProbe {
             signal: StemSignal::Empty,
@@ -208,13 +213,13 @@ pub(crate) fn probe_and_repair(path: &Path) -> Result<StemProbe, String> {
         .and_then(|size| u32::try_from(size).ok())
         .ok_or_else(|| {
             format!(
-                "{} is too large for a standard RIFF/WAVE header; RF64 recovery is required",
+                "{} is too large for a standard RIFF/WAVE header; run minutes recover-stem with a new output directory to recover bounded WAV chunks",
                 path.display()
             )
         })?;
     let expected_data_size = u32::try_from(layout.actual_data_size).map_err(|_| {
         format!(
-            "{} has a data payload too large for a standard RIFF/WAVE header; RF64 recovery is required",
+            "{} has a data payload too large for a standard RIFF/WAVE header; run minutes recover-stem with a new output directory to recover bounded WAV chunks",
             path.display()
         )
     })?;
@@ -247,6 +252,223 @@ pub(crate) fn probe_and_repair(path: &Path) -> Result<StemProbe, String> {
     })
 }
 
+/// One lossless WAV part and its exact position in the original stem.
+#[derive(Debug, serde::Serialize)]
+pub struct RecoveredStemPart {
+    pub path: std::path::PathBuf,
+    pub start_frame: u64,
+    pub frames: u64,
+    pub pcm_sha256: String,
+}
+
+/// A complete recovery receipt, also saved as recovery.json beside the parts.
+#[derive(Debug, serde::Serialize)]
+pub struct RecoveredStem {
+    pub source: std::path::PathBuf,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
+    pub parts: Vec<RecoveredStemPart>,
+}
+
+/// Copy all PCM into independently processable parts, without changing the input.
+/// Refuses active/changed input, an existing destination, partial sample frames,
+/// excessive chunk counts, low disk space and work beyond the decode deadline.
+/// On failure, complete parts already published remain available; incomplete
+/// temporary parts are removed and no completion receipt is published.
+pub fn recover_stem(
+    path: &Path,
+    output_dir: &Path,
+    chunk_secs: u64,
+) -> Result<RecoveredStem, String> {
+    if chunk_secs == 0 || chunk_secs > crate::audio_budget::MAX_AUDIO_SECONDS {
+        return Err("chunk seconds must be between 1 and 14400".into());
+    }
+    let mut input = File::open(path).map_err(|error| error.to_string())?;
+    input
+        .try_lock_exclusive()
+        .map_err(|error| format!("stem is locked or active: {error}"))?;
+    let original = input.metadata().map_err(|error| error.to_string())?;
+    if !original.is_file() {
+        return Err("stem must be a regular file".into());
+    }
+    let original_modified = original.modified().map_err(|error| error.to_string())?;
+    let layout = match parse_wav_file(&mut input, path)? {
+        ParsedStem::Wav(layout) => layout,
+        ParsedStem::Invalid(detail) => return Err(detail),
+        ParsedStem::Missing => return Err("stem is missing".into()),
+    };
+    crate::audio_budget::AudioWorkBudget::new()
+        .validate_stream(
+            layout.format.sample_rate,
+            usize::from(layout.format.channels),
+        )
+        .map_err(|error| error.to_string())?;
+    let frame_bytes = u64::from(layout.format.block_align);
+    if layout.actual_data_size == 0 || !layout.actual_data_size.is_multiple_of(frame_bytes) {
+        return Err("stem is empty or ends inside a sample frame; original preserved".into());
+    }
+    let frames = layout.actual_data_size / frame_bytes;
+    let chunk_frames = chunk_secs
+        .checked_mul(u64::from(layout.format.sample_rate))
+        .ok_or_else(|| "chunk frame count overflow".to_string())?;
+    let chunk_bytes = chunk_frames
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| "chunk byte count overflow".to_string())?;
+    // Odd-byte PCM also needs a RIFF padding byte. Include it in the limit.
+    if chunk_bytes + 36 + chunk_bytes % 2 > u64::from(u32::MAX) {
+        return Err("chunk exceeds RIFF capacity; choose a shorter chunk duration".into());
+    }
+    let part_count = frames.div_ceil(chunk_frames);
+    if part_count > 1_024 {
+        return Err("recovery exceeds the 1024-part limit".into());
+    }
+    let parent = output_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let required = layout
+        .actual_data_size
+        .checked_add(part_count * 44 + 1_024 * 1_024 * 1_024)
+        .ok_or_else(|| "recovery disk budget overflow".to_string())?;
+    if fs2::available_space(parent).map_err(|error| error.to_string())? < required {
+        return Err(
+            "not enough free disk space for recovery plus a 1 GiB reserve; original preserved"
+                .into(),
+        );
+    }
+    // Atomic reservation. No existing folder or part can be overwritten.
+    std::fs::create_dir(output_dir)
+        .map_err(|error| format!("recovery requires a new output directory: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(output_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    let deadline = std::time::Instant::now() + crate::audio_budget::AUDIO_DECODE_DEADLINE;
+    let stable = |input: &File| -> Result<(), String> {
+        let current = input.metadata().map_err(|error| error.to_string())?;
+        if current.len() != original.len()
+            || current.modified().map_err(|error| error.to_string())? != original_modified
+        {
+            return Err("stem changed during recovery; original preserved, complete parts retained without a completion receipt".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("stem recovery exceeded its time budget".into());
+        }
+        Ok(())
+    };
+    input
+        .seek(SeekFrom::Start(layout.data_offset))
+        .map_err(|error| error.to_string())?;
+    use sha2::{Digest, Sha256};
+    let mut buffer = [0_u8; 64 * 1_024];
+    let mut receipt = RecoveredStem {
+        source: path.to_path_buf(),
+        sample_rate: layout.format.sample_rate,
+        channels: layout.format.channels,
+        frames,
+        parts: Vec::new(),
+    };
+    let encoding = layout
+        .format
+        .encoding()
+        .ok_or_else(|| "unsupported PCM encoding".to_string())?;
+    let fields = encoding
+        .format_fields(layout.format.channels, layout.format.sample_rate)
+        .ok_or_else(|| "PCM format overflow".to_string())?;
+    for index in 0..part_count {
+        stable(&input)?;
+        if fs2::available_space(output_dir).map_err(|error| error.to_string())?
+            < 1_024 * 1_024 * 1_024
+        {
+            return Err(
+                "recovery stopped at the 1 GiB disk reserve; complete parts retained".into(),
+            );
+        }
+        let start_frame = index * chunk_frames;
+        let part_frames = (frames - start_frame).min(chunk_frames);
+        let data_len =
+            u32::try_from(part_frames * frame_bytes).map_err(|error| error.to_string())?;
+        let mut output =
+            tempfile::NamedTempFile::new_in(output_dir).map_err(|error| error.to_string())?;
+        let mut header = Vec::with_capacity(44);
+        header.extend_from_slice(b"RIFF");
+        let riff_size = u32::try_from(36_u64 + u64::from(data_len) + u64::from(data_len % 2))
+            .map_err(|_| "recovered part exceeds RIFF capacity".to_string())?;
+        header.extend_from_slice(&riff_size.to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16_u32.to_le_bytes());
+        header.extend_from_slice(&fields.audio_format.to_le_bytes());
+        header.extend_from_slice(&layout.format.channels.to_le_bytes());
+        header.extend_from_slice(&layout.format.sample_rate.to_le_bytes());
+        header.extend_from_slice(&fields.byte_rate.to_le_bytes());
+        header.extend_from_slice(&fields.block_align.to_le_bytes());
+        header.extend_from_slice(&fields.bits_per_sample.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data_len.to_le_bytes());
+        output
+            .write_all(&header)
+            .map_err(|error| error.to_string())?;
+        let mut pcm_hash = Sha256::new();
+        let mut remaining = u64::from(data_len);
+        while remaining > 0 {
+            stable(&input)?;
+            let bytes = remaining.min(buffer.len() as u64) as usize;
+            input
+                .read_exact(&mut buffer[..bytes])
+                .map_err(|error| error.to_string())?;
+            pcm_hash.update(&buffer[..bytes]);
+            output
+                .write_all(&buffer[..bytes])
+                .map_err(|error| error.to_string())?;
+            remaining -= bytes as u64;
+        }
+        if data_len % 2 != 0 {
+            output.write_all(&[0]).map_err(|error| error.to_string())?;
+        }
+        stable(&input)?;
+        output
+            .as_file()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        output
+            .as_file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| error.to_string())?;
+        {
+            let reader =
+                hound::WavReader::new(output.as_file_mut()).map_err(|error| error.to_string())?;
+            if u64::from(reader.duration()) != part_frames {
+                return Err("recovered WAV frame count did not validate".into());
+            }
+        }
+        let part_path = output_dir.join(format!("part-{:04}.wav", index + 1));
+        output
+            .persist_noclobber(&part_path)
+            .map_err(|error| error.to_string())?;
+        receipt.parts.push(RecoveredStemPart {
+            path: part_path,
+            start_frame,
+            frames: part_frames,
+            pcm_sha256: format!("{:x}", pcm_hash.finalize()),
+        });
+    }
+    stable(&input)?;
+    let mut manifest =
+        tempfile::NamedTempFile::new_in(output_dir).map_err(|error| error.to_string())?;
+    serde_json::to_writer_pretty(&mut manifest, &receipt).map_err(|error| error.to_string())?;
+    manifest
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    manifest
+        .persist_noclobber(output_dir.join("recovery.json"))
+        .map_err(|error| error.to_string())?;
+    Ok(receipt)
+}
+
 fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -257,6 +479,10 @@ fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
             return Err(format!("could not open {}: {error}", path.display()));
         }
     };
+    parse_wav_file(&mut file, path)
+}
+
+fn parse_wav_file(file: &mut File, path: &Path) -> Result<ParsedStem, String> {
     let file_len = file
         .metadata()
         .map_err(|error| format!("could not stat {}: {error}", path.display()))?
@@ -270,19 +496,29 @@ fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
     let mut header = [0_u8; RIFF_HEADER_LEN as usize];
     file.read_exact(&mut header)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+    let large_container = &header[0..4] == b"RF64" || &header[0..4] == b"BW64";
+    if (!large_container && &header[0..4] != b"RIFF") || &header[8..12] != b"WAVE" {
         return Ok(ParsedStem::Invalid(
             "missing RIFF/WAVE signature".to_string(),
         ));
     }
     let declared_riff_size = u32::from_le_bytes(header[4..8].try_into().unwrap());
 
+    let mut ds64: Option<(u64, u64)> = None;
+    let mut size_table = Vec::<([u8; 4], u64)>::new();
+    let mut chunks = 0_u32;
     let mut offset = RIFF_HEADER_LEN;
     let mut found_format: Option<(u64, FormatContainer, WavFormat)> = None;
     while offset
         .checked_add(CHUNK_HEADER_LEN)
         .is_some_and(|end| end <= file_len)
     {
+        chunks += 1;
+        if chunks > 1_024 || offset > 16 * 1_024 * 1_024 {
+            return Ok(ParsedStem::Invalid(
+                "WAV header exceeds the bounded chunk scan".into(),
+            ));
+        }
         file.seek(SeekFrom::Start(offset))
             .map_err(|error| format!("could not seek {}: {error}", path.display()))?;
         let mut chunk_header = [0_u8; CHUNK_HEADER_LEN as usize];
@@ -291,6 +527,59 @@ fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
         let chunk_id = &chunk_header[0..4];
         let chunk_size = u32::from_le_bytes(chunk_header[4..8].try_into().unwrap());
         let chunk_data_offset = offset + CHUNK_HEADER_LEN;
+        if large_container && offset == RIFF_HEADER_LEN && chunk_id != b"ds64" {
+            return Ok(ParsedStem::Invalid(
+                "RF64/BW64 requires ds64 as its first chunk".into(),
+            ));
+        }
+        if large_container && chunk_id == b"ds64" {
+            if ds64.is_some()
+                || chunk_size < 28
+                || chunk_data_offset + u64::from(chunk_size) > file_len
+            {
+                return Ok(ParsedStem::Invalid(
+                    "invalid or duplicate ds64 chunk".into(),
+                ));
+            }
+            let mut body = [0_u8; 28];
+            file.read_exact(&mut body)
+                .map_err(|error| error.to_string())?;
+            let riff_size = u64::from_le_bytes(body[0..8].try_into().unwrap());
+            let data_size = u64::from_le_bytes(body[8..16].try_into().unwrap());
+            let table_len = u32::from_le_bytes(body[24..28].try_into().unwrap());
+            if table_len > 1_024
+                || 28 + u64::from(table_len) * 12 > u64::from(chunk_size)
+                || riff_size.checked_add(8) != Some(file_len)
+                || declared_riff_size != u32::MAX
+            {
+                return Ok(ParsedStem::Invalid(
+                    "ds64 sizes do not match the finalized file".into(),
+                ));
+            }
+            for _ in 0..table_len {
+                let mut entry = [0_u8; 12];
+                file.read_exact(&mut entry)
+                    .map_err(|error| error.to_string())?;
+                size_table.push((
+                    entry[0..4].try_into().unwrap(),
+                    u64::from_le_bytes(entry[4..12].try_into().unwrap()),
+                ));
+            }
+            ds64 = Some((riff_size, data_size));
+        }
+        let effective_chunk_size = if chunk_size == u32::MAX && large_container {
+            if chunk_id == b"data" {
+                ds64.map(|(_, data)| data)
+            } else {
+                size_table
+                    .iter()
+                    .position(|(id, _)| id == chunk_id)
+                    .map(|index| size_table.remove(index).1)
+            }
+            .ok_or_else(|| "missing ds64 size for a sentinel chunk".to_string())?
+        } else {
+            u64::from(chunk_size)
+        };
 
         if chunk_id == b"fmt " && found_format.is_none() {
             if chunk_size < 16 || chunk_data_offset + 16 > file_len {
@@ -365,7 +654,24 @@ fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
                     "data chunk appears before a valid fmt chunk".into(),
                 ));
             };
-            let actual_data_size = file_len.saturating_sub(chunk_data_offset);
+            let actual_data_size = if large_container {
+                // Respect the declared data extent. Trailing metadata is not PCM.
+                if chunk_data_offset
+                    .checked_add(effective_chunk_size)
+                    .and_then(|end| end.checked_add(effective_chunk_size % 2))
+                    .is_none_or(|end| end > file_len)
+                {
+                    return Ok(ParsedStem::Invalid("ds64 data extends beyond EOF".into()));
+                }
+                effective_chunk_size
+            } else if u64::from(declared_riff_size) + 8 == file_len
+                && chunk_size > 0
+                && chunk_data_offset + u64::from(chunk_size) <= file_len
+            {
+                u64::from(chunk_size)
+            } else {
+                file_len.saturating_sub(chunk_data_offset)
+            };
             return Ok(ParsedStem::Wav(WavLayout {
                 file_len,
                 declared_riff_size,
@@ -376,11 +682,12 @@ fn parse_wav(path: &Path) -> Result<ParsedStem, String> {
                 data_offset: chunk_data_offset,
                 declared_data_size: chunk_size,
                 actual_data_size,
+                large_container,
             }));
         }
 
-        let padded_size = u64::from(chunk_size)
-            .checked_add(u64::from(chunk_size % 2))
+        let padded_size = effective_chunk_size
+            .checked_add(effective_chunk_size % 2)
             .ok_or_else(|| format!("chunk size overflow in {}", path.display()))?;
         let Some(next_offset) = chunk_data_offset.checked_add(padded_size) else {
             return Ok(ParsedStem::Invalid("chunk offset overflow".into()));
@@ -814,6 +1121,187 @@ mod tests {
 
     fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn large_wave(kind: &[u8; 4], samples: &[f32], trailing: bool) -> Vec<u8> {
+        let data_size = (samples.len() * 4) as u64;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEds64");
+        bytes.extend_from_slice(&28_u32.to_le_bytes());
+        bytes.extend_from_slice(&(72 + data_size + if trailing { 12 } else { 0 }).to_le_bytes());
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.extend_from_slice(&(samples.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&3_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&192_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u16.to_le_bytes());
+        bytes.extend_from_slice(&32_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        if trailing {
+            bytes.extend_from_slice(b"JUNK\x04\x00\x00\x00tail");
+        }
+        bytes
+    }
+
+    #[test]
+    fn rf64_and_bw64_recovery_preserve_every_pcm_byte_and_exclude_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<f32> = (0..120_123)
+            .map(|n| ((n % 100) as f32 - 50.0) / 100.0)
+            .collect();
+        for kind in [b"RF64", b"BW64"] {
+            let path = dir
+                .path()
+                .join(format!("{}.wav", String::from_utf8_lossy(kind)));
+            let original = large_wave(kind, &samples, true);
+            std::fs::write(&path, &original).unwrap();
+            let output = path.with_extension("parts");
+            let receipt = recover_stem(&path, &output, 1).unwrap();
+            assert_eq!(receipt.frames, samples.len() as u64);
+            assert_eq!(receipt.parts.len(), 3);
+            let mut recovered = Vec::new();
+            for (index, part) in receipt.parts.iter().enumerate() {
+                assert_eq!(part.start_frame, index as u64 * 48_000);
+                let mut reader = hound::WavReader::open(&part.path).unwrap();
+                assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+                recovered.extend(reader.samples::<f32>().map(Result::unwrap));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(&part.path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+            }
+            assert_eq!(recovered, samples);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(output.join("recovery.json").exists());
+            assert!(recover_stem(&path, &output, 1)
+                .unwrap_err()
+                .contains("new output directory"));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn odd_pcm8_parts_include_padding_without_adding_audio_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("odd.wav");
+        let samples = [0_i8, 127, -128, 1, 2, 52, 62];
+        let mut writer = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 3,
+                bits_per_sample: 8,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in samples {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let receipt = recover_stem(&path, &dir.path().join("parts"), 1).unwrap();
+        assert_eq!(receipt.parts.len(), 3);
+        let mut decoded = Vec::new();
+        for part in &receipt.parts {
+            let bytes = std::fs::read(&part.path).unwrap();
+            assert_eq!(u64::from(read_u32(&bytes, 4)) + 8, bytes.len() as u64);
+            assert_eq!(read_u32(&bytes, 40) as u64, part.frames);
+            assert_eq!(bytes.len() as u64, 44 + part.frames + part.frames % 2);
+            decoded.extend(
+                hound::WavReader::open(&part.path)
+                    .unwrap()
+                    .samples::<i8>()
+                    .map(Result::unwrap),
+            );
+        }
+        assert_eq!(decoded, samples);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn oversized_sparse_riff_and_rf64_sizes_are_64_bit_and_sources_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_size = u64::from(u32::MAX) + 5;
+        for large in [false, true] {
+            let path = dir.path().join(format!("large-{large}.wav"));
+            let mut bytes = large_wave(b"RF64", &[], false);
+            if large {
+                bytes[20..28].copy_from_slice(&(data_size + 72).to_le_bytes());
+                bytes[28..36].copy_from_slice(&data_size.to_le_bytes());
+            } else {
+                bytes[0..4].copy_from_slice(b"RIFF");
+                bytes[12..16].copy_from_slice(b"JUNK");
+            }
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&bytes).unwrap();
+            file.set_len(80 + data_size).unwrap();
+            drop(file);
+            let layout = match parse_wav(&path).unwrap() {
+                ParsedStem::Wav(layout) => layout,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(layout.actual_data_size, data_size);
+            assert_eq!(layout.large_container, large);
+            let mut header = [0; 80];
+            File::open(&path).unwrap().read_exact(&mut header).unwrap();
+            assert_eq!(header.as_slice(), bytes);
+        }
+    }
+
+    #[test]
+    fn corrupt_ds64_and_partial_frames_do_not_publish_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.wav");
+        let valid = large_wave(b"RF64", &[0.25; 100], false);
+        for fault in 0..5 {
+            let mut bytes = valid.clone();
+            match fault {
+                0 => bytes[12..16].copy_from_slice(b"JUNK"),
+                1 => bytes[28..36].copy_from_slice(&u64::MAX.to_le_bytes()),
+                2 => bytes[44..48].copy_from_slice(&u32::MAX.to_le_bytes()),
+                3 => bytes[20..28].copy_from_slice(&0_u64.to_le_bytes()),
+                _ => bytes[28..36].copy_from_slice(&399_u64.to_le_bytes()),
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let output = dir.path().join(format!("out-{fault}"));
+            assert!(recover_stem(&path, &output, 1).is_err());
+            assert!(!output.exists());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn placeholder_riff_recovery_preserves_payload_and_refuses_locked_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unfinalized.wav");
+        let samples = tone_samples();
+        write_placeholder_f32_wav(&path, &samples, SampleEncoding::Float32, 0);
+        let original = std::fs::read(&path).unwrap();
+        let locked = File::open(&path).unwrap();
+        locked.try_lock_exclusive().unwrap();
+        let out = dir.path().join("parts");
+        assert!(recover_stem(&path, &out, 1).is_err());
+        assert!(!out.exists());
+        drop(locked);
+        let receipt = recover_stem(&path, &out, 1).unwrap();
+        let recovered = std::fs::read(&receipt.parts[0].path).unwrap();
+        assert_eq!(&recovered[44..], &original[DATA_OFFSET..]);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]

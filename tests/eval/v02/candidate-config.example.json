@@ -1,0 +1,9 @@
+{
+  "model": "REPLACE_WITH_MODEL_NAME",
+  "revision": "REPLACE_WITH_IMMUTABLE_MODEL_REVISION",
+  "hardware": "REPLACE_WITH_MEASURED_HARDWARE",
+  "platform": "REPLACE_WITH_MEASURED_OS",
+  "privacy": "local",
+  "cost_per_audio_hour": null,
+  "configuration": "REPLACE_WITH_DECODING_AND_DIARIZATION_SETTINGS"
+}

@@ -41,12 +41,61 @@ const meetings = await listMeetings('~/meetings', 50);
 
 ### `searchMeetings(dir, query, limit?, options?)`
 
-Full-text search across titles and transcripts. It uses the same validated
+Literal lexical search across titles and transcripts. It uses the same validated
 1–10,000 meeting-result limit and restricted-meeting policy as `listMeetings`.
+
+The `literal-and-prefix-v1` contract is shared with the CLI and MCP: normalize
+Unicode accents, compare lowercase letter/number tokens, require every token,
+and prefix-match only the final token when it has at least two code points.
+Single-character terms match exactly; `AND`, `OR`, and `NOT` are literal words.
+There is no implicit stemming. Queries are limited to 2,048 UTF-16 code units.
+Results rank lexical relevance first (title occurrences have greater weight),
+then date and path. `retrieval.score` is a ranking score, not a confidence level.
+
+Search results and full `getMeeting` results now carry an additive `evidence`
+bundle. It contains the SHA-256 revision of the **exact original Markdown**,
+stable source/segment IDs, exact quotes, 1-based lines, and 0-based UTF-16
+`start`/`end` offsets into that Markdown. Timestamp and speaker fields are present
+only when source text supports them. Only high-confidence speaker attributions
+carry a name. Quotes are bounded to 1,200 code units; `quote_truncated` and the
+bundle's `truncated` flag disclose omitted context. A citation path or timestamp
+does not authorize reading or playing any inferred audio file. Changing source
+bytes invalidates segment IDs. Restricted stubs contain no evidence identifiers.
 
 ```typescript
 const results = await searchMeetings('~/meetings', 'Q2 roadmap');
 ```
+
+### `getDecisionHistory(dir, options?)`
+
+Project decisions from one policy-authorized corpus snapshot. Options include
+`includeRestricted`, `asOf` (an ISO date; defaults to now), and `limit` (1–1,000).
+Every entry includes an ID bound to the source revision, an exact YAML text
+evidence span, recorded/effective dates, and a state:
+
+- `current`: one unresolved statement remains for the topic, with no broken links.
+- `superseded`: a unique explicit successor names this decision.
+- `unresolved`: multiple statements, ambiguous links, or competing successors.
+- `unknown`: missing topic/evidence, invalid dates, or a future effective date.
+
+Optional decision fields are preserved: `id`, `authority`, `supersedes`, and
+`effective_date`. A supersession may name a unique declared/generated ID, exact
+decision text, or source `YYYY-MM-DD` within the same topic. Missing effective
+dates use the recorded date with `effective_date_basis: "recorded-at"`. Calendar dates must be valid `YYYY-MM-DD` values or RFC3339 instants with a timezone; shorthand and rollover dates are not accepted. Distinct
+statements are **not** automatically classified as contradictions. The analysis
+processes the complete authorized input before limiting output and refuses more
+than 10,000 decision records. Restricted and inactive sources cannot settle a
+visible decision.
+
+### Experimental local semantic evaluation
+
+`fuseAuthorizedRankings(authorizedCandidates, rankings, options?)` provides pure
+reciprocal-rank fusion for local experiments. Pass a map of IDs from the current
+authorized snapshot and ranked lexical/semantic scores. Unknown IDs, revoked IDs,
+duplicates, and non-finite provider scores cannot add candidates. The helper
+performs no I/O and installs no model. Callers must still reauthorize their source
+snapshot before publishing; it is not an authorization API or a measured claim
+that semantic search improves this corpus.
 
 ### `getMeeting(path, options?)`
 
@@ -82,7 +131,7 @@ const firstTen = await findOpenActions('~/meetings', undefined, { limit: 10 });
 
 ### `getPersonProfile(dir, name, options?)`
 
-Build a profile for someone across policy-authorized meetings within the supported corpus bounds — their meetings, open action items, and topics.
+Build a profile for someone across policy-authorized meetings within the supported corpus bounds, including their meetings, open action items, and topics. Names match exact normalized labels, declared canonical IDs or explicit `entities.people` aliases. Empty and ambiguous selectors are rejected; transcript substrings and uncertain speaker guesses do not establish identity. Meetings/topics require participation evidence, while owned actions may come from a meeting they did not attend.
 The three returned collections are independently bounded. Use `meetingLimit`,
 `openActionLimit`, and `topicLimit`; each defaults to and may not exceed its
 exported 1,000-item cap. `includeRestricted` defaults to false.
@@ -192,7 +241,7 @@ interface MeetingFile {
 
 interface Frontmatter {
   title: string;
-  type: string;      // "meeting" | "memo" | "dictation"
+  type: string;      // "meeting" | "memo" | "dictation" | "note"
   date: string;      // ISO 8601
   duration: string;
   source?: string;   // "voice-memos" | "dictation" | undefined
@@ -228,7 +277,7 @@ interface Intent {
 
 ## How it works
 
-The SDK reads markdown files with YAML frontmatter produced by [Minutes](https://github.com/silverstein/minutes). No database, no server, no API key — just files on disk.
+The SDK reads markdown files with YAML frontmatter produced by [Minutes](https://github.com/silverstein/minutes). The SDK uses files on disk without a database, server or API key.
 
 ```
 ~/meetings/

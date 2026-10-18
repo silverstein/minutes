@@ -19,6 +19,7 @@ function inferCategory(skillName) {
       "minutes-debrief",
       "minutes-weekly",
       "minutes-x1-closeout",
+      "minutes-x1-send-meeting",
     ].includes(skillName)
   )
     return "lifecycle";

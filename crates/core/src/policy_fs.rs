@@ -3264,17 +3264,23 @@ fn retire_legacy_policy_caches_at(state_root: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
 
-    let state = BoundRecoveryDirectory::prepare_owner_private(state_root)?;
-
     // Fast path. After the one-time migration nothing is left to retire, and
     // this runs on every search/graph open. Without it, concurrent startup
     // readers (meeting inventory, config, graph, ambient context) raced for a
     // lease held for microseconds, and the loser surfaced a fatal "another
     // process" error that was really another thread a few milliseconds earlier.
+    // Inspect names through a retained no-follow capability before requiring a
+    // private mutation namespace. A normal Windows profile directory inherits
+    // SYSTEM/Administrators entries; absence of obsolete caches neither reads
+    // private content nor requires rewriting that directory's permissions.
+    // Any existing cache still goes through the strict retirement boundary.
+    let state = BoundRecoveryDirectory::bind_existing(state_root)?;
     if !legacy_policy_cache_entries_exist(&state)? {
+        state.attest_location()?;
         return Ok(());
     }
 
+    let state = BoundRecoveryDirectory::prepare_owner_private(state_root)?;
     let lease =
         state.bind_or_create_private_lease_file(OsStr::new("policy-cache-retirement.lock"))?;
     let deadline = std::time::Instant::now() + LEGACY_POLICY_CACHE_RETIREMENT_WAIT;
@@ -3323,6 +3329,63 @@ fn retire_legacy_policy_caches_at(state_root: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_cache_retirement_accepts_an_ordinary_root_without_caches() {
+        let root = tempfile::TempDir::new().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join("config.toml"), b"unrelated configuration").unwrap();
+
+        retire_legacy_policy_caches_at(&state).unwrap();
+
+        assert_eq!(
+            fs::read(state.join("config.toml")).unwrap(),
+            b"unrelated configuration"
+        );
+        assert!(!state.join("policy-cache-retirement.lock").exists());
+        // On Windows this ordinary directory must still fail the private-store
+        // check: an empty retirement must not tighten or weaken its DACL.
+        #[cfg(windows)]
+        assert!(BoundRecoveryDirectory::prepare_owner_private(&state).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+            retire_legacy_policy_caches_at(&state).unwrap();
+            assert_eq!(
+                fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_cache_retirement_still_refuses_nonprivate_windows_cache_roots() {
+        let root = tempfile::TempDir::new().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let cache = state.join("search.db");
+        fs::write(&cache, b"LEGACY-CACHE-CANARY").unwrap();
+
+        assert!(retire_legacy_policy_caches_at(&state).is_err());
+        assert_eq!(fs::read(&cache).unwrap(), b"LEGACY-CACHE-CANARY");
+        assert!(!state.join("policy-cache-retirement.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_cache_retirement_refuses_a_symlinked_empty_root() {
+        let root = tempfile::TempDir::new().unwrap();
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let state = root.path().join("state");
+        std::os::unix::fs::symlink(&target, &state).unwrap();
+
+        assert!(retire_legacy_policy_caches_at(&state).is_err());
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+    }
 
     #[test]
     fn legacy_policy_caches_are_zeroed_for_open_holders_then_retired() {

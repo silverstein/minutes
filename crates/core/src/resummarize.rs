@@ -225,7 +225,10 @@ fn action_item_has_user_state(item: &ActionItem) -> bool {
 
 /// Does this decision carry user-curated state worth preserving?
 fn decision_has_user_state(decision: &Decision) -> bool {
-    decision.authority.is_some() || decision.supersedes.is_some()
+    decision.id.is_some()
+        || decision.effective_date.is_some()
+        || decision.authority.is_some()
+        || decision.supersedes.is_some()
 }
 
 fn count_keys<'a, I: Iterator<Item = &'a str>>(
@@ -364,6 +367,8 @@ pub fn merge_decisions(old: &[Decision], new: &[Decision]) -> (Vec<Decision>, Ve
         match old_match {
             Some(old_decision) => {
                 let mut decision = new_decision.clone();
+                decision.id = old_decision.id.clone();
+                decision.effective_date = old_decision.effective_date.clone();
                 decision.authority = old_decision.authority.clone();
                 decision.supersedes = old_decision.supersedes.clone();
                 if old_decision.topic.is_some() {
@@ -683,8 +688,8 @@ pub fn resummarize_meeting(
     opts: &ResummarizeOptions,
 ) -> Result<ResummarizeReport, ResummarizeError> {
     let mut report =
-        resummarize_meeting_with(path, config, opts, |transcript, notes, template| {
-            summarize::summarize_with_template(
+        resummarize_meeting_with_report(path, config, opts, |transcript, notes, template| {
+            summarize::summarize_with_template_report(
                 transcript,
                 notes,
                 &[], // v1 is text-only: no screenshot re-feed
@@ -713,9 +718,10 @@ pub fn resummarize_meeting(
 ///
 /// Crate-private on purpose: the public entry point is
 /// [`resummarize_meeting`], whose summarizer is always
-/// `summarize_with_template` — the same engine-resolution choke point the
+/// `summarize_with_template_report` — the same engine-resolution choke point the
 /// pipeline uses. A public closure-taking variant would let callers bypass
 /// that policy (#523 maintainer note M1).
+#[cfg(test)]
 pub(crate) fn resummarize_meeting_with<F>(
     path: &Path,
     config: &Config,
@@ -724,6 +730,23 @@ pub(crate) fn resummarize_meeting_with<F>(
 ) -> Result<ResummarizeReport, ResummarizeError>
 where
     F: FnOnce(&str, Option<&str>, Option<&Template>) -> Option<Summary>,
+{
+    resummarize_meeting_with_report(path, config, opts, |transcript, notes, template| {
+        summarize::SummaryReport {
+            summary: run_summarize(transcript, notes, template),
+            coverage: None,
+        }
+    })
+}
+
+fn resummarize_meeting_with_report<F>(
+    path: &Path,
+    config: &Config,
+    opts: &ResummarizeOptions,
+    run_summarize: F,
+) -> Result<ResummarizeReport, ResummarizeError>
+where
+    F: FnOnce(&str, Option<&str>, Option<&Template>) -> summarize::SummaryReport,
 {
     let engine = config.summarization.engine.clone();
     if engine == "none" {
@@ -769,13 +792,21 @@ where
 
     // The summarize stage — the only model invocation, preview included.
     let started = Instant::now();
-    let summary =
-        run_summarize(&transcript, notes.as_deref(), template.as_ref()).ok_or_else(|| {
-            ResummarizeError::SummarizeFailed {
-                engine: engine.clone(),
-                reason: "provider_error".into(),
-            }
-        })?;
+    let summarize::SummaryReport { summary, coverage } =
+        run_summarize(&transcript, notes.as_deref(), template.as_ref());
+    if let Some(incomplete) = coverage.as_ref().filter(|coverage| !coverage.complete) {
+        return Err(ResummarizeError::SummarizeFailed {
+            engine: engine.clone(),
+            reason: incomplete.message(),
+        });
+    }
+    let summary = summary.ok_or_else(|| ResummarizeError::SummarizeFailed {
+        engine: engine.clone(),
+        reason: coverage
+            .as_ref()
+            .map(summarize::SummaryCoverage::message)
+            .unwrap_or_else(|| "provider_error".into()),
+    })?;
     let duration_ms = started.elapsed().as_millis() as u64;
 
     // Empty output is a hard failure: a splice from it would erase a good
@@ -802,7 +833,12 @@ where
     // Clean carries are internal detail; the report surfaces what needs eyes.
     merge_notes.retain(|n| n.disposition != MergeDisposition::Carried);
 
-    let new_ai_body = render_ai_body(&summary, &merged_actions, &merged_decisions);
+    let mut new_ai_body = render_ai_body(&summary, &merged_actions, &merged_decisions);
+    if let Some(coverage) = coverage {
+        new_ai_body.push_str("\n\n> ");
+        new_ai_body.push_str(&coverage.message());
+        new_ai_body.push('\n');
+    }
     let (new_body, sections_replaced) = splice_ai_sections(body, &new_ai_body)?;
 
     let model = summarize::summarization_model_hint(config, false);
@@ -877,10 +913,22 @@ where
     // runs immediately before the swap, and each successful run writes one
     // hidden sibling carrying the artifact's mode. The newest three backups
     // are retained, so a conflicted run never disturbs an earlier run's backup.
-    let unix_secs = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let backup = timestamped_backup_path(path, unix_secs);
+        .map_or(0, |duration| {
+            duration.as_nanos().min(u64::MAX as u128) as u64
+        });
+    // Distinct even on a coarse-resolution clock and during rapid retries.
+    // Publication is still no-replace, so another process cannot be clobbered.
+    static LAST_BACKUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let previous = LAST_BACKUP
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |previous| Some(now.max(previous.saturating_add(1))),
+        )
+        .expect("backup timestamp update always succeeds");
+    let backup = timestamped_backup_path(path, now.max(previous.saturating_add(1)));
     match markdown::atomic_rewrite_preserving_mode_guarded(
         path,
         &new_content,
@@ -900,7 +948,9 @@ where
 }
 
 /// Return this run's hidden sibling backup path:
-/// `.<filename>.pre-resummarize.<unix-secs>.bak`.
+/// `.<filename>.pre-resummarize.<timestamp>.bak`.
+/// New runs use monotonic nanosecond timestamps; older second timestamps
+/// remain compatible with numeric backup retention.
 ///
 /// [`prune_resummarize_backups`] keeps only the newest backups per artifact.
 pub fn timestamped_backup_path(path: &Path, unix_secs: u64) -> PathBuf {
@@ -972,6 +1022,8 @@ mod tests {
 
     fn decision(text: &str, authority: Option<&str>, supersedes: Option<&str>) -> Decision {
         Decision {
+            id: None,
+            effective_date: None,
             text: text.into(),
             topic: None,
             authority: authority.map(String::from),
@@ -1137,6 +1189,22 @@ mod tests {
     }
 
     #[test]
+    fn merge_decisions_preserves_identity_dates_and_unmatched_curated_records() {
+        let mut old = decision("Annual only", None, None);
+        old.id = Some("price-v1".into());
+        old.effective_date = Some("2030-01-01".into());
+        let (matched, _) = merge_decisions(&[old.clone()], &[decision("annual only", None, None)]);
+        assert_eq!(matched[0].id, old.id);
+        assert_eq!(matched[0].effective_date, old.effective_date);
+        let (unmatched, notes) = merge_decisions(&[old], &[decision("Other decision", None, None)]);
+        assert_eq!(unmatched.len(), 2);
+        assert_eq!(unmatched[1].id.as_deref(), Some("price-v1"));
+        assert!(notes
+            .iter()
+            .any(|note| note.disposition == MergeDisposition::KeptUnmatched));
+    }
+
+    #[test]
     fn merge_decisions_keeps_stateful_and_drops_pristine_unmatched() {
         let old = vec![
             decision("Keep me (authority)", Some("high"), None),
@@ -1248,6 +1316,113 @@ mod tests {
             &[],
             &[],
         )
+    }
+
+    #[test]
+    fn applied_resummarize_preserves_declared_decision_identity_and_effective_date() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(&dir);
+        markdown::update_frontmatter(&path, |fm| {
+            fm.decisions.push(Decision {
+                id: Some("ship-v1".into()),
+                effective_date: Some("2030-01-01".into()),
+                text: "Ship it".into(),
+                topic: None,
+                authority: None,
+                supersedes: None,
+            });
+        })
+        .unwrap();
+        let report = resummarize_meeting_with(
+            &path,
+            &test_config(),
+            &ResummarizeOptions {
+                apply: true,
+                ..Default::default()
+            },
+            |_, _, _| Some(good_summary()),
+        )
+        .unwrap();
+        assert!(report.applied);
+        let updated = fs::read_to_string(&path).unwrap();
+        let fm: Frontmatter =
+            serde_yaml::from_str(markdown::split_frontmatter(&updated).0).unwrap();
+        let decision = fm
+            .decisions
+            .iter()
+            .find(|item| item.id.as_deref() == Some("ship-v1"))
+            .unwrap();
+        assert_eq!(decision.effective_date.as_deref(), Some("2030-01-01"));
+    }
+
+    #[test]
+    fn coverage_is_present_in_preview_and_applied_summary() {
+        for apply in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let path = write_meeting(&dir);
+            let report = resummarize_meeting_with_report(
+                &path,
+                &test_config(),
+                &ResummarizeOptions {
+                    apply,
+                    ..ResummarizeOptions::default()
+                },
+                |_, _, _| summarize::SummaryReport {
+                    summary: Some(good_summary()),
+                    coverage: Some(summarize::SummaryCoverage {
+                        complete: true,
+                        transcript_bytes: 120_000,
+                        notes_bytes: 40,
+                        source_chunks: 3,
+                        completed_chunks: 3,
+                        detail: "All source chunks delivered.".into(),
+                    }),
+                },
+            )
+            .unwrap();
+            assert!(report
+                .new_ai_body
+                .contains("Agent input coverage: complete"));
+            if apply {
+                assert!(fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("Agent input coverage: complete"));
+            } else {
+                assert_eq!(fs::read_to_string(&path).unwrap(), MEETING);
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_coverage_is_a_precise_no_write_failure() {
+        for partial_output in [None, Some(good_summary())] {
+            let dir = TempDir::new().unwrap();
+            let path = write_meeting(&dir);
+            let error = resummarize_meeting_with_report(
+                &path,
+                &test_config(),
+                &ResummarizeOptions {
+                    apply: true,
+                    ..ResummarizeOptions::default()
+                },
+                |_, _, _| summarize::SummaryReport {
+                    summary: partial_output,
+                    coverage: Some(summarize::SummaryCoverage {
+                        complete: false,
+                        transcript_bytes: 120_000,
+                        notes_bytes: 40,
+                        source_chunks: 3,
+                        completed_chunks: 1,
+                        detail: "source chunk 2/3 failed: agent timed out".into(),
+                    }),
+                },
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("source chunk 2/3 failed: agent timed out"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), MEETING);
+        }
     }
 
     #[test]
@@ -1393,6 +1568,27 @@ mod tests {
         .unwrap();
 
         assert!(!report.applied);
+    }
+
+    #[test]
+    fn rapid_applies_create_distinct_non_overwriting_backups() {
+        let dir = TempDir::new().unwrap();
+        let path = write_meeting(&dir);
+        let options = ResummarizeOptions {
+            apply: true,
+            ..ResummarizeOptions::default()
+        };
+        let first = resummarize_meeting_with(&path, &test_config(), &options, |_, _, _| {
+            Some(good_summary())
+        })
+        .unwrap();
+        let second = resummarize_meeting_with(&path, &test_config(), &options, |_, _, _| {
+            Some(good_summary())
+        })
+        .unwrap();
+        assert_ne!(first.backup, second.backup);
+        assert_eq!(fs::read_to_string(first.backup.unwrap()).unwrap(), MEETING);
+        assert!(second.backup.unwrap().exists());
     }
 
     #[test]

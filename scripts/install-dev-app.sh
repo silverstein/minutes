@@ -194,9 +194,16 @@ echo "=== Building ${DEV_PRODUCT_NAME}.app ==="
 # sidecar's), and any post-seal patching of nested code invalidates the
 # bundle seal, so copied/downloaded apps fail Gatekeeper as "damaged".
 SIDECAR_BIN="$BUILD_APP/Contents/MacOS/minutes"
+MAIN_BIN="$BUILD_APP/Contents/MacOS/minutes-app"
+# Signing the main executable also seals its containing app. Leave it for
+# the final outer-bundle sign: Intel nested binaries may still be unsigned,
+# and the XPC packaging steps below must patch the parent before it is sealed.
 if [[ "$SIGN_MODE" == "identity" ]]; then
   echo "=== Signing nested executables (inside-out) with configured identity ==="
   while IFS= read -r nested_executable; do
+    if [[ "$nested_executable" == "$MAIN_BIN" ]]; then
+      continue
+    fi
     if [[ "$nested_executable" == "$SIDECAR_BIN" ]]; then
       codesign --force --options runtime --timestamp \
         --entitlements tauri/src-tauri/minutes-cli.entitlements \
@@ -228,6 +235,9 @@ else
   echo "Using ad-hoc signing so the app remains runnable for contributors."
   echo "TCC-sensitive features may still require re-granting permissions after rebuilds."
   while IFS= read -r nested_executable; do
+    if [[ "$nested_executable" == "$MAIN_BIN" ]]; then
+      continue
+    fi
     if [[ "$nested_executable" == "$SIDECAR_BIN" ]]; then
       codesign --force --options runtime \
         --entitlements tauri/src-tauri/minutes-cli.entitlements \
@@ -248,7 +258,8 @@ else
 fi
 
 echo "=== Verifying bundle seal (strict) ==="
-codesign --verify --deep --strict "$BUILD_APP" && echo "  Seal OK"
+codesign --verify --deep --strict "$BUILD_APP"
+echo "  Seal OK"
 
 if [[ "$INSTALL_AFTER_BUILD" == "1" ]]; then
   echo "=== Installing ${DEV_PRODUCT_NAME}.app to ${INSTALL_DIR} ==="

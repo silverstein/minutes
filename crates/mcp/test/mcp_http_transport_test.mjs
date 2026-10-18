@@ -21,8 +21,7 @@
  *     module scope: results must equal single-session baselines exactly, so a
  *     response delivered to the wrong session fails rather than passing as
  *     "it returned something". See the test's own comment for what this
- *     deliberately does not prove (corpus-lease slot exhaustion, cliAvailable
- *     cache poisoning)
+ *     separates from corpus memory admission and CLI availability caching)
  *  5. localhost hardening: cross-origin POSTs, non-JSON bodies, unknown
  *     session ids, and non-initialize requests without a session are refused
  *  6. --help lists the transport flags and exits 0
@@ -379,36 +378,13 @@ try {
     assert(result.content.length > 0, "get_status should return text content");
   });
 
-  // Shared process state is the thing the diff does not show. Under stdio each
-  // client got its own process, so its own caches and counters; under HTTP every
-  // session runs in one module scope. The corpus tool is used because it is the
-  // deepest shared path reachable from a tool call: `dispatchStableCorpusLease`
-  // admits work against process-global counters (`activeCorpusWorkerCount` and
-  // the reserved-memory total) that two sessions now contend for.
-  //
-  // On a machine where the corpus tool is denied, this is *more* useful, not
-  // less. The denial path is the one with the interesting release logic, and it
-  // is the one every call here takes.
-  //
-  // Baselines are captured single-session, before the second client exists, and
-  // every concurrent result must equal one exactly. Exact equality rather than
-  // "it returned content" is what catches the failure the SDK names when one
-  // transport is shared across clients: colliding JSON-RPC ids deliver a
-  // perfectly plausible response to the wrong session.
-  //
-  // What this does NOT prove, stated because the repetition below looks like it
-  // should. Admission is capped at min(MAX_ACTIVE_WATCHERS, maxWatcherCount) =
-  // 64 slots, so exhausting it needs 33 concurrent pairs even if every call
-  // leaked, and a pair costs ~1.2s here (~39s, and far worse where the corpus
-  // actually resolves). The rounds catch state that degrades quickly, not slot
-  // exhaustion. `withStableCorpusLease`'s release runs in a `finally` with
-  // explicit handling for the "worker died before authorization" case this
-  // machine hits, so leaks are not the likely defect; proving that needs a unit
-  // test against corpus-lease.ts, not an HTTP round trip.
-  //
-  // Also not covered: `cliAvailable`/`cliCheckedAt` poisoning, where one
-  // session's transient CLI failure gates every other session for the cache TTL.
-  // That is sharing rather than concurrency and needs a different setup.
+  // Each session must get its own tool's response, including when both clients
+  // reuse JSON-RPC request IDs. Keep one corpus read in flight alongside a local
+  // status call: a default corpus reservation alone exceeds 128 MiB, so the
+  // 256 MiB process budget correctly refuses a second simultaneous corpus read.
+  // Exact baselines in both directions detect swapped responses without asking
+  // the transport test to bypass that admission boundary. Memory reservation
+  // and refusal behavior are covered by corpus-lease.test.ts.
   test("overlapping tool execution from two sessions stays independent", async () => {
     const CORPUS_TOOL = "list_meetings"; // routes through withStableCorpusLease
     const LOCAL_TOOL = "get_status"; // no corpus lease
@@ -426,41 +402,26 @@ try {
 
     const second = await connectHttpClient(server.url, "http-concurrent");
     try {
-      // Same tool from both sessions at once, repeated. One round would not
-      // distinguish "concurrency works" from "the first call happened to win".
       for (let round = 1; round <= 3; round++) {
-        const [fromPrimary, fromSecondary] = await Promise.all([
-          httpClient.callTool({ name: CORPUS_TOOL, arguments: {} }),
-          second.callTool({ name: CORPUS_TOOL, arguments: {} }),
-        ]);
-        assertEqual(
-          JSON.stringify(fromPrimary),
-          corpusBaseline,
-          `round ${round}: primary session diverged from its single-session baseline`
-        );
-        assertEqual(
-          JSON.stringify(fromSecondary),
-          corpusBaseline,
-          `round ${round}: secondary session diverged from the single-session baseline`
-        );
+        for (const reverse of [false, true]) {
+          const primaryTool = reverse ? CORPUS_TOOL : LOCAL_TOOL;
+          const secondaryTool = reverse ? LOCAL_TOOL : CORPUS_TOOL;
+          const [fromPrimary, fromSecondary] = await Promise.all([
+            httpClient.callTool({ name: primaryTool, arguments: {} }),
+            second.callTool({ name: secondaryTool, arguments: {} }),
+          ]);
+          assertEqual(
+            JSON.stringify(fromPrimary),
+            reverse ? corpusBaseline : localBaseline,
+            `round ${round}: primary session asked for ${primaryTool} and did not get its response`
+          );
+          assertEqual(
+            JSON.stringify(fromSecondary),
+            reverse ? localBaseline : corpusBaseline,
+            `round ${round}: secondary session asked for ${secondaryTool} and did not get its response`
+          );
+        }
       }
-
-      // Different tools at once. Each session must get its own tool's answer;
-      // a swap here is the id-collision failure.
-      const [local, corpus] = await Promise.all([
-        httpClient.callTool({ name: LOCAL_TOOL, arguments: {} }),
-        second.callTool({ name: CORPUS_TOOL, arguments: {} }),
-      ]);
-      assertEqual(
-        JSON.stringify(local),
-        localBaseline,
-        `primary session asked for ${LOCAL_TOOL} and did not get its response`
-      );
-      assertEqual(
-        JSON.stringify(corpus),
-        corpusBaseline,
-        `secondary session asked for ${CORPUS_TOOL} and did not get its response`
-      );
     } finally {
       await second.transport.terminateSession();
       await second.close();

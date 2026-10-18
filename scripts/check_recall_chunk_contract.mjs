@@ -1,60 +1,32 @@
 #!/usr/bin/env node
-/**
- * Guard the Recall chat chunk contract.
- *
- * The backend emits `recall-chat-chunk` payloads tagged with a `type`, and the
- * panel dispatches on that tag. Nothing links the two, so a provider path can
- * stream perfectly while the UI silently discards every chunk.
- *
- * That is not hypothetical. The Ollama path emitted `{"type":"text",...}` from
- * the day it landed and the panel never had a branch for it, so local-model
- * Recall chat rendered nothing at all until #650. No Rust test could see it:
- * the defect lived in the gap between the two layers.
- *
- * This asserts every emitted tag is handled. Run from the repo root.
- */
-import { readFileSync } from "node:fs";
+/** Guard the generated wire contract, explicit Rust emissions, and exhaustive
+ * frontend dispatch. Claude's dynamic JSON passthrough is validated at runtime;
+ * this check does not pretend to infer arbitrary Rust/JSON payload types. */
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+process.argv.push('--check');
+await import('./generate_recall_contract.mjs');
+const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+const schema = JSON.parse(read('tauri/src/contracts/recall-chat.json'));
+const backend = read('tauri/src-tauri/src/commands.rs');
+const controller = read('tauri/src/scripts/recall-chat.js');
+const panel = read('tauri/src/index.html');
+const dispatched = new Set([...controller.matchAll(/case '([a-z_]+)':/g)].map(match => match[1]));
+assert.deepEqual([...dispatched].sort(), Object.keys(schema.variants).sort(), 'Recall decoder must handle every contracted tag exactly once');
+for (const script of ['recall-contract.js', 'recall-chat.js']) assert.ok(panel.includes(`src="scripts/${script}"`), `shell must load ${script}`);
+assert.ok(panel.includes('window.MinutesRecallChat.create('), 'shell must use the tested controller');
 
-const BACKEND = "tauri/src-tauri/src/commands.rs";
-const PANEL = "tauri/src/index.html";
-
-const backend = readFileSync(BACKEND, "utf8");
-const panel = readFileSync(PANEL, "utf8");
-
-// Emitted tags: json!({"type": "<tag>" ...}) passed to a recall-chat-chunk emit.
-// Scan a window after each emit so unrelated json! macros are not swept in.
-const emitted = new Set();
-const emitRe = /"recall-chat-chunk"/g;
-let m;
-while ((m = emitRe.exec(backend)) !== null) {
-  const window = backend.slice(m.index, m.index + 400);
-  for (const t of window.matchAll(/"type"\s*:\s*"([a-z_]+)"/g)) emitted.add(t[1]);
+let emitted = 0, passthrough = 0;
+for (const match of backend.matchAll(/\.emit_to\(\s*"main",\s*"recall-chat-chunk",\s*([\s\S]*?)\)\s*\.ok\(\)/g)) {
+  const payload = match[1];
+  if (/^json\s*$/.test(payload)) { passthrough++; continue; }
+  const type = /"type"\s*:\s*"([a-z_]+)"/.exec(payload)?.[1];
+  assert.ok(type && schema.variants[type], 'Unknown explicit Recall emission; extend the contract and decoder');
+  for (const field of Object.keys(schema.variants[type]).filter(name => !name.endsWith('?'))) {
+    assert.ok(new RegExp(`"${field}"\\s*:`).test(payload), `Rust ${type} emission is missing ${field}`);
+  }
+  emitted++;
 }
-
-// Handled tags: chunk.type === '<tag>' in the panel's dispatch.
-const handled = new Set();
-for (const t of panel.matchAll(/chunk\.type\s*===\s*'([a-z_]+)'/g)) handled.add(t[1]);
-
-if (emitted.size === 0) {
-  console.error(
-    "recall chunk contract: found no emitted chunk types; the emit shape in " +
-      `${BACKEND} probably changed and this guard needs updating.`,
-  );
-  process.exit(1);
-}
-
-const unhandled = [...emitted].filter((t) => !handled.has(t));
-if (unhandled.length > 0) {
-  console.error(
-    `recall chunk contract: ${BACKEND} emits chunk type(s) the panel never ` +
-      `renders: ${unhandled.join(", ")}.\n` +
-      `  handled in ${PANEL}: ${[...handled].sort().join(", ") || "(none)"}\n` +
-      "  A provider streaming one of these produces an empty reply bubble.\n" +
-      "  Add a branch to the recall-chat-chunk listener, or stop emitting the tag.",
-  );
-  process.exit(1);
-}
-
-console.log(
-  `recall chunk contract: ok (${[...emitted].sort().join(", ")} all handled)`,
-);
+assert.equal(passthrough, 1, 'Claude passthrough changed; inspect the runtime validation boundary');
+assert.ok(emitted >= 3, 'Expected explicit local-provider emissions; scanner must be updated if Rust shape changed');
+console.log(`Recall contract: ${emitted} explicit Rust emissions, ${passthrough} runtime-validated passthrough; exhaustive dispatch`);

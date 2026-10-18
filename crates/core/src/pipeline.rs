@@ -196,6 +196,34 @@ fn detect_summarization_warnings(
     warnings
 }
 
+/// Coverage survives both Markdown rendering and machine-readable degradation.
+/// Complete means every source chunk was delivered, not that extraction is perfect.
+fn format_summary_with_coverage(
+    summary: &summarize::Summary,
+    coverage: Option<&summarize::SummaryCoverage>,
+) -> String {
+    let mut text = summarize::format_summary(summary);
+    if let Some(coverage) = coverage {
+        text.push_str("\n\n> ");
+        text.push_str(&coverage.message());
+        text.push('\n');
+    }
+    text
+}
+
+fn detect_summary_coverage_warning(
+    coverage: Option<&summarize::SummaryCoverage>,
+) -> Option<ProcessingWarning> {
+    coverage
+        .filter(|coverage| !coverage.complete)
+        .map(|coverage| ProcessingWarning {
+            step: "summarize".into(),
+            reason: "summary_coverage_incomplete".into(),
+            timeout_secs: None,
+            message: Some(coverage.message()),
+        })
+}
+
 /// Records a [`ProcessingWarning`] when the configured batch transcription
 /// engine is not the one that actually produced the transcript.
 ///
@@ -216,17 +244,52 @@ fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> 
         apple_speech_unavailable_reason()
     } else if requested.eq_ignore_ascii_case("sherpa") {
         crate::transcribe::sherpa_unavailable_reason(config)
+    } else if requested.eq_ignore_ascii_case("auto") {
+        // `auto` is a resolution strategy, not an engine that can be absent, so
+        // "it is unavailable in this build" asserted something untrue and
+        // withheld the only thing the reader needs: why auto landed here. That
+        // reason already exists and simply was not reaching the artifact.
+        auto_resolution_detail(
+            crate::transcribe::auto_transcription_engine_resolution(config).reason,
+        )
     } else {
         "it is unavailable in this build"
+    };
+    // Name the model as well as the engine. The engine alone does not explain a
+    // transcript, and a reader comparing a poor desktop result against a clean
+    // CLI one on the same audio has no way to tell whether a different model
+    // ran (#940). Whisper is the only engine whose model is configured here, so
+    // it is the only one this can name honestly.
+    let model = if effective.eq_ignore_ascii_case("whisper") {
+        let name = config.transcription.model.trim();
+        if name.is_empty() {
+            String::new()
+        } else {
+            format!(" using model `{name}`")
+        }
+    } else {
+        String::new()
     };
     Some(ProcessingWarning {
         step: "transcribe".to_string(),
         reason: "engine_fallback".to_string(),
         timeout_secs: None,
         message: Some(format!(
-            "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`."
+            "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`{model}."
         )),
     })
+}
+
+/// Strip the leading `engine: ` from an auto-resolution reason.
+///
+/// Those reasons are spelled "whisper: sherpa not compiled" because they are
+/// also rendered on their own in health output. Here the engine is already
+/// named in the surrounding sentence, so repeating it reads as a stutter.
+fn auto_resolution_detail(reason: &'static str) -> &'static str {
+    reason
+        .split_once(": ")
+        .map(|(_, rest)| rest)
+        .unwrap_or(reason)
 }
 
 /// Records a [`ProcessingWarning`] when diarization ran but produced no
@@ -4814,6 +4877,7 @@ fn write_transcript_artifact_with_authority(
             ContentType::Memo => Some("voice-memos".into()),
             ContentType::Meeting => None,
             ContentType::Dictation => Some("dictation".into()),
+            ContentType::Note => Some("note".into()),
         }
     };
     let tags = derive_structured_tags(
@@ -5018,6 +5082,35 @@ where
             "live capability does not match transcript provenance",
         ));
     }
+    // Bind enrichment to the exact artifact that was created. A user edit
+    // before or during a provider call must not be overwritten by stale state.
+    let canonical_root = config.output_dir.canonicalize()?;
+    let original =
+        markdown::read_stable_active_markdown(&artifact.write_result.path, &canonical_root)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact unavailable or changed before enrichment",
+                )
+            })?;
+    let expected = markdown::render_markdown(
+        &artifact.frontmatter,
+        &artifact.transcript,
+        None,
+        context.user_notes.as_deref(),
+        if descriptor_authorized {
+            None
+        } else {
+            Some(audio_path)
+        },
+    )?;
+    if original.content != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "artifact changed before enrichment; existing edits were preserved",
+        )
+        .into());
+    }
     let diagnostic_audio_path = if descriptor_authorized {
         Path::new("authorized-audio")
     } else {
@@ -5145,20 +5238,22 @@ where
     let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
+    let mut summary_coverage: Option<summarize::SummaryCoverage> = None;
     let summary = if config.summarization.engine != "none" {
         on_progress(PipelineStage::Summarizing);
         // Notes are passed separately so the agent path can byte-budget them
         // apart from the transcript and keep the screenshot coverage bound
         // derived from transcript text only.
-        summarize::summarize_with_template(
+        let report = summarize::summarize_with_template_report(
             &transcript,
             context.user_notes.as_deref(),
             &screen_files,
             config,
             context.template.as_ref(),
             Some(&audio_log_target),
-        )
-        .map(|summary| {
+        );
+        summary_coverage = report.coverage;
+        report.summary.map(|summary| {
             let summary_chars = summary_signal_chars(&summary);
 
             let actions_started = std::time::Instant::now();
@@ -5202,7 +5297,7 @@ where
             );
 
             summary_participants = summary.participants.clone();
-            let formatted = summarize::format_summary(&summary);
+            let formatted = format_summary_with_coverage(&summary, summary_coverage.as_ref());
             raw_summary = Some(summary);
             formatted
         })
@@ -5293,15 +5388,10 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people remain candidates for entity links, but cannot
+        // authorize a transcript rewrite. Use the same evidence as persistence.
+        let participants =
+            confirmed_attendees(&artifact.frontmatter.attendees, &attendees, &speaker_map);
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
@@ -5399,6 +5489,9 @@ where
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = detect_summary_coverage_warning(summary_coverage.as_ref()) {
+        summarization_warnings.push(warning);
+    }
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
@@ -5430,7 +5523,8 @@ where
         Some(OutputStatus::TranscriptOnly)
     };
     frontmatter.processing_warnings = summarization_warnings;
-    frontmatter.attendees = attendees;
+    frontmatter.attendees =
+        confirmed_attendees(&artifact.frontmatter.attendees, &attendees, &speaker_map);
     frontmatter.people = people;
     frontmatter.entities = entities;
     frontmatter.action_items = structured_actions;
@@ -5442,21 +5536,23 @@ where
         merge_recording_health(recording_health, frontmatter.recording_health);
 
     let mut result = if descriptor_authorized {
-        markdown::rewrite_without_retry_path(
+        markdown::rewrite_without_retry_path_guarded(
             &artifact.write_result.path,
             &frontmatter,
             &transcript,
             summary.as_deref(),
             context.user_notes.as_deref(),
+            &original.content,
         )?
     } else {
-        markdown::rewrite_with_retry_path(
+        markdown::rewrite_with_retry_path_guarded(
             &artifact.write_result.path,
             &frontmatter,
             &transcript,
             summary.as_deref(),
             context.user_notes.as_deref(),
             Some(audio_path),
+            &original.content,
         )?
     };
     apply_title_generation(
@@ -5841,6 +5937,7 @@ where
     let summary_model = summarize::summarization_model_hint(config, !screen_files.is_empty());
 
     let mut raw_summary: Option<summarize::Summary> = None;
+    let mut summary_coverage: Option<summarize::SummaryCoverage> = None;
     // Skip summarization when the all-noise gate replaced the transcript body:
     // the LLM has nothing to summarize, and we'd just burn tokens / surface
     // a hallucinated summary on top of a hallucinated transcript.
@@ -5854,15 +5951,16 @@ where
         // passed separately so the agent path can byte-budget them apart from
         // the transcript and keep the screenshot coverage bound derived from
         // transcript text only.
-        summarize::summarize_with_template(
+        let report = summarize::summarize_with_template_report(
             &transcript,
             user_notes.as_deref(),
             &screen_files,
             config,
             template,
             Some(&audio_log_target),
-        )
-        .map(|s| {
+        );
+        summary_coverage = report.coverage;
+        report.summary.map(|s| {
             let summary_chars = summary_signal_chars(&s);
 
             let actions_started = std::time::Instant::now();
@@ -5912,7 +6010,7 @@ where
                     "extracted participants from summary"
                 );
             }
-            let formatted = summarize::format_summary(&s);
+            let formatted = format_summary_with_coverage(&s, summary_coverage.as_ref());
             raw_summary = Some(s);
             formatted
         })
@@ -5993,6 +6091,9 @@ where
     let mut transcript = attribution.transcript;
     let speaker_map = attribution.speaker_map;
     let attendees = normalize_attendees_with_speaker_map(&attendees, &speaker_map);
+    // See `confirmed_attendees`: `attendees` stays the merged superset for
+    // entity links and candidate matching; persistence and rewrite permission narrow.
+    let persisted_attendees = confirmed_attendees(&calendar_attendees, &attendees, &speaker_map);
     let name_corrections = if config.transcription.name_correction != NameCorrectionMode::Off
         && content_type == ContentType::Meeting
     {
@@ -6001,20 +6102,13 @@ where
             Some(&config.identity),
             load_vocabulary_for_decode_hints().as_ref(),
         );
-        // Confirmed participants gate the aggressive (name-position) tier:
-        // attendees plus High-confidence attributed speakers.
-        let mut participants = attendees.clone();
-        participants.extend(
-            speaker_map
-                .iter()
-                .filter(|a| a.confidence == crate::diarize::Confidence::High)
-                .map(|a| a.name.clone()),
-        );
+        // Mentioned people cannot authorize a transcript rewrite.
+        let participants = &persisted_attendees;
         let (corrected_transcript, corrections) =
             crate::name_correction::correct_names_with_participants(
                 &transcript,
                 &name_pool,
-                &participants,
+                participants,
             );
         transcript = corrected_transcript;
         corrections
@@ -6108,6 +6202,7 @@ where
             ContentType::Memo => Some("voice-memos".into()),
             ContentType::Meeting => None,
             ContentType::Dictation => Some("dictation".into()),
+            ContentType::Note => Some("note".into()),
         }
     };
     let tags = derive_structured_tags(
@@ -6138,6 +6233,9 @@ where
         config.summarization.agent_timeout_secs,
         summarization_attempted,
     );
+    if let Some(warning) = detect_summary_coverage_warning(summary_coverage.as_ref()) {
+        summarization_warnings.push(warning);
+    }
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
@@ -6167,7 +6265,7 @@ where
         status,
         processing_warnings: summarization_warnings,
         tags,
-        attendees,
+        attendees: persisted_attendees,
         attendees_raw: None,
         calendar_event: calendar_event_title,
         people,
@@ -6951,6 +7049,96 @@ fn select_calendar_event(
         })
         .min_by_key(|event| event.minutes_until.abs())
         .cloned()
+}
+
+/// Narrow a merged attendee list down to the people actually established as
+/// present, for the `attendees:` field that gets written to disk.
+///
+/// Issue #245. `attendees` is not a display field. `knowledge_extract.rs`
+/// walks `normalized_attendees()` and files every decision in the meeting
+/// under every name in it, so a name that lands here is recorded as a party
+/// to decisions made on that call.
+///
+/// The merged list cannot carry that weight, because part of it comes from
+/// `summary.participants`, and the prompt behind that field asks the model
+/// for people "present or mentioned in the conversation". A reporter with a
+/// two person Teams call got eight attendees: the two real ones, plus six
+/// people whose access permissions were being discussed. The model answered
+/// the question it was asked; the pipeline read "mentioned" as "attended".
+///
+/// So presence has to come from sources that can actually establish it:
+///
+/// - `trusted`, the calendar event's attendee list (L0, deterministic).
+/// - speakers the attribution pass resolved at `Confidence::High`, which is
+///   the same bar CLAUDE.md sets for rewriting user visible labels.
+///
+/// The merged list stays in use everywhere a superset is harmless or helpful:
+/// speaker mapping candidates, entity links, and the name correction pool.
+/// Only what gets persisted narrows. A meeting with no calendar event and no
+/// high confidence attribution now writes an empty `attendees:`, which is the
+/// intended answer under "a wrong rewrite is worse than none".
+///
+/// Only two of the three places that persist `attendees` need this.
+/// `write_transcript_artifact_with_authority` takes its list straight from the
+/// matched calendar event and never merges `summary.participants` into it, so
+/// it was never the leak and is left alone.
+fn confirmed_attendees(
+    trusted: &[String],
+    merged: &[String],
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Vec<String> {
+    let confirmed: Vec<String> = trusted
+        .iter()
+        .cloned()
+        .chain(
+            speaker_map
+                .iter()
+                .filter(|attribution| attribution.confidence == diarize::Confidence::High)
+                .map(|attribution| attribution.name.clone()),
+        )
+        .collect();
+
+    // #385 class 2 shapes reach this list too, so match on split references
+    // rather than whole strings: a trusted "Gert and Liam" has to be findable
+    // from a High attribution for either of them.
+    fn match_keys(raw: &str) -> Vec<String> {
+        crate::person_identity::split_person_references(raw)
+            .iter()
+            .filter_map(|reference| normalize_attendee_candidate(reference))
+            .map(|name| name.to_lowercase())
+            .collect()
+    }
+
+    // Keep the merged list's spelling and ordering for anyone who survives the
+    // filter, so this narrows the list without also rewriting the names in it.
+    let mut keep = std::collections::HashSet::new();
+    for name in &confirmed {
+        keep.extend(match_keys(name));
+    }
+
+    let mut result: Vec<String> = merged
+        .iter()
+        .filter(|name| {
+            let keys = match_keys(name);
+            !keys.is_empty() && keys.iter().all(|key| keep.contains(key))
+        })
+        .cloned()
+        .collect();
+
+    // A high confidence speaker who is not in the merged list still attended.
+    let mut seen: std::collections::HashSet<String> =
+        result.iter().flat_map(|name| match_keys(name)).collect();
+    for name in confirmed {
+        let Some(normalized) = normalize_attendee_candidate(&name) else {
+            continue;
+        };
+        let key = normalized.to_lowercase();
+        if seen.insert(key) {
+            result.push(normalized);
+        }
+    }
+
+    result
 }
 
 fn merge_attendees(existing: &[String], additions: &[String]) -> Vec<String> {
@@ -7810,6 +7998,8 @@ pub(crate) fn extract_decisions(summary: &summarize::Summary) -> Vec<markdown::D
             // Try to infer topic from the first few words
             let topic = infer_topic(text);
             markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: text.clone(),
                 topic,
                 authority: None,
@@ -8420,6 +8610,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn summary_coverage_persists_and_marks_incomplete_work() {
+        let mut coverage = summarize::SummaryCoverage {
+            complete: true,
+            transcript_bytes: 120_000,
+            notes_bytes: 2_000,
+            source_chunks: 3,
+            completed_chunks: 3,
+            detail: "All source chunks delivered.".into(),
+        };
+        let summary = summarize::Summary {
+            text: String::new(),
+            key_points: vec!["Meeting point".into()],
+            decisions: vec![],
+            action_items: vec![],
+            open_questions: vec![],
+            commitments: vec![],
+            participants: vec![],
+        };
+        let rendered = format_summary_with_coverage(&summary, Some(&coverage));
+        assert!(rendered.contains("Meeting point"));
+        assert!(rendered.contains("Agent input coverage: complete"));
+        assert!(rendered.contains("120000 transcript bytes"));
+        assert!(detect_summary_coverage_warning(Some(&coverage)).is_none());
+        coverage.complete = false;
+        coverage.completed_chunks = 1;
+        coverage.detail = "source chunk 2/3 failed".into();
+        let warning = detect_summary_coverage_warning(Some(&coverage)).unwrap();
+        assert_eq!(warning.reason, "summary_coverage_incomplete");
+        assert!(warning.message.unwrap().contains("source chunk 2/3 failed"));
+    }
+
+    #[test]
+    fn enrichment_preserves_edits_before_and_during_summarization() {
+        for edit_during_summary in [false, true] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let audio_path = dir.path().join("recording.wav");
+            std::fs::write(&audio_path, vec![0u8; 64_044]).unwrap();
+            let mut config = Config {
+                output_dir: dir.path().join("meetings"),
+                ..Config::default()
+            };
+            config.transcription.min_words = 1;
+            config.summarization.engine = "unknown-test-engine".into();
+            config.diarization.engine = "none".into();
+            let context = BackgroundPipelineContext::default();
+            let artifact = write_transcript_artifact(
+                &audio_path,
+                ContentType::Meeting,
+                Some("Revision guard"),
+                &config,
+                &context,
+                None,
+                "[0:00] We agreed to deliver the report on Friday.\n".into(),
+                crate::transcribe::FilterStats::default(),
+                0,
+            )
+            .unwrap();
+            let path = artifact.write_result.path.clone();
+            let edited = format!(
+                "{}\nHuman edit must survive.\n",
+                std::fs::read_to_string(&path).unwrap()
+            );
+            if !edit_during_summary {
+                std::fs::write(&path, &edited).unwrap();
+            }
+            let result =
+                enrich_transcript_artifact(&audio_path, &artifact, &config, &context, |stage| {
+                    if edit_during_summary && matches!(stage, PipelineStage::Summarizing) {
+                        std::fs::write(&path, &edited).unwrap();
+                    }
+                });
+            assert!(result.is_err(), "must refuse to replace a changed artifact");
+            assert_eq!(std::fs::read_to_string(path).unwrap(), edited);
+        }
+    }
+
+    #[test]
     fn apple_speech_preference_resolves_through_closed_product_gate() {
         assert_eq!(
             resolved_apple_speech_backend("apple-speech"),
@@ -8742,6 +9009,56 @@ mod tests {
         assert!(
             message.contains("build") || message.contains("model") || message.contains("plugin"),
             "gives an actionable reason: {message}"
+        );
+    }
+
+    #[test]
+    fn engine_fallback_warning_names_the_whisper_model_that_ran() {
+        // Reported in #940: a desktop transcript was badly wrong while the CLI
+        // produced clean output from the same audio, and the warning named only
+        // the engine. Both runs used whisper, so the engine was never the
+        // variable; the model was, and nothing in the artifact recorded it.
+        let mut config = Config::default();
+        config.transcription.engine = "parakeet".into();
+        config.transcription.model = "large-v3".into();
+        let message = detect_engine_fallback_warning(&config)
+            .expect("a substitution must be recorded")
+            .message
+            .expect("the warning carries a message");
+        assert!(
+            message.contains("`large-v3`"),
+            "names the model that produced the transcript: {message}"
+        );
+    }
+
+    #[test]
+    fn engine_fallback_warning_explains_why_auto_chose_this_engine() {
+        // `auto` is a resolution strategy, not an engine that can be missing,
+        // but it fell through to a generic "it is unavailable in this build".
+        // That told the reader of #940 something untrue and withheld the only
+        // useful part, which is why auto landed on whisper here.
+        let mut config = Config::default();
+        config.transcription.engine = "auto".into();
+        let message = detect_engine_fallback_warning(&config)
+            .expect("an auto substitution must be recorded")
+            .message
+            .expect("the warning carries a message");
+        assert!(
+            !message.contains("it is unavailable in this build"),
+            "auto is not an engine that can be absent: {message}"
+        );
+        // The real reason names what was missing: the feature, the platform,
+        // the plugin, or the model.
+        assert!(
+            ["sherpa", "Apple Silicon", "plugin", "model"]
+                .iter()
+                .any(|needle| message.contains(needle)),
+            "gives the actual resolution reason: {message}"
+        );
+        // And it is not repeated as "whisper: whisper: ...".
+        assert!(
+            !message.contains("whisper: "),
+            "does not stutter the engine name: {message}"
         );
     }
 
@@ -10342,6 +10659,176 @@ mod tests {
             .contains("low confidence"));
     }
 
+    fn attribution(
+        label: &str,
+        name: &str,
+        confidence: diarize::Confidence,
+    ) -> diarize::SpeakerAttribution {
+        diarize::SpeakerAttribution {
+            speaker_label: label.into(),
+            name: name.into(),
+            confidence,
+            source: diarize::AttributionSource::Llm,
+        }
+    }
+
+    #[test]
+    fn both_persist_points_narrow_attendees_before_writing() {
+        // Codex review of the #245 fix: every other test here calls
+        // `confirmed_attendees` directly, so all of them would still pass if
+        // someone reverted the two call sites and went back to persisting the
+        // merged list. The helper is not the fix. Calling it is.
+        //
+        // Needles are assembled at runtime so this test cannot match its own
+        // source text.
+        // rustfmt wraps these assignments, so match on whitespace-normalized
+        // source rather than on exact line shape.
+        let source: String = include_str!("pipeline.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let raw_refine = format!("{}{}", "frontmatter.attendees = ", "attendees;");
+
+        assert!(
+            !source.contains(&raw_refine),
+            "the refine path persists the merged attendee list again; it must go through confirmed_attendees"
+        );
+        assert!(
+            source.contains(&format!(
+                "{}{}",
+                "frontmatter.attendees = confirmed_", "attendees("
+            )),
+            "the refine path no longer narrows attendees before writing them"
+        );
+        assert!(
+            source.contains(&format!("{}{}", "attendees: persisted_", "attendees,")),
+            "the foreground path no longer narrows attendees before writing them"
+        );
+    }
+
+    #[test]
+    fn mentioned_or_uncertain_people_cannot_authorize_name_rewrites() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speaker_map = vec![
+            attribution("SPEAKER_00", "Geert", diarize::Confidence::Medium),
+            attribution("SPEAKER_01", "Jacques", diarize::Confidence::Low),
+        ];
+        let participants = confirmed_attendees(&[], &candidates, &speaker_map);
+        let raw = "thanks bert for the notes; merci jacque for joining";
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            raw,
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, raw);
+        assert!(corrections.is_empty());
+    }
+
+    #[test]
+    fn trusted_quiet_attendees_and_high_confidence_speakers_keep_name_corrections() {
+        let candidates = vec!["Geert".to_string(), "Jacques".to_string()];
+        let speakers = vec![attribution(
+            "SPEAKER_00",
+            "Jacques",
+            diarize::Confidence::High,
+        )];
+        // Existing calendar/prior-artifact trust is preserved, including someone
+        // who did not produce an attributable speaking segment.
+        let participants = confirmed_attendees(&["Geert".into()], &candidates, &speakers);
+        let (out, corrections) = crate::name_correction::correct_names_with_participants(
+            "thanks bert for the notes; merci jacque for joining",
+            &candidates,
+            &participants,
+        );
+        assert_eq!(out, "thanks Geert for the notes; merci Jacques for joining");
+        assert_eq!(corrections.len(), 2);
+    }
+
+    #[test]
+    fn confirmed_attendees_drops_names_only_mentioned_in_the_transcript() {
+        // Issue #245. The reporter's two person Teams call produced eight
+        // attendees: the two who were there, plus six people whose access
+        // permissions were being discussed. The six reached `attendees` because
+        // the summarization prompt asks for people "present or mentioned" and
+        // `merge_attendees` appended the answer wholesale.
+        let trusted = vec!["Dana".to_string(), "Priya".to_string()];
+        let merged = vec![
+            "Dana".to_string(),
+            "Priya".to_string(),
+            "Marcus".to_string(),
+            "Ines".to_string(),
+        ];
+
+        let confirmed = confirmed_attendees(&trusted, &merged, &[]);
+
+        assert_eq!(confirmed, vec!["Dana", "Priya"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_keeps_high_confidence_speakers_and_drops_lower_ones() {
+        // High confidence is the bar CLAUDE.md sets for rewriting user visible
+        // labels, so it is the bar for claiming someone was in the room. A
+        // Medium attribution is a suggestion, and a suggestion must not become
+        // a party to every decision in the meeting.
+        let merged = vec!["Dana".to_string(), "Marcus".to_string(), "Ines".to_string()];
+        let speaker_map = vec![
+            attribution("SPEAKER_00", "Dana", diarize::Confidence::High),
+            attribution("SPEAKER_01", "Marcus", diarize::Confidence::Medium),
+            attribution("SPEAKER_02", "Ines", diarize::Confidence::Low),
+        ];
+
+        let confirmed = confirmed_attendees(&[], &merged, &speaker_map);
+
+        assert_eq!(confirmed, vec!["Dana"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_is_empty_when_nothing_establishes_presence() {
+        // No calendar event and no high confidence attribution means nothing
+        // proved anyone attended. Empty is the correct answer here, not the
+        // model's guess: a wrong rewrite is worse than none.
+        let merged = vec!["Marcus".to_string(), "Ines".to_string()];
+
+        let confirmed = confirmed_attendees(&[], &merged, &[]);
+
+        assert!(
+            confirmed.is_empty(),
+            "expected no attendees, got {confirmed:?}"
+        );
+    }
+
+    #[test]
+    fn confirmed_attendees_adds_a_high_confidence_speaker_missing_from_the_merged_list() {
+        // The merged list is not a superset in every case: a speaker the
+        // attribution pass resolved from voice enrollment need never have been
+        // named by the summarizer or the calendar.
+        let speaker_map = vec![attribution(
+            "SPEAKER_00",
+            "Priya",
+            diarize::Confidence::High,
+        )];
+
+        let confirmed =
+            confirmed_attendees(&["Dana".to_string()], &["Dana".to_string()], &speaker_map);
+
+        assert_eq!(confirmed, vec!["Dana", "Priya"]);
+    }
+
+    #[test]
+    fn confirmed_attendees_matches_case_insensitively_without_rewriting_spelling() {
+        // Narrowing the list must not also renormalize the names in it, or this
+        // fix would quietly become the kind of rewrite it exists to prevent.
+        let speaker_map = vec![attribution("SPEAKER_00", "dana", diarize::Confidence::High)];
+
+        let confirmed = confirmed_attendees(
+            &[],
+            &["Dana Whitfield".to_string(), "Dana".to_string()],
+            &speaker_map,
+        );
+
+        assert_eq!(confirmed, vec!["Dana"]);
+    }
+
     #[test]
     fn merge_attendees_adds_summary_participants_case_insensitively() {
         let merged = merge_attendees(
@@ -10608,6 +11095,8 @@ mod tests {
             status: "open".into(),
         }];
         let decisions = vec![markdown::Decision {
+            id: None,
+            effective_date: None,
             text: "Launch pricing at monthly billing per month".into(),
             topic: Some("pricing strategy".into()),
             authority: None,
@@ -10660,24 +11149,32 @@ mod tests {
             &[],
             &[
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Speaker_1 provide speaker roster and contact notes".into(),
                     topic: Some("speaker 1 provide speaker".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Reach out to Cardinal about access".into(),
                     topic: Some("reach out".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "Pioneer asked build the custom report after review".into(),
                     topic: Some("pioneer asked build".into()),
                     authority: None,
                     supersedes: None,
                 },
                 markdown::Decision {
+                    id: None,
+                    effective_date: None,
                     text: "LeaderNet 835 reconciliation remains the core workflow".into(),
                     topic: Some("leadernet 835 reconciliation".into()),
                     authority: None,
@@ -11357,6 +11854,8 @@ mod tests {
             &attendees,
             &action_items,
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Speaker_1 provide speaker roster and contact notes".into(),
                 topic: Some("speaker 1 provide speaker".into()),
                 authority: None,
@@ -11436,6 +11935,8 @@ mod tests {
             &["Alex Chen".into()],
             &[],
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
                 authority: None,
@@ -11458,6 +11959,8 @@ mod tests {
             Some("iPhone 16 Pro"),
             &entities,
             &[markdown::Decision {
+                id: None,
+                effective_date: None,
                 text: "Use annual billing for premium users".into(),
                 topic: Some("pricing strategy".into()),
                 authority: None,

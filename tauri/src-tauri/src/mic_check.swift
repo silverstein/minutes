@@ -1,5 +1,6 @@
 // Minimal Swift helper to check if any audio input is active.
-// Outputs "1" if mic/input capture is active, "0" if idle.
+// Default output is "1" if input capture is active, "0" if idle.
+// --call-input-state returns a device-gated attribution snapshot as JSON.
 
 import CoreAudio
 import Foundation
@@ -90,16 +91,17 @@ func activeInputProcessIDs() -> [pid_t]? {
     return sawReadableProcess ? pids : nil
 }
 
-func inputChannelCount(for deviceID: AudioObjectID) -> UInt32 {
+func inputChannelCount(for deviceID: AudioObjectID) -> UInt32? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyStreamConfiguration,
         mScope: kAudioDevicePropertyScopeInput,
         mElement: kAudioObjectPropertyElementMain
     )
     var size: UInt32 = 0
-    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr, size > 0 else {
-        return 0
+    guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr else {
+        return nil
     }
+    guard size > 0 else { return 0 }
 
     let bufferList = UnsafeMutableRawPointer.allocate(
         byteCount: Int(size),
@@ -108,7 +110,7 @@ func inputChannelCount(for deviceID: AudioObjectID) -> UInt32 {
     defer { bufferList.deallocate() }
 
     guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else {
-        return 0
+        return nil
     }
 
     let audioBufferList = bufferList.assumingMemoryBound(to: AudioBufferList.self)
@@ -116,14 +118,71 @@ func inputChannelCount(for deviceID: AudioObjectID) -> UInt32 {
         .reduce(UInt32(0)) { total, buffer in total + buffer.mNumberChannels }
 }
 
-func anyInputDeviceRunning() -> Bool {
+// Unknown device state must not suppress process attribution: a route can
+// disappear during enumeration, and a non-default input may still be active.
+func anyInputDeviceRunning() -> Bool? {
     guard let devices = objectIDs(for: kAudioHardwarePropertyDevices) else {
-        return false
+        return nil
     }
-    return devices.contains { deviceID in
-        inputChannelCount(for: deviceID) > 0
-            && (uint32Property(kAudioDevicePropertyDeviceIsRunningSomewhere, on: deviceID) ?? 0) > 0
+    var unknown = false
+    for deviceID in devices {
+        guard let channels = inputChannelCount(for: deviceID) else {
+            unknown = true
+            continue
+        }
+        if channels == 0 { continue }
+        guard let running = uint32Property(kAudioDevicePropertyDeviceIsRunningSomewhere, on: deviceID) else {
+            unknown = true
+            continue
+        }
+        if running > 0 { return true }
     }
+    return unknown ? nil : false
+}
+
+func callInputState(
+    deviceProbe: () -> Bool? = anyInputDeviceRunning,
+    attributionProbe: () -> [pid_t]? = activeInputProcessIDs
+) -> [String: Any] {
+    let deviceActive = deviceProbe()
+    // This branch never enumerates process objects when every input is idle.
+    let pids = deviceActive == false ? [] : attributionProbe()
+    let micLive = pids.map { !$0.isEmpty } ?? deviceActive ?? false
+    return [
+        "mic_live": micLive,
+        "device_active": deviceActive.map { $0 as Any } ?? NSNull(),
+        "active_input_pids": pids.map { $0 as Any } ?? NSNull(),
+    ]
+}
+
+#if !MIC_CHECK_LIBRARY
+// Keep the CoreAudio client alive between polls. Starting a new client for
+// each device-only query can itself provoke repeated TCC checks (#1127).
+if CommandLine.arguments.contains("--serve-call-input") {
+    while let command = readLine() {
+        if command == "full" {
+            let data = try JSONSerialization.data(withJSONObject: callInputState(), options: [.sortedKeys])
+            print(String(decoding: data, as: UTF8.self))
+        } else if command == "device" {
+            print(anyInputDeviceRunning().map { $0 ? "1" : "0" } ?? "unknown")
+        } else {
+            exit(2)
+        }
+        fflush(stdout)
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--device-input-active") {
+    guard let active = anyInputDeviceRunning() else { exit(2) }
+    print(active ? "1" : "0")
+    exit(0)
+}
+
+if CommandLine.arguments.contains("--call-input-state") {
+    let data = try JSONSerialization.data(withJSONObject: callInputState(), options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--active-input-pids") {
@@ -136,5 +195,7 @@ if CommandLine.arguments.contains("--active-input-pids") {
     exit(0)
 }
 
-let micActive = activeInputProcessIDs().map { !$0.isEmpty } ?? anyInputDeviceRunning()
+let micActive = activeInputProcessIDs().map { !$0.isEmpty } ?? anyInputDeviceRunning() ?? false
 print(micActive ? "1" : "0")
+
+#endif

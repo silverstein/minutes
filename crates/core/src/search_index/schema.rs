@@ -7,8 +7,8 @@
 //!   `rowid` is explicit so it can be matched against `meetings_fts.rowid`.
 //! - `meeting_attendees` (B-tree, normalized): preserves the existing
 //!   case-insensitive substring filter semantics.
-//! - `meetings_fts` (FTS5, owns its content): title + body, with porter
-//!   tokenizer + diacritic-stripping + 2/3/4-char prefix index.
+//! - `meetings_fts` (FTS5, owns its content): title + body, with literal Unicode
+//!   tokenization + diacritic-stripping + 2/3/4-char prefix index.
 //! - `sync_state` (B-tree, key/value): tracks the indexed `output_dir` for
 //!   full-rebuild on directory changes.
 //!
@@ -24,12 +24,13 @@ use std::path::Path;
 
 use super::SearchIndexError;
 
-/// Version 2 is a privacy-boundary migration. Version 1 could persist
+/// Version 3 aligns literal token matching with MCP/SDK (no English stemming).
+/// Version 2 was a privacy-boundary migration. Version 1 could persist
 /// restricted or malformed meeting bodies in both the B-tree and FTS tables.
 /// There is no trustworthy in-place classifier for those existing rows, so an
 /// upgrade deliberately drops the index and lets the next sync repopulate it
 /// from policy-verified source files.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Open or create the index database. Sets WAL + busy_timeout pragmas, runs
 /// schema validation, and rebuilds in place if anything is corrupted or
@@ -252,7 +253,7 @@ const SCHEMA_SQL: &str = r#"
 
     CREATE VIRTUAL TABLE IF NOT EXISTS meetings_fts USING fts5(
         title, body,
-        tokenize='porter unicode61 remove_diacritics 2',
+        tokenize='unicode61 remove_diacritics 2',
         prefix='2 3 4'
     );
 

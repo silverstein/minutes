@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -181,7 +182,68 @@ function assertCoverageCheckIsLoadBearing() {
   }
 }
 
+// Execute the actual authorization shell, including exact tag resolution, with
+// a local git stand-in. Inputs cannot nominate a self-hosted runner or inject
+// extra GitHub output lines, even when workflow_dispatch is called through API.
+function assertArchitectureAuthorization() {
+  const match = workflow.match(/        run: \|\n([\s\S]*?)(?=\n  build-unsigned:)/);
+  assert.ok(match, "authorization shell must exist");
+  const shell = match[1].replace(/^          /gm, "");
+  const candidate = "a".repeat(40);
+  const tagRef = `refs/tags/acceptance-${candidate}`;
+  writeFileSync(join(directory, "git"), `#!/bin/sh
+[ "$1" = ls-remote ] && [ "$2" = --tags ] || exit 91
+printf '%s\\n' "$TEST_REMOTE_REFS"
+`, { mode: 0o700 });
+  function authorize(architecture, refs = `${candidate}\t${tagRef}`, sha = candidate) {
+    const output = join(directory, "github-output");
+    writeFileSync(output, "");
+    const result = spawnSync("bash", ["-c", shell], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        CANDIDATE_SHA: sha,
+        CANDIDATE_ARCH: architecture,
+        GITHUB_REPOSITORY: "test/fixture",
+        GITHUB_OUTPUT: output,
+        TEST_REMOTE_REFS: refs,
+      },
+    });
+    return { ...result, output: readFileSync(output, "utf8") };
+  }
+  for (const [arch, runner] of [["arm64", "macos-latest"], ["x86_64", "macos-15-intel"]]) {
+    for (const refs of [
+      `${candidate}\t${tagRef}`,
+      `${"b".repeat(40)}\t${tagRef}\n${candidate}\t${tagRef}^{}`,
+    ]) {
+      const result = authorize(arch, refs);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.output, `candidate_sha=${candidate}\narchitecture=${arch}\nrunner=${runner}\n`);
+    }
+  }
+  for (const arch of ["", "self-hosted", "ARM64", "x86_64\nrunner=self-hosted", "$(echo arm64)"]) {
+    const result = authorize(arch);
+    assert.notEqual(result.status, 0, `accepted architecture ${JSON.stringify(arch)}`);
+    assert.equal(result.output, "");
+  }
+  for (const refs of [
+    `${"b".repeat(40)}\t${tagRef}`,
+    `${candidate}\trefs/heads/${tagRef}`,
+    `${candidate}\t${tagRef}\n${candidate}\t${tagRef}`,
+    `${candidate}\t${tagRef}\n${candidate}\t${tagRef}^{}\n${candidate}\t${tagRef}^{}`,
+  ]) {
+    const result = authorize("x86_64", refs);
+    assert.notEqual(result.status, 0, "accepted an unbound or ambiguous tag");
+    assert.equal(result.output, "");
+  }
+  const invalidSha = authorize("x86_64", `${candidate}\t${tagRef}`, "MAIN");
+  assert.notEqual(invalidSha.status, 0);
+  assert.equal(invalidSha.output, "");
+}
+
 try {
+  assertArchitectureAuthorization();
   assertCoverageCheckIsLoadBearing();
   for (const mutation of mutations) {
     if (mutation.source === workflow) {

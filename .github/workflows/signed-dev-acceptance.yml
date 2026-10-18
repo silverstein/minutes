@@ -7,6 +7,14 @@ on:
         description: Full SHA protected by the matching acceptance-<sha> tag
         required: true
         type: string
+      architecture:
+        description: Native build and acceptance architecture
+        required: true
+        type: choice
+        default: arm64
+        options:
+          - arm64
+          - x86_64
 
 permissions:
   contents: read
@@ -28,17 +36,26 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
+      architecture: ${{ steps.authorize.outputs.architecture }}
+      runner: ${{ steps.authorize.outputs.runner }}
     steps:
       - name: Bind the request to its protected acceptance tag
         id: authorize
         env:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_ARCH: ${{ inputs.architecture }}
         run: |
           set -euo pipefail
           if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "candidate_sha must be a full lowercase commit SHA" >&2
             exit 1
           fi
+          # Never route an arbitrary dispatch input into runs-on.
+          case "$CANDIDATE_ARCH" in
+            arm64) runner="macos-latest" ;;
+            x86_64) runner="macos-15-intel" ;;
+            *) echo "architecture must be arm64 or x86_64" >&2; exit 1 ;;
+          esac
           tag="acceptance-$CANDIDATE_SHA"
           remote="https://github.com/${GITHUB_REPOSITORY}.git"
           # `git ls-remote` patterns tail-match across ref namespaces, so a
@@ -77,12 +94,13 @@ jobs:
             echo "Protected tag $tag does not resolve exactly to $CANDIDATE_SHA" >&2
             exit 1
           fi
-          echo "candidate_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "candidate_sha=$CANDIDATE_SHA" \
+            "architecture=$CANDIDATE_ARCH" "runner=$runner" >> "$GITHUB_OUTPUT"
 
   build-unsigned:
     name: Build candidate without signing secrets
     needs: authorize-candidate
-    runs-on: macos-latest
+    runs-on: ${{ needs.authorize-candidate.outputs.runner }}
     timeout-minutes: 90
     steps:
       - name: Check out exact protected candidate
@@ -94,10 +112,29 @@ jobs:
       - name: Verify exact candidate checkout
         env:
           CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+          CANDIDATE_ARCH: ${{ needs.authorize-candidate.outputs.architecture }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(uname -m)" = "$CANDIDATE_ARCH"
           printf '%s\n' "$CANDIDATE_SHA" > candidate-sha.txt
+
+      - name: Select the Speech-capable SDK on Intel
+        if: needs.authorize-candidate.outputs.architecture == 'x86_64'
+        run: |
+          set -euo pipefail
+          test -d /Applications/Xcode_26.3.app/Contents/Developer
+          echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Check the Swift bridge before building Rust dependencies
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun swiftc -typecheck -parse-as-library \
+            -target "$(uname -m)-apple-macos11.0" \
+            crates/core/src/macos_graph_xpc_authority.swift \
+            crates/core/src/macos_apple_speech_bridge.swift
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
@@ -111,10 +148,19 @@ jobs:
         run: ./scripts/install-dev-app.sh --target-only
 
       - name: Package unsigned candidate and signing metadata
+        env:
+          CANDIDATE_ARCH: ${{ needs.authorize-candidate.outputs.architecture }}
         run: |
           set -euo pipefail
           app="target/release/bundle/macos/Minutes Dev.app"
           test -d "$app"
+          for binary in \
+            "$app/Contents/MacOS/minutes-app" \
+            "$app/Contents/MacOS/minutes" \
+            "$app/Contents/XPCServices/com.useminutes.graph-worker.xpc/Contents/MacOS/minutes-graph-worker" \
+            "$app/Contents/XPCServices/com.useminutes.apple-speech-worker.xpc/Contents/MacOS/minutes-apple-speech-worker"; do
+            test "$(lipo -archs "$binary")" = "$CANDIDATE_ARCH"
+          done
           ditto -c -k --sequesterRsrc --keepParent "$app" minutes-dev-unsigned.zip
           shasum -a 256 minutes-dev-unsigned.zip > minutes-dev-unsigned.zip.sha256
           cp -f tauri/src-tauri/entitlements.plist outer-entitlements.plist
@@ -462,7 +508,7 @@ jobs:
     needs:
       - authorize-candidate
       - sign-reviewed-artifact
-    runs-on: macos-latest
+    runs-on: ${{ needs.authorize-candidate.outputs.runner }}
     timeout-minutes: 20
     steps:
       - name: Check out exact protected acceptance harness
@@ -481,16 +527,26 @@ jobs:
       - name: Verify and expand exact signed candidate
         env:
           CANDIDATE_SHA: ${{ needs.authorize-candidate.outputs.candidate_sha }}
+          CANDIDATE_ARCH: ${{ needs.authorize-candidate.outputs.architecture }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(uname -m)" = "$CANDIDATE_ARCH"
           (
             cd payload
             shasum -a 256 -c minutes-dev-signed.zip.sha256
           )
           mkdir -p runtime
           ditto -x -k payload/minutes-dev-signed.zip runtime
-          test -d "runtime/Minutes Dev.app"
+          app="runtime/Minutes Dev.app"
+          test -d "$app"
+          for binary in \
+            "$app/Contents/MacOS/minutes-app" \
+            "$app/Contents/MacOS/minutes" \
+            "$app/Contents/XPCServices/com.useminutes.graph-worker.xpc/Contents/MacOS/minutes-graph-worker" \
+            "$app/Contents/XPCServices/com.useminutes.apple-speech-worker.xpc/Contents/MacOS/minutes-apple-speech-worker"; do
+            test "$(lipo -archs "$binary")" = "$CANDIDATE_ARCH"
+          done
 
       - name: Exercise signed byte path under same-UID open holder
         env:

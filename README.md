@@ -19,12 +19,18 @@ Capture, transcription, and storage run locally. If you choose a cloud AI assist
 
 ## Install
 
+Choose the desktop app or one standalone CLI installation. The desktop app
+includes a CLI: use **About Minutes → Set up CLI** to add it to your PATH.
+
 ```bash
-brew install --cask silverstein/tap/minutes
-brew install silverstein/tap/minutes
-cargo install minutes-cli
-npx minutes-mcp  # or: claude mcp add minutes -- npx -y minutes-mcp
+brew install --cask silverstein/tap/minutes  # Desktop app, with bundled CLI
+brew install silverstein/tap/minutes         # Standalone CLI alternative
+cargo install minutes-cli                   # Standalone CLI via Cargo
 ```
+
+For an agent connection, add the MCP server separately with
+`claude mcp add minutes -- npx -y minutes-mcp` (or run `npx minutes-mcp`
+from another MCP client).
 
 If Homebrew reports an untrusted tap, run `brew trust silverstein/tap` once.
 
@@ -85,11 +91,17 @@ quality. See the full [persona notes](docs/personas.md).
 
 | Surface | What it provides | Docs |
 |---|---|---|
-| Desktop app | Menu bar capture, Recall, documents, and Coach. | [Install](docs/install.md#desktop-app) |
-| CLI (58 commands) | Local recording, processing, search, import, and automation. | [Commands](docs/features.md) |
+| Desktop app | Menu bar capture, dictation, Recall, documents, and Coach. | [Install](docs/install.md#desktop-app) |
+| CLI (60 commands) | Local recording, processing, search, import, and automation. | [Commands](docs/features.md) |
 | MCP server (34 tools) | Local meeting tools and resources for any MCP client. | [MCP reference](docs/integration/agent-integrations.md) |
 | Claude Code plugin (23 skills) | Prep, capture, live help, debrief, and memory workflows. | [Client setup](docs/integration/clients.md#claude-code-plugin) |
 | SDK | TypeScript access to meeting files without MCP. | [Agent architecture](docs/architecture/README.md#building-your-own-agent-on-minutes) |
+
+## Dictation
+
+The desktop Dictation settings bring writing preferences, personal spellings and snippets, microphone selection, and recent text together. Cursor context is optional and stays on the Mac. Recovery restores text for review; local edits use an explicit Ollama preview, and spelling corrections require confirmation.
+
+See [dictation behavior and evaluation boundaries](docs/design/dictation-experience.md) for supported fields, safe insertion and undo, clipboard restoration, and the synthetic benchmark.
 
 ## Output format
 
@@ -134,10 +146,14 @@ See the [security documentation](docs/security/) and
 - [Summarization and automation](docs/architecture/summarization.md)
 - [Configuration](docs/configuration.md)
 - [Architecture and agent development](docs/architecture/README.md)
+- [Evidence, retrieval, and decision-history contracts](docs/architecture/evidence-memory.md)
+- [Recall and speech evaluation](tests/eval/v02/README.md)
 - [Switching from Granola and importing archives](docs/switching-from-granola.md)
 - [Frontmatter schema](docs/architecture/frontmatter-schema.md)
 - [Security](docs/security/)
 - [Personas](docs/personas.md)
+- [Native call capture recovery](docs/native-capture-recovery.md) (`minutes recover-stem`)
+- [Opt-in automatic call recording](docs/call-auto-record.md) for Teams and Zoom desktop on macOS
 - [MCP tools](https://useminutes.app/docs/mcp/tools)
 - [Error reference](https://useminutes.app/docs/errors)
 - [Agent index](https://useminutes.app/llms.txt)

@@ -1,11 +1,12 @@
 ---
 source: crates/core/src/markdown.rs
+assertion_line: 3124
 expression: schema
 ---
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Frontmatter",
-  "description": "Frontmatter for a meeting/memo markdown file.",
+  "description": "Frontmatter for a corpus Markdown file.",
   "type": "object",
   "properties": {
     "action_items": {
@@ -349,12 +350,13 @@ expression: schema
       ]
     },
     "ContentType": {
-      "description": "Content types for output files.",
+      "description": "Content types for corpus artifacts.",
       "type": "string",
       "enum": [
         "meeting",
         "memo",
-        "dictation"
+        "dictation",
+        "note"
       ]
     },
     "DebriefStatus": {
@@ -382,6 +384,18 @@ expression: schema
       "type": "object",
       "properties": {
         "authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
           "type": [
             "string",
             "null"

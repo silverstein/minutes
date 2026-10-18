@@ -112,6 +112,27 @@ cd crates/mcp && npm run build && node test/mcp_tools_test.mjs
 - Explicit > clever
 - `String.includes()` not regex for user-input search (special char safety)
 
+## Branch Lifecycle
+
+Merged branches are deleted automatically. Stale ones are swept periodically, so
+a branch disappearing does not mean the work was rejected.
+
+To get one back:
+
+- **Your PR was merged or closed.** Open the PR and use GitHub's "Restore branch"
+  button. This works indefinitely and is the normal path.
+- **The branch never had a PR.** Check for an `archive/<branch-name>` tag —
+  branches with no PR behind them are tagged before deletion:
+
+  ```bash
+  git fetch origin --tags
+  git tag -l 'archive/*'
+  git checkout -b my-branch archive/my-branch
+  ```
+
+An `archive/` tag means the branch was retired without landing. It is a
+recoverable snapshot, not an endorsement of the code in it.
+
 ## Code of Conduct
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By taking part, you agree to uphold it.

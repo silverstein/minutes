@@ -159,11 +159,7 @@ fn policy_verified_result(
         crate::search_index::live_fts_match_snippet(&frontmatter.title, body, live_query_trimmed)
     }?;
     if filters.content_type.as_ref().is_some_and(|expected| {
-        let actual = match frontmatter.r#type {
-            crate::markdown::ContentType::Meeting => "meeting",
-            crate::markdown::ContentType::Memo => "memo",
-            crate::markdown::ContentType::Dictation => "dictation",
-        };
+        let actual = frontmatter.r#type.as_str();
         actual != expected
     }) {
         return None;
@@ -219,14 +215,28 @@ fn policy_verified_result(
         return None;
     }
 
+    // Evidence is derived exclusively from this live, authorized snapshot.
+    // Cached candidates never carry citations through the policy boundary.
+    // List mode is metadata-only; do not materialize whole-corpus quote bundles.
+    result.evidence = if live_query_trimmed.is_empty() {
+        None
+    } else {
+        crate::evidence::build_source_evidence(
+            &crate::evidence::EvidenceSource {
+                path: snapshot.path.to_str()?,
+                content: &snapshot.content,
+                body,
+                speaker_map: &frontmatter.speaker_map,
+            },
+            live_query_trimmed,
+            32,
+        )
+        .ok()
+    };
     result.path = snapshot.path.clone();
     result.title = frontmatter.title;
     result.date = live_date;
-    result.content_type = match frontmatter.r#type {
-        crate::markdown::ContentType::Meeting => "meeting".into(),
-        crate::markdown::ContentType::Memo => "memo".into(),
-        crate::markdown::ContentType::Dictation => "dictation".into(),
-    };
+    result.content_type = frontmatter.r#type.as_str().into();
     result.snippet = live_snippet;
     Some((result, is_restricted))
 }
@@ -238,6 +248,7 @@ fn retain_policy_verified_results(
     revision: &StableActiveCorpusRevision,
 ) -> Result<(), SearchError> {
     let candidates = std::mem::take(results);
+    let mut ranked = Vec::new();
     for result in candidates {
         // Stale index rows absent from the pre-operation allowlist are
         // ineligible even if the path becomes readable during this query.
@@ -246,9 +257,34 @@ fn retain_policy_verified_results(
         }
         let snapshot = revision_snapshot(revision, &result.path)?;
         if let Some((result, _)) = policy_verified_result(result, &snapshot, filters, query) {
-            results.push(result);
+            let (_, body) = split_frontmatter(&snapshot.content);
+            let score = crate::retrieval::lexical_score(
+                &result.title,
+                body,
+                result.matched_via_alias.as_deref().unwrap_or(query),
+            )
+            .unwrap_or(0.0);
+            ranked.push((score, result));
         }
     }
+    // Empty-query listing retains its existing normal/restricted grouping.
+    // Relevance ordering applies only to an actual text query.
+    if !query.trim().is_empty() {
+        ranked.sort_by(|(a_score, a), (b_score, b)| {
+            b_score
+                .total_cmp(a_score)
+                .then_with(|| {
+                    let epoch = |value: &str| {
+                        chrono::DateTime::parse_from_rfc3339(value)
+                            .map(|date| date.timestamp_millis())
+                            .unwrap_or(0)
+                    };
+                    epoch(&b.date).cmp(&epoch(&a.date))
+                })
+                .then_with(|| a.path.cmp(&b.path))
+        });
+    }
+    results.extend(ranked.into_iter().map(|(_, result)| result));
     Ok(())
 }
 
@@ -268,6 +304,8 @@ pub struct SearchResult {
     pub snippet: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_via_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<crate::evidence::EvidenceBundle>,
 }
 
 /// One descriptor-verified meeting snapshot authorized for a read surface.
@@ -508,6 +546,7 @@ impl MeetingMutation {
         }
         #[cfg(windows)]
         {
+            let _ = writable;
             use windows_sys::Win32::Foundation::GENERIC_READ;
             use windows_sys::Win32::Storage::FileSystem::{
                 DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -763,6 +802,9 @@ impl MeetingMutation {
         after_atomic_claim: impl FnOnce(),
         after_atomic_promotion: impl FnOnce(),
     ) -> std::io::Result<()> {
+        #[cfg(not(unix))]
+        let _ = (source_path, destination_path);
+
         #[cfg(unix)]
         {
             // POSIX cannot rename an opened file handle. First atomically claim
@@ -1692,11 +1734,7 @@ fn cross_meeting_research_once(
             continue;
         }
 
-        let content_type = match frontmatter.r#type {
-            crate::markdown::ContentType::Meeting => "meeting".to_string(),
-            crate::markdown::ContentType::Memo => "memo".to_string(),
-            crate::markdown::ContentType::Dictation => "dictation".to_string(),
-        };
+        let content_type = frontmatter.r#type.as_str().to_string();
         let speaker_overlays = speaker_overlay_map(&frontmatter, &overlay_db_path, path);
         if let Some(ref type_filter) = filters.content_type {
             if content_type != *type_filter {
@@ -1922,6 +1960,7 @@ fn list_from_stable_corpus(
                     content_type: String::new(),
                     snippet: String::new(),
                     matched_via_alias: None,
+                    evidence: None,
                 };
                 if let Some((result, is_restricted)) =
                     policy_verified_result(candidate, snapshot, filters, "")
@@ -2322,11 +2361,7 @@ fn consistency_report_at_once(
                         path: path.clone(),
                         title: frontmatter.title.clone(),
                         date: frontmatter.date.to_rfc3339(),
-                        content_type: match frontmatter.r#type {
-                            crate::markdown::ContentType::Meeting => "meeting".to_string(),
-                            crate::markdown::ContentType::Memo => "memo".to_string(),
-                            crate::markdown::ContentType::Dictation => "dictation".to_string(),
-                        },
+                        content_type: frontmatter.r#type.as_str().to_string(),
                     });
 
             let mut reasons = Vec::new();
@@ -2461,11 +2496,7 @@ fn person_profile_once(
         std::collections::HashMap::new();
 
     for (path, frontmatter) in parsed_frontmatters {
-        let content_type = match frontmatter.r#type {
-            crate::markdown::ContentType::Meeting => "meeting".to_string(),
-            crate::markdown::ContentType::Memo => "memo".to_string(),
-            crate::markdown::ContentType::Dictation => "dictation".to_string(),
-        };
+        let content_type = frontmatter.r#type.as_str().to_string();
         let date = frontmatter.date.to_rfc3339();
         let speaker_overlays = speaker_overlay_map(&frontmatter, &overlay_db_path, &path);
 
@@ -2635,6 +2666,7 @@ fn process_file(
             content_type,
             snippet,
             matched_via_alias: None,
+            evidence: None,
         }))
     } else {
         Ok(None)
@@ -2681,11 +2713,7 @@ fn process_intent_snapshot(
     }
 
     let date = frontmatter.date.to_rfc3339();
-    let content_type = match frontmatter.r#type {
-        crate::markdown::ContentType::Meeting => "meeting".to_string(),
-        crate::markdown::ContentType::Memo => "memo".to_string(),
-        crate::markdown::ContentType::Dictation => "dictation".to_string(),
-    };
+    let content_type = frontmatter.r#type.as_str().to_string();
 
     if let Some(ref type_filter) = filters.content_type {
         if content_type != *type_filter {
@@ -2993,6 +3021,58 @@ mod tests {
         let results = search("pricing", &config, &filters).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].snippet.contains("pricing"));
+    }
+
+    #[test]
+    fn note_artifacts_participate_in_list_and_search_without_bypassing_policy() {
+        let _guard = crate::test_support::home_env_lock();
+        let dir = TempDir::new().unwrap();
+        create_test_file(
+            dir.path(),
+            "2026-09-15-launch-prep.md",
+            "---\ntitle: Launch Prep\ntype: note\ndate: 2026-09-15T10:00:00Z\n---\n\nLaunch checklist canary.",
+        );
+        create_test_file(
+            dir.path(),
+            "2026-09-15-private-prep.md",
+            "---\ntitle: Private Prep\ntype: note\ndate: 2026-09-15T11:00:00Z\nsensitivity: restricted\n---\n\nLaunch private canary.",
+        );
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let listed = search("", &config, &SearchFilters::default()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "Launch Prep");
+        assert_eq!(listed[0].content_type, "note");
+
+        let filtered = search(
+            "launch",
+            &config,
+            &SearchFilters {
+                content_type: Some("note".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].title, "Launch Prep");
+
+        let with_restricted = search(
+            "launch",
+            &config,
+            &SearchFilters {
+                content_type: Some("note".into()),
+                include_restricted: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(with_restricted.len(), 2);
+        assert!(with_restricted
+            .iter()
+            .any(|result| result.title == "Private Prep"));
     }
 
     #[test]
@@ -3876,7 +3956,7 @@ mod tests {
         create_test_file(
             dir.path(),
             "restricted.md",
-            "---\ntitle: Private Plan\ntype: meeting\ndate: 2026-06-11T12:00:00-07:00\nsensitivity: restricted\n---\n\nThe roadmap comes first. Later we revisited prices and resumes at the cafe.\n",
+            "---\ntitle: Private Plan\ntype: meeting\ndate: 2026-06-11T12:00:00-07:00\nsensitivity: restricted\n---\n\nThe roadmap comes first. Later we revisited pricing and resumes at the cafe.\n",
         );
         let config = Config {
             output_dir: dir.path().to_path_buf(),
@@ -4092,6 +4172,7 @@ mod tests {
             content_type: "meeting".into(),
             snippet: "STALE_RESTRICTED_CANARY".into(),
             matched_via_alias: None,
+            evidence: None,
         }];
         let revision = stable_active_corpus_revision(dir.path()).unwrap();
 
@@ -4121,6 +4202,7 @@ mod tests {
             content_type: "meeting".into(),
             snippet: "STALE_SNIPPET_CANARY".into(),
             matched_via_alias: None,
+            evidence: None,
         }];
         let revision = stable_active_corpus_revision(dir.path()).unwrap();
 
@@ -5369,6 +5451,7 @@ mod tests {
             content_type: "meeting".into(),
             snippet: "OUTSIDE_CANARY".into(),
             matched_via_alias: None,
+            evidence: None,
         }];
         let revision = stable_active_corpus_revision(root.path()).unwrap();
 

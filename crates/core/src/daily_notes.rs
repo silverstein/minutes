@@ -23,6 +23,7 @@ pub fn append_backlink(
         ContentType::Meeting => "Meetings",
         ContentType::Memo => "Voice Memos",
         ContentType::Dictation => "Dictations",
+        ContentType::Note => "Notes",
     };
     let link_target = relative_or_absolute_link(note_dir, &result.path);
     let bullet = if let Some(excerpt) = summary_excerpt(summary) {
@@ -313,6 +314,8 @@ mod tests {
             filter_diagnosis: None,
         };
         fm.decisions = vec![Decision {
+            id: None,
+            effective_date: None,
             text: "Switch to monthly billing".into(),
             topic: Some("pricing".into()),
             authority: None,

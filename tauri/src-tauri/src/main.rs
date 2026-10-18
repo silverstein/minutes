@@ -20,9 +20,13 @@ static PARAKEET_FEATURE_SENTINEL: &[u8] = b"transcribe_parakeet parakeet_helper\
 mod call_capture;
 mod call_detect;
 #[cfg(target_os = "macos")]
+mod capture_recovery_qa;
+#[cfg(target_os = "macos")]
 mod cli_setup;
 mod commands;
 mod context;
+mod dictation_experience;
+mod dictation_field;
 mod palette_dispatch;
 mod pty;
 mod secret_store;
@@ -599,6 +603,10 @@ pub struct TrayMenuHandles {
     pub quick_thought: tauri::menu::MenuItem<tauri::Wry>,
     pub stop: tauri::menu::MenuItem<tauri::Wry>,
     pub coach: tauri::menu::MenuItem<tauri::Wry>,
+    /// Only exists in voice-live builds. A build that cannot open a session
+    /// shows no Voice entry at all, rather than one that always errors.
+    #[cfg(feature = "voice-live")]
+    pub voice: tauri::menu::MenuItem<tauri::Wry>,
     // Remaining static-label items, held so a UI language switch can relabel
     // them in place via `tr()` without an app restart (see
     // `rebuild_localized_shell`). The dynamic Stop label + tooltip are handled
@@ -643,6 +651,10 @@ pub enum TrayActivity {
     Live,
     Dictation,
     Copilot,
+    /// A voice session. It does not own the capture pipeline, but it does hold
+    /// the microphone, and recording is refused while it runs, so unlike
+    /// Copilot it grays out the capture controls.
+    Voice,
 }
 
 /// Inferred macOS menu-bar appearance. Honestly a proxy: we read the app's
@@ -713,7 +725,16 @@ impl TrayActivity {
     }
 
     fn blocks_capture_controls(self) -> bool {
-        matches!(self, Self::Recording | Self::Live | Self::Dictation)
+        // Voice belongs here and Copilot does not, even though neither owns the
+        // capture pipeline. The test is not who owns capture, it is whether
+        // clicking Start Recording will work: a recording can begin during
+        // Coach, and is refused during Voice. An enabled item that is going to
+        // be refused is a lie, and Quick Thought's tray handler discards the
+        // launch result, so it would fail silently.
+        matches!(
+            self,
+            Self::Recording | Self::Live | Self::Dictation | Self::Voice
+        )
     }
 
     fn icon_bytes(self, appearance: TrayAppearance) -> &'static [u8] {
@@ -724,6 +745,12 @@ impl TrayActivity {
             }
             (Self::Recording | Self::Dictation, TrayAppearance::Dark) => {
                 include_bytes!("../icons/icon-recording-dark.png")
+            }
+            (Self::Voice, TrayAppearance::Light) => {
+                include_bytes!("../icons/icon-live.png")
+            }
+            (Self::Voice, TrayAppearance::Dark) => {
+                include_bytes!("../icons/icon-live-dark.png")
             }
             (Self::Live | Self::Copilot, TrayAppearance::Light) => {
                 include_bytes!("../icons/icon-live.png")
@@ -741,6 +768,7 @@ impl TrayActivity {
             Self::Live => "Minutes — Live Transcribing...",
             Self::Dictation => "Minutes — Dictating...",
             Self::Copilot => "Minutes — Coach Listening...",
+            Self::Voice => "Minutes — Voice Session...",
         }
     }
 
@@ -752,6 +780,7 @@ impl TrayActivity {
             Self::Live => "Stop Live Transcript",
             Self::Dictation => "Stop Dictation",
             Self::Copilot => "Stop Coach",
+            Self::Voice => "Close Voice",
         }
     }
 
@@ -762,6 +791,7 @@ impl TrayActivity {
             Self::Live => "live-transcript",
             Self::Dictation => "dictation",
             Self::Copilot => "copilot",
+            Self::Voice => "voice",
         }
     }
 }
@@ -775,6 +805,7 @@ pub struct TrayStateSnapshot {
     pub live: bool,
     pub dictation: bool,
     pub copilot: bool,
+    pub voice: bool,
 }
 
 /// Derive the tray activity from a state snapshot. Pure function; tested in
@@ -790,6 +821,10 @@ pub fn derive_tray_activity(snapshot: TrayStateSnapshot) -> TrayActivity {
         TrayActivity::Live
     } else if snapshot.dictation {
         TrayActivity::Dictation
+    } else if snapshot.voice {
+        // Above Copilot: voice owns the microphone for a live conversation,
+        // so it is the more specific thing to report when both are somehow on.
+        TrayActivity::Voice
     } else if snapshot.copilot {
         TrayActivity::Copilot
     } else {
@@ -806,12 +841,14 @@ fn snapshot_tray_state(app: &tauri::AppHandle) -> TrayStateSnapshot {
             live: state.live_transcript_active.load(Ordering::Relaxed),
             dictation: state.dictation_active.load(Ordering::Relaxed),
             copilot: state.copilot_active.load(Ordering::Relaxed),
+            voice: state.voice_active.load(Ordering::Relaxed),
         },
         None => TrayStateSnapshot {
             recording: false,
             live: false,
             dictation: false,
             copilot: false,
+            voice: false,
         },
     }
 }
@@ -882,6 +919,15 @@ fn apply_tray_activity(
                     "Coach"
                 }))
                 .ok();
+            #[cfg(feature = "voice-live")]
+            handles
+                .voice
+                .set_text(minutes_core::i18n::tr(if snapshot.voice {
+                    "Voice ✓"
+                } else {
+                    "Voice"
+                }))
+                .ok();
         }
         None => {
             tracing::warn!(
@@ -933,6 +979,10 @@ pub fn rebuild_localized_shell(app: &tauri::AppHandle) {
             } else {
                 "Coach"
             }))
+            .ok();
+        #[cfg(feature = "voice-live")]
+        h.voice
+            .set_text(tr(if snapshot.voice { "Voice ✓" } else { "Voice" }))
             .ok();
         h.mic_mute
             .set_text(tr(if minutes_core::streaming::is_mic_muted() {
@@ -1643,6 +1693,16 @@ fn main() {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    let app_context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().any(|arg| arg == "--capture-recovery-test-root") {
+        // LaunchServices can supply arguments, but not a per-launch environment.
+        // Install the isolated Dev acceptance environment before starting threads.
+        if let Err(error) = capture_recovery_qa::configure(&app_context.config().identifier) {
+            eprintln!("Capture recovery acceptance setup refused: {error}");
+            std::process::exit(64);
+        }
+    }
     #[cfg(target_os = "macos")]
     if let Some(sidecar) = std::env::current_exe()
         .ok()
@@ -1752,6 +1812,14 @@ fn main() {
         }
     }
     let _ = secret_store::hydrate_openai_compatible_api_key_env();
+    match secret_store::voice_api_key_env(&startup_config_snapshot) {
+        Ok(env_var) => {
+            let _ = secret_store::hydrate_voice_api_key_env(&env_var);
+        }
+        // Never fatal at startup: voice is optional and every other feature has
+        // to keep working with a bad [voice_live] api_key_env.
+        Err(message) => tracing::warn!("voice key not hydrated: {}", message),
+    }
     let recording = Arc::new(AtomicBool::new(false));
     let starting = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -2048,6 +2116,9 @@ fn main() {
             dictation_overlay: Arc::new(Mutex::new(commands::DictationOverlaySnapshot::default())),
             live_transcript_active: live_transcript_active.clone(),
             live_transcript_stop_flag: live_transcript_stop_flag.clone(),
+            voice_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "voice-live")]
+            voice_session: Arc::new(Mutex::new(None)),
             copilot_active: copilot_active.clone(),
             copilot_stop_flag: copilot_stop_flag.clone(),
             copilot_paused: copilot_paused.clone(),
@@ -2076,6 +2147,7 @@ fn main() {
             palette_reopen_pending: palette_reopen_pending.clone(),
             pending_meeting_prompts: Arc::new(Mutex::new(HashMap::new())),
             recording_started_by_call_detect: recording_started_by_call_detect.clone(),
+            auto_record_app: Arc::new(Mutex::new(None)),
             call_end_countdown_cancel: call_end_countdown_cancel.clone(),
             call_end_countdown_active: call_end_countdown_active.clone(),
             call_end_countdown_terminal_state: call_end_countdown_terminal_state.clone(),
@@ -2090,6 +2162,7 @@ fn main() {
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
 
+            dictation_experience::install_shortcuts(app.handle());
             let recovered_dictations = commands::adopt_orphaned_dictation_audio();
             if recovered_dictations > 0 {
                 eprintln!(
@@ -2104,6 +2177,26 @@ fn main() {
 
             // Clean up stale terminal workspaces from previous sessions
             context::cleanup_stale_workspaces();
+
+            // Raw-audio retention runs only when the operator opted into both
+            // automatic apply and startup cleanup. Background thread: the scan
+            // reads every meeting's frontmatter, which can stall on slow disks.
+            if startup_config.retention.auto_cleanup && startup_config.retention.cleanup_on_startup
+            {
+                let retention_config = startup_config.clone();
+                std::thread::spawn(move || {
+                    let plan = minutes_core::retention::preview_audio_retention(
+                        &retention_config,
+                        chrono::Local::now(),
+                    );
+                    let removal = minutes_core::retention::apply_audio_retention(&plan);
+                    eprintln!(
+                        "[retention] startup cleanup removed {} file(s), {} error(s)",
+                        removal.removed.len(),
+                        removal.errors.len()
+                    );
+                });
+            }
 
             let debug_update_state =
                 std::env::var("MINUTES_DEBUG_UPDATE_STATE")
@@ -2338,6 +2431,9 @@ fn main() {
             )?;
             let stop_item_ref = stop_item.clone();
             let coach_item = MenuItem::with_id(app, "coach-toggle", "Coach", true, None::<&str>)?;
+            #[cfg(feature = "voice-live")]
+            let voice_item =
+                MenuItem::with_id(app, "voice-toggle", tr("Voice"), true, None::<&str>)?;
             // Enabled regardless of recording state: toggling when no recording
             // is active primes the sentinel so the NEXT dual-source recording
             // starts muted. During a recording, the toggle takes effect on the
@@ -2427,6 +2523,10 @@ fn main() {
                 &sensitive_item,
                 &stop_item,
                 &coach_item,
+            ])?;
+            #[cfg(feature = "voice-live")]
+            menu.append_items(&[&voice_item])?;
+            menu.append_items(&[
                 &mic_mute_item,
                 &sep,
                 &note_item,
@@ -2519,17 +2619,23 @@ fn main() {
                             //   - recording → `commands::request_stop`
                             //   - live      → `commands::cmd_stop_live_transcript`
                             //   - dictation → `commands::cmd_stop_dictation`
+                            //   - voice     → `commands::cmd_stop_voice`
                             //   - copilot   → `commands::cmd_stop_copilot_surface`
                             // Priority order matches `derive_tray_activity`
-                            // (Recording > Live > Dictation > Copilot) so behavior is
-                            // deterministic if two flags are somehow both
-                            // true.
+                            // (Recording > Live > Dictation > Voice > Copilot)
+                            // so behavior is deterministic if two flags are
+                            // somehow both true.
+                            //
+                            // Every activity that `is_active()` must appear
+                            // here. One that does not leaves Stop enabled and
+                            // labelled for it while doing nothing at all.
                             let state = app.state::<commands::AppState>();
                             let recording_was_active = commands::recording_active(&recording);
                             let live_active = state.live_transcript_active.load(Ordering::Relaxed);
                             let dictation_was_active =
                                 state.dictation_active.load(Ordering::Relaxed);
                             let copilot_was_active = state.copilot_active.load(Ordering::Relaxed);
+                            let voice_was_active = state.voice_active.load(Ordering::Relaxed);
 
                             let stop_ok = if recording_was_active {
                                 commands::request_stop(&recording, &stop).is_ok()
@@ -2537,6 +2643,15 @@ fn main() {
                                 commands::cmd_stop_live_transcript(state).is_ok()
                             } else if dictation_was_active {
                                 commands::cmd_stop_dictation(state).is_ok()
+                            } else if voice_was_active {
+                                #[cfg(feature = "voice-live")]
+                                {
+                                    commands::cmd_stop_voice(app.clone(), state).is_ok()
+                                }
+                                #[cfg(not(feature = "voice-live"))]
+                                {
+                                    false
+                                }
                             } else if copilot_was_active {
                                 commands::cmd_stop_copilot_surface(state).is_ok()
                             } else {
@@ -2586,6 +2701,18 @@ fn main() {
                                     qi.set_text("Quick Thought").ok();
                                 }
                             });
+                        }
+                        #[cfg(feature = "voice-live")]
+                        "voice-toggle" => {
+                            let state = app.state::<commands::AppState>();
+                            let result = if state.voice_active.load(Ordering::Relaxed) {
+                                commands::cmd_stop_voice(app.clone(), state).map(|_| ())
+                            } else {
+                                commands::cmd_start_voice(app.clone(), state).map(|_| ())
+                            };
+                            if let Err(error) = result {
+                                commands::show_user_notification(app, "Voice", &error);
+                            }
                         }
                         "coach-toggle" => {
                             let state = app.state::<commands::AppState>();
@@ -2816,6 +2943,8 @@ fn main() {
                 quick_thought: quick_thought_item.clone(),
                 stop: stop_item.clone(),
                 coach: coach_item.clone(),
+                #[cfg(feature = "voice-live")]
+                voice: voice_item.clone(),
                 open: open_item.clone(),
                 sensitive: sensitive_item.clone(),
                 mic_mute: mic_mute_item.clone(),
@@ -3087,6 +3216,12 @@ fn main() {
             commands::cmd_open_meeting_url,
             commands::cmd_get_meeting_prompt,
             commands::cmd_close_meeting_prompt,
+            commands::cmd_start_voice,
+            commands::cmd_stop_voice,
+            commands::cmd_voice_status,
+            commands::cmd_voice_secret_status,
+            commands::cmd_set_voice_api_key,
+            commands::cmd_clear_voice_api_key,
             commands::cmd_start_dictation,
             commands::cmd_show_dictation_permission_help,
             commands::cmd_stop_dictation,
@@ -3094,6 +3229,22 @@ fn main() {
             commands::cmd_dismiss_dictation_overlay,
             commands::cmd_dictation_overlay_ready,
             commands::cmd_recent_dictations,
+            dictation_experience::cmd_accept_dictation_recovery,
+            dictation_experience::cmd_dictation_audio,
+            dictation_experience::cmd_dictation_preferences,
+            dictation_experience::cmd_dictation_history_destination,
+            dictation_experience::cmd_dictation_correction,
+            dictation_experience::cmd_copy_dictation_text,
+            dictation_experience::cmd_save_dictation_preferences,
+            dictation_experience::cmd_test_dictation_microphone,
+            dictation_experience::cmd_stop_dictation_mic_test,
+            dictation_experience::cmd_dictation_devices,
+            dictation_experience::cmd_undo_last_dictation,
+            dictation_experience::cmd_show_dictation_history,
+            dictation_experience::cmd_dictation_selection,
+            dictation_experience::cmd_clear_dictation_history_target,
+            dictation_experience::cmd_paste_dictation_from_history,
+            dictation_experience::cmd_dictation_rewrite,
             commands::cmd_copy_dictation,
             commands::cmd_copy_pre_command_dictation,
             commands::cmd_copy_raw_dictation,
@@ -3111,6 +3262,8 @@ fn main() {
             commands::cmd_start_live_transcript,
             commands::cmd_stop_live_transcript,
             commands::cmd_live_transcript_status,
+            commands::cmd_live_capture_plan,
+            commands::cmd_capture_owner_pid,
             commands::cmd_start_copilot_surface,
             commands::cmd_stop_copilot_surface,
             commands::cmd_pause_copilot_surface,
@@ -3143,7 +3296,7 @@ fn main() {
             palette_dispatch::palette_list,
             palette_dispatch::palette_execute,
         ])
-        .build(tauri::generate_context!())
+        .build(app_context)
         .expect("error while building minutes app")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { code, api, .. } => {
@@ -3176,6 +3329,7 @@ mod tray_activity_tests {
             live,
             dictation,
             copilot: false,
+            voice: false,
         }
     }
 
@@ -3190,6 +3344,7 @@ mod tray_activity_tests {
             live,
             dictation,
             copilot,
+            voice: false,
         }
     }
 
@@ -3359,7 +3514,8 @@ mod tray_activity_tests {
             "routine startup must not imply a warm model is loading"
         );
         assert!(
-            overlay.contains(">Starting…</span>")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("id=\"label\"></span>")
                 && !overlay.contains("Preparing dictation")
                 && !overlay.contains("preparationTimer"),
             "the first frame may be neutral, but routine startup must not expose internal preparation phases"
@@ -3467,7 +3623,8 @@ mod tray_activity_tests {
             "routine dictation activity should use capture blue, not error red"
         );
         assert!(
-            overlay.contains("setIndicator('dot-neutral')")
+            overlay.contains("class=\"pill compact busy\"")
+                && overlay.contains("class=\"busy-mark\" aria-hidden=\"true\"")
                 && overlay.contains("indicator.className = 'dot capture blink'")
                 && overlay.contains("indicator.className = 'dot capture'"),
             "dictation startup should remain neutral until active capture is confirmed"
@@ -3497,8 +3654,8 @@ mod tray_activity_tests {
 
         assert!(commands_rs.contains("\"activeLabel\": \"copy only\""));
         assert!(
-            overlay.contains("const destinationHint = earlyInsertionFallback")
-                && overlay.contains("insertionActiveLabel || 'copy only'")
+            overlay.contains("return earlyInsertionFallback ? 'Copy only' : ''")
+                && overlay.contains("pill.classList.add('capture-warning')")
                 && overlay.contains("'Copied · typing needs setup'")
                 && overlay.contains("permissionButton.classList.remove('hidden')")
                 && overlay.contains("cmd_show_dictation_permission_help"),
@@ -3595,19 +3752,24 @@ mod tray_activity_tests {
         let overlay =
             std::fs::read_to_string(format!("{}/../src/dictation-overlay.html", manifest))
                 .expect("failed to read dictation overlay");
-        let success_case = overlay
-            .split("case 'success':")
+        let checkpoint_guard = overlay
+            .split("function renderOverlaySnapshot(snapshot) {")
             .nth(1)
-            .and_then(|tail| tail.split("case 'copied':").next())
-            .expect("success case should be extractable");
+            .and_then(|tail| {
+                tail.split("const stateChanged = state !== lastState;")
+                    .next()
+            })
+            .expect("snapshot checkpoint guard should be extractable");
 
         assert!(
-            success_case.contains("label.textContent = 'Captured'"),
-            "per-utterance success should be presented as an in-session capture checkpoint"
+            checkpoint_guard.contains("if (state === 'success') return;"),
+            "per-utterance success must preserve the current listening presentation"
         );
         assert!(
-            !success_case.contains("scheduleDismiss") && !success_case.contains("dismiss()"),
-            "per-utterance success must not schedule dismissal while dictation can continue"
+            !checkpoint_guard.contains("scheduleDismiss")
+                && !checkpoint_guard.contains("dismiss()")
+                && !checkpoint_guard.contains("playCue("),
+            "per-utterance success must not dismiss or play completion feedback"
         );
         assert!(
             overlay.contains("if (!isTerminalState(state))")
@@ -3735,11 +3897,15 @@ mod tray_activity_tests {
         let dictation = index
             .split("<!-- Dictation -->")
             .nth(1)
-            .and_then(|tail| tail.split("<!-- Live Transcript -->").next())
+            .and_then(|tail| tail.split("id=\"panel-ai\"").next())
             .expect("dictation settings section should be extractable");
-        let (routine, advanced) = dictation
+        let (before_advanced, rest) = dictation
             .split_once("<details class=\"settings-advanced\">")
             .expect("dictation settings should have an Advanced disclosure");
+        let (advanced, after_advanced) = rest
+            .split_once("</details>")
+            .expect("Advanced disclosure should be bounded");
+        let routine = format!("{before_advanced}{after_advanced}");
 
         for id in [
             "settings-dictation-destination",
@@ -3749,6 +3915,10 @@ mod tray_activity_tests {
             "settings-dictation-recents",
         ] {
             assert!(routine.contains(id), "routine settings should contain {id}");
+            assert!(
+                !advanced.contains(id),
+                "routine settings must stay outside Advanced: {id}"
+            );
         }
         for id in [
             "settings-dictation-model",
@@ -3886,6 +4056,87 @@ mod tray_activity_tests {
             derive_tray_activity(snap_with_copilot(false, false, true, true)),
             TrayActivity::Dictation
         );
+    }
+
+    #[test]
+    fn voice_reports_itself_and_outranks_coach() {
+        let snap = |voice: bool, copilot: bool| TrayStateSnapshot {
+            recording: false,
+            live: false,
+            dictation: false,
+            copilot,
+            voice,
+        };
+        assert_eq!(derive_tray_activity(snap(true, false)), TrayActivity::Voice);
+        // Voice owns the microphone for a live conversation, so it is the more
+        // specific thing to report if both are somehow on.
+        assert_eq!(derive_tray_activity(snap(true, true)), TrayActivity::Voice);
+        assert_eq!(
+            derive_tray_activity(snap(false, true)),
+            TrayActivity::Copilot
+        );
+        // Voice grays out the capture controls, unlike Coach. Not because it
+        // owns capture, but because starting a recording during a voice session
+        // is refused, and an enabled menu item that is going to be refused lies
+        // about what clicking it does.
+        assert!(TrayActivity::Voice.blocks_capture_controls());
+        assert!(!TrayActivity::Copilot.blocks_capture_controls());
+        assert!(TrayActivity::Voice.is_active());
+    }
+
+    #[test]
+    fn every_active_tray_activity_has_a_tray_stop_path() {
+        // An activity that `is_active()` enables the tray Stop item and gives
+        // it that activity's label. If the "stop" arm does not also route it,
+        // Stop reads "Close Voice" and does nothing at all when clicked, which
+        // is exactly what shipped in the first draft of this change.
+        //
+        // The match below is exhaustive on purpose: a new TrayActivity variant
+        // will not compile until someone answers "how does Stop stop it?".
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let main_rs = std::fs::read_to_string(format!("{}/src/main.rs", manifest))
+            .expect("failed to read main.rs");
+        let start = main_rs
+            .find("\"stop\" => {")
+            .expect("tray stop handler not found");
+        let end = main_rs[start..]
+            .find("\"mic-mute-toggle\" => {")
+            .expect("tray handler arms not found in the expected order")
+            + start;
+        let stop_arm = &main_rs[start..end];
+
+        for activity in [
+            TrayActivity::Idle,
+            TrayActivity::Recording,
+            TrayActivity::Live,
+            TrayActivity::Dictation,
+            TrayActivity::Copilot,
+            TrayActivity::Voice,
+        ] {
+            let routed_by = match activity {
+                TrayActivity::Idle => None,
+                TrayActivity::Recording => Some("recording_was_active"),
+                TrayActivity::Live => Some("live_active"),
+                TrayActivity::Dictation => Some("dictation_was_active"),
+                TrayActivity::Copilot => Some("copilot_was_active"),
+                TrayActivity::Voice => Some("voice_was_active"),
+            };
+            assert_eq!(
+                routed_by.is_some(),
+                activity.is_active(),
+                "{:?} claims to be active but names no stop route (or vice versa)",
+                activity
+            );
+            if let Some(flag) = routed_by {
+                assert!(
+                    stop_arm.contains(flag),
+                    "the tray Stop handler never checks {}, so {:?} would leave Stop \
+                     enabled and labelled while doing nothing",
+                    flag,
+                    activity
+                );
+            }
+        }
     }
 
     #[test]

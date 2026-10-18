@@ -46,6 +46,7 @@ TAP_BRANCH = "main"
 SOURCE_REPO = "silverstein/minutes"
 CASK_PATH = "Casks/minutes.rb"
 FORMULA_PATH = "Formula/minutes.rb"
+SHERPA_ASSET = "minutes-macos-arm64-sherpa.tar.gz"
 API = "https://api.github.com"
 
 
@@ -84,7 +85,9 @@ class HostChangeStripsAuth(urllib.request.HTTPRedirectHandler):
 # ---------------------------------------------------------------------------
 
 
-def substitute_once(pattern: str, replacement, text: str, what: str) -> str:
+def substitute_once(
+    pattern: str, replacement, text: str, what: str, flags: int = re.MULTILINE
+) -> str:
     """Replace exactly one match, or refuse.
 
     Zero matches means the file moved on and this script no longer understands
@@ -93,7 +96,7 @@ def substitute_once(pattern: str, replacement, text: str, what: str) -> str:
     """
     # MULTILINE so `^` anchors per line: these directives sit indented inside a
     # cask or formula block, never at the start of the file.
-    new_text, count = re.subn(pattern, replacement, text, count=2, flags=re.MULTILINE)
+    new_text, count = re.subn(pattern, replacement, text, count=2, flags=flags)
     if count != 1:
         raise BumpError(
             f"expected exactly one {what} in the tap file, found {count}. "
@@ -117,13 +120,48 @@ def bump_cask(content: str, version: str, sha256: str) -> str:
     )
 
 
-def bump_formula(content: str, version: str) -> str:
-    return substitute_once(
+def bump_formula(content: str, version: str, sherpa_sha256: str | None) -> str:
+    content = substitute_once(
         r'(tag:\s*)"v[^"]+"',
         lambda m: f'{m.group(1)}"v{version}"',
         content,
         "git tag reference",
     )
+    if sherpa_sha256 is None:
+        return content
+
+    # The staged plugin is pinned by URL and hash. Moving only the git tag
+    # would build a new CLI and hand it the previous release's plugin, which
+    # is a version skew the ABI check would reject at load time.
+    content = substitute_once(
+        rf'(releases/download/)v[^/]+(/{re.escape(SHERPA_ASSET)})',
+        lambda m: f"{m.group(1)}v{version}{m.group(2)}",
+        content,
+        "sherpa resource url",
+    )
+    return substitute_once(
+        r'(resource "sherpa-plugin" do[^\n]*(?:\n(?!\s*end\b)[^\n]*)*?sha256\s+)"[0-9a-f]{64}"',
+        lambda m: f'{m.group(1)}"{sherpa_sha256}"',
+        content,
+        "sherpa resource sha256",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+
+def formula_sherpa_sha256(content: str) -> str | None:
+    match = re.search(
+        r'resource "sherpa-plugin" do.*?sha256\s+"([0-9a-f]{64})"',
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1) if match else None
+
+
+def formula_sherpa_version(content: str) -> str | None:
+    match = re.search(
+        rf'releases/download/v([^/]+)/{re.escape(SHERPA_ASSET)}', content
+    )
+    return match.group(1) if match else None
 
 
 def cask_version(content: str) -> str | None:
@@ -142,7 +180,11 @@ def formula_version(content: str) -> str | None:
 
 
 def tap_mismatches(
-    formula: str, cask: str, version: str, expected_sha256: str | None
+    formula: str,
+    cask: str,
+    version: str,
+    expected_sha256: str | None,
+    sherpa_sha256: str | None = None,
 ) -> list[str]:
     """Describe any tap fields that do not match a released version."""
     mismatches: list[str] = []
@@ -150,6 +192,16 @@ def tap_mismatches(
         mismatches.append(
             f"formula is {formula_version(formula) or 'unparseable'}, expected {version}"
         )
+    if sherpa_sha256 is not None:
+        # A stale plugin pin is invisible in the version line, and the failure
+        # it causes appears at transcription time as a refusing loader.
+        if formula_sherpa_version(formula) != version:
+            mismatches.append(
+                f"formula stages the sherpa plugin from "
+                f"v{formula_sherpa_version(formula) or 'unparseable'}, expected v{version}"
+            )
+        if formula_sherpa_sha256(formula) != sherpa_sha256:
+            mismatches.append("formula sherpa sha256 does not match the release archive")
     if expected_sha256 is not None:
         if cask_version(cask) != version:
             mismatches.append(
@@ -287,7 +339,23 @@ def check_write_access(token: str) -> int:
 
 def dmg_digest(version: str, token: str) -> str | None:
     """SHA-256 of the released DMG, or None when the release has no DMG."""
-    asset_name = f"Minutes_{version}_aarch64.dmg"
+    return asset_digest(f"Minutes_{version}_aarch64.dmg", version, token)
+
+
+def sherpa_digest(version: str, token: str) -> str | None:
+    """SHA-256 of the macOS arm64 sherpa archive the formula stages.
+
+    The formula compiles the CLI with `engine-sherpa` and installs the signed
+    plugin from this archive beside the binary, because the plugin crate
+    downloads a prebuilt sherpa-onnx bundle during its own build and a formula
+    sandbox does not get that network. The archive is pinned by URL and hash,
+    so it has to move with every release or a new CLI loads an old plugin.
+    """
+    return asset_digest(SHERPA_ASSET, version, token)
+
+
+def asset_digest(asset_name: str, version: str, token: str) -> str | None:
+    """SHA-256 of one release asset, or None when the release lacks it."""
     release = request(f"{API}/repos/{SOURCE_REPO}/releases/tags/v{version}", token)
     asset = next((a for a in release.get("assets", []) if a["name"] == asset_name), None)
     if asset is None:
@@ -351,12 +419,13 @@ def wait_until_current(
             f"release v{version} has no Minutes_{version}_aarch64.dmg; "
             "cannot verify the cask"
         )
+    sherpa = sherpa_digest(version, token)
 
     mismatches: list[str] = []
     for attempt in range(1, attempts + 1):
         formula = read_tap_file(FORMULA_PATH, token)
         cask = read_tap_file(CASK_PATH, token)
-        mismatches = tap_mismatches(formula, cask, version, expected)
+        mismatches = tap_mismatches(formula, cask, version, expected, sherpa)
         if not mismatches:
             print(f"tap verified at {version} with matching DMG hash")
             return 0
@@ -391,11 +460,35 @@ def run(version: str, token: str, dry_run: bool) -> int:
     cask = read_tap_file(CASK_PATH, token)
     pending: dict[str, str] = {}
 
-    if formula_version(formula) == version:
+    sherpa = sherpa_digest(version, token)
+    if sherpa is None:
+        # Visible, not fatal: a release without the archive leaves the formula
+        # pinned to the last one that had it, which is a skew worth saying out
+        # loud rather than a reason to fail the whole bump.
+        print(
+            f"::warning::release v{version} has no {SHERPA_ASSET}; "
+            f"formula still stages the plugin from "
+            f"v{formula_sherpa_version(formula)}"
+        )
+
+    formula_current = formula_version(formula) == version and (
+        sherpa is None
+        or (
+            formula_sherpa_version(formula) == version
+            and formula_sherpa_sha256(formula) == sherpa
+        )
+    )
+    if formula_current:
         print(f"formula already at {version}")
     else:
-        pending[FORMULA_PATH] = bump_formula(formula, version)
+        pending[FORMULA_PATH] = bump_formula(formula, version, sherpa)
         print(f"formula {formula_version(formula)} -> {version}")
+        if sherpa is not None:
+            print(
+                f"formula sherpa plugin "
+                f"v{formula_sherpa_version(formula)} -> v{version} "
+                f"(sha256 {sherpa[:12]}...)"
+            )
 
     expected = dmg_digest(version, token)
     if expected is None:
@@ -441,6 +534,15 @@ end
 FIXTURE_FORMULA = """class Minutes < Formula
   url "https://github.com/silverstein/minutes.git", tag: "v0.24.0"
   license "MIT"
+
+  on_macos do
+    on_arm do
+      resource "sherpa-plugin" do
+        url "https://github.com/silverstein/minutes/releases/download/v0.24.0/minutes-macos-arm64-sherpa.tar.gz"
+        sha256 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      end
+    end
+  end
 end
 """
 
@@ -469,10 +571,39 @@ def self_test() -> int:
         "cask bump leaves surrounding content intact",
     )
     check(
-        formula_version(bump_formula(FIXTURE_FORMULA, "0.25.0")) == "0.25.0",
+        formula_version(bump_formula(FIXTURE_FORMULA, "0.25.0", None)) == "0.25.0",
         "formula bump rewrites the tag",
     )
-    current_formula = bump_formula(FIXTURE_FORMULA, "0.25.0")
+    # The pin that goes stale silently: only the tag line moves on its own, and
+    # a new CLI handed the previous release's plugin fails at load, not here.
+    sherpa_sha = "b" * 64
+    bumped = bump_formula(FIXTURE_FORMULA, "0.25.0", sherpa_sha)
+    check(
+        formula_sherpa_version(bumped) == "0.25.0"
+        and formula_sherpa_sha256(bumped) == sherpa_sha,
+        "formula bump moves the staged sherpa plugin url and hash",
+    )
+    check(
+        formula_sherpa_version(bump_formula(FIXTURE_FORMULA, "0.25.0", None)) == "0.24.0",
+        "a release without the sherpa archive leaves the pin untouched",
+    )
+    check(
+        tap_mismatches(bumped, FIXTURE_CASK, "0.25.0", None, sherpa_sha) == [],
+        "verifier accepts a fully bumped formula",
+    )
+    check(
+        len(tap_mismatches(FIXTURE_FORMULA, FIXTURE_CASK, "0.25.0", None, sherpa_sha)) == 3,
+        "verifier catches a stale tag, stale plugin url and stale plugin hash",
+    )
+    check(
+        len(tap_mismatches(
+            bump_formula(FIXTURE_FORMULA, "0.25.0", None),
+            FIXTURE_CASK, "0.25.0", None, sherpa_sha,
+        )) == 2,
+        "verifier catches a bumped tag that left the plugin pin behind",
+    )
+
+    current_formula = bump_formula(FIXTURE_FORMULA, "0.25.0", None)
     current_cask = bump_cask(FIXTURE_CASK, "0.25.0", new_sha)
     check(
         tap_mismatches(current_formula, current_cask, "0.25.0", new_sha) == [],
@@ -494,7 +625,7 @@ def self_test() -> int:
          'version "1.0.0"\nversion "2.0.0"\nsha256 "%s"\n' % ("a" * 64),
          lambda c: bump_cask(c, "1.0.0", new_sha)),
         ("a formula with no tag", "class Minutes < Formula\nend\n",
-         lambda c: bump_formula(c, "1.0.0")),
+         lambda c: bump_formula(c, "1.0.0", None)),
     ]:
         try:
             fn(content)

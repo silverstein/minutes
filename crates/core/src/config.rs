@@ -36,6 +36,8 @@ pub struct Config {
     pub vault: VaultConfig,
     pub dictation: DictationConfig,
     pub voice: VoiceConfig,
+    /// Voice Live spoken assistant (RFC 0007). Distinct from `[voice]`, which is speaker identification.
+    pub voice_live: VoiceLiveConfig,
     pub live_transcript: LiveTranscriptConfig,
     pub recording: RecordingConfig,
     pub retention: RetentionConfig,
@@ -247,41 +249,37 @@ pub struct TranscriptionConfig {
     pub vad_model: String,
     /// VAD engine for the recording sidecar.
     ///
-    /// **`"ort-silero"` (default, known-risk experimental, not
-    /// recommended as a general default)**. A 20-WAV stratified
-    /// screen of internal meeting audio truncated to 5 min each
-    /// found 6/20 samples had at least one substantive regression
-    /// vs whisper-silero. The Wilson 95% CI on the per-WAV rate is
-    /// [15%, 52%], with a 30% point estimate. Per-utterance the
-    /// rate is approximately 1.4% as secondary context. Regression
-    /// types observed: named-entity loss (`"Claude"` -> `"cloth"`,
-    /// real participant names redacted from this comment ->
-    /// nonsense words), nonword hallucination at chunk boundaries,
-    /// and content-word loss in the first ~30s of recordings.
+    /// **`"whisper-silero"` (default)**: whisper-rs's bundled Silero,
+    /// full-buffer rescan per 100 ms call. About 10 ms per call on Apple
+    /// Silicon, so it keeps up comfortably. Did not show the longer-chunk
+    /// regression class in the 20-WAV screen described below.
     ///
-    /// Mechanism: streaming Silero via ort, O(new_audio) per call.
-    /// Requires the `vad-ort` build feature AND
-    /// `silero-vad-v6.2.0.onnx` in `model_path`. About 2x faster
-    /// than whisper-silero on the recording sidecar's hot path
-    /// (median 2.16x on the same 20-WAV screen). Recommended only
-    /// for users who explicitly accept the regression tradeoff.
-    /// FSM tuning (candidates: max-chunk cap or chunk-boundary
-    /// smoothing) is needed before promotion to the general
-    /// default; see `docs/plans/vad-refactor.md` and the harness at
-    /// `crates/core/examples/dogfood_vad_engines.rs`.
+    /// **`"ort-silero"` (opt-in, known-risk experimental)**: streaming
+    /// Silero via ort, O(new_audio) per call and about 2x faster than
+    /// whisper-silero on the sidecar's hot path (median 2.16x on the same
+    /// 20-WAV screen). Requires a build with the `vad-ort` feature AND
+    /// `silero-vad-v6.2.0.onnx` in `model_path`; the release desktop app
+    /// has neither, so setting this there only produces a startup warning
+    /// and the whisper-silero fallback. A 20-WAV stratified screen of
+    /// internal meeting audio truncated to 5 min each found 6/20 samples
+    /// with at least one substantive regression vs whisper-silero (Wilson
+    /// 95% CI [15%, 52%] per WAV, about 1.4% per utterance): named-entity
+    /// loss (`"Claude"` -> `"cloth"`), nonword hallucination at chunk
+    /// boundaries, and content-word loss in the first ~30 s. FSM tuning
+    /// (max-chunk cap or chunk-boundary smoothing) is needed before it can
+    /// be the default again; see `docs/plans/vad-refactor.md` and the
+    /// harness at `crates/core/examples/dogfood_vad_engines.rs`.
     ///
-    /// **`"whisper-silero"`**: whisper-rs's bundled Silero,
-    /// full-buffer rescan per 100ms call. Slower; did not show the
-    /// longer-chunk regression class in the 20-WAV screen. Set this
-    /// in `~/.config/minutes/config.toml` to opt out of ort-silero
-    /// on a per-process basis.
+    /// This was the default from May to September 2026. It went back to
+    /// whisper-silero because every shipped build fell through to
+    /// whisper-silero anyway, silently, which left the config describing an
+    /// engine nobody was running.
     ///
     /// **Fallback chain**: when `"ort-silero"` is requested but the
-    /// `vad-ort` feature is off OR the ONNX is missing, the
-    /// dispatcher logs a warning and falls through to
-    /// `"whisper-silero"`. Unknown values log and fall through to
-    /// `"whisper-silero"` as well. Energy is the dispatcher's
-    /// emergency fallback; not a user-selectable engine here.
+    /// `vad-ort` feature is off OR the ONNX is missing, the dispatcher logs
+    /// a warning and falls through to `"whisper-silero"`. Unknown values log
+    /// and fall through to `"whisper-silero"` as well. Energy is the
+    /// dispatcher's emergency fallback; not a user-selectable engine here.
     pub vad_engine: String,
     /// Enable noise reduction via nnnoiseless (RNNoise) before transcription.
     /// Requires the `denoise` feature flag. Default: true.
@@ -809,12 +807,11 @@ pub struct RetentionConfig {
     pub restricted_audio_days: u32,
     /// Honor `audio_retention: pinned` in meeting frontmatter.
     pub keep_pinned_audio: bool,
-    /// Whether future cleanup runners may apply the policy automatically.
-    ///
-    /// The current implementation only previews cleanup candidates; destructive
-    /// apply paths must opt in explicitly.
+    /// Whether automatic runners may apply the policy (delete candidates)
+    /// without an explicit `minutes cleanup --apply`.
     pub auto_cleanup: bool,
-    /// Whether startup is allowed to trigger automatic cleanup.
+    /// Whether the desktop app runs cleanup at launch. Requires
+    /// `auto_cleanup` too; either flag alone never deletes anything.
     pub cleanup_on_startup: bool,
     /// Surface a storage warning when raw audio exceeds this many GiB.
     pub warn_above_gb: u64,
@@ -835,6 +832,12 @@ pub struct CalendarConfig {
     /// event's title as the meeting title (overriding the AI-generated title).
     /// Opt-in; defaults to false to preserve existing behavior.
     pub use_event_title_for_meeting_title: bool,
+    /// Drop events whose title contains any of these substrings
+    /// (case-insensitive), e.g. "focus time" or "lunch". Empty by default.
+    pub ignore_title_contains: Vec<String>,
+    /// When true, drop events that have neither attendees nor a meeting URL,
+    /// such as personal blocks and reminders. Opt-in; defaults to false.
+    pub require_attendees_or_url: bool,
 }
 
 impl Default for CalendarConfig {
@@ -842,6 +845,8 @@ impl Default for CalendarConfig {
         Self {
             enabled: true,
             use_event_title_for_meeting_title: false,
+            ignore_title_contains: Vec::new(),
+            require_attendees_or_url: false,
         }
     }
 }
@@ -897,6 +902,10 @@ pub struct CallDetectionConfig {
     pub poll_interval_secs: u64,
     pub cooldown_minutes: u64,
     pub apps: Vec<String>,
+    /// Opt in to native call recording without clicking the detection banner.
+    pub auto_record: bool,
+    /// Desktop app names eligible for auto-record. An empty list starts nothing.
+    pub auto_record_apps: Vec<String>,
     /// When a call that the detector started a recording for ends, show a
     /// countdown banner that auto-stops the recording. Default: false.
     /// Named for the behavior (an assistive prompt, not a silent hard stop);
@@ -957,6 +966,7 @@ impl IdentityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DictationConfig {
+    pub experience: crate::dictation_experience::DictationExperience,
     pub backend: String,
     pub destination: String,
     pub accumulate: bool,
@@ -1005,6 +1015,7 @@ pub struct VaultConfig {
 impl Default for DictationConfig {
     fn default() -> Self {
         Self {
+            experience: Default::default(),
             backend: "whisper".into(),
             destination: "insert".into(),
             accumulate: true,
@@ -1071,8 +1082,8 @@ pub struct RecordingConfig {
     /// Allow Minutes to start a call capture even when the selected input
     /// looks like a plain microphone rather than a system-audio route.
     pub allow_degraded_call_capture: bool,
-    /// System-audio capture backend. "cpal" keeps the current loopback-device
-    /// path. "core-audio-tap" opts into Apple's macOS Process Tap backend.
+    /// Selects CPAL loopback capture, the macOS Core Audio tap, or
+    /// PocketStation application capture on Windows and Linux.
     pub capture_backend: String,
     /// Multi-source capture: explicit voice + call device names.
     /// When set, `device` is ignored. CLI `--source` flags override this.
@@ -1086,7 +1097,8 @@ pub struct RecordingConfig {
 pub struct SourcesConfig {
     /// Voice (microphone) device name, or "default" for system default.
     pub voice: Option<String>,
-    /// Call (system audio) device name, or "auto" to detect loopback devices.
+    /// Call audio device. PocketStation accepts an application name,
+    /// application ID, or `pid:<process id>` here.
     pub call: Option<String>,
 }
 
@@ -1110,6 +1122,227 @@ impl Default for RecordingConfig {
 /// Knowledge base integration — Karpathy-style LLM wiki maintained from meeting data.
 /// After each meeting, extract facts about people and decisions, update person profiles,
 /// append to a chronological log, and maintain an index. Opt-in (disabled by default).
+/// Voice Live: a push-to-talk spoken assistant over Minutes' memory (RFC 0007).
+///
+/// This is a cloud provider behind an explicit opt-in. The API key is never stored
+/// in config; `api_key_env` names the environment variable that holds it. The
+/// desktop app hydrates that variable from the Keychain at startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceLiveConfig {
+    /// Master switch for the feature surfaces (CLI command, shortcut slot).
+    pub enabled: bool,
+    /// Realtime provider. Phase 1 supports only "gemini".
+    pub provider: String,
+    /// Model id, e.g. "gemini-3.8-live".
+    pub model: String,
+    /// Reasoning depth for the extended-thinking Live model: low, medium, high.
+    /// Ignored for the standard Live model, which does not accept this field.
+    pub thinking_level: String,
+    /// Name of the environment variable holding the provider API key.
+    pub api_key_env: String,
+    /// BCP-47 language code pinned for transcription and speech ("en-US").
+    pub language: String,
+    /// Named Gemini voice. Empty leaves the provider's default unchanged.
+    pub voice_name: String,
+    /// Conversation persona: empty/default, or "morris" for restrained dry humor.
+    pub persona: String,
+    /// Explicit acknowledgement that microphone audio and tool results leave the device.
+    pub allow_cloud: bool,
+    /// How async tool results are delivered: "when_idle" (after the model finishes speaking) or "interrupt".
+    pub tool_scheduling: String,
+    /// Per-tool-result character budget so one transcript cannot fill the voice context.
+    pub max_tool_chars: usize,
+    /// How many known people to inject as spelling bias.
+    pub known_people: usize,
+    /// Expose knowledge-base search/read when `[knowledge].path` is set.
+    pub brain_search: bool,
+    /// Explicit opt-in to request-scoped Jev evaluation of bounded observed snippets/labels.
+    pub jev_evaluation: bool,
+    /// Expose a single on-request screen frame (phase 3).
+    pub screen_on_request: bool,
+    /// Explicit clipboard reads and copies, not continuous monitoring.
+    pub clipboard: bool,
+    /// Named-app selected-text reads and guarded text insertion.
+    pub text_input: bool,
+    /// Save and resume voice-created work history on explicit spoken request.
+    pub work_memory: bool,
+    /// Exact bundle identifiers allowed to receive text. Never shell/agent consoles.
+    pub text_input_apps: Vec<String>,
+    /// Write a markdown transcript of each session to ~/.minutes/voice-sessions/.
+    pub log_sessions: bool,
+    /// Cancel the speaker signal out of the microphone so open mic does not hear
+    /// and interrupt the assistant. Uses the platform voice-processing unit on
+    /// macOS; other platforms fall back to plain capture.
+    pub echo_cancellation: bool,
+    /// Reopen a session the provider ended, carrying its context forward.
+    ///
+    /// A Live session has a cap of roughly fifteen minutes. The provider offers
+    /// a resumption handle before it closes, so a new socket can continue the
+    /// same conversation instead of starting over with no memory of it.
+    pub resume_sessions: bool,
+    /// Let the model decide not to answer at all.
+    ///
+    /// Open mic otherwise treats everything it hears as addressed to it, so a
+    /// half sentence to someone else, or noise a transcriber turns into words,
+    /// becomes a prompt. With this on the provider stays quiet unless the
+    /// speech was meant for it, which is the difference between something you
+    /// talk to deliberately and something you can leave running.
+    pub proactive_audio: bool,
+    /// Provider speech-start sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_start_sensitivity: String,
+    /// Provider speech-end sensitivity on open mic: "low" (default), "high", or "" for the provider default.
+    pub speech_end_sensitivity: String,
+    /// Expose the prep and brief artifacts written by the `/minutes-prep` and
+    /// `/minutes-brief` skills under `~/.minutes/preps` and `~/.minutes/briefs`.
+    pub prep_artifacts: bool,
+    /// Expose upcoming calendar events. Follows `[calendar] enabled` as well.
+    pub calendar: bool,
+    /// Expose `ask_agent`, which relays a question to a local coding agent.
+    ///
+    /// Off by default. Only its answer travels onward, but the agent itself
+    /// runs with whatever permissions it was configured with, and Minutes
+    /// cannot constrain what it does once asked. `delegate_agent_args` is the
+    /// control that matters; the flag here only decides whether to offer it.
+    pub ask_agent: bool,
+    /// Opt in to bounded HTML generation and sandboxed local previews.
+    /// The coding agent receives only the brief and optional prior prototype.
+    pub html_prototypes: bool,
+    /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
+    /// first agent CLI found on the machine.
+    pub delegate_agent: String,
+    /// How long to wait for that agent before giving up.
+    pub delegate_timeout_secs: u64,
+    /// Launch flags for the relayed agent. Empty follows `[assistant] agent_args`.
+    ///
+    /// A relayed agent runs with no terminal, so it must not stop to ask for
+    /// tool-use permission: nothing can answer, and the call burns its whole
+    /// timeout looking like a hang. Give it whatever flags your agent needs to
+    /// run non-interactively.
+    pub delegate_agent_args: Vec<String>,
+    /// Directory the relayed agent starts in. Empty uses the Minutes process
+    /// directory, which for a desktop launch is not where any code lives.
+    pub delegate_cwd: String,
+    /// Let the assistant act on the desktop: open things, control playback,
+    /// add a reminder. A fixed catalogue of verbs, never arbitrary script.
+    pub desktop_control: bool,
+    /// Also allow the verbs that leave the machine, such as sending a message
+    /// or an email. Each one is confirmed out loud before it happens, and that
+    /// gate is enforced in code rather than asked for in the prompt.
+    pub desktop_outward: bool,
+    /// Labs toy: let the assistant generate and play music steered by what it
+    /// knows about a conversation. Off by default and deliberately separate
+    /// from the memory features.
+    pub music: bool,
+    /// Music model id.
+    pub music_model: String,
+    /// Longest stretch to play, in seconds. 0 plays the whole piece.
+    ///
+    /// Music and speech share one output queue, which is what lets the echo
+    /// canceller treat the music as reference audio so the microphone never
+    /// hears it. The cost is that unprompted speech waits behind queued music.
+    /// Talking flushes the queue, so anything the user starts is unaffected.
+    pub music_max_secs: u64,
+    /// Let the relayed agent change things: write files, open issues, call a
+    /// service that writes. Off by default.
+    ///
+    /// The caller here is a cloud speech model deciding on its own when to
+    /// relay, from audio it may have misheard, with nobody reviewing the
+    /// request. RFC 0007 keeps phase 1 to a single write, `add_note`, for that
+    /// reason. Turning this on is a deliberate widening of that boundary.
+    pub delegate_writes: bool,
+    /// MCP servers to launch for a voice session, so the assistant can reach
+    /// tools Minutes does not implement. Secrets are never named here: a server
+    /// inherits this process's environment and reads whatever variable it
+    /// already expects.
+    pub mcp_servers: Vec<McpServerConfig>,
+    /// Pause between closing the screen tool call and sending the frame that
+    /// answers it. Only spacing between two ordered messages; the frame is the
+    /// turn the model answers, so this does not need to be long.
+    pub screen_settle_ms: u64,
+}
+
+impl Default for VoiceLiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "gemini".into(),
+            model: "gemini-3.8-live".into(),
+            thinking_level: "medium".into(),
+            api_key_env: "GEMINI_API_KEY".into(),
+            language: "en-US".into(),
+            allow_cloud: false,
+            voice_name: String::new(),
+            persona: String::new(),
+            tool_scheduling: "when_idle".into(),
+            max_tool_chars: 12_000,
+            known_people: 200,
+            brain_search: true,
+            jev_evaluation: false,
+            screen_on_request: false,
+            clipboard: false,
+            text_input: false,
+            work_memory: false,
+            text_input_apps: [
+                "com.apple.TextEdit",
+                "com.apple.Notes",
+                "com.apple.mail",
+                "com.apple.iWork.Pages",
+                "com.apple.Safari",
+                "com.google.Chrome",
+                "org.mozilla.firefox",
+                "com.microsoft.edgemac",
+                "com.brave.Browser",
+                "company.thebrowser.Browser",
+                "md.obsidian",
+                "notion.id",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            log_sessions: true,
+            echo_cancellation: true,
+            resume_sessions: true,
+            proactive_audio: false,
+            speech_start_sensitivity: "low".into(),
+            speech_end_sensitivity: "low".into(),
+            prep_artifacts: true,
+            calendar: true,
+            ask_agent: false,
+            html_prototypes: false,
+            delegate_agent: String::new(),
+            delegate_timeout_secs: 120,
+            delegate_agent_args: Vec::new(),
+            delegate_cwd: String::new(),
+            delegate_writes: false,
+            desktop_control: false,
+            desktop_outward: false,
+            music: false,
+            music_model: "lyria-3.5".into(),
+            music_max_secs: 0,
+            mcp_servers: Vec::new(),
+            screen_settle_ms: 150,
+        }
+    }
+}
+
+/// One MCP server launched for a voice session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Short name. It prefixes every tool this server offers, so keep it to
+    /// letters, digits and underscores.
+    pub name: String,
+    /// Executable to launch, e.g. "npx".
+    pub command: String,
+    /// Arguments for it.
+    pub args: Vec<String>,
+    /// Only expose these tools. Empty means take what fits under `max_tools`.
+    pub tools: Vec<String>,
+    /// Cap on tools taken from this server. 0 uses the built-in default.
+    pub max_tools: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KnowledgeConfig {
@@ -1246,6 +1479,28 @@ impl Default for AssistantConfig {
     }
 }
 
+/// Known desktop apps supported by automatic native recording. Browser sentinels
+/// and unknown process names never gain automatic recording authority.
+pub fn auto_record_app_id(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "msteams" | "microsoft teams" | "microsoft teams (work or school)" => Some("MSTeams"),
+        "zoom.us" => Some("zoom.us"),
+        _ => None,
+    }
+}
+
+impl CallDetectionConfig {
+    pub fn auto_record_enabled_for(&self, app: &str) -> bool {
+        self.enabled
+            && self.auto_record
+            && auto_record_app_id(app).is_some_and(|id| {
+                self.auto_record_apps
+                    .iter()
+                    .any(|allowed| auto_record_app_id(allowed) == Some(id))
+            })
+    }
+}
+
 impl Default for CallDetectionConfig {
     fn default() -> Self {
         Self {
@@ -1253,6 +1508,8 @@ impl Default for CallDetectionConfig {
             poll_interval_secs: 1,
             cooldown_minutes: 5,
             apps: vec!["zoom.us".into(), "Microsoft Teams".into(), "Webex".into()],
+            auto_record: false,
+            auto_record_apps: vec!["MSTeams".into(), "zoom.us".into()],
             stop_when_call_ends: false,
             call_end_stop_countdown_secs: 30,
         }
@@ -1319,7 +1576,16 @@ fn home_dir() -> PathBuf {
 }
 
 fn minutes_dir() -> PathBuf {
-    home_dir().join(".minutes")
+    minutes_dir_from(std::env::var_os("MINUTES_DATA_DIR"), home_dir())
+}
+
+// A process-scoped native dogfood root keeps history, recovery audio and state
+// away from the user's production data. Empty/relative paths cannot redirect it.
+fn minutes_dir_from(override_dir: Option<OsString>, home: PathBuf) -> PathBuf {
+    override_dir
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".minutes"))
 }
 
 fn config_base_dir_from(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
@@ -1331,6 +1597,54 @@ fn config_base_dir_from(xdg_config_home: Option<OsString>, home: PathBuf) -> Pat
 
 fn config_base_dir() -> PathBuf {
     config_base_dir_from(std::env::var_os("XDG_CONFIG_HOME"), home_dir())
+}
+
+fn config_path_override(value: Option<OsString>, fallback: PathBuf) -> PathBuf {
+    value
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(fallback)
+}
+
+// Compare against the fields this build understands, not the raw document:
+// unknown keys survive, while explicitly cleared known options are removed.
+fn merge_config_tables(
+    document: &mut dyn toml_edit::TableLike,
+    previous: &dyn toml_edit::TableLike,
+    updated: &dyn toml_edit::TableLike,
+) {
+    for (key, _) in previous.iter() {
+        if !updated.contains_key(key) {
+            document.remove(key);
+        }
+    }
+    for (key, next) in updated.iter() {
+        if let Some(existing) = document.get_mut(key) {
+            if let (Some(target), Some(old), Some(new)) = (
+                existing.as_table_like_mut(),
+                previous.get(key).and_then(toml_edit::Item::as_table_like),
+                next.as_table_like(),
+            ) {
+                merge_config_tables(target, old, new);
+                continue;
+            }
+            // Unchanged values (including arrays) retain original formatting
+            // and any forward-compatible fields inside their elements.
+            if previous
+                .get(key)
+                .is_some_and(|old| old.to_string() == next.to_string())
+            {
+                continue;
+            }
+            let decor = existing.as_value().map(|value| value.decor().clone());
+            *existing = next.clone();
+            if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+        } else {
+            document.insert(key, next.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1363,6 +1677,7 @@ impl Default for Config {
             vault: VaultConfig::default(),
             dictation: DictationConfig::default(),
             voice: VoiceConfig::default(),
+            voice_live: VoiceLiveConfig::default(),
             live_transcript: LiveTranscriptConfig::default(),
             recording: RecordingConfig::default(),
             retention: RetentionConfig::default(),
@@ -1385,7 +1700,7 @@ impl Default for TranscriptionConfig {
             min_words: 3,
             language: None,
             vad_model: "silero-v6.2.0".into(),
-            vad_engine: "ort-silero".into(),
+            vad_engine: "whisper-silero".into(),
             noise_reduction: true,
             compressed_decode_fallback: true,
             parakeet_binary: "parakeet".into(),
@@ -1547,9 +1862,12 @@ impl Config {
         }
     }
 
-    /// Standard config file location.
+    /// Standard config file location, or a process-scoped dogfood override.
     pub fn config_path() -> PathBuf {
-        config_base_dir().join("minutes").join("config.toml")
+        config_path_override(
+            std::env::var_os("MINUTES_CONFIG_PATH"),
+            config_base_dir().join("minutes").join("config.toml"),
+        )
     }
 
     /// Load config from file, falling back to defaults.
@@ -1570,13 +1888,36 @@ impl Config {
     }
 
     pub fn load_strict_from(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let contents = std::fs::read_to_string(path)
-            .map_err(|_| "Minutes config exists but could not be read safely.".to_string())?;
-        let mut config: Self = toml::from_str(&contents)
-            .map_err(|_| "Minutes config exists but is malformed.".to_string())?;
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && matches!(std::fs::symlink_metadata(path), Err(ref metadata_error)
+                    if metadata_error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Minutes config could not be read safely ({:?}).",
+                    error.kind()
+                ))
+            }
+        };
+        let mut config: Self = toml::from_str(&contents).map_err(|error| {
+            // TOML's Display includes source excerpts, which may contain secrets.
+            // Expose only the location; the original bytes stay on disk.
+            let location = error
+                .span()
+                .map(|span| {
+                    let prefix = contents.get(..span.start).unwrap_or("");
+                    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+                    let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+                    format!(" at line {line}, column {column}")
+                })
+                .unwrap_or_default();
+            format!("Minutes config exists but is malformed{location}.")
+        })?;
         apply_raw_toml_compat(&mut config, inspect_raw_toml_compat(&contents));
         Ok(config)
     }
@@ -1641,7 +1982,13 @@ impl Config {
             .map(inspect_raw_toml_compat)
             .unwrap_or_default();
 
-        let mut config = Self::load_from(path);
+        let mut config = match Self::load_strict_from(path) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "Using defaults; skipping config migrations");
+                return Self::default();
+            }
+        };
         let mut migrated_toml: Option<String> = None;
 
         // Apple Speech migration: older configs overloaded
@@ -1743,10 +2090,6 @@ impl Config {
     /// Load config from a specific path. Used for testing and by
     /// [`Self::load_with_migrations_from`].
     pub fn load_from(path: &Path) -> Self {
-        if !path.exists() {
-            return Self::default();
-        }
-
         match Self::load_strict_from(path) {
             Ok(config) => config,
             Err(error) => {
@@ -1769,12 +2112,64 @@ impl Config {
 
     /// Save config to a specific path.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::other(format!("TOML serialize: {}", e)))?;
-        std::fs::write(path, contents)?;
+        let invalid = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Minutes config could not be saved safely; existing file was left untouched.",
+            )
+        };
+        let original = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => Some(std::fs::read_to_string(path)?),
+            Ok(_) => return Err(invalid()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let contents = if let Some(raw) = &original {
+            let mut previous: Self = toml::from_str(raw).map_err(|_| invalid())?;
+            apply_raw_toml_compat(&mut previous, inspect_raw_toml_compat(raw));
+            let previous = toml::to_string_pretty(&previous)
+                .map_err(|_| invalid())?
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            let updated = contents
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            let mut document = raw
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| invalid())?;
+            merge_config_tables(
+                document.as_table_mut(),
+                previous.as_table(),
+                updated.as_table(),
+            );
+            document.to_string()
+        } else {
+            contents
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut temporary, contents.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        // Detect another writer during preparation instead of knowingly
+        // replacing settings that arrived after our snapshot.
+        let current = match std::fs::read_to_string(path) {
+            Ok(raw) => Some(raw),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current != original {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Minutes config changed during save; reload before retrying.",
+            ));
+        }
+        temporary.persist(path).map_err(|error| error.error)?;
         tracing::info!(path = %path.display(), "config saved");
         Ok(())
     }
@@ -2030,13 +2425,13 @@ mod tests {
         );
         assert_eq!(config.transcription.model, "small");
         assert_eq!(config.transcription.min_words, 3);
-        // The recording sidecar's default VAD engine is the streaming
-        // ort-Silero impl. The dispatcher falls through to whisper-Silero
-        // when the `vad-ort` build feature is off or the ONNX is missing,
-        // so users on older builds see no behavior change. Pinning the
-        // string here means a future refactor cannot silently revert
-        // the default without a failing test.
-        assert_eq!(config.transcription.vad_engine, "ort-silero");
+        // The recording sidecar's default VAD engine is whisper-Silero.
+        // ort-Silero was the default from May to September 2026, but no
+        // shipped build carried the `vad-ort` feature or the ONNX, so every
+        // session silently fell through to whisper-Silero. Pinning the
+        // string here means a future flip has to be deliberate and come
+        // with the build and setup changes that make it real.
+        assert_eq!(config.transcription.vad_engine, "whisper-silero");
         assert_eq!(config.transcription.vad_model, "silero-v6.2.0");
         assert_eq!(config.transcription.parakeet_binary, "parakeet");
         assert_eq!(config.transcription.parakeet_model, "tdt-600m");
@@ -2302,6 +2697,46 @@ mod tests {
     }
 
     #[test]
+    fn malformed_config_migrations_preserve_original_bytes_and_report_location() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        let contents = "[transcription]\nmodel = \"PRIVATE-CONFIG-CANARY\n";
+        std::fs::write(&path, contents).unwrap();
+        let error = Config::load_strict_from(&path).unwrap_err();
+        assert!(error.contains("line 2"));
+        assert!(!error.contains("PRIVATE-CONFIG-CANARY"));
+        assert_eq!(
+            Config::load_with_migrations_from(&path).transcription.model,
+            "small"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        assert!(Config::default().save_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        std::fs::write(&path, "[transcription]\nmodel = \"base\"\n").unwrap();
+        assert_eq!(
+            Config::load_strict_from(&path).unwrap().transcription.model,
+            "base"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_config_symlink_is_an_error_instead_of_a_first_run() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::os::unix::fs::symlink(directory.path().join("missing.toml"), &path).unwrap();
+        assert!(Config::load_strict_from(&path)
+            .unwrap_err()
+            .contains("could not be read"));
+        Config::load_with_migrations_from(&path);
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!directory.path().join("missing.toml").exists());
+    }
+
+    #[test]
     fn string_setting_upsert_creates_a_fresh_minimal_config() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("nested/minutes/config.toml");
@@ -2315,6 +2750,135 @@ mod tests {
             Config::load_strict_from(&path).unwrap().transcription.model,
             "base"
         );
+    }
+
+    #[test]
+    fn full_save_preserves_future_tables_nested_fields_and_comments() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# A newer build wrote this.
+future_root = "keep"
+[transcription]
+model = "tiny" # Keep the explanation.
+future_decoder = { mode = "fast", version = 3 }
+[future_voice]
+voice = "Kore"
+[future_voice.reasoning]
+enabled = true
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_strict_from(&path).unwrap();
+        config.transcription.model = "base".into();
+        config.save_to(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&raw).unwrap();
+        assert!(raw.contains("# A newer build wrote this."));
+        assert!(raw.contains("# Keep the explanation."));
+        assert_eq!(parsed["future_root"].as_str(), Some("keep"));
+        assert_eq!(parsed["future_voice"]["voice"].as_str(), Some("Kore"));
+        assert_eq!(
+            parsed["future_voice"]["reasoning"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            parsed["transcription"]["future_decoder"]["version"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(parsed["transcription"]["model"].as_str(), Some("base"));
+        config.save_to(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn full_save_clears_known_options_without_removing_unknown_inline_fields() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "transcription = { model = 'tiny', language = 'es', future = 42 }\n",
+        )
+        .unwrap();
+        let mut config = Config::load_strict_from(&path).unwrap();
+        config.transcription.language = None;
+        config.transcription.model = "base".into();
+        config.save_to(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(parsed["transcription"].get("language").is_none());
+        assert_eq!(parsed["transcription"]["future"].as_integer(), Some(42));
+        assert_eq!(
+            Config::load_strict_from(&path).unwrap().transcription.model,
+            "base"
+        );
+    }
+
+    #[test]
+    fn full_save_refuses_malformed_or_wrong_typed_existing_config() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("config.toml");
+        for original in [
+            "[broken\nPRIVATE-CANARY",
+            "[voice_live]\nenabled = 'PRIVATE-CANARY'\n",
+        ] {
+            std::fs::write(&path, original).unwrap();
+            let error = Config::default().save_to(&path).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(!error.to_string().contains("PRIVATE-CANARY"));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn dogfood_data_root_requires_an_absolute_path_and_preserves_the_default() {
+        let directory = TempDir::new().unwrap();
+        let home = directory.path().join("home");
+        let isolated = directory.path().join("isolated");
+        assert_eq!(minutes_dir_from(None, home.clone()), home.join(".minutes"));
+        for invalid in [OsString::new(), OsString::from("relative/state")] {
+            assert_eq!(
+                minutes_dir_from(Some(invalid), home.clone()),
+                home.join(".minutes")
+            );
+        }
+        assert_eq!(
+            minutes_dir_from(Some(isolated.clone().into_os_string()), home),
+            isolated
+        );
+    }
+
+    #[test]
+    fn config_override_does_not_change_the_shared_default() {
+        let shared = PathBuf::from("shared/minutes/config.toml");
+        let voice = PathBuf::from("private/voice.toml");
+        assert_eq!(
+            config_path_override(Some(voice.clone().into_os_string()), shared.clone()),
+            voice
+        );
+        assert_eq!(
+            config_path_override(Some(OsString::new()), shared.clone()),
+            shared
+        );
+        assert_eq!(config_path_override(None, shared.clone()), shared);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_save_is_private_and_refuses_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("nested/config.toml");
+        Config::default().save_to(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let link = directory.path().join("linked.toml");
+        symlink(&path, &link).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(Config::default().save_to(&link).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -2671,6 +3235,38 @@ backend = "parakeet"
     }
 
     // ── Call detection: stop-when-call-ends opt-in ────────────
+
+    #[test]
+    fn auto_record_requires_opt_in_and_a_supported_selected_app() {
+        let mut config = CallDetectionConfig::default();
+        assert!(!config.auto_record_enabled_for("MSTeams"));
+        config.auto_record = true;
+        assert!(config.auto_record_enabled_for("Microsoft Teams"));
+        assert!(config.auto_record_enabled_for("zoom.us"));
+        for app in ["teams-web", "google-meet", "WhatsApp", "MSTeams impostor"] {
+            config.auto_record_apps.push(app.into());
+            assert!(!config.auto_record_enabled_for(app));
+        }
+        config.auto_record_apps.clear();
+        assert!(!config.auto_record_enabled_for("MSTeams"));
+        config.auto_record_apps.push("MSTeams".into());
+        config.enabled = false;
+        assert!(!config.auto_record_enabled_for("MSTeams"));
+    }
+
+    #[test]
+    fn auto_record_old_config_stays_off_and_explicit_empty_list_round_trips() {
+        let old: CallDetectionConfig = toml::from_str("enabled = true").unwrap();
+        assert!(!old.auto_record);
+        let selected: CallDetectionConfig =
+            toml::from_str("auto_record = true\nauto_record_apps = []").unwrap();
+        assert!(selected.auto_record);
+        assert!(selected.auto_record_apps.is_empty());
+        let again: CallDetectionConfig =
+            toml::from_str(&toml::to_string(&selected).unwrap()).unwrap();
+        assert!(again.auto_record);
+        assert!(again.auto_record_apps.is_empty());
+    }
 
     #[test]
     fn stop_when_call_ends_is_off_by_default() {

@@ -36,6 +36,7 @@ pub struct ProbeResult {
 
 pub const CPAL_CAPTURE_BACKEND: &str = "cpal";
 pub const CORE_AUDIO_TAP_CAPTURE_BACKEND: &str = "core-audio-tap";
+pub const POCKETSTATION_CAPTURE_BACKEND: &str = "pocketstation";
 pub const CORE_AUDIO_TAP_ROUTE_NAME: &str = "Core Audio Process Tap";
 pub const CORE_AUDIO_TAP_MIN_MACOS: MacOsVersion = MacOsVersion {
     major: 14,
@@ -46,6 +47,7 @@ pub const CORE_AUDIO_TAP_MIN_MACOS: MacOsVersion = MacOsVersion {
 pub enum CaptureBackendKind {
     Cpal,
     CoreAudioTap,
+    PocketStation,
 }
 
 impl CaptureBackendKind {
@@ -53,6 +55,7 @@ impl CaptureBackendKind {
         match self {
             Self::Cpal => CPAL_CAPTURE_BACKEND,
             Self::CoreAudioTap => CORE_AUDIO_TAP_CAPTURE_BACKEND,
+            Self::PocketStation => POCKETSTATION_CAPTURE_BACKEND,
         }
     }
 }
@@ -92,8 +95,9 @@ pub fn parse_capture_backend(value: &str) -> Result<CaptureBackendKind, String> 
         "core-audio-tap" | "core_audio_tap" | "coreaudio-tap" | "process-tap" => {
             Ok(CaptureBackendKind::CoreAudioTap)
         }
+        "pocketstation" => Ok(CaptureBackendKind::PocketStation),
         other => Err(format!(
-            "unknown recording.capture_backend '{other}'; expected 'cpal' or 'core-audio-tap'"
+            "unknown recording.capture_backend '{other}'; expected 'cpal', 'core-audio-tap', or 'pocketstation'"
         )),
     }
 }
@@ -131,6 +135,33 @@ pub fn system_audio_backend_for_config(
                 ))
             }
         }
+        CaptureBackendKind::PocketStation => {
+            if route_hint.trim().is_empty() || route_hint.eq_ignore_ascii_case("auto") {
+                return Err(capture_config_error(
+                    "recording.capture_backend = 'pocketstation' requires an application name, application ID, or pid:<process id> in [recording.sources] call",
+                ));
+            }
+
+            #[cfg(all(
+                feature = "pocketstation-capture",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            {
+                Ok(Box::new(
+                    crate::pocketstation_capture::PocketStationCapture::new(route_hint)?,
+                ))
+            }
+            #[cfg(not(all(
+                feature = "pocketstation-capture",
+                any(target_os = "linux", target_os = "windows")
+            )))]
+            {
+                let _ = route_hint;
+                Err(capture_config_error(
+                    "recording.capture_backend = 'pocketstation' is available on Windows and Linux when minutes-core is built with the 'pocketstation-capture' feature",
+                ))
+            }
+        }
     }
 }
 
@@ -145,7 +176,7 @@ pub trait SystemAudioBackend {
     fn permission_status(&self) -> Option<PermissionStatus>;
 }
 
-trait SystemAudioStreamHandle: Send {
+pub(crate) trait SystemAudioStreamHandle: Send {
     fn has_error(&self) -> bool;
     fn route(&self) -> RouteDescription;
 }
@@ -155,7 +186,7 @@ pub struct StreamHandle {
 }
 
 impl StreamHandle {
-    fn new(inner: impl SystemAudioStreamHandle + 'static) -> Self {
+    pub(crate) fn new(inner: impl SystemAudioStreamHandle + 'static) -> Self {
         Self {
             inner: Box::new(inner),
         }
@@ -849,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_backend_parser_accepts_default_and_core_audio_tap_aliases() {
+    fn given_supported_backend_names_when_parsed_then_kind_is_returned() {
         assert_eq!(parse_capture_backend(""), Ok(CaptureBackendKind::Cpal));
         assert_eq!(parse_capture_backend("cpal"), Ok(CaptureBackendKind::Cpal));
         assert_eq!(
@@ -859,6 +890,10 @@ mod tests {
         assert_eq!(
             parse_capture_backend("core_audio_tap"),
             Ok(CaptureBackendKind::CoreAudioTap)
+        );
+        assert_eq!(
+            parse_capture_backend("pocketstation"),
+            Ok(CaptureBackendKind::PocketStation)
         );
         assert!(parse_capture_backend("screencapturekit").is_err());
     }

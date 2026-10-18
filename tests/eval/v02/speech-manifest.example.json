@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "kind": "consented-recordings",
+    "independent_holdout": false,
+    "synthetic": false,
+    "description": "Replace with independently annotated recordings you may evaluate.",
+    "annotator": "REFERENCE_ANNOTATOR",
+    "holdout_sealed_at": "TIMESTAMP_BEFORE_MODEL_SELECTION"
+  },
+  "recordings": [{
+    "id": "meeting-001",
+    "audio": "recordings/meeting-001.wav",
+    "sha256": "REPLACE_WITH_SHA256_OF_ACTUAL_PCM_WAV",
+    "authorization": {"basis": "consent", "reference": "LOCAL_CONSENT_REFERENCE"},
+    "split": "holdout",
+    "language": "en",
+    "conditions": {"device": "RECORD_DEVICE", "noise": "ENVIRONMENT", "speaker_count": 2},
+    "reference_text": "REPLACE_WITH_VERBATIM_REFERENCE_WORDS",
+    "critical_terms": [{"text": "REPLACE_WITH_NAME", "kind": "name"}],
+    "segments": [
+      {"start": 0.0, "end": 1.2, "speaker": "reference-speaker-1"},
+      {"start": 1.1, "end": 2.4, "speaker": "reference-speaker-2"}
+    ]
+  }]
+}

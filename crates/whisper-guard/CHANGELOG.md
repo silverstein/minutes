@@ -5,6 +5,20 @@ All notable changes to whisper-guard will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-09
+
+### Added
+
+- **`params::set_abort_callback(&mut FullParams, &F)`** - install a whisper
+  abort callback from a stack-owned `Fn() -> bool` closure. This replaces
+  whisper-rs 0.16's `FullParams::set_abort_callback_safe`, which instantiates
+  its trampoline with the caller's closure type while handing whisper a
+  `Box<Box<dyn FnMut>>` pointer: any capturing closure reads garbage, and a
+  closure capturing an `Arc<AtomicBool>` aborts the encoder on almost every
+  call (`failed to encode`). The caller keeps the closure alive across
+  `WhisperState::full`; the borrow is tied to `FullParams` so the compiler
+  enforces it.
+
 ## [0.2.0] - unreleased
 
 ### Added

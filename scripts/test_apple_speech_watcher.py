@@ -18,6 +18,14 @@ SPEC.loader.exec_module(ACCEPTANCE)
 
 
 class WatcherCancellationTests(unittest.TestCase):
+    def test_transport_mode_does_not_require_macos_26(self):
+        self.assertTrue(ACCEPTANCE.runtime_os_supported(False, 15))
+        self.assertTrue(ACCEPTANCE.runtime_os_supported(False, 26))
+
+    def test_runtime_mode_requires_macos_26(self):
+        self.assertFalse(ACCEPTANCE.runtime_os_supported(True, 15))
+        self.assertTrue(ACCEPTANCE.runtime_os_supported(True, 26))
+
     def test_stop_interrupts_the_current_directory_scan(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

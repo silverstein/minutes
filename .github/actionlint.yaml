@@ -1,0 +1,6 @@
+# actionlint 1.7.7 predates GitHub's hosted Intel alias. This configuration
+# extends only the linter's recognized labels; GitHub routes this exact label
+# to its hosted macOS 15 Intel image.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

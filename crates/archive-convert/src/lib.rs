@@ -2398,13 +2398,13 @@ fn docx_paragraphs(xml: &[u8]) -> Result<ConvertedDocument, ConversionError> {
                 // decrement on every close below. Decrementing only for the
                 // record's own name left the counter stuck above zero for the
                 // rest of the paragraph, silently suppressing the live style.
-                if skip_depth > 0 || matches!(local, b"pPrChange" | b"rPrChange") {
+                if skip_depth > 0 || matches!(local, "pPrChange" | "rPrChange") {
                     skip_depth += 1;
                 }
                 match local {
-                    b"t" if skip_depth == 0 => in_text = true,
-                    b"pStyle" if skip_depth == 0 => {
-                        if let Some(value) = attribute_value(&event, b"val") {
+                    "t" if skip_depth == 0 => in_text = true,
+                    "pStyle" if skip_depth == 0 => {
+                        if let Some(value) = attribute_value(&event, "val") {
                             saw_style = true;
                             heading_style = is_heading_style(&value);
                         }
@@ -2414,26 +2414,23 @@ fn docx_paragraphs(xml: &[u8]) -> Result<ConvertedDocument, ConversionError> {
             }
             Ok(Event::Empty(event)) => match local_name(event.name().as_ref()) {
                 // Run and paragraph properties are usually self-closing.
-                b"pStyle" if skip_depth == 0 => {
-                    if let Some(value) = attribute_value(&event, b"val") {
+                "pStyle" if skip_depth == 0 => {
+                    if let Some(value) = attribute_value(&event, "val") {
                         saw_style = true;
                         heading_style = is_heading_style(&value);
                     }
                 }
-                b"tab" => paragraph.push('\t'),
-                b"br" | b"cr" => paragraph.push('\n'),
+                "tab" => paragraph.push('\t'),
+                "br" | "cr" => paragraph.push('\n'),
                 // `<w:p/>` is a self-closing empty paragraph and arrives as
                 // Empty rather than Start/End. Word emits these constantly as
                 // spacers, and each one still occupies a paragraph position
                 // in the document a reader is asked to navigate to.
-                b"p" => paragraph_ordinal += 1,
+                "p" => paragraph_ordinal += 1,
                 _ => {}
             },
             Ok(Event::Text(event)) if in_text && skip_depth == 0 => {
-                let decoded = event
-                    .decode()
-                    .map_err(|_| ConversionError::MalformedSource)?;
-                paragraph.push_str(&decoded);
+                paragraph.push_str(&event);
             }
             Ok(Event::GeneralRef(reference)) if in_text && skip_depth == 0 => {
                 if let Some(character) = reference
@@ -2442,10 +2439,7 @@ fn docx_paragraphs(xml: &[u8]) -> Result<ConvertedDocument, ConversionError> {
                 {
                     paragraph.push(character);
                 } else {
-                    let name = reference
-                        .decode()
-                        .map_err(|_| ConversionError::MalformedSource)?;
-                    let value = quick_xml::escape::resolve_xml_entity(&name)
+                    let value = quick_xml::escape::resolve_xml_entity(&reference)
                         .ok_or(ConversionError::MalformedSource)?;
                     paragraph.push_str(value);
                 }
@@ -2456,13 +2450,13 @@ fn docx_paragraphs(xml: &[u8]) -> Result<ConvertedDocument, ConversionError> {
             // silently suppressing the live style and size.
             Ok(Event::End(event)) if skip_depth > 0 => {
                 skip_depth -= 1;
-                if local_name(event.name().as_ref()) == b"p" {
+                if local_name(event.name().as_ref()) == "p" {
                     skip_depth = 0;
                 }
             }
             Ok(Event::End(event)) => match local_name(event.name().as_ref()) {
-                b"t" => in_text = false,
-                b"p" => {
+                "t" => in_text = false,
+                "p" => {
                     let paragraph_style = heading_style;
                     let paragraph_saw_style = saw_style;
                     heading_style = false;
@@ -2537,10 +2531,9 @@ fn docx_paragraphs(xml: &[u8]) -> Result<ConvertedDocument, ConversionError> {
 }
 
 /// Attribute value by local name, ignoring namespace prefix.
-fn attribute_value(event: &quick_xml::events::BytesStart<'_>, wanted: &[u8]) -> Option<String> {
+fn attribute_value(event: &quick_xml::events::BytesStart<'_>, wanted: &str) -> Option<String> {
     event.attributes().flatten().find_map(|attribute| {
-        (local_name(attribute.key.as_ref()) == wanted)
-            .then(|| String::from_utf8_lossy(&attribute.value).into_owned())
+        (local_name(attribute.key.as_ref()) == wanted).then(|| attribute.value.into_owned())
     })
 }
 
@@ -2558,8 +2551,8 @@ fn is_heading_style(value: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit()))
 }
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }
 
 fn normalize_extracted_text(text: &str) -> String {

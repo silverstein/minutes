@@ -13,6 +13,10 @@
 //                      listMeetings()      searchMeetings()
 
 import { realpath, stat } from "fs/promises";
+import { lexicalMatch, compareSearchMatches, queryTokens, type LexicalMatch } from "./retrieval.js";
+import { buildSourceEvidence, type EvidenceBundle } from "./evidence.js";
+import { buildDecisionHistory, type DecisionHistoryEntry, type HistoricalDecision } from "./decision-history.js";
+import { resolvePersonIdentity, meetingHasPersonParticipant, personOwnsAction } from "./identity.js";
 import { extname, isAbsolute, join, relative, resolve } from "path";
 import { homedir } from "os";
 import { parse as parseYaml } from "yaml";
@@ -34,10 +38,7 @@ export interface ActionItem {
   status: string;
 }
 
-export interface Decision {
-  text: string;
-  topic?: string;
-}
+export interface Decision extends HistoricalDecision {}
 
 export interface Intent {
   kind: string;
@@ -141,6 +142,7 @@ export interface Frontmatter {
   decisions: Decision[];
   intents: Intent[];
   speaker_map?: SpeakerAttribution[];
+  entities?: { people?: Array<{ slug?: string; label: string; aliases?: string[] }> };
   /** Applied post-pass name corrections (raw token preserved), if any. */
   name_corrections?: { raw: string; corrected: string }[];
   recording_health?: RecordingHealth;
@@ -152,6 +154,8 @@ export interface MeetingFile {
   path: string;
   /** Discriminant retained for ergonomic narrowing of exact-read results. */
   restricted_stub?: false;
+  evidence?: EvidenceBundle;
+  retrieval?: LexicalMatch;
 }
 
 /**
@@ -344,7 +348,7 @@ export function parseFrontmatter(
     }
     if (
       typeof parsed.type !== "string" ||
-      !["meeting", "memo", "dictation"].includes(parsed.type)
+      !["meeting", "memo", "dictation", "note"].includes(parsed.type)
     ) {
       return null;
     }
@@ -405,6 +409,10 @@ export function parseFrontmatter(
         ? parsed.decisions.map((d: any) => ({
             text: String(d.text || ""),
             topic: d.topic ? String(d.topic) : undefined,
+            id: d.id ? String(d.id) : undefined,
+            authority: d.authority ? String(d.authority) : undefined,
+            supersedes: d.supersedes ? String(d.supersedes) : undefined,
+            effective_date: d.effective_date ? String(d.effective_date) : undefined,
           }))
         : [],
       intents: Array.isArray(parsed.intents)
@@ -428,6 +436,13 @@ export function parseFrontmatter(
             source: parseAttributionSource(String(s.source || "")),
           }))
         : undefined,
+      entities: Array.isArray(parsed.entities?.people) ? {
+        people: parsed.entities.people.filter((p: any) => p && typeof p.label === "string").map((p: any) => ({
+          label: p.label,
+          slug: typeof p.slug === "string" ? p.slug : undefined,
+          aliases: Array.isArray(p.aliases) ? p.aliases.filter((a: unknown) => typeof a === "string") : [],
+        })),
+      } : undefined,
       recording_health: parseRecordingHealth(parsed.recording_health),
     };
 
@@ -612,6 +627,27 @@ export interface VoiceMemoOptions extends ReadOptions {
 
 const meetingSnapshotContent = new WeakMap<object, string>();
 
+function evidenceFromMeeting(meeting: MeetingFile, query?: string): EvidenceBundle | undefined {
+  const content = meetingSnapshotContent.get(meeting);
+  return content === undefined ? undefined : buildSourceEvidence({
+    path: meeting.path, content, body: meeting.body, speakerMap: meeting.frontmatter.speaker_map,
+  }, { query });
+}
+
+/** Temporal decisions from the same policy-authorized corpus lease as search. */
+export async function getDecisionHistory(
+  dir: string,
+  opts: ReadOptions & { asOf?: string; limit?: number } = {}
+): Promise<DecisionHistoryEntry[]> {
+  buildDecisionHistory([], opts); // Validate public options before opening a corpus lease.
+  return stableMeetingOperation(dir, opts, "decision_history", (meetings) =>
+    buildDecisionHistory(meetings.flatMap((meeting) => {
+      const content = meetingSnapshotContent.get(meeting);
+      return content === undefined ? [] : [{ ...meeting, content }];
+    }), opts)
+  );
+}
+
 /** True when a meeting is marked `sensitivity: restricted`. */
 export function isRestricted(meeting: MeetingFile): boolean {
   return meeting.frontmatter.sensitivity === "restricted";
@@ -706,7 +742,7 @@ export async function listMeetings(
 
 /**
  * Search meetings by a text query in title and body.
- * Uses String.includes() — no regex, safe from special character crashes.
+ * Uses the shared literal AND/final-token-prefix lexical retrieval contract.
  *
  * Restricted meetings are excluded by default; pass `{ includeRestricted: true }`
  * for an explicit, logged override.
@@ -718,21 +754,20 @@ export async function searchMeetings(
   opts: ReadOptions = {}
 ): Promise<MeetingFile[]> {
   const boundedLimit = normalizeMeetingResultLimit(limit);
-  if (!query) return [];
+  if (queryTokens(query).length === 0) return [];
 
-  const queryLower = query.toLowerCase();
   return stableMeetingOperation(dir, opts, "search_meetings", (meetings) => {
-    const results: MeetingFile[] = [];
-    for (const meeting of sortByDateDesc(meetings)) {
-      const titleMatch = meeting.frontmatter.title
-        .toLowerCase()
-        .includes(queryLower);
-      const bodyMatch = meeting.body.toLowerCase().includes(queryLower);
-      if (!titleMatch && !bodyMatch) continue;
-      results.push(meeting);
-      if (results.length >= boundedLimit) break;
-    }
-    return results;
+    const matches = meetings.flatMap((meeting) => {
+      const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, query);
+      return retrieval ? [{ meeting, retrieval }] : [];
+    });
+    matches.sort((a, b) => compareSearchMatches(
+      { score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
+      { score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
+    ));
+    return matches.slice(0, boundedLimit).map(({ meeting, retrieval }) => ({
+      ...meeting, retrieval, evidence: evidenceFromMeeting(meeting, query),
+    }));
   });
 }
 
@@ -797,6 +832,7 @@ async function getMeetingAtCanonicalRoot(
     }
     console.warn("[minutes] includeRestricted override: returning one restricted meeting");
   }
+  meeting.evidence = evidenceFromMeeting(meeting);
   return meeting;
 }
 
@@ -1106,59 +1142,29 @@ export async function getPersonProfile(
     SDK_PERSON_PROFILE_TOPIC_MAX,
     "getPersonProfile topic"
   );
-  const nameLower = name.toLowerCase();
+  if (!name.trim()) throw new Error("person selector is empty");
   return stableMeetingOperation(dir, opts, "person_profile", (sourceMeetings) => {
+    // Resolve against the complete authorized corpus before applying result caps.
+    const identity = resolvePersonIdentity(sourceMeetings, name);
     const meetings: Array<{ title: string; date: string; path: string }> = [];
     const openActions: ActionItem[] = [];
     const topicSet = new Set<string>();
-
     for (const meeting of sortByDateDesc(sourceMeetings)) {
-      const attendees = [
-        ...meeting.frontmatter.attendees,
-        ...parseRawAttendees(meeting.frontmatter.attendees_raw),
-      ];
-
-      const inAttendees = attendees.some((a) =>
-        a.toLowerCase().includes(nameLower)
-      );
-      const inPeople = meeting.frontmatter.people.some((p) =>
-        p.toLowerCase().includes(nameLower)
-      );
-      const inBody = meeting.body.toLowerCase().includes(nameLower);
-
-      if (inAttendees || inPeople || inBody) {
-        if (meetings.length < meetingLimit) {
-          meetings.push({
-            title: meeting.frontmatter.title,
-            date: meeting.frontmatter.date,
-            path: meeting.path,
-          });
-        }
-
-        if (topicSet.size < topicLimit) {
-          for (const tag of meeting.frontmatter.tags) {
-            if (topicSet.has(tag)) continue;
-            topicSet.add(tag);
-            if (topicSet.size >= topicLimit) break;
-          }
-        }
-        for (const item of meeting.frontmatter.action_items) {
-          if (openActions.length >= openActionLimit) break;
-          if (
-            item.status === "open" &&
-            item.assignee.toLowerCase().includes(nameLower)
-          ) {
-            openActions.push(item);
-          }
-        }
-        if (
-          meetings.length >= meetingLimit &&
-          openActions.length >= openActionLimit &&
-          topicSet.size >= topicLimit
-        ) {
-          break;
+      if (!identity) break;
+      if (meetingHasPersonParticipant(meeting, identity)) {
+        if (meetings.length < meetingLimit) meetings.push({
+          title: meeting.frontmatter.title, date: meeting.frontmatter.date, path: meeting.path,
+        });
+        for (const tag of meeting.frontmatter.tags) {
+          if (topicSet.size >= topicLimit) break;
+          topicSet.add(tag);
         }
       }
+      for (const item of meeting.frontmatter.action_items) {
+        if (openActions.length >= openActionLimit) break;
+        if (item.status === "open" && personOwnsAction(meeting, item.assignee, identity)) openActions.push(item);
+      }
+      if (meetings.length >= meetingLimit && openActions.length >= openActionLimit && topicSet.size >= topicLimit) break;
     }
     return {
       name,

@@ -366,7 +366,7 @@ mod windows_private {
             }
             let mut descriptor = Box::new(unsafe { zeroed::<SECURITY_DESCRIPTOR>() });
             let descriptor_ptr = descriptor.as_mut() as *mut SECURITY_DESCRIPTOR as *mut c_void;
-            if unsafe {
+            let initialized = unsafe {
                 InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) != 0
                     && SetSecurityDescriptorOwner(descriptor_ptr, sid, 0) != 0
                     && SetSecurityDescriptorDacl(descriptor_ptr, 1, acl, 0) != 0
@@ -375,8 +375,8 @@ mod windows_private {
                         SE_DACL_PROTECTED,
                         SE_DACL_PROTECTED,
                     ) != 0
-            } == false
-            {
+            };
+            if !initialized {
                 unsafe { LocalFree(acl.cast()) };
                 return Err(io::Error::last_os_error());
             }
@@ -619,14 +619,36 @@ mod windows_private {
     /// non-canonical (#800). The retained parent directory handle prevents the
     /// ambient path from being renamed while this call resolves it.
     pub(super) fn create_lease_file(path: &Path) -> io::Result<File> {
+        create_private_file(path, false)
+    }
+
+    /// Staged artifacts need delete sharing so their exact handle can survive
+    /// atomic publication. Lease handles deliberately retain the stricter mode.
+    pub(super) fn create_staged_file(path: &Path) -> io::Result<File> {
+        create_private_file(path, true)
+    }
+
+    fn create_private_file(path: &Path, renameable: bool) -> io::Result<File> {
         let wide = wide(path)?;
         let mut security = OwnerOnlySecurity::new(false)?;
         let attributes = security.attributes();
+        let access = GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER;
+        let sharing = FILE_SHARE_READ | FILE_SHARE_WRITE;
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC | WRITE_OWNER,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                access
+                    | if renameable {
+                        0x0001_0000 /* DELETE */
+                    } else {
+                        0
+                    },
+                sharing
+                    | if renameable {
+                        0x0000_0004 /* FILE_SHARE_DELETE */
+                    } else {
+                        0
+                    },
                 &attributes,
                 CREATE_NEW,
                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
@@ -703,6 +725,11 @@ pub(crate) fn create_owner_only_directory(path: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 pub(crate) fn create_owner_only_lease_file(path: &Path) -> std::io::Result<File> {
     windows_private::create_lease_file(path)
+}
+
+#[cfg(windows)]
+pub(crate) fn create_owner_only_staged_file(path: &Path) -> std::io::Result<File> {
+    windows_private::create_staged_file(path)
 }
 
 #[cfg(windows)]
@@ -1016,7 +1043,21 @@ pub(crate) fn stable_speaker_overlay_snapshot_at_until(
     check_deadline()?;
     if let Some(parent) = db_path.parent() {
         match fs::symlink_metadata(parent) {
-            Ok(_) => secure_private_parent(parent)?,
+            Ok(_) => {
+                // A reader with no correction database has no private bytes to
+                // admit. Check absence through the same no-follow capabilities
+                // used by policy reads, without tightening an ordinary state
+                // root just because search asked for an empty snapshot (#973).
+                let directory = crate::policy_fs::BoundRecoveryDirectory::bind_existing(parent)?;
+                let name = db_path.file_name().ok_or_else(|| {
+                    std::io::Error::other("speaker correction store has no file name")
+                })?;
+                if !directory.entry_exists(name)? {
+                    directory.attest_for_source_cleanup()?;
+                    return Ok(StableSpeakerOverlaySnapshot::empty());
+                }
+                secure_private_parent(parent)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -1046,7 +1087,7 @@ pub(crate) fn stable_speaker_overlay_snapshot_at_until(
             | OpenFlags::SQLITE_OPEN_NOFOLLOW
             | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
     )?;
-    conn.progress_handler(1_000, Some(move || std::time::Instant::now() >= deadline));
+    conn.progress_handler(1_000, Some(move || std::time::Instant::now() >= deadline))?;
     conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA query_only=ON; BEGIN")?;
     let temp_mode: i64 = conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?;
     if temp_mode != 2 {
@@ -1344,6 +1385,32 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("byte budget"));
         assert!(!db.exists());
+    }
+
+    #[test]
+    fn missing_overlay_snapshot_does_not_change_state_directory_permissions() {
+        let root = TempDir::new().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+        }
+
+        let snapshot = stable_speaker_overlay_snapshot_at(&state.join("overlays.db")).unwrap();
+        assert_eq!(snapshot.confirmations().count(), 0);
+        assert_eq!(fs::read_dir(&state).unwrap().count(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+        }
+        #[cfg(windows)]
+        assert!(crate::policy_fs::BoundRecoveryDirectory::prepare_owner_private(&state).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 > Generated file. Do not edit by hand.
 > Source: manifest.json + crates/mcp/src/index.ts + site/lib/skills-catalog.json
-> Last generated: 2026-09-05
+> Last generated: 2026-10-17
 
 Minutes is free, open-source meeting memory for the AI tools you already use. Record meetings, voice memos, and dictation locally, then keep transcripts and notes as Markdown in `~/meetings/`. Policy-aware tools let Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Pi, and MCP-compatible clients search the context you authorize. Restricted meetings are excluded from agent results by default; explicit access requires a trusted launch policy, a per-call request, and a durable audit record. Capture, transcription, and storage run locally. If you choose a cloud assistant or summarizer, the meeting context you authorize is sent to that provider. File-sync and backup services you configure have their own data boundaries.
 
@@ -11,7 +11,7 @@ Minutes is free, open-source meeting memory for the AI tools you already use. Re
 - License: MIT
 - Languages: Rust (core engine), TypeScript (MCP server)
 - Platforms: darwin, win32, linux
-- Version: 0.26.0
+- Version: 0.30.2
 - Source: https://github.com/silverstein/minutes
 - Website: https://useminutes.app
 - Privacy: https://useminutes.app/privacy
@@ -123,6 +123,7 @@ Workflow-level skills that wrap MCP tools into operator motions. Install in Clau
 - `/minutes-debrief` — Turn the latest meeting into decisions, follow-ups, and what changed from prep. Category: Lifecycle. Example: `/minutes-debrief`. Docs: https://useminutes.app/for-agents#minutes-debrief
 - `/minutes-prep` — Do a deeper relationship brief and talking-point prep before an important call. Category: Lifecycle. Example: `/minutes-prep Alex`. Docs: https://useminutes.app/for-agents#minutes-prep
 - `/minutes-x1-closeout` — Turn an explicit meeting outcome into a sourced X1 closeout proposal without letting the agent close the work. Category: Lifecycle. Example: `/minutes-x1-closeout capital call review`. Docs: https://useminutes.app/for-agents#minutes-x1-closeout
+- `/minutes-x1-send-meeting` — Get a meeting's decisions and follow-ups into your X1 household review queue without pasting a transcript or letting the agent write your record. Category: Lifecycle. Example: `/minutes-x1-send-meeting estate plan review with our attorney`. Docs: https://useminutes.app/for-agents#minutes-x1-send-meeting
 - `/minutes-weekly` — See weekly themes, stale commitments, and what deserves attention next. Category: Lifecycle. Example: `/minutes-weekly`. Docs: https://useminutes.app/for-agents#minutes-weekly
 - `/minutes-mcp-recall` — Route a meeting-memory question to the smallest useful read-only MCP tool. Category: Search. Example: `/minutes-mcp-recall what did we discuss about pricing?`. Docs: https://useminutes.app/for-agents#minutes-mcp-recall
 - `/minutes-search` — Find a topic, quote, person, or decision across past transcripts. Category: Search. Example: `/minutes-search pricing strategy`. Docs: https://useminutes.app/for-agents#minutes-search
@@ -152,7 +153,7 @@ decisions:
 ## Capabilities For Agents
 
 1. Meeting recall — Search and retrieve past meetings, memos, and transcripts.
-2. Policy-bound people context — Build bounded live-source profiles, relationship rankings, losing-touch signals, and commitments.
+2. People memory — Who said what, what they committed to, and what you owe them, built only from meetings you let agents read.
 3. Decision and action-item tracking — Query structured decisions, commitments, and open follow-ups.
 4. Recording and live transcript control — Start or stop capture and read live transcript deltas.
 5. Local-first context — Audio processing happens on-device and the durable output is inspectable markdown.

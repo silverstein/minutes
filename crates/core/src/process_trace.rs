@@ -212,11 +212,7 @@ fn configured_model_path(config: &Config) -> Option<PathBuf> {
 }
 
 fn content_type_label(content_type: ContentType) -> &'static str {
-    match content_type {
-        ContentType::Meeting => "meeting",
-        ContentType::Memo => "memo",
-        ContentType::Dictation => "dictation",
-    }
+    content_type.as_str()
 }
 
 #[cfg(test)]

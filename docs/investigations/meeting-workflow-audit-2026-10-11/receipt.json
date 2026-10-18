@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-11",
+  "source_sha": "d3285c7990e69ff5db36e1691cca43517b232d66",
+  "cli_version": "0.28.2",
+  "cli_sha256": "f3b8b8f5170ef99f3708f9d2d5304e886a238467b58cc31367ca192775bb6cea",
+  "mac_version": "0.28.2",
+  "mac_executable_sha256": "38ddef7d4f0b12ba5adea2354f690287f8e34bc3c436da0b3c5013c4771950ca",
+  "mac_codesign_verify_strict_exit": 0,
+  "synthetic_corpus_files": 10,
+  "search_admitted_files": 9,
+  "policy_uncertain_fixture": "2026-04-10-voice-memo-q2-priorities.md",
+  "memo_type_normalization_get_exit": 0,
+  "open_actions": 24,
+  "stale_intents": 0,
+  "pricing_supersession_detected": true,
+  "explicit_mat_merge": {
+    "canonical": "Mat Silverstein",
+    "meeting_count": 9,
+    "open_commitments": 8
+  },
+  "native_follow_up_created": true,
+  "native_follow_up_temporal_wording_error": true,
+  "native_recall_question": "What is the current pricing decision in these synthetic meetings? Explain what it replaced and cite the source meetings.",
+  "native_recall_result": {
+    "decision": "annual-only billing",
+    "source_timestamp": "0:47",
+    "quote_matched_fixture": true,
+    "earlier_meeting_context_limit_acknowledged": true,
+    "provider": "existing Claude subscription",
+    "broad_synthesis_acceptance": false
+  },
+  "validation": {
+    "source_sha": "d3285c7990e69ff5db36e1691cca43517b232d66",
+    "commands": [
+      {
+        "argv": [
+          "python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests/eval",
+          "-p",
+          "test_live_sidekick_fixture_*.py"
+        ],
+        "exit": 0,
+        "tests": 16
+      },
+      {
+        "argv": [
+          "node",
+          "--test",
+          "scripts/check_recall_terminal_input_contract.test.mjs",
+          "scripts/test/sidekick_sota_fixture.test.mjs"
+        ],
+        "exit": 0,
+        "tests": 21
+      }
+    ],
+    "limits": "Contract and fixture checks only; no model, capture, or end-to-end assistant benchmark."
+  },
+  "foresight_version": "1.0.0",
+  "foresight_stage": "first-run; separate terms/model-download consent pending",
+  "microphone_used": false,
+  "audio_played": false,
+  "live_call_retested": false,
+  "new_release": false
+}

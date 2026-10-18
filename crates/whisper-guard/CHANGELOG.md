@@ -5,6 +5,20 @@ All notable changes to whisper-guard will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-10-18
+
+### Fixed
+
+- Preserve distinct transcript statements that share most words but differ in
+  numbers, names, negations or word order. Consecutive dedup now requires matching
+  ordered tokens, allowing case and nonnumeric edge punctuation to vary.
+- Keep signs, decimal separators and date formatting in numeric repetition keys.
+- Preserve other statements inside an interleaved repetition region instead of
+  removing the entire region. Repeated phrases and their fillers still collapse.
+
+This deliberately favors retaining a varied hallucination over deleting real
+speech on word overlap alone. No API changes.
+
 ## [0.3.1] - 2026-09-09
 
 ### Added

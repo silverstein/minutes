@@ -46,7 +46,7 @@
 //! GPU patches, or model compatibility), use:
 //!
 //! ```toml
-//! whisper-guard = { version = "0.2", default-features = false }
+//! whisper-guard = { version = "0.3.2", default-features = false }
 //! ```
 //!
 //! …and the cleaning pipeline works regardless of which whisper-rs is in your tree.

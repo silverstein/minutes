@@ -679,44 +679,36 @@ pub fn clean_transcript(transcript: &str) -> (String, CleanStats) {
     (cleaned.join("\n"), stats)
 }
 
+// A high word-overlap score is not evidence of repeated audio: changing
+// just a number, name or negation can change the whole meaning. Only
+// collapse the same ordered words, tolerating case and edge punctuation.
+// Numeric tokens stay byte-exact (after case folding), including signs,
+// decimal separators and dates. Losing a real turn is worse than leaving
+// a slightly varied hallucination for another evidence-based guard.
+fn repetition_key(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            let word = word.to_lowercase();
+            if word.chars().any(char::is_numeric) {
+                word
+            } else {
+                word.trim_matches(|c: char| !c.is_alphanumeric()).to_owned()
+            }
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
 /// Detect and remove repetition loops from whisper output.
 ///
 /// Whisper's decoder can get stuck repeating the same text across consecutive segments,
 /// especially on non-English audio. This function detects runs of 3+ consecutive segments
-/// with >80% text overlap and collapses them to the first occurrence.
+/// with the same ordered words (ignoring case and nonnumeric edge punctuation)
+/// and collapses them to the first occurrence. Meaningful word or number changes
+/// are preserved even when most of the sentence repeats.
 pub fn dedup_segments(lines: &[String]) -> Vec<String> {
     if lines.len() < 3 {
         return lines.to_vec();
-    }
-
-    // Simple text similarity: ratio of matching chars to total chars (normalized)
-    fn similarity(a: &str, b: &str) -> f64 {
-        if a.is_empty() || b.is_empty() {
-            return 0.0;
-        }
-        let a_lower = a.to_lowercase();
-        let b_lower = b.to_lowercase();
-        if a_lower == b_lower {
-            return 1.0;
-        }
-        // Use longest common substring ratio as a fast similarity measure
-        let (short, long) = if a_lower.len() <= b_lower.len() {
-            (&a_lower, &b_lower)
-        } else {
-            (&b_lower, &a_lower)
-        };
-        if long.contains(short.as_str()) {
-            return short.len() as f64 / long.len() as f64;
-        }
-        // Count matching words as fallback
-        let a_words: Vec<&str> = a_lower.split_whitespace().collect();
-        let b_words: Vec<&str> = b_lower.split_whitespace().collect();
-        let matching = a_words.iter().filter(|w| b_words.contains(w)).count();
-        let total = a_words.len().max(b_words.len());
-        if total == 0 {
-            return 0.0;
-        }
-        matching as f64 / total as f64
     }
 
     let mut result = Vec::with_capacity(lines.len());
@@ -736,11 +728,12 @@ pub fn dedup_segments(lines: &[String]) -> Vec<String> {
             continue;
         }
 
+        let base_key = repetition_key(base_text);
         let mut run_end = i + 1;
 
         while run_end < lines.len() {
             let candidate = text_part(&lines[run_end]);
-            if similarity(base_text, candidate) >= 0.8 {
+            if !base_key.is_empty() && base_key == repetition_key(candidate) {
                 run_end += 1;
             } else {
                 break;
@@ -782,20 +775,11 @@ pub fn dedup_segments(lines: &[String]) -> Vec<String> {
 ///
 /// Strategy: use a sliding window to detect when a single phrase dominates a region.
 /// If any phrase appears in >=50% of lines within a 10-line window, and the window
-/// contains at least 5 such occurrences, collapse the entire dominated region.
+/// contains at least 5 such occurrences, collapse that phrase and intervening
+/// fillers. Other statements inside the region remain intact.
 pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
     if lines.len() < 6 {
         return lines.to_vec();
-    }
-
-    fn normalize(text: &str) -> String {
-        text.to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
     }
 
     /// Short filler phrases that whisper inserts between hallucinated repetitions.
@@ -821,7 +805,10 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
     }
 
     // Build normalized text for each line
-    let texts: Vec<String> = lines.iter().map(|l| normalize(text_part(l))).collect();
+    let texts: Vec<String> = lines
+        .iter()
+        .map(|l| repetition_key(text_part(l)).join(" "))
+        .collect();
     let fillers: Vec<bool> = texts.iter().map(|t| is_filler(t)).collect();
 
     // Mark lines that are part of a hallucination region.
@@ -899,9 +886,11 @@ pub fn dedup_interleaved(lines: &[String]) -> Vec<String> {
                 for j in i..region_end {
                     if !kept_first && texts[j] == phrase {
                         kept_first = true;
-                    } else {
+                    } else if texts[j] == phrase || fillers[j] {
                         remove[j] = true;
                     }
+                    // A repeated phrase does not authorize discarding other
+                    // statements that happen to fall inside the same window.
                 }
                 i = region_end;
                 continue;
@@ -1399,6 +1388,51 @@ mod tests {
     }
 
     #[test]
+    fn dedup_preserves_numbered_dutch_turns_through_all_cleanup() {
+        let lines: Vec<String> = (1000..1064)
+            .enumerate()
+            .map(|(i, number)| {
+                format!(
+                "[00:{i:02}] Het nummer voor deze afspraak is {number} en de controle staat klaar."
+            )
+            })
+            .collect();
+        assert_eq!(dedup_segments(&lines), lines);
+        let (cleaned, stats) = clean_segments(&lines);
+        assert_eq!(cleaned, lines);
+        assert_eq!(stats.lines_removed, 0);
+    }
+
+    #[test]
+    fn dedup_preserves_small_changes_in_meaning() {
+        for variants in [
+            ["1234", "5678", "9012"],
+            ["1.5", "15", "-1.5"],
+            ["+5", "5", "-5"],
+            ["1,000", "1000", "1.000"],
+            ["2026-10-18", "2026-10-19", "2026-10-20"],
+            ["Ellen", "Xander", "Sarah"],
+            ["approved", "rejected", "pending"],
+            ["can", "cannot", "can't"],
+            ["pay Alice", "Alice pay", "pay Bob"],
+        ] {
+            let lines: Vec<String> = variants.iter().enumerate().map(|(i, value)| {
+                format!("[0:{i:02}] The team confirmed the following detail {value} during this meeting.")
+            }).collect();
+            assert_eq!(
+                dedup_segments(&lines),
+                lines,
+                "changed detail: {variants:?}"
+            );
+            assert_eq!(
+                clean_segments(&lines).0,
+                lines,
+                "full cleanup: {variants:?}"
+            );
+        }
+    }
+
+    #[test]
     fn dedup_leaves_two_similar_alone() {
         let lines = vec![
             "[0:00] Hello world".into(),
@@ -1474,6 +1508,53 @@ mod tests {
             .last()
             .unwrap()
             .contains("Something completely different"));
+    }
+
+    #[test]
+    fn interleaved_preserves_distinct_content_inside_a_repeated_region() {
+        let lines: Vec<String> = [
+            "The delivery reference is 1234 and this is confirmed.",
+            "Okay.",
+            "The delivery reference is 1234 and this is confirmed.",
+            "The delivery reference is 5678 and this is confirmed.",
+            "The delivery reference is 1234 and this is confirmed.",
+            "Sarah did not approve the payment.",
+            "The delivery reference is 1234 and this is confirmed.",
+            "Okay.",
+            "The delivery reference is 1234 and this is confirmed.",
+            "The final amount is -1.5 and this is confirmed.",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| format!("[0:{i:02}] {text}"))
+        .collect();
+        for cleaned in [dedup_interleaved(&lines), clean_segments(&lines).0] {
+            for index in [3, 5, 9] {
+                assert!(
+                    cleaned.contains(&lines[index]),
+                    "lost real content: {}",
+                    lines[index]
+                );
+            }
+            assert!(
+                cleaned.len() < lines.len(),
+                "true repetitions still collapse"
+            );
+        }
+    }
+
+    #[test]
+    fn interleaved_does_not_equate_decimal_and_integer_tokens() {
+        let lines: Vec<String> = (0..10)
+            .map(|i| {
+                let value = if i % 2 == 0 { "1.5" } else { "15" };
+                format!("[0:{i:02}] The team confirmed {value} units for the order.")
+            })
+            .collect();
+        // Each repeated phrase may collapse, but both distinct values survive.
+        let cleaned = clean_segments(&lines).0.join("\n");
+        assert!(cleaned.contains("confirmed 1.5 units"));
+        assert!(cleaned.contains("confirmed 15 units"));
     }
 
     #[test]

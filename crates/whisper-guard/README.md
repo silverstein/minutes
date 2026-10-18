@@ -81,6 +81,14 @@ what you reach for after the params still aren't enough.
 
 ### Behavior worth knowing
 
+As of 0.3.2, repetition cleanup preserves changed words and numbers. Consecutive
+loops must have the same words in the same order; case and edge punctuation on
+nonnumeric words may vary. Numeric tokens retain their signs, decimal separators
+and date formatting. Interleaved cleanup also preserves distinct statements
+inside a repetition region rather than deleting the entire passage. This may
+retain more imperfect hallucination variants; high word overlap alone cannot
+justify deleting a real statement.
+
 - **Filler-word floor.** Single trailing fillers (`Yeah.`, `Okay.`, `You.`) are
   intentionally preserved - they're often legitimate one-word closings.
   Only a 5+ run of filler at the end triggers trim. The bracketed noise tokens
@@ -100,7 +108,7 @@ what you reach for after the params still aren't enough.
 
 ```toml
 [dependencies]
-whisper-guard = "0.2"
+whisper-guard = "0.3.2"
 ```
 
 ### Using a forked or pinned `whisper-rs`?
@@ -111,7 +119,7 @@ GPU patches, or model compatibility - looking at you, screenpipe-audio), use:
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.2", default-features = false }
+whisper-guard = { version = "0.3.2", default-features = false }
 ```
 
 …and the cleaning pipeline works regardless of which `whisper-rs` is in your tree.
@@ -206,7 +214,7 @@ you depend on `whisper-rs` directly.
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.2", features = ["whisper"] }
+whisper-guard = { version = "0.3.2", features = ["whisper"] }
 ```
 
 ## Examples

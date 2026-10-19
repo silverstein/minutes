@@ -4,12 +4,12 @@ import argparse
 import json
 import os
 import platform
-import re
 from pathlib import Path
 import subprocess
 import sys
 import time
 from run import digest, reference_segments, score
+from worker_diagnostics import parse_worker_diagnostics
 
 p = argparse.ArgumentParser(description=__doc__)
 for name in ('probe', 'worker', 'fixtures', 'output'):
@@ -40,6 +40,7 @@ identity = dict(probe_sha256=digest(a.probe), worker_sha256=digest(a.worker),
                 check_sha256=digest(Path(__file__)),
                 source_sha256={str(p): digest(root.parents[2] / p) for p in [
                     Path('crates/core/src/diarize_full_worker.rs'),
+                    Path('tests/eval/diarization/worker_diagnostics.py'),
                     Path('crates/core/src/bounded_child.rs'),
                     Path('crates/speaker-worker/src/main.rs'),
                     Path('crates/speaker-worker/src/windows_handles.rs'),
@@ -114,16 +115,13 @@ for item in manifest['recordings']:
                        stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=930)
     elapsed = time.monotonic() - started
     if completed.returncode:
-        phases = {'handles_started', 'handles_closed', 'awaiting_pcm',
-                  'pcm_loaded', 'pipeline_ready', 'inference_complete'}
-        # The offline host probe emits only allowlisted progress. Never expose
-        # arbitrary child stderr through CI receipts or saved meeting errors.
-        observed = re.findall(r'\bworker_phase="([a-z_]+)"',
-                              (a.output / (item['id'] + '.stderr')).read_text(errors='replace'))
-        phase = next((value for value in reversed(observed) if value in phases), 'unreported')
+        # Return only closed diagnostic labels and a bounded numeric status;
+        # arbitrary worker stderr stays in the private local file.
+        diagnostics = parse_worker_diagnostics(
+            (a.output / (item['id'] + '.stderr')).read_text(errors='replace'))
         failure = dict(**identity, id=item['id'], processing_seconds=elapsed,
                        real_time_factor=elapsed / item['duration'],
-                       last_worker_phase=phase,
+                       **diagnostics,
                        exit_code=completed.returncode, gates=dict(engine_completed=False))
         (a.output / (item['id'] + '-regression.json')).write_text(json.dumps(failure, indent=2) + '\n')
         print(json.dumps(failure), flush=True)

@@ -12,6 +12,23 @@ pub const MAX_SAMPLES: usize = 16_000 * 3600;
 pub const MAX_SEGMENTS: usize = 100_000;
 pub const OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
 pub const MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+// Closed diagnostics: never reflect native errors, paths or audio through logs.
+pub const FAILURE_CLASSES: &[&str] = &[
+    "model_load",
+    "inference",
+    "unsupported_mode",
+    "segmentation",
+    "powerset",
+    "plda",
+    "reconstruct",
+    "queue",
+    "invariant",
+    "worker_panic",
+    "worker_spawn",
+    "backend",
+    "other",
+    "unclassified",
+];
 pub const MODEL_FILES: &[(&str, &str)] = &[
     (
         "segmentation-3.0.safetensors",

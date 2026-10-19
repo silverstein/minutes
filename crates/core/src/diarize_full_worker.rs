@@ -15,27 +15,42 @@ struct AudioInput {
     offset: usize,
 }
 
-fn last_worker_phase(stderr: &[u8]) -> &'static str {
-    const PHASES: &[&str] = &[
-        "handles_started",
-        "handles_closed",
-        "awaiting_pcm",
-        "pcm_loaded",
-        "pipeline_ready",
-        "inference_complete",
-    ];
+fn last_worker_marker(stderr: &[u8], prefix: &[u8], allowed: &[&'static str]) -> &'static str {
     stderr
         .split(|byte| *byte == b'\n')
         .rev()
         .find_map(|line| {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let value = line.strip_prefix(b"MINUTES_SPEAKER_PHASE ")?;
-            PHASES
+            let value = line.strip_prefix(prefix)?;
+            allowed
                 .iter()
                 .copied()
-                .find(|phase| value == phase.as_bytes())
+                .find(|value_allowed| value == value_allowed.as_bytes())
         })
         .unwrap_or("unreported")
+}
+
+fn last_worker_phase(stderr: &[u8]) -> &'static str {
+    last_worker_marker(
+        stderr,
+        b"MINUTES_SPEAKER_PHASE ",
+        &[
+            "handles_started",
+            "handles_closed",
+            "awaiting_pcm",
+            "pcm_loaded",
+            "pipeline_ready",
+            "inference_complete",
+        ],
+    )
+}
+
+fn last_worker_failure(stderr: &[u8]) -> &'static str {
+    last_worker_marker(
+        stderr,
+        b"MINUTES_SPEAKER_FAILURE ",
+        protocol::FAILURE_CLASSES,
+    )
 }
 
 impl Read for AudioInput {
@@ -183,6 +198,8 @@ pub(super) fn diarize(
     )?;
     tracing::debug!(
         worker_phase = last_worker_phase(&run.output.stderr),
+        worker_failure = last_worker_failure(&run.output.stderr),
+        worker_exit_code = ?run.output.status.code(),
         timed_out = run.timed_out,
         "full speaker worker completion"
     );
@@ -260,6 +277,22 @@ mod tests {
             b"\xff\xfeprivate content".as_slice(),
         ] {
             assert_eq!(last_worker_phase(untrusted), "unreported");
+        }
+    }
+
+    #[test]
+    fn failure_diagnostics_accept_only_exact_closed_classes() {
+        assert_eq!(
+            last_worker_failure(b"MINUTES_SPEAKER_FAILURE backend\r\nprivate payload"),
+            "backend"
+        );
+        for input in [
+            b"MINUTES_SPEAKER_FAILURE private/path\n".as_slice(),
+            b"prefix MINUTES_SPEAKER_FAILURE backend\n".as_slice(),
+            b"MINUTES_SPEAKER_FAILURE backend extra payload\n".as_slice(),
+            b"\xff\xfeprivate content".as_slice(),
+        ] {
+            assert_eq!(last_worker_failure(input), "unreported");
         }
     }
 

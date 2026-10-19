@@ -69,17 +69,45 @@ tests pass with these compiler flags. The report's source and checker hashes
 match snapshot `dcac4139d2f4e14653ae420ea38cccb7793a382f`; its compiled Rust source
 is unchanged from `f5e64349`.
 This was a separate native Mac from the hosted runner; comparing their times does
-not measure the compiler flag's speedup. Linux, Intel and Windows still need their
-own native-CPU receipts.
+not measure the compiler flag's speedup. The hosted native-CPU results below qualify each platform separately.
 
-Windows still reached the 900-second deadline after static BLAS linkage. That
-receipt alone does not distinguish slow inference from a startup or transport
-stall. The next build adds fixed progress markers for handle fencing, PCM input,
-pipeline initialization and inference. The host accepts only exact allowlisted
-markers from bounded worker stderr; arbitrary errors, paths, audio and transcript
-content are never reflected through that diagnostic channel. The offline probe
-and regression runner preserve the last known phase on failure. This is
-observability, not a relaxed deadline or a claimed Windows repair.
+## Hosted native-CPU results
+
+[Run 39288257150](https://github.com/silverstein/minutes/actions/runs/39288257150)
+uses source `8115c887fa0b0132e1829fa572c95e341d7ab610`. The numeric
+[Linux](full-speaker-worker-2026-10-19/8115c887-linux.json),
+[Intel](full-speaker-worker-2026-10-19/8115c887-intel.json),
+[ARM64](full-speaker-worker-2026-10-19/8115c887-arm.json) and
+[Windows failure](full-speaker-worker-2026-10-19/8115c887-windows-failed.json)
+receipts preserve source and executable bindings. Source hashes were verified
+against that revision, including Windows checkout line endings.
+
+| Platform | IS1008a seconds / ratio | TS3004a seconds / ratio | IB4001 seconds / ratio | Result |
+| --- | ---: | ---: | ---: | --- |
+| Linux x86-64 | 266.34 / 0.2822 | Not run after failure | Not run after failure | Runtime fails |
+| macOS ARM64 | 149.78 / 0.1587 | 206.74 / 0.1537 | 285.38 / 0.1603 | All frozen gates pass |
+| macOS Intel | 382.68 / 0.4054 | Not run after failure | Not run after failure | Runtime fails |
+| Windows x86-64 | Failed after 131.55 / 0.1394 | Not run after failure | Not run after failure | No completed engine result |
+
+Completed outputs retain the frozen DER, four speakers and unchanged input hashes.
+Linux's earlier portable pass does not qualify this newer head: its measured
+runtime fails. These are separate runner executions, not a controlled estimate
+of a compiler flag's speedup.
+
+All four platforms pass the actual short-input host/helper smoke. Windows reaches
+`pipeline_ready` on the full first recording and then fails. This establishes that
+it passed startup, handle fencing, PCM input and pipeline construction. It does
+not identify the inference failure or establish a successful engine result.
+The ratio in its failure receipt is elapsed time until failure, not processing
+throughput. The prior 900-second deadline failure remains in its own receipt.
+
+The next diagnostic adds only a closed pipeline error class and numeric worker
+exit status. Error messages, paths, audio and transcript content cannot be
+reflected through that channel. Classifier and parser tests reject private
+payloads and invalid exit codes; the actual native-helper silence smoke also
+passes. No inference parameters, acceptance thresholds, deadline or memory cap
+have changed. The new head still needs its own full platform matrix.
+
 Before the full recordings, CI also invokes the actual host/helper on three
 seconds of generated silence with a separate 60-second smoke-test budget. That
 explicit model test is ignored in ordinary model-free unit runs and executed by

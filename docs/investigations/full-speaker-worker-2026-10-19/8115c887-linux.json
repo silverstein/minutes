@@ -1,0 +1,60 @@
+{
+  "source_commit": "8115c887fa0b0132e1829fa572c95e341d7ab610",
+  "workflow_run": 39288257150,
+  "identity": {
+    "probe_sha256": "1f0525a76d495d4d686f7551dffa617128a783e8d730b48873980379149ed107",
+    "worker_sha256": "9fad976d42527e0236e45c70cd65264440dccc020e581cf12a27e942d169beb2",
+    "runtime": {
+      "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+      "machine": "x86_64",
+      "logical_cpu_count": 4,
+      "worker_build_rustflags": "-C target-cpu=native",
+      "openblas_libraries": [
+        {
+          "name": "libopenblasp-r0.3.26.so",
+          "sha256": "bfc7492adbf84a8f567720a9e1fae2afc18f3d817da233e7f4d453683485308e"
+        }
+      ]
+    },
+    "manifest_sha256": "4210c2d98b79493f21efefcc02c161bb6409308c8832e7017110e63d57744337",
+    "check_sha256": "d764db6dda9438235a172a41526e29688dc6f7f437ed43c8a9a58a152c43e0a1",
+    "source_sha256": {
+      "crates/core/src/diarize_full_worker.rs": "833ca5fe0de784882e7f98017e509b72dd1ec119e4462e849f952cb0b0b5bd1e",
+      "crates/core/src/bounded_child.rs": "d45e0b42e69f2034c3f9f3113c1c658662bd2845e90ed047f63800a5b08bcda1",
+      "crates/speaker-worker/src/main.rs": "ab3e3d26c330fc7aa0d0bf3d6e432a4e824117ea71946948b9a60fd603fa6f5b",
+      "crates/speaker-worker/src/windows_handles.rs": "2c0813f30d3d19130df841aa0ba9118131cf8d790518fbc5b131fb2d7a7df32c",
+      "crates/core/examples/full_diarize_file.rs": "08185cd34b52d328fbd56fb0c9784aed091adb4fb268d0e4fbdfd3c26fa0ad53",
+      "crates/core/src/diarize_full_protocol.rs": "ba65c71384393252139611512ab4ddd427c9f77215f2f5c8c47ff1479b44913d",
+      "crates/speaker-worker/Cargo.toml": "3ab9187ba016af8f197e74543fd2a15bf1c2491a0a399c6f1ab09ebc9d70e7bc",
+      "crates/speaker-worker/build.rs": "5841365750564d58480d12a0d55c20fee0265a52a74e82a7fed0025cdacc834c",
+      "crates/speaker-worker/vcpkg.json": "fb1118df519563e35465f44166f256012c0ebf0a76e33e93048535ec9160d8ab",
+      ".github/workflows/full-speaker-worker.yml": "e67d155fe295e5014946e110ddf239c9993256655f3732478117dfb34f03defa",
+      "crates/speaker-worker/Cargo.lock": "0f17ba293648f8a73744c1fc481a7d378e2a9c2b3a8466a975f2ab1f635a7ef3"
+    }
+  },
+  "records": [
+    {
+      "id": "IS1008a",
+      "processing_seconds": 266.34351572800006,
+      "real_time_factor": 0.2821563138513216,
+      "gates": {
+        "der": true,
+        "speaker_count": true,
+        "runtime": false,
+        "input_preserved": true
+      },
+      "der": 0.09947805829881977,
+      "missed_speaker_seconds": 32.20474999999955,
+      "false_alarm_speaker_seconds": 35.618499999999436,
+      "confusion_speaker_seconds": 10.24215624999988,
+      "reference_speaker_seconds": 784.7500000000005,
+      "collar_seconds": 0,
+      "overlap": "included",
+      "mapping": "global-optimal",
+      "predicted_speakers": 4,
+      "reference_speakers": 4,
+      "unknown_speaker_seconds": 0
+    }
+  ],
+  "source_hashes_verified": true
+}

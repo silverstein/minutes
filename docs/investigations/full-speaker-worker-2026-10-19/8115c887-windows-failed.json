@@ -1,0 +1,38 @@
+{
+  "source_commit": "8115c887fa0b0132e1829fa572c95e341d7ab610",
+  "workflow_run": 39288257150,
+  "source_hashes_verified_with_checkout_crlf": true,
+  "record": {
+    "probe_sha256": "2cd4c1ebe8eb9ed57eb6bd5ce0addf3d134b36e6f5b9b16704d8c4afe6be8eb5",
+    "worker_sha256": "4ea65f5d78fca984bca982156f158762cee75115f3940e4b541c141b870747c5",
+    "runtime": {
+      "platform": "Windows-2025Server-10.0.26100-SP0",
+      "machine": "AMD64",
+      "logical_cpu_count": 4,
+      "worker_build_rustflags": "-C target-cpu=native"
+    },
+    "manifest_sha256": "418e6ad90de2155b8491a6070cf03fb321d73508da1eb82bca43e05b9a726e57",
+    "check_sha256": "ed86ad0f72cf1462ceff9410ad4080b106df886782a3f1ab708061156705ba83",
+    "source_sha256": {
+      "crates\\core\\src\\diarize_full_worker.rs": "9fda364fd8cc169b8546bcea6c47b1bbdfabf628287b57bd3d8ccbb639b62ede",
+      "crates\\core\\src\\bounded_child.rs": "fe5e88e93ac2b265d4a9af6d9bafa59f53ed25d27f759b2b248ac9e82c73cbc3",
+      "crates\\speaker-worker\\src\\main.rs": "6ef29f4b3c37a31c5ff5c58fd43089e6dab22f18b15cafd55586c931e5d56af5",
+      "crates\\speaker-worker\\src\\windows_handles.rs": "a342537692172d85ff12bcf31a68dc6f7832a502608a535e7f112fb768388f0c",
+      "crates\\core\\examples\\full_diarize_file.rs": "49ce5a7429f50de850fd2a4bf6dd1d17aecc3dd62af1f05949f0cbe6507c430e",
+      "crates\\core\\src\\diarize_full_protocol.rs": "557706714ce44a59f1eadbeace70bf79daba767b3b2d9fb8e18479dcea6bcd21",
+      "crates\\speaker-worker\\Cargo.toml": "4430fb75e24591d2f0590339f02e93e86c50c733d9aac0a476882d3ab8ccd5bc",
+      "crates\\speaker-worker\\build.rs": "ae1b609dcab94436b5e4feba162137bacebae5429fa35fdc4395dd0125c65a83",
+      "crates\\speaker-worker\\vcpkg.json": "f021c15dc1cf9c8578b7e6c5be3ae987f903b20ca1d8b4d76beba698b656b2a3",
+      ".github\\workflows\\full-speaker-worker.yml": "c6fb72200f6d4f4cb25e92550ec6981fac9bebe6d2b43ae2985638892b6a6cd6",
+      "crates\\speaker-worker\\Cargo.lock": "2bcda1c8b8a391ba19e38f75b66cd782e10f0943579736a01e5796864a33795e"
+    },
+    "id": "IS1008a",
+    "processing_seconds": 131.54700000000003,
+    "real_time_factor": 0.1393569372873522,
+    "last_worker_phase": "pipeline_ready",
+    "exit_code": 1,
+    "gates": {
+      "engine_completed": false
+    }
+  }
+}

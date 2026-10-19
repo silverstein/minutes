@@ -23,6 +23,26 @@ fn main() {
     }
 }
 
+fn pipeline_failure_class(error: &speakrs::PipelineError) -> &'static str {
+    use speakrs::PipelineError as E;
+    match error {
+        E::ModelLoad(_) => "model_load",
+        E::Inference(_) => "inference",
+        E::UnsupportedExecutionMode(_) => "unsupported_mode",
+        E::Segmentation(_) => "segmentation",
+        E::Powerset(_) => "powerset",
+        E::Plda(_) => "plda",
+        E::Reconstruct(_) => "reconstruct",
+        E::Queue(_) => "queue",
+        E::Invariant(_) => "invariant",
+        E::WorkerPanic { .. } => "worker_panic",
+        E::WorkerSpawn { .. } => "worker_spawn",
+        E::Backend { .. } => "backend",
+        E::Other(_) => "other",
+        _ => "unclassified",
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Fixed markers only: never send model paths, audio or arbitrary errors to
     // the host's diagnostic progress channel.
@@ -87,7 +107,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("full speaker observation budget exceeded".into());
     }
-    let result = pipeline.run(&samples)?;
+    let result = pipeline.run(&samples).inspect_err(|error| {
+        eprintln!("MINUTES_SPEAKER_FAILURE {}", pipeline_failure_class(error));
+    })?;
     eprintln!("MINUTES_SPEAKER_PHASE inference_complete");
     if result.segments.len() > MAX_SEGMENTS {
         return Err("segment budget exceeded".into());
@@ -340,6 +362,34 @@ mod tests {
         assert!(super::canonical_segment("SPEAKER_00", 2.0, 3.0, 2.0)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn pipeline_failure_class_does_not_reflect_error_context_or_payload() {
+        for (error, expected) in [
+            (
+                speakrs::PipelineError::Other("private/path or audio".into()),
+                "other",
+            ),
+            (
+                speakrs::PipelineError::Backend {
+                    context: "private context",
+                    message: "private payload".into(),
+                },
+                "backend",
+            ),
+            (
+                speakrs::PipelineError::WorkerSpawn {
+                    worker: "private worker",
+                    source: std::io::Error::other("private detail"),
+                },
+                "worker_spawn",
+            ),
+        ] {
+            let class = super::pipeline_failure_class(&error);
+            assert_eq!(class, expected);
+            assert!(super::FAILURE_CLASSES.contains(&class));
+        }
     }
 
     #[cfg(unix)]

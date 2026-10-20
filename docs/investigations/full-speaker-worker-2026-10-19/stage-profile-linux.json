@@ -1,0 +1,50 @@
+{
+  "scope": "First already-seen public AMI control on this Linux host; diagnostic characterization, not complete platform qualification or a compiler speedup measurement",
+  "id": "IS1008a",
+  "elapsed_seconds": 189.49071336071938,
+  "real_time_factor": 0.2007407653412499,
+  "exit": 0,
+  "worker_sha256": "159d551d6ad1abadc8d74d5f2ef18697391ad1cbdd3fffb42e46a620bb19f723",
+  "probe_sha256": "5299bdac6e9f3a4df9a01ccdf0571b0165c663b2ad2cfe04caf530f297753275",
+  "input_preserved": true,
+  "runtime": {
+    "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+    "logical_cpus": 16,
+    "concurrent_local_work": "Whole-workspace Clippy running with two Cargo jobs; diagnostic profiling only, not an isolated throughput measurement"
+  },
+  "source_parent": "2c9c21ad61907880345f9feb4d7acfff784f06a2",
+  "source_sha256": {
+    "crates/speaker-worker/src/main.rs": "a14fa929a8517dbb2571a9e9ddfe96bf7985a9c1a409198e239aa89ce7b80179",
+    "crates/speaker-worker/src/stage_diagnostics.rs": "ff739071bc06e60fcbb7f0d0617ff91a6a28f5301d6b7fa657470c3179840a9c",
+    "crates/core/src/diarize_full_worker.rs": "6a5c96295d758faa9c73eee6d54d58f18e379690f4ed7f8747fdca0c037dcf12",
+    "crates/core/src/bounded_child.rs": "d45e0b42e69f2034c3f9f3113c1c658662bd2845e90ed047f63800a5b08bcda1",
+    "crates/core/src/diarize_full_protocol.rs": "5cc7b325fa26ad5be546505c202e16becc192690b7858158839738bb03cf7c0b",
+    "crates/speaker-worker/src/windows_handles.rs": "2c0813f30d3d19130df841aa0ba9118131cf8d790518fbc5b131fb2d7a7df32c",
+    "crates/speaker-worker/Cargo.toml": "0902f10b80cd2084b822d84c43ffc974f94a26c48714706bc6c7d39e5a543f58",
+    "crates/speaker-worker/Cargo.lock": "f4daf4e3367590e37164f2e4ea4487e5697174b96240090d23d333bba5220be4",
+    "crates/speaker-worker/build.rs": "5841365750564d58480d12a0d55c20fee0265a52a74e82a7fed0025cdacc834c"
+  },
+  "last_worker_phase": "inference_complete",
+  "worker_failure_class": "unreported",
+  "worker_exit_code": 0,
+  "stage_timings_ms": {
+    "segmentation_end_ms": 23272,
+    "embeddings_end_ms": 171443,
+    "inference_end_ms": 171532
+  },
+  "score": {
+    "der": 0.09947805829881977,
+    "missed_speaker_seconds": 32.20474999999955,
+    "false_alarm_speaker_seconds": 35.618499999999436,
+    "confusion_speaker_seconds": 10.24215624999988,
+    "reference_speaker_seconds": 784.7500000000005,
+    "collar_seconds": 0,
+    "overlap": "included",
+    "mapping": "global-optimal",
+    "predicted_speakers": 4,
+    "reference_speakers": 4,
+    "unknown_speaker_seconds": 0
+  },
+  "source_revision": "3cf92ce619cc0396af8ea8dc3395ce63ad998519",
+  "diagnostic_driver_sha256": "2ed704d3f06ad9f79d34ad445d74d553b0cb761b97566c07c3a1436385643806"
+}

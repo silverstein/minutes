@@ -115,6 +115,30 @@ name after the pinned public models are fetched. It checks an empty anonymous
 result, no embeddings and byte-for-byte WAV preservation. A failure prevents the
 longer qualification from running; it does not substitute for those recordings.
 
+## Local stage diagnostic check
+
+The [one-control Linux receipt](full-speaker-worker-2026-10-19/stage-profile-linux.json)
+binds the diagnostic source `3cf92ce619cc0396af8ea8dc3395ce63ad998519`, executable
+hashes and input. IS1008a completed in 189.49 seconds (ratio 0.2007), preserving
+the WAV, four speakers and DER 9.9478%. Cumulative inference timings were 23.272
+seconds at segmentation completion, 171.443 at embedding completion and 171.532
+at inference completion. The interval between segmentation and embedding
+completion was 148.171 seconds; it includes decoding, preparation and embedding.
+The remaining inference interval was 0.089 seconds. These stage boundaries
+identify a place to profile rather than measure individual kernels or establish
+a faster implementation.
+
+Whole-workspace Clippy was running concurrently with two Cargo jobs. This is
+one already-seen diagnostic control, not an isolated throughput measurement,
+complete platform qualification or evidence about the Windows crash. The actual
+three-second silence test also passed with all three timing fields present.
+Strict helper and feature-specific host Clippy, seven helper tests, ten host
+tests, twenty Python controls (two optional skips), sixteen coverage-auditor
+tests, actionlint and generated-doc checks passed. Whole-workspace Clippy passed
+on macOS with identical source bytes. The Linux whole-workspace attempt reported
+unused-code lint errors in the unchanged Tauri platform code; the changed core
+feature and helper passed their separate strict Linux checks.
+
 ## Scope still unqualified
 
 The next diagnostic revision observes the pinned pipeline's existing

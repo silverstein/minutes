@@ -135,7 +135,9 @@ mod tests {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcessId, GetProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -156,6 +158,17 @@ mod tests {
     #[test]
     fn runtime_handles_survive_while_ambient_parent_handle_is_retired() {
         let ambient = process_handle(true);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert_ne!(
+            unsafe {
+                SetHandleInformation(
+                    file.as_file().as_raw_handle(),
+                    HANDLE_FLAG_INHERIT,
+                    HANDLE_FLAG_INHERIT,
+                )
+            },
+            0
+        );
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -167,6 +180,10 @@ mod tests {
             .env(
                 "MINUTES_SPEAKER_TEST_INHERITED_HANDLE",
                 (ambient.as_raw_handle() as usize).to_string(),
+            )
+            .env(
+                "MINUTES_SPEAKER_FENCE_TEST_FILE_HANDLE",
+                (file.as_file().as_raw_handle() as usize).to_string(),
             )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -204,6 +221,16 @@ mod tests {
         assert_ne!(unsafe { GetHandleInformation(ambient, &mut flags) }, 0);
         assert_ne!(flags & HANDLE_FLAG_INHERIT, 0, "inheritance precondition");
         assert_ne!(unsafe { GetProcessId(ambient) }, 0);
+        let file = std::env::var("MINUTES_SPEAKER_FENCE_TEST_FILE_HANDLE")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap() as HANDLE;
+        assert_ne!(unsafe { GetHandleInformation(file, &mut flags) }, 0);
+        assert_ne!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "file inheritance precondition"
+        );
 
         let runtime = process_handle(false);
         assert_ne!(
@@ -218,5 +245,6 @@ mod tests {
             "runtime-owned handle was closed"
         );
         assert_eq!(unsafe { GetHandleInformation(ambient, &mut flags) }, 0);
+        assert_eq!(unsafe { GetHandleInformation(file, &mut flags) }, 0);
     }
 }

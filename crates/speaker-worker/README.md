@@ -128,7 +128,7 @@ On Windows the fence distinguishes inheritable parent handles from
 non-inheritable handles owned by the trusted runtime. It inspects the
 [`HANDLE_FLAG_INHERIT` property](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-gethandleinformation)
 and closes inheritable handles other than the three explicit stdio channels.
-An isolated native test requires a real inherited parent handle to be closed
+An isolated native test requires real inherited parent process and file handles to be closed
 while a runtime-owned process handle remains usable. That test and the complete
 recordings still need to pass on the candidate revision; this change alone does
 not establish the previous inference crash's cause.

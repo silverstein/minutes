@@ -144,8 +144,8 @@ feature and helper passed their separate strict Linux checks.
 Code inspection also found that the Windows fence closed all non-stdio process
 handles, including runtime-owned non-inheritable handles. The candidate narrows
 closure to handles marked inheritable by Windows, retaining runtime ownership.
-Its isolated native regression requires a real inherited parent-process handle
-to be valid and inheritable before the fence, invalid afterward, and a separate
+Its isolated native regression requires real inherited parent process and file
+handles to be valid and inheritable before the fence, invalid afterward, and a separate
 non-inheritable runtime handle to remain usable. Failure to inspect or retire
 an inheritable handle still refuses startup. This repairs the ownership contract;
 the native regression and full recordings remain pending and the earlier

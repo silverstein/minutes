@@ -1572,6 +1572,7 @@ pub(crate) fn run(
         stdout_target,
         budget,
         StdinCompletion::RequireComplete,
+        None,
     )
 }
 
@@ -1587,6 +1588,32 @@ pub(crate) fn run_allowing_child_to_close_stdin(
         stdout_target,
         budget,
         StdinCompletion::AllowChildEarlyClose,
+        None,
+    )
+}
+
+/// Cancelled work retires the same process tree as deadline/output failures.
+#[cfg(feature = "diarize")]
+pub(crate) fn run_cancellable(
+    command: &mut BoundedCommand,
+    input: Option<StdinSource>,
+    stdout_target: StdoutTarget,
+    budget: ChildBudget,
+    cancellation: Arc<AtomicBool>,
+) -> std::io::Result<ChildRun> {
+    if cancellation.load(Ordering::Acquire) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "child launch cancelled",
+        ));
+    }
+    run_with_stdin_completion(
+        command,
+        input,
+        stdout_target,
+        budget,
+        StdinCompletion::RequireComplete,
+        Some(cancellation),
     )
 }
 
@@ -1596,6 +1623,7 @@ fn run_with_stdin_completion(
     stdout_target: StdoutTarget,
     budget: ChildBudget,
     stdin_completion: StdinCompletion,
+    external_cancellation: Option<Arc<AtomicBool>>,
 ) -> std::io::Result<ChildRun> {
     if budget.wall_clock.is_zero() {
         return Err(std::io::Error::new(
@@ -1741,6 +1769,16 @@ fn run_with_stdin_completion(
         }
 
         let now = Instant::now();
+        if failure.is_none()
+            && external_cancellation
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            failure = Some(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "child processing cancelled",
+            ));
+        }
         if now >= deadline && failure.is_none() {
             timed_out = true;
             failure = Some(std::io::Error::new(

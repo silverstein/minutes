@@ -385,6 +385,8 @@ pub const VALID_PARAKEET_MODELS: &[&str] = &["tdt-ctc-110m", "tdt-600m"];
 #[serde(default)]
 pub struct DiarizationConfig {
     pub engine: String,
+    /// Explicit absolute path to the separately built opt-in full speaker worker.
+    pub speaker_worker_path: Option<PathBuf>,
     pub model_path: PathBuf,
     /// Diarization model set: "legacy" (default) or "community-1".
     /// Kept separate from `embedding_model` so opting into community-1
@@ -1734,6 +1736,7 @@ impl Default for DiarizationConfig {
     fn default() -> Self {
         Self {
             engine: "auto".into(),
+            speaker_worker_path: None,
             model_path: minutes_dir().join("models").join("diarization"),
             model: "legacy".into(),
             threshold: 0.4,

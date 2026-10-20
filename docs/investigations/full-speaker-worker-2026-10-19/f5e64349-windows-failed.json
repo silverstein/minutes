@@ -1,0 +1,32 @@
+{
+  "probe_sha256": "3293a39fa912a28ebaca020e175c17bd81b3d6560ee50c6b739b91735d013141",
+  "worker_sha256": "fe668c8b40aa8a0aac48186e6568d8f9ca5437bd3ae6644b5a9a5675f427027e",
+  "runtime": {
+    "platform": "Windows-2025Server-10.0.26100-SP0",
+    "machine": "AMD64",
+    "logical_cpu_count": 4
+  },
+  "manifest_sha256": "418e6ad90de2155b8491a6070cf03fb321d73508da1eb82bca43e05b9a726e57",
+  "check_sha256": "2d7bd3fd37224dbe047728550307004e625557a9c5075fd3ec7c2192363d684d",
+  "source_sha256": {
+    "crates\\core\\src\\diarize_full_worker.rs": "41d79f203209f898983945d657c1df0644469bf4369b72c63508d9ec4255451c",
+    "crates\\core\\src\\bounded_child.rs": "fe5e88e93ac2b265d4a9af6d9bafa59f53ed25d27f759b2b248ac9e82c73cbc3",
+    "crates\\speaker-worker\\src\\main.rs": "072d089f0075a47b67341d42b77fb160ba377f877fa7a7abe65c4d3e44198894",
+    "crates\\core\\src\\diarize_full_protocol.rs": "557706714ce44a59f1eadbeace70bf79daba767b3b2d9fb8e18479dcea6bcd21",
+    "crates\\speaker-worker\\Cargo.toml": "4430fb75e24591d2f0590339f02e93e86c50c733d9aac0a476882d3ab8ccd5bc",
+    "crates\\speaker-worker\\build.rs": "ae1b609dcab94436b5e4feba162137bacebae5429fa35fdc4395dd0125c65a83",
+    "crates\\speaker-worker\\vcpkg.json": "f021c15dc1cf9c8578b7e6c5be3ae987f903b20ca1d8b4d76beba698b656b2a3",
+    "crates\\speaker-worker\\Cargo.lock": "2bcda1c8b8a391ba19e38f75b66cd782e10f0943579736a01e5796864a33795e"
+  },
+  "id": "IS1008a",
+  "processing_seconds": 900.0320000000002,
+  "real_time_factor": 0.9534668444024583,
+  "exit_code": 1,
+  "gates": {
+    "engine_completed": false
+  },
+  "source_revision": "f5e643496d720dfb671edb1c68d222df78f26ff9",
+  "qualification": "Failed already-seen regression; no completed activity labels, no speed or quality pass.",
+  "checkout_line_endings": "CRLF; observed hashes verified against source_revision blobs with LF replaced by CRLF.",
+  "github_actions_job": "https://github.com/silverstein/minutes/actions/runs/39279757314/job/118153198865"
+}

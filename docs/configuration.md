@@ -176,3 +176,12 @@ Images are never attached to every prompt automatically, and an assistant
 should only claim it can see the screen after it has opened or received a
 specific returned image. Unless `keep_after_summary = true`, Minutes deletes
 the PNGs and their readable references after summarization.
+
+### Experimental full native speaker worker
+
+A separately built, explicitly configured `engine = "speakrs"` runs the full
+native CPU pipeline in a bounded child process for ordinary WAV post-processing.
+It is never selected by `auto`, performs no automatic model downloads, and
+returns anonymous labels only. Existing voice profiles remain isolated; named
+enrollment for this engine is not yet qualified. See the
+[worker setup and limits](../crates/speaker-worker/README.md) before opting in.

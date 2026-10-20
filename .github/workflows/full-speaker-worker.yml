@@ -1,0 +1,165 @@
+name: Full speaker worker
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/speaker-worker/**'
+      - 'crates/core/src/diarize*'
+      - 'crates/core/src/voice.rs'
+      - 'crates/core/src/bounded_child.rs'
+      - 'crates/core/src/config.rs'
+      - 'crates/core/Cargo.toml'
+      - 'crates/core/examples/full_diarize_file.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'tests/eval/diarization/**'
+      - '.github/workflows/full-speaker-worker.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: full-speaker-worker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      VCPKG_MAX_CONCURRENCY: 2
+      WINDOWS_BLAS_TRIPLET: x64-windows-static-md-release
+      # This unbundled helper is compiled and exercised on the same machine.
+      # Keep the host portable and never restore CPU-specific helper objects.
+      MINUTES_SPEAKER_BUILD_RUSTFLAGS: -C target-cpu=native
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libpulse-dev libclang-dev libopenblas-dev cmake pkg-config
+      - name: Select Speech SDK on Intel macOS
+        if: runner.os == 'macOS' && runner.arch == 'X64'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
+      - name: Read the pinned Windows BLAS source
+        if: runner.os == 'Windows'
+        id: windows-blas
+        shell: pwsh
+        run: |
+          $manifest = Get-Content crates/speaker-worker/vcpkg.json -Raw | ConvertFrom-Json
+          "revision=$($manifest.'builtin-baseline')" >> $env:GITHUB_OUTPUT
+          $cpu = (Get-CimInstance Win32_Processor).Name -join ','
+          $digest = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($cpu))
+          "cpu=$([Convert]::ToHexString($digest).Substring(0, 16))" >> $env:GITHUB_OUTPUT
+          "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
+      - uses: actions/checkout@v7
+        if: runner.os == 'Windows'
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ steps.windows-blas.outputs.revision }}
+          persist-credentials: false
+          path: .vcpkg-openblas
+      - name: Restore static Windows CPU library and license notices
+        if: runner.os == 'Windows'
+        id: windows-blas-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .vcpkg-openblas/installed
+          key: speaker-blas-${{ steps.windows-blas.outputs.image }}-${{ steps.windows-blas.outputs.cpu }}-${{ env.WINDOWS_BLAS_TRIPLET }}-${{ hashFiles('crates/speaker-worker/vcpkg.json') }}
+      - name: Build the pinned static Windows BLAS library
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./.vcpkg-openblas/bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $root = (Resolve-Path .vcpkg-openblas).Path
+          & "$root/vcpkg.exe" install "--x-manifest-root=$pwd/crates/speaker-worker" "--x-install-root=$root/installed" "--triplet=$env:WINDOWS_BLAS_TRIPLET" --disable-metrics
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=$env:WINDOWS_BLAS_TRIPLET" >> $env:GITHUB_ENV
+      # A later inference failure must not discard the successful pinned BLAS
+      # build and force another long native-library rebuild for diagnostics.
+      - name: Save completed static Windows CPU library and license notices
+        if: runner.os == 'Windows' && steps.windows-blas-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .vcpkg-openblas/installed
+          key: ${{ steps.windows-blas-cache.outputs.cache-primary-key }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+          key: full-speaker-worker-${{ runner.arch }}
+          cache-on-failure: true
+      - name: Build explicitly pinned CPU worker
+        env:
+          RUSTFLAGS: ${{ env.MINUTES_SPEAKER_BUILD_RUSTFLAGS }}
+        run: cargo build --release --locked --manifest-path crates/speaker-worker/Cargo.toml
+      - name: Lint standalone helper
+        env:
+          RUSTFLAGS: ${{ env.MINUTES_SPEAKER_BUILD_RUSTFLAGS }}
+        run: |
+          cargo fmt --manifest-path crates/speaker-worker/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path crates/speaker-worker/Cargo.toml --all-targets -- -D warnings
+      - name: Lint feature-gated host
+        run: |
+          cargo clippy --locked -p minutes-core --no-default-features --features diarize --lib --example full_diarize_file -- -D warnings
+      - name: Worker memory-ceiling regression
+        env:
+          RUSTFLAGS: ${{ env.MINUTES_SPEAKER_BUILD_RUSTFLAGS }}
+        run: cargo test --locked --manifest-path crates/speaker-worker/Cargo.toml
+      - name: Build actual host bridge probe
+        run: cargo build --release --locked -p minutes-core --no-default-features --features diarize --example full_diarize_file
+      - name: Host protocol and cancellation tests
+        run: cargo test --locked -p minutes-core --no-default-features --features diarize --lib diarize::full_worker -- --test-threads=1
+      - name: Cache licensed public AMI audio and annotations
+        uses: actions/cache@v6
+        with:
+          path: |
+            fixtures/audio
+            fixtures/ATTRIBUTION.txt
+          key: full-speaker-ami-${{ hashFiles('tests/eval/diarization/full-native-ami.json') }}
+          enableCrossOsArchive: true
+      - name: Explicitly fetch pinned public integration controls
+        run: python tests/eval/diarization/fetch_full_pipeline.py --manifest tests/eval/diarization/full-native-ami.json --directory fixtures
+      - name: Actual native helper short-input protocol smoke
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          MINUTES_SPEAKER_SMOKE_WORKER="$GITHUB_WORKSPACE/crates/speaker-worker/target/release/minutes-speaker-worker${suffix}" \
+          MINUTES_SPEAKER_SMOKE_MODELS="$GITHUB_WORKSPACE/fixtures/candidate-models" \
+          cargo test --locked -p minutes-core --no-default-features --features diarize --lib \
+            diarize::full_worker::tests::real_worker_short_silence_preserves_protocol_and_completes \
+            -- --ignored --exact --nocapture --test-threads=1
+      - name: Exercise actual worker through the host on complete recordings
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then suffix=".exe"; fi
+          python tests/eval/diarization/check_full_worker.py \
+            --probe "target/release/examples/full_diarize_file${suffix}" \
+            --worker "crates/speaker-worker/target/release/minutes-speaker-worker${suffix}" \
+            --fixtures fixtures --output results
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: full-speaker-worker-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            results/*.json
+            fixtures/ATTRIBUTION.txt
+          if-no-files-found: warn

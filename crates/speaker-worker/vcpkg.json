@@ -1,0 +1,8 @@
+{
+  "name": "minutes-speaker-worker",
+  "version-string": "0.0.0",
+  "builtin-baseline": "664933b8d385dfc01f4e0cdff4c7c74e71f6a740",
+  "dependencies": [
+    { "name": "openblas", "features": ["threads"] }
+  ]
+}

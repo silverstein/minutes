@@ -153,3 +153,7 @@ required-features = ["streaming", "whisper"]
 [[test]]
 name = "integration"
 path = "../../tests/integration/pipeline_test.rs"
+
+[[example]]
+name = "full_diarize_file"
+required-features = ["diarize"]

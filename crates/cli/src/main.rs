@@ -8125,6 +8125,9 @@ fn cmd_setup_diarization(requested_model: &str) -> Result<()> {
     use minutes_core::diarize;
 
     let mut config = Config::load();
+    if config.diarization.engine == "speakrs" {
+        anyhow::bail!("The opt-in full speaker worker uses a separate pinned model bundle. See docs/configuration.md; setup will not replace it with ONNX models.");
+    }
     let selected_model = if requested_model == "small" {
         config.diarization.model.clone()
     } else {

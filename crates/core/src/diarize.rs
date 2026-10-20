@@ -14,6 +14,9 @@ const MAX_DIARIZATION_SEGMENTS: usize = 100_000;
 #[cfg(feature = "diarize")]
 const MAX_SPEAKER_TEMPLATES: usize = 64;
 #[cfg(feature = "diarize")]
+#[path = "diarize_full_worker.rs"]
+mod full_worker;
+#[cfg(feature = "diarize")]
 #[path = "diarize_legacy.rs"]
 mod legacy_regions;
 #[cfg(any(feature = "diarize", test))]
@@ -646,6 +649,11 @@ pub fn extract_speaker_embeddings(
     windows: &[Vec<i16>],
     config: &Config,
 ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    if config.diarization.engine == "speakrs" {
+        return Err(
+            "named voice enrollment is not yet qualified for the full speaker worker".into(),
+        );
+    }
     let info = embedding_model_for_config(config);
     let model_path = config.diarization.model_path.join(info.filename);
     if !model_path.exists() {
@@ -692,6 +700,12 @@ pub fn extract_speaker_embeddings(
 
 /// Check if diarization models are installed.
 pub fn models_installed(config: &Config) -> bool {
+    if config.diarization.engine == "speakrs" {
+        #[cfg(feature = "diarize")]
+        return full_worker::models_installed(config);
+        #[cfg(not(feature = "diarize"))]
+        return false;
+    }
     let dir = &config.diarization.model_path;
     let model = diarization_model_for_config(config);
     let emb = embedding_model_for_config(config);
@@ -2252,7 +2266,7 @@ fn run_diarization_engine_inner(
     // Preprocessing belongs to the same lease and deadline as decode and
     // inference. Keep its private capability alive through the entire worker,
     // including after a caller-side timeout.
-    let preprocessed = if engine == "pyannote" {
+    let preprocessed = if matches!(engine, "pyannote" | "speakrs") {
         Ok((source_path.to_path_buf(), None))
     } else {
         preprocess_audio(source_path, config, cancellation)
@@ -2261,6 +2275,8 @@ fn run_diarization_engine_inner(
         preprocessed.map_err(|error| format!("diarization preprocessing failed: {error}"))?;
     cancellation.check().map_err(|error| error.to_string())?;
     let result = match engine {
+        #[cfg(feature = "diarize")]
+        "speakrs" => full_worker::diarize(&effective_path, config, cancellation),
         #[cfg(feature = "diarize")]
         "pyannote-rs" => diarize_with_pyannote_rs(&effective_path, config, cancellation),
         #[cfg(not(feature = "diarize"))]

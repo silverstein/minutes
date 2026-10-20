@@ -1,0 +1,48 @@
+{
+  "qualification": "Failed already-seen public integration regression. No later recordings run after runtime failure.",
+  "source_revision": "f5e643496d720dfb671edb1c68d222df78f26ff9",
+  "github_actions_job": "https://github.com/silverstein/minutes/actions/runs/39279757314/job/118153199295",
+  "probe_sha256": "592fc674e088ab5fbdfcfc9bcb91874e66107e660df8d7232b5d632ef6250fde",
+  "worker_sha256": "921bfff4d2a525b7592fdb4e742c6414cdb04a2605bb0b51db7b85e42aa21a08",
+  "runtime": {
+    "platform": "macOS-15.7.9-x86_64-i386-64bit",
+    "machine": "x86_64",
+    "logical_cpu_count": 4
+  },
+  "manifest_sha256": "4210c2d98b79493f21efefcc02c161bb6409308c8832e7017110e63d57744337",
+  "check_sha256": "e98291479d5124d23618fc64b239ce58a9d29ee010758d43dcef5f56c36c5dad",
+  "source_sha256": {
+    "crates/core/src/diarize_full_worker.rs": "1e4d83f83ab1f5e4e872346cc101704c859279945ff983b063b8db2c5ab3f2f0",
+    "crates/core/src/bounded_child.rs": "d45e0b42e69f2034c3f9f3113c1c658662bd2845e90ed047f63800a5b08bcda1",
+    "crates/speaker-worker/src/main.rs": "a87f0b7695cf02ec1209f88ce3a93acdb24beb08d915afc6d8163182180d6761",
+    "crates/core/src/diarize_full_protocol.rs": "ba65c71384393252139611512ab4ddd427c9f77215f2f5c8c47ff1479b44913d",
+    "crates/speaker-worker/Cargo.toml": "3ab9187ba016af8f197e74543fd2a15bf1c2491a0a399c6f1ab09ebc9d70e7bc",
+    "crates/speaker-worker/build.rs": "5841365750564d58480d12a0d55c20fee0265a52a74e82a7fed0025cdacc834c",
+    "crates/speaker-worker/vcpkg.json": "fb1118df519563e35465f44166f256012c0ebf0a76e33e93048535ec9160d8ab",
+    "crates/speaker-worker/Cargo.lock": "0f17ba293648f8a73744c1fc481a7d378e2a9c2b3a8466a975f2ab1f635a7ef3"
+  },
+  "rows": [
+    {
+      "id": "IS1008a",
+      "processing_seconds": 385.0567509130001,
+      "real_time_factor": 0.40791754649710404,
+      "gates": {
+        "der": true,
+        "speaker_count": true,
+        "runtime": false,
+        "input_preserved": true
+      },
+      "der": 0.09947805829881977,
+      "missed_speaker_seconds": 32.20474999999955,
+      "false_alarm_speaker_seconds": 35.618499999999436,
+      "confusion_speaker_seconds": 10.24215624999988,
+      "reference_speaker_seconds": 784.7500000000005,
+      "collar_seconds": 0,
+      "overlap": "included",
+      "mapping": "global-optimal",
+      "predicted_speakers": 4,
+      "reference_speakers": 4,
+      "unknown_speaker_seconds": 0
+    }
+  ]
+}

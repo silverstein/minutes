@@ -169,3 +169,7 @@ MIT. Built by [Mat Silverstein](https://github.com/silverstein), founder of
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=silverstein/minutes&type=Date)](https://star-history.dera.page/#silverstein/minutes&Date)
+
+The experimental [full native speaker worker](crates/speaker-worker/README.md)
+is a separately built, opt-in post-processing engine. It preserves the live
+transcription path and existing voice profiles while returning anonymous labels.

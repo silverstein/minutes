@@ -1,0 +1,97 @@
+{
+  "qualification": "Already-seen public integration regression; not fresh model admission, live capture, ASR or named-profile qualification.",
+  "probe_sha256": "bf187c204d5b657f99f1bbfe793c87869276fee07d1d502a010d105d892d99c9",
+  "worker_sha256": "4b022bec8364929ccd688107d09815b5f5237d5fc9599b546a7c5ad1752384b0",
+  "runtime": {
+    "platform": "macOS-26.6-arm64-arm-64bit",
+    "machine": "arm64",
+    "logical_cpu_count": 16,
+    "worker_build_rustflags": "-C target-cpu=native"
+  },
+  "manifest_sha256": "4210c2d98b79493f21efefcc02c161bb6409308c8832e7017110e63d57744337",
+  "check_sha256": "4d6f1ac9333e7633e50cdbbe25443f6153a4d86579189a284c437f026eeaa130",
+  "source_sha256": {
+    "crates/core/src/diarize_full_worker.rs": "1e4d83f83ab1f5e4e872346cc101704c859279945ff983b063b8db2c5ab3f2f0",
+    "crates/core/src/bounded_child.rs": "d45e0b42e69f2034c3f9f3113c1c658662bd2845e90ed047f63800a5b08bcda1",
+    "crates/speaker-worker/src/main.rs": "a87f0b7695cf02ec1209f88ce3a93acdb24beb08d915afc6d8163182180d6761",
+    "crates/core/src/diarize_full_protocol.rs": "ba65c71384393252139611512ab4ddd427c9f77215f2f5c8c47ff1479b44913d",
+    "crates/speaker-worker/Cargo.toml": "3ab9187ba016af8f197e74543fd2a15bf1c2491a0a399c6f1ab09ebc9d70e7bc",
+    "crates/speaker-worker/build.rs": "5841365750564d58480d12a0d55c20fee0265a52a74e82a7fed0025cdacc834c",
+    "crates/speaker-worker/vcpkg.json": "fb1118df519563e35465f44166f256012c0ebf0a76e33e93048535ec9160d8ab",
+    ".github/workflows/full-speaker-worker.yml": "b741646c0f0bebb073a27b014703b8e6e05d012640ee9ac3076552c8868448c5",
+    "crates/speaker-worker/Cargo.lock": "0f17ba293648f8a73744c1fc481a7d378e2a9c2b3a8466a975f2ab1f635a7ef3"
+  },
+  "parent_loss": {
+    "passed": true,
+    "scope": "actual worker retired after its own synthetic host exited; internal inference phase uninstrumented"
+  },
+  "rows": [
+    {
+      "id": "IS1008a",
+      "processing_seconds": 45.478369666,
+      "real_time_factor": 0.04817841767182666,
+      "gates": {
+        "der": true,
+        "speaker_count": true,
+        "runtime": true,
+        "input_preserved": true
+      },
+      "der": 0.09947805829881977,
+      "missed_speaker_seconds": 32.20474999999955,
+      "false_alarm_speaker_seconds": 35.618499999999436,
+      "confusion_speaker_seconds": 10.24215624999988,
+      "reference_speaker_seconds": 784.7500000000005,
+      "collar_seconds": 0,
+      "overlap": "included",
+      "mapping": "global-optimal",
+      "predicted_speakers": 4,
+      "reference_speakers": 4,
+      "unknown_speaker_seconds": 0
+    },
+    {
+      "id": "TS3004a",
+      "processing_seconds": 64.7981775,
+      "real_time_factor": 0.04816553018276935,
+      "gates": {
+        "der": true,
+        "speaker_count": true,
+        "runtime": true,
+        "input_preserved": true
+      },
+      "der": 0.21196450333266906,
+      "missed_speaker_seconds": 103.13346875000049,
+      "false_alarm_speaker_seconds": 51.06721874999809,
+      "confusion_speaker_seconds": 58.86603125000056,
+      "reference_speaker_seconds": 1005.2000000000011,
+      "collar_seconds": 0,
+      "overlap": "included",
+      "mapping": "global-optimal",
+      "predicted_speakers": 4,
+      "reference_speakers": 4,
+      "unknown_speaker_seconds": 0
+    },
+    {
+      "id": "IB4001",
+      "processing_seconds": 86.61593058400001,
+      "real_time_factor": 0.04863819123015637,
+      "gates": {
+        "der": true,
+        "speaker_count": true,
+        "runtime": true,
+        "input_preserved": true
+      },
+      "der": 0.1991638077203388,
+      "missed_speaker_seconds": 118.5850312499955,
+      "false_alarm_speaker_seconds": 88.5244062499969,
+      "confusion_speaker_seconds": 107.1013437500003,
+      "reference_speaker_seconds": 1577.650000000001,
+      "collar_seconds": 0,
+      "overlap": "included",
+      "mapping": "global-optimal",
+      "predicted_speakers": 4,
+      "reference_speakers": 4,
+      "unknown_speaker_seconds": 0
+    }
+  ],
+  "source_binding": "Each source_sha256 entry and check_sha256 verified against the candidate tree before commit; source base f5e643496d720dfb671edb1c68d222df78f26ff9. Native CPU flags apply only to helper."
+}

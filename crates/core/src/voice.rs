@@ -41,6 +41,9 @@ const SOLO_MAX_CLIPPING_FRACTION: f32 = 0.05;
 /// Resolve the model version tag for the currently configured embedding model.
 /// Falls back to the CAM++ version string if the legacy override is unrecognized.
 pub fn model_version(config: &Config) -> &'static str {
+    if config.diarization.engine == "speakrs" {
+        return "speakrs_af8013f_cpu_67f963b6_anonymous_v1";
+    }
     crate::diarize::embedding_model_for_config(config).version
 }
 
@@ -510,6 +513,11 @@ fn solo_embedding_windows(samples: &[f32]) -> Vec<Vec<i16>> {
 /// normalized windows and reject clips that cannot safely form a voiceprint.
 #[cfg(feature = "diarize")]
 pub fn embed_solo_clip(wav_path: &Path, config: &Config) -> Result<SoloEmbedding, VoiceError> {
+    if config.diarization.engine == "speakrs" {
+        return Err(VoiceError::Other(
+            "named voice enrollment is not yet qualified for the full speaker worker".into(),
+        ));
+    }
     let samples = decode_wav_mono_16khz(wav_path)?;
     let (speech_seconds, snr, clipping, peak_rms) = solo_audio_quality(&samples);
     ensure_usable_microphone_signal(peak_rms)?;

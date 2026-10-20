@@ -153,3 +153,28 @@ environment. CI without this optional dependency skips its two conformance
 tests; the recorded Mac run executed all 17 tests with MeetEval 0.4.3 installed.
 The [native comparison report](../../../docs/investigations/full-native-diarization-2026-10-18.md)
 explains the measured gains, limitations and remaining integration gates.
+
+### Actual host-to-worker regression
+
+The separate `minutes-speaker-worker` helper and `full_diarize_file` example
+exercise the opt-in Minutes dispatcher, PCM transport, resource supervision and
+anonymous response validation. Follow the [build and setup instructions](../../../crates/speaker-worker/README.md)
+for both executables; an older installed host cannot use a newly built helper.
+
+```bash
+python3 tests/eval/diarization/check_full_worker.py \
+  --probe /owned/minutes/target/release/examples/full_diarize_file \
+  --worker /owned/minutes/crates/speaker-worker/target/release/minutes-speaker-worker \
+  --fixtures /owned/full-native --output /owned/worker-results
+```
+
+On Windows, supply both executable paths with `.exe`. The check uses the three
+already-seen AMI recordings and frozen native predictions above. It requires
+each file's DER to remain within one percentage point of that result, exactly
+four anonymous speakers, RTF at most 0.25 and unchanged input WAV hashes. On
+POSIX it also kills its own synthetic host after worker launch and checks that
+the actual helper retires. That check does not instrument inference phase or
+qualify Windows parent loss. Reports bind the executable, source, input and
+checker hashes. The `Full speaker worker` CI workflow runs the actual bridge
+on Linux, Windows, Apple Silicon and Intel. This is integration regression,
+not a fresh model admission, live capture test or installed-app acceptance.

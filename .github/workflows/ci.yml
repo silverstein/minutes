@@ -67,6 +67,7 @@ jobs:
               # so `cargo clippy --all` never reaches it and only the filter
               # keeps it covered.
               - 'crates/sherpa-plugin/**'
+              - 'crates/speaker-worker/**'
               - 'crates/archive-convert/**'
               - 'crates/archive-core/**'
               - 'crates/archive-ocr/**'

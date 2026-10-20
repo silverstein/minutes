@@ -22,6 +22,18 @@ class WorkerDiagnosticTests(unittest.TestCase):
                                           worker_failure_class='unreported',
                                           worker_exit_code=None))
 
+    def test_only_bounded_numeric_stage_timings_are_published(self):
+        receipt = parse_worker_diagnostics(
+            'worker_phase="segmentation_complete" segmentation_end_ms=Some(123) '
+            'embeddings_end_ms=Some(456) inference_end_ms=Some(900000) private audio')
+        self.assertEqual(receipt['last_worker_phase'], 'segmentation_complete')
+        self.assertEqual(receipt['stage_timings_ms'], dict(
+            segmentation_end_ms=123, embeddings_end_ms=456, inference_end_ms=900000))
+        self.assertNotIn('private', str(receipt))
+        for value in ('-1', '+1', '900001', '1234567', '12 private', 'private/path'):
+            self.assertNotIn('stage_timings_ms', parse_worker_diagnostics(
+                'segmentation_end_ms=Some(' + value + ')'))
+
 
 if __name__ == '__main__':
     unittest.main()

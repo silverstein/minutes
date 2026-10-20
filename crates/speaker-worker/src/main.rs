@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 #[path = "../../core/src/diarize_full_protocol.rs"]
 mod protocol;
+mod stage_diagnostics;
 #[cfg(windows)]
 mod windows_handles;
 use protocol::*;
@@ -107,9 +108,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("full speaker observation budget exceeded".into());
     }
+    let inference_start = stage_diagnostics::install()?;
     let result = pipeline.run(&samples).inspect_err(|error| {
         eprintln!("MINUTES_SPEAKER_FAILURE {}", pipeline_failure_class(error));
     })?;
+    stage_diagnostics::finished(inference_start);
     eprintln!("MINUTES_SPEAKER_PHASE inference_complete");
     if result.segments.len() > MAX_SEGMENTS {
         return Err("segment budget exceeded".into());

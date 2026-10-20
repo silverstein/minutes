@@ -43,6 +43,7 @@ identity = dict(probe_sha256=digest(a.probe), worker_sha256=digest(a.worker),
                     Path('tests/eval/diarization/worker_diagnostics.py'),
                     Path('crates/core/src/bounded_child.rs'),
                     Path('crates/speaker-worker/src/main.rs'),
+                    Path('crates/speaker-worker/src/stage_diagnostics.rs'),
                     Path('crates/speaker-worker/src/windows_handles.rs'),
                     Path('crates/core/examples/full_diarize_file.rs'),
                     Path('crates/core/src/diarize_full_protocol.rs'),
@@ -114,11 +115,11 @@ for item in manifest['recordings']:
                         str((a.fixtures / 'candidate-models').resolve()), str(audio.resolve())],
                        stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=930)
     elapsed = time.monotonic() - started
+    diagnostics = parse_worker_diagnostics(
+        (a.output / (item['id'] + '.stderr')).read_text(errors='replace'))
     if completed.returncode:
         # Return only closed diagnostic labels and a bounded numeric status;
         # arbitrary worker stderr stays in the private local file.
-        diagnostics = parse_worker_diagnostics(
-            (a.output / (item['id'] + '.stderr')).read_text(errors='replace'))
         failure = dict(**identity, id=item['id'], processing_seconds=elapsed,
                        real_time_factor=elapsed / item['duration'],
                        **diagnostics,
@@ -134,7 +135,7 @@ for item in manifest['recordings']:
                  runtime=elapsed / item['duration'] <= 0.25,
                  input_preserved=digest(audio) == item['files'][0]['sha256'])
     row = dict(id=item['id'], processing_seconds=elapsed,
-               real_time_factor=elapsed / item['duration'], gates=gates, **scored)
+               real_time_factor=elapsed / item['duration'], gates=gates, **diagnostics, **scored)
     # Preserve failed measurements too; a failing gate is evidence, not a reason
     # to lose the timing and exact executable/source identity.
     (a.output / (item['id'] + '-regression.json')).write_text(

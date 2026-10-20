@@ -75,9 +75,10 @@ jobs:
           ref: ${{ steps.windows-blas.outputs.revision }}
           persist-credentials: false
           path: .vcpkg-openblas
-      - name: Cache static Windows CPU library and license notices
+      - name: Restore static Windows CPU library and license notices
         if: runner.os == 'Windows'
-        uses: actions/cache@v6
+        id: windows-blas-cache
+        uses: actions/cache/restore@v6
         with:
           path: .vcpkg-openblas/installed
           key: speaker-blas-${{ steps.windows-blas.outputs.image }}-${{ steps.windows-blas.outputs.cpu }}-${{ env.WINDOWS_BLAS_TRIPLET }}-${{ hashFiles('crates/speaker-worker/vcpkg.json') }}
@@ -92,6 +93,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
           "VCPKGRS_TRIPLET=$env:WINDOWS_BLAS_TRIPLET" >> $env:GITHUB_ENV
+      # A later inference failure must not discard the successful pinned BLAS
+      # build and force another long native-library rebuild for diagnostics.
+      - name: Save completed static Windows CPU library and license notices
+        if: runner.os == 'Windows' && steps.windows-blas-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .vcpkg-openblas/installed
+          key: ${{ steps.windows-blas-cache.outputs.cache-primary-key }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |

@@ -14,6 +14,8 @@ sha2 = "0.10"
 zeroize = "1"
 tempfile = "3"
 ndarray = { version = "=0.17.2", features = ["blas"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -117,6 +117,13 @@ proof that concurrent capture is unaffected. Model copies are hashed before
 inference reopens their private snapshot. Duration, observation, speaker,
 segment and output bounds precede acceptance of results.
 
+The helper observes only the pinned pipeline's segmentation and embedding
+completion events. It emits fixed stage labels and cumulative elapsed
+milliseconds from inference start, bounded by the existing 900-second budget.
+The host discards arbitrary tracing fields, paths and messages; diagnostic
+receipts retain only the closed labels and numeric timings. These observations
+do not change inference parameters or qualify a failed runtime gate.
+
 Preserving overlap in model output does not resolve which overlapping speaker
 said an ASR word. Existing conservative attribution remains in place. Real ASR
 alignment, multilingual/short-turn/similar-voice/headphone cases, named false

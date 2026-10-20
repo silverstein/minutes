@@ -117,6 +117,17 @@ longer qualification from running; it does not substitute for those recordings.
 
 ## Scope still unqualified
 
+The next diagnostic revision observes the pinned pipeline's existing
+`Segmentation complete` and `Embeddings complete` events through a bounded
+subscriber. It emits only fixed labels and cumulative elapsed milliseconds
+from inference start; the host and receipt parser accept only those labels and
+numbers within the existing 900-second envelope. Successful recordings retain
+the timings too. This should distinguish segmentation from embedding and
+post-processing cost without changing the model or inference path. It does not
+yet establish the Windows crash's cause or a speed improvement. The Windows
+workflow also saves a successfully built pinned static BLAS library before any
+later inference failure, preserving its existing image/CPU/triplet/source key.
+
 Anonymous-label protocol checks, cancellation and process-tree retirement are
 separate from end-to-end meeting acceptance. Real ASR word alignment and overlap,
 multilingual and Dutch conversations, short turns, similar voices, headphone calls,

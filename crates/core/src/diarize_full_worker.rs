@@ -40,6 +40,8 @@ fn last_worker_phase(stderr: &[u8]) -> &'static str {
             "awaiting_pcm",
             "pcm_loaded",
             "pipeline_ready",
+            "segmentation_complete",
+            "embeddings_complete",
             "inference_complete",
         ],
     )
@@ -51,6 +53,19 @@ fn last_worker_failure(stderr: &[u8]) -> &'static str {
         b"MINUTES_SPEAKER_FAILURE ",
         protocol::FAILURE_CLASSES,
     )
+}
+
+fn worker_timing_ms(stderr: &[u8], field: &str) -> Option<u64> {
+    stderr.split(|byte| *byte == b'\n').rev().find_map(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let tail = line.strip_prefix(b"MINUTES_SPEAKER_TIMING ")?;
+        let value = tail.strip_prefix(field.as_bytes())?.strip_prefix(b" ")?;
+        if value.is_empty() || value.len() > 6 || !value.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let milliseconds = std::str::from_utf8(value).ok()?.parse::<u64>().ok()?;
+        (milliseconds <= 900_000).then_some(milliseconds)
+    })
 }
 
 impl Read for AudioInput {
@@ -200,6 +215,9 @@ pub(super) fn diarize(
         worker_phase = last_worker_phase(&run.output.stderr),
         worker_failure = last_worker_failure(&run.output.stderr),
         worker_exit_code = ?run.output.status.code(),
+        segmentation_end_ms = ?worker_timing_ms(&run.output.stderr, "segmentation_end_ms"),
+        embeddings_end_ms = ?worker_timing_ms(&run.output.stderr, "embeddings_end_ms"),
+        inference_end_ms = ?worker_timing_ms(&run.output.stderr, "inference_end_ms"),
         timed_out = run.timed_out,
         "full speaker worker completion"
     );
@@ -278,6 +296,47 @@ mod tests {
         ] {
             assert_eq!(last_worker_phase(untrusted), "unreported");
         }
+    }
+
+    #[test]
+    fn stage_timings_refuse_payloads_overflow_and_out_of_budget_values() {
+        assert_eq!(
+            worker_timing_ms(
+                b"private\nMINUTES_SPEAKER_TIMING segmentation_end_ms 1234\r\n",
+                "segmentation_end_ms"
+            ),
+            Some(1234)
+        );
+        for value in [
+            "",
+            "-1",
+            "+1",
+            "900001",
+            "1234567",
+            "12 private",
+            "12/path",
+            "1.0",
+        ] {
+            let input = format!("MINUTES_SPEAKER_TIMING segmentation_end_ms {value}\n");
+            assert_eq!(
+                worker_timing_ms(input.as_bytes(), "segmentation_end_ms"),
+                None
+            );
+        }
+        assert_eq!(
+            worker_timing_ms(
+                b"prefix MINUTES_SPEAKER_TIMING segmentation_end_ms 123\n",
+                "segmentation_end_ms"
+            ),
+            None
+        );
+        assert_eq!(
+            worker_timing_ms(
+                b"MINUTES_SPEAKER_TIMING embeddings_end_ms 123\n",
+                "segmentation_end_ms"
+            ),
+            None
+        );
     }
 
     #[test]

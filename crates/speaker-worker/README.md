@@ -124,6 +124,15 @@ The host discards arbitrary tracing fields, paths and messages; diagnostic
 receipts retain only the closed labels and numeric timings. These observations
 do not change inference parameters or qualify a failed runtime gate.
 
+On Windows the fence distinguishes inheritable parent handles from
+non-inheritable handles owned by the trusted runtime. It inspects the
+[`HANDLE_FLAG_INHERIT` property](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-gethandleinformation)
+and closes inheritable handles other than the three explicit stdio channels.
+An isolated native test requires a real inherited parent handle to be closed
+while a runtime-owned process handle remains usable. That test and the complete
+recordings still need to pass on the candidate revision; this change alone does
+not establish the previous inference crash's cause.
+
 Preserving overlap in model output does not resolve which overlapping speaker
 said an ASR word. Existing conservative attribution remains in place. Real ASR
 alignment, multilingual/short-turn/similar-voice/headphone cases, named false

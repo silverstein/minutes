@@ -141,6 +141,16 @@ feature and helper passed their separate strict Linux checks.
 
 ## Scope still unqualified
 
+Code inspection also found that the Windows fence closed all non-stdio process
+handles, including runtime-owned non-inheritable handles. The candidate narrows
+closure to handles marked inheritable by Windows, retaining runtime ownership.
+Its isolated native regression requires a real inherited parent-process handle
+to be valid and inheritable before the fence, invalid afterward, and a separate
+non-inheritable runtime handle to remain usable. Failure to inspect or retire
+an inheritable handle still refuses startup. This repairs the ownership contract;
+the native regression and full recordings remain pending and the earlier
+`0xC0000005` inference crash is not attributed to it without further evidence.
+
 The next diagnostic revision observes the pinned pipeline's existing
 `Segmentation complete` and `Embeddings complete` events through a bounded
 subscriber. It emits only fixed labels and cumulative elapsed milliseconds

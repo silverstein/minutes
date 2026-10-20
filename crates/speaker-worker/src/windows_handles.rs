@@ -4,7 +4,7 @@ pub fn close_inherited_handles() -> Result<(), String> {
     use std::ffi::c_void;
     use std::mem::size_of;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetHandleInformation, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::System::Console::GetStdHandle;
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
@@ -100,6 +100,18 @@ pub fn close_inherited_handles() -> Result<(), String> {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE || preserved.contains(&handle) {
             continue;
         }
+        // DLL and Rust startup run before main and can own non-inheritable
+        // handles already. They are not parent capabilities. Closing every
+        // process handle can corrupt those runtimes before inference starts.
+        // Non-stdio inheritance requires HANDLE_FLAG_INHERIT; retain the
+        // runtime's non-inheritable handles and retire every inheritable one.
+        let mut flags = 0u32;
+        if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+            return Err("speaker worker handle flags could not be inspected".into());
+        }
+        if flags & HANDLE_FLAG_INHERIT == 0 {
+            continue;
+        }
         if unsafe { CloseHandle(handle) } == 0 {
             return Err("speaker worker could not retire an inherited handle".into());
         }
@@ -116,4 +128,95 @@ pub fn close_inherited_handles() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, GetProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    fn process_handle(inheritable: bool) -> OwnedHandle {
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                i32::from(inheritable),
+                GetCurrentProcessId(),
+            )
+        };
+        assert!(!handle.is_null());
+        // SAFETY: OpenProcess just returned a new, owned process handle.
+        unsafe { OwnedHandle::from_raw_handle(handle) }
+    }
+
+    #[test]
+    fn runtime_handles_survive_while_ambient_parent_handle_is_retired() {
+        let ambient = process_handle(true);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "windows_handles::tests::fence_child",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env("MINUTES_SPEAKER_FENCE_TEST_CHILD", "1")
+            .env(
+                "MINUTES_SPEAKER_TEST_INHERITED_HANDLE",
+                (ambient.as_raw_handle() as usize).to_string(),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "isolated handle regression failed: {status}"
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated handle regression exceeded its deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn fence_child() {
+        if std::env::var("MINUTES_SPEAKER_FENCE_TEST_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        let ambient = std::env::var("MINUTES_SPEAKER_TEST_INHERITED_HANDLE")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap() as HANDLE;
+        let mut flags = 0u32;
+        assert_ne!(unsafe { GetHandleInformation(ambient, &mut flags) }, 0);
+        assert_ne!(flags & HANDLE_FLAG_INHERIT, 0, "inheritance precondition");
+        assert_ne!(unsafe { GetProcessId(ambient) }, 0);
+
+        let runtime = process_handle(false);
+        assert_ne!(
+            unsafe { GetHandleInformation(runtime.as_raw_handle(), &mut flags) },
+            0
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        super::close_inherited_handles().unwrap();
+        assert_eq!(
+            unsafe { GetProcessId(runtime.as_raw_handle()) },
+            unsafe { GetCurrentProcessId() },
+            "runtime-owned handle was closed"
+        );
+        assert_eq!(unsafe { GetHandleInformation(ambient, &mut flags) }, 0);
+    }
 }

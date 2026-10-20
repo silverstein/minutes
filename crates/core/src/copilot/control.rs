@@ -15,6 +15,10 @@ pub enum CopilotEvidenceMode {
     CaptureRelayPartials,
 }
 
+/// Refusal when Coach would attach to a recording whose live sidecar is off:
+/// it publishes neither partials nor `live.utterance.final` events.
+pub const RECORDING_WITHOUT_LIVE_TEXT: &str = "The current recording runs without live text (live_transcript.recording_sidecar = false), so Coach has nothing to listen to until it stops. Coach did not open a second microphone. Turn the option on and start a new recording, or use `minutes live` for a standalone Live session.";
+
 impl CopilotEvidenceMode {
     pub fn as_str(self) -> &'static str {
         match self {

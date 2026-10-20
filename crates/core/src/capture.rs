@@ -1920,6 +1920,9 @@ fn record_to_wav_dual_source(
     if let Some(handle) = sidecar_handle {
         handle.join().ok();
     }
+    // The disabled state has no sidecar thread to clear it; mirror the single-source path.
+    #[cfg(feature = "whisper")]
+    crate::live_transcript::clear_status_file();
 
     eprintln!(
         "[minutes] Captured {} mixed samples ({:.1}s), peak audio level: {}",
@@ -1996,8 +1999,11 @@ pub fn record_to_wav_with_lifecycle(
     // producer is bounded and optional; relay failure disables drafts without
     // changing capture or the durable transcript path.
     let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
+    // No sidecar means no partial producer, so the relay advertises final-only evidence.
     let (mut recording_partial_publisher, recording_partial_subscriber) =
-        if cfg!(all(feature = "whisper", feature = "streaming")) {
+        if cfg!(all(feature = "whisper", feature = "streaming"))
+            && config.live_transcript.recording_sidecar
+        {
             let (publisher, subscriber) = crate::live_partials::channel_with_source(
                 relay_epoch,
                 crate::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
@@ -2493,6 +2499,22 @@ pub(crate) fn start_live_sidecar(
     Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
     Option<std::thread::JoinHandle<()>>,
 ) {
+    if !config.live_transcript.recording_sidecar {
+        // Every recording path comes through here. Without a sender the pump
+        // never forwards audio, and no thread writes live status, so readers
+        // get the explicit disabled state instead of "failed to start".
+        crate::logging::log_step(
+            "live_sidecar_skipped",
+            "",
+            0,
+            serde_json::json!({ "reason": "live_transcript.recording_sidecar = false" }),
+        );
+        tracing::info!(
+            "live transcript sidecar is off (live_transcript.recording_sidecar = false); recording audio only"
+        );
+        crate::live_transcript::mark_recording_sidecar_disabled();
+        return (None, None);
+    }
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
     let sidecar_config = config.clone();
     let sidecar_stop = stop_flag.clone();
@@ -3419,6 +3441,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wav_bytes_are_identical_with_and_without_a_live_sidecar_sender() {
+        use std::sync::atomic::AtomicU64;
+        let dir = tempfile::tempdir().unwrap();
+        let samples: Vec<f32> = (0..48_000)
+            .map(|i| ((i as f32) * 0.01).sin() * 0.5)
+            .collect();
+
+        let record = |name: &str, live_tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>>| {
+            let path = dir.path().join(name);
+            let count = Arc::new(AtomicU64::new(0));
+            let failed = Arc::new(AtomicBool::new(false));
+            let mut pump = CaptureWriterPump::start(
+                create_wav_writer(&path).unwrap(),
+                Arc::clone(&count),
+                Arc::clone(&failed),
+                live_tx,
+            );
+            pump.queue.push_samples(&samples);
+            // This checks WAV integrity, not stop latency. Hosted Windows file
+            // finalization can exceed the production two-second stop budget.
+            // The blocked-writer tests below exercise that deadline separately.
+            pump.finish_with_timeout(std::time::Duration::from_secs(15))
+                .unwrap();
+            assert!(!failed.load(Ordering::Acquire));
+            assert_eq!(count.load(Ordering::Relaxed), samples.len() as u64);
+            std::fs::read(path).unwrap()
+        };
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
+        let drain = std::thread::spawn(move || rx.iter().map(|chunk| chunk.len()).sum::<usize>());
+        let with_sidecar = record("with-sidecar.wav", Some(tx));
+        let forwarded = drain.join().unwrap();
+        let without_sidecar = record("without-sidecar.wav", None);
+
+        assert_eq!(forwarded, samples.len(), "the sender saw every sample");
+        assert_eq!(
+            with_sidecar, without_sidecar,
+            "the WAV must not depend on whether a sidecar consumer exists"
+        );
+        let reader = hound::WavReader::new(std::io::Cursor::new(&without_sidecar)).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.duration(), samples.len() as u32);
+    }
+
+    #[test]
     fn wav_creation_preserves_existing_nonempty_recording() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("recording.wav");
@@ -3563,7 +3630,10 @@ mod tests {
         let samples = vec![0.25_f32; 32_137];
         pump.queue.push_samples(&samples);
         let finish_started = Instant::now();
-        pump.finish().unwrap_or_else(|error| {
+        // Allow slow hosted filesystems to seal the file in this tail-integrity
+        // test; dedicated blocked-writer tests still enforce bounded stop.
+        pump.finish_with_timeout(std::time::Duration::from_secs(15))
+            .unwrap_or_else(|error| {
             panic!(
                 "capture writer stop failed: {error:?}; elapsed_us={}, accepted={}/{}, queued={}, storage_failed={}",
                 finish_started.elapsed().as_micros(),

@@ -1897,11 +1897,9 @@ fn main() {
                 let _ = app.emit("minutes://show-whats-new", ());
             }
             "calendar-access-warning" => {
-                let _ = std::process::Command::new("open")
-                    .arg(
-                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
-                    )
-                    .spawn();
+                let _ = minutes_core::spawn_reaped(std::process::Command::new("open").arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+                ));
             }
             "app-open-settings" => {
                 show_main_window(app);

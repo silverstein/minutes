@@ -3481,6 +3481,14 @@ fn cmd_record(
 
     // Record audio from default input device
     let wav_path = minutes_core::pid::current_wav_path();
+    let mut capabilities = vec![
+        "audio.capture".to_string(),
+        format!("mode.{}", capture_mode.noun().replace(' ', "-")),
+        format!("intent.{}", preflight.intent.as_str()),
+    ];
+    if config.live_transcript.recording_sidecar {
+        capabilities.insert(1, "live.utterance.final".to_string());
+    }
     minutes_core::capture::record_to_wav_with_lifecycle(
         &wav_path,
         stop_flag,
@@ -3488,12 +3496,7 @@ fn cmd_record(
         Some(minutes_core::capture::RecordingStartedContext {
             session_id: context_session_id.clone(),
             source: "capture".into(),
-            capabilities: vec![
-                "audio.capture".into(),
-                "live.utterance.final".into(),
-                format!("mode.{}", capture_mode.noun().replace(' ', "-")),
-                format!("intent.{}", preflight.intent.as_str()),
-            ],
+            capabilities,
         }),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -12134,6 +12137,37 @@ life (qmd://life/)
 
     #[cfg(feature = "whisper")]
     #[test]
+    fn transcript_text_output_names_the_disabled_sidecar_instead_of_waiting() {
+        use minutes_core::copilot::RelayDraftState;
+        use minutes_core::live_transcript::LiveTranscriptDisabled;
+
+        // Sidecar off: the relay still runs final-only, so `active` is true.
+        let line = current_speech_summary_line(
+            true,
+            RelayDraftState::Unsupported,
+            Some(LiveTranscriptDisabled::RecordingSidecarConfig),
+        )
+        .unwrap();
+        assert!(line.contains("live transcript off for this recording"));
+        assert!(line.contains("live_transcript.recording_sidecar = false"));
+        assert!(!line.contains("finalized transcript only"));
+
+        assert_eq!(
+            current_speech_summary_line(true, RelayDraftState::Unsupported, None).as_deref(),
+            Some("[current speech: finalized transcript only]")
+        );
+        assert_eq!(
+            current_speech_summary_line(true, RelayDraftState::None, None),
+            None
+        );
+        assert_eq!(
+            current_speech_summary_line(false, RelayDraftState::Unavailable, None),
+            None
+        );
+    }
+
+    #[cfg(feature = "whisper")]
+    #[test]
     fn copilot_evidence_mode_uses_runtime_resolved_live_backend() {
         let mut config = Config::default();
         assert_eq!(
@@ -14392,6 +14426,18 @@ impl Drop for LiveCaptureGuard {
     }
 }
 
+#[cfg(feature = "whisper")]
+fn recording_has_live_text_disabled() -> bool {
+    minutes_core::live_transcript::session_status()
+        .disabled
+        .is_some()
+}
+
+#[cfg(not(feature = "whisper"))]
+fn recording_has_live_text_disabled() -> bool {
+    false
+}
+
 fn cmd_copilot_start(
     goal: &str,
     surface: Option<&str>,
@@ -14507,6 +14553,11 @@ fn cmd_copilot_start(
     } else {
         None
     };
+    // A recording with the sidecar off publishes nothing; refuse rather than
+    // listen to silence until it stops.
+    if relay_client.is_some() && recording_has_live_text_disabled() {
+        anyhow::bail!("{}", minutes_core::copilot::RECORDING_WITHOUT_LIVE_TEXT);
+    }
     let evidence_mode = relay_client
         .as_ref()
         .map(|client| client.discovery().evidence_mode)
@@ -19003,6 +19054,24 @@ fn relay_draft_state_label(state: minutes_core::copilot::RelayDraftState) -> &'s
     }
 }
 
+/// The bracketed line printed after the finals when there is no provisional
+/// draft. `None` means nothing worth printing.
+#[cfg(feature = "whisper")]
+fn current_speech_summary_line(
+    active: bool,
+    draft_state: minutes_core::copilot::RelayDraftState,
+    disabled: Option<minutes_core::live_transcript::LiveTranscriptDisabled>,
+) -> Option<String> {
+    if disabled.is_some() {
+        return Some(
+            "[live transcript off for this recording: live_transcript.recording_sidecar = false; the transcript is written after stop]"
+                .to_string(),
+        );
+    }
+    (active && draft_state != minutes_core::copilot::RelayDraftState::None)
+        .then(|| format!("[current speech: {}]", relay_draft_state_label(draft_state)))
+}
+
 #[cfg(feature = "whisper")]
 fn read_current_speech_replay() -> std::result::Result<
     (
@@ -19069,12 +19138,15 @@ fn cmd_transcript(
                     source_label,
                     s.pid.unwrap_or(0)
                 );
+            } else if s.disabled.is_some() {
+                eprintln!("Live transcript: off for this recording (live_transcript.recording_sidecar = false)");
+                eprintln!("  The transcript is written after the recording stops.");
             } else {
                 eprintln!("Live transcript: inactive");
             }
             eprintln!("  Lines: {}", s.line_count);
             eprintln!("  Duration: {:.0}s", s.duration_secs);
-            if let Some(ref diagnostic) = s.diagnostic {
+            if let (Some(diagnostic), None) = (s.diagnostic.as_ref(), s.disabled) {
                 eprintln!("  Diagnostic: {}", diagnostic);
             }
             if let Some(ref p) = s.jsonl_path {
@@ -19163,13 +19235,12 @@ fn cmd_transcript(
             }
             if let Some(draft) = &snapshot.current_draft {
                 println!("[current speech, provisional] {}", draft.text);
-            } else if snapshot.active
-                && snapshot.draft_state != minutes_core::copilot::RelayDraftState::None
-            {
-                println!(
-                    "[current speech: {}]",
-                    relay_draft_state_label(snapshot.draft_state)
-                );
+            } else if let Some(line) = current_speech_summary_line(
+                snapshot.active,
+                snapshot.draft_state,
+                snapshot.transcript_status.disabled,
+            ) {
+                println!("{line}");
             }
         }
     } else if format == "json" {

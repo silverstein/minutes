@@ -357,6 +357,7 @@ Call detection keeps one audio-check helper alive between polls and skips audio 
 | `model` | empty, meaning `dictation.model` | Whisper model for live mode. An empty value uses `dictation.model`, **not** `transcription.model`: live transcription is real-time and wants a small fast model, while batch transcription can afford a slower, more accurate one. Set this explicitly to decouple them. |
 | `max_utterance_secs` | `30` | Force-finalize an utterance at this length |
 | `save_wav` | `true` | Save raw WAV so the stopped session can be preserved or processed |
+| `recording_sidecar` | `true` | Run the live transcript sidecar during normal and call recordings (microphone, dual-source and native call capture). The final transcript always comes from re-transcribing the saved WAV with `transcription.model`, so turning this off removes live text and avoids live-transcription inference during recording. Live-text readers (`minutes transcript --status`, `--include-current`, the desktop recording bar, Coach) report an explicit off state instead of waiting. Standalone Live mode is unaffected. |
 | `promote_on_stop` | `"process"` | `"process"` creates a normal meeting; `"preserve"` keeps a timestamped WAV/JSONL pair only; `"off"` leaves the overwrite-prone fixed slot unchanged |
 | `shortcut_enabled` | `false` | Global shortcut on |
 | `shortcut` | `"CmdOrCtrl+Shift+L"` | Chord |

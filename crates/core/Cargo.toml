@@ -53,6 +53,7 @@ engine-sherpa = ["dep:libloading", "whisper"]
 voice-live = ["streaming", "dep:tungstenite", "dep:coreaudio-rs", "dep:objc2-audio-toolbox", "dep:objc2-core-audio-types", "dep:tiny_http"]
 
 [dependencies]
+same-file = "1.0.6"
 regex = "1"
 unicode-normalization = "0.1"
 tiny_http = { version = "0.12", optional = true }
@@ -113,7 +114,7 @@ objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = 
     "AudioUnitProperties",
 ], optional = true }
 block2 = "0.6"
-cidre = { version = "0.22.1", default-features = false, features = ["at", "av", "cat", "cf", "cm", "core_audio", "macos_14_4", "ns"] }
+cidre = { version = "0.22.1", default-features = false, features = ["at", "av", "blocks", "cat", "cf", "cm", "core_audio", "dispatch", "macos_14_4", "ns"] }
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSRunningApplication", "NSWorkspace", "NSPasteboard", "NSPasteboardItem", "libc"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["alloc", "NSString", "NSArray", "NSData", "NSProcessInfo"] }

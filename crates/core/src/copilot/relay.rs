@@ -949,11 +949,12 @@ fn run_server(
     mut partials: Option<LivePartialSubscriber>,
     poll_durable_events: bool,
 ) {
-    let mut event_cursor = if poll_durable_events {
-        crate::events::latest_event_seq()
+    let mut event_tail = if poll_durable_events {
+        crate::events::EventTail::following_now().ok()
     } else {
-        0
+        None
     };
+    let mut last_event_poll = Instant::now() - Duration::from_millis(100);
     let mut last_heartbeat = Instant::now() - HEARTBEAT_INTERVAL;
 
     while !stop.load(Ordering::Acquire) {
@@ -979,9 +980,23 @@ fn run_server(
             }
         }
 
-        if poll_durable_events {
-            for envelope in crate::events::read_events_since_seq(event_cursor, None) {
-                event_cursor = event_cursor.max(envelope.seq);
+        if poll_durable_events && last_event_poll.elapsed() >= Duration::from_millis(100) {
+            last_event_poll = Instant::now();
+            if event_tail.is_none() {
+                match crate::events::EventTail::following_now() {
+                    Ok(tail) => event_tail = Some(tail),
+                    Err(error) => tracing::debug!(%error, "capture relay event tail unavailable"),
+                }
+            }
+            let events = event_tail.as_mut().map(|tail| tail.poll()).transpose();
+            let events = match events {
+                Ok(events) => events.unwrap_or_default(),
+                Err(error) => {
+                    tracing::debug!(%error, "capture relay event tail read failed");
+                    Vec::new()
+                }
+            };
+            for envelope in events {
                 let MinutesEvent::LiveUtteranceFinal {
                     source,
                     text,

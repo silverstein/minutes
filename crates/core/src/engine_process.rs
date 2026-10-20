@@ -140,12 +140,53 @@ mod tests {
                 std::thread::park();
             },
             Ok("abort") => std::process::abort(),
+            Ok("delay") => std::thread::sleep(Duration::from_secs(4)),
             Ok("oversized") => {
                 let bytes = vec![b'x'; 2 * 1024 * 1024];
                 std::io::stdout().write_all(&bytes).unwrap();
                 std::io::stderr().write_all(&bytes).unwrap();
             }
             _ => {}
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_reaper_does_not_wait_for_slow_helpers_before_reaping_exited_ones() {
+        use crate::spawn_reaped;
+
+        let absent = tempfile::tempdir().unwrap();
+        let error = spawn_reaped(&mut command(absent.path().join("missing-helper"))).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let slow = spawn_reaped(&mut fixture_command("delay")).unwrap();
+        let quick: Vec<_> = (0..8)
+            .map(|_| spawn_reaped(&mut fixture_command("exit")).unwrap())
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal zero only checks existence of our fixture PIDs.
+            let all_reaped = quick
+                .iter()
+                .all(|pid| unsafe { libc::kill(*pid as i32, 0) } == -1);
+            if all_reaped {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "quick helpers remain behind slow helper"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: signal zero does not alter this synthetic child.
+        assert_eq!(unsafe { libc::kill(slow as i32, 0) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(6);
+        // SAFETY: signal zero does not alter this synthetic child.
+        while unsafe { libc::kill(slow as i32, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "slow helper was not reaped after exit"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

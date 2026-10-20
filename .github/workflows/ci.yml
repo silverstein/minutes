@@ -961,6 +961,9 @@ jobs:
       - name: Test design-token checker
         run: node --test scripts/check_design_tokens.test.mjs
 
+      - name: Test stored update offer restoration
+        run: node scripts/test_update_offer.mjs
+
       - name: Test shipped dictation controllers
         run: |
           node scripts/test_dictation_readiness.mjs

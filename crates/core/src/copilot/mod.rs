@@ -29,6 +29,7 @@ pub use control::{
     copilot_status_path, copilot_stop_path, create_session_guard, read_session_status,
     request_feedback, request_pause, request_resume, request_stop, take_feedback_request,
     write_session_status, CopilotEvidenceMode, CopilotFeedbackRequest, CopilotSessionStatus,
+    RECORDING_WITHOUT_LIVE_TEXT,
 };
 pub use latency::{LatencyRecord, PartialLatencySeed};
 pub use mode::{MeetingMode, MeetingModePolicy, OpportunityKind};

@@ -3165,88 +3165,61 @@ fn run_title_refinement_via_agent(
     prompt: &str,
     agent_cmd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    use std::io::Write;
+    run_title_refinement_via_agent_timeout(prompt, agent_cmd, std::time::Duration::from_secs(120))
+}
 
+fn run_title_refinement_via_agent_timeout(
+    prompt: &str,
+    agent_cmd: &str,
+    timeout: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
     let invocation = prepare_agent_invocation(agent_cmd, prompt, &[], false)?;
     let cleanup_path = invocation.cleanup_path.clone();
-    // Same fix as summarize_with_agent_impl_timeout (#288): file-arg agents
-    // (pi, opencode) have no stdin payload, and an unclosed piped stdin makes
-    // them block until the timeout. Null stdin closes it immediately.
-    let stdin_stdio = if invocation.stdin_payload.is_some() {
-        std::process::Stdio::piped()
-    } else {
-        std::process::Stdio::null()
-    };
-    let mut command = crate::engine_process::command(&invocation.cmd);
-    command
-        .args(&invocation.args)
-        .stdin(stdin_stdio)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // Own process group so a timeout can kill the WHOLE tree. Real agent CLIs
-    // spawn MCP servers and tool subprocesses; killing only the direct child
-    // leaves those running, and they hold the inherited stdout/stderr pipes
-    // open (#592). Mirrors run_speaker_mapping_via_agent.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().map_err(|e| {
-        if let Some(path) = cleanup_path.as_ref() {
-            let _ = std::fs::remove_file(path);
-        }
-        format!("Agent '{}' not found or failed to start: {}", agent_cmd, e)
-    })?;
-
-    if let Some(bytes) = invocation.stdin_payload.clone() {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Agent stdin unexpectedly unavailable".to_string())?;
-        std::thread::spawn(move || {
-            stdin.write_all(&bytes).ok();
+    let result = (|| {
+        let mut command = crate::bounded_child::BoundedCommand::new(&invocation.cmd);
+        command.args(&invocation.args);
+        let input = invocation.stdin_payload.map(|bytes| {
+            Box::new(std::io::Cursor::new(bytes)) as crate::bounded_child::StdinSource
         });
-    }
-
-    let timeout = std::time::Duration::from_secs(120);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output()?;
-                if let Some(path) = cleanup_path.as_ref() {
-                    let _ = std::fs::remove_file(path);
-                }
-                if !status.success() {
-                    return Err(
-                        format!("Agent '{}' exited with error", agent_label(agent_cmd)).into(),
-                    );
-                }
-                let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if response.is_empty() {
-                    return Err(format!("Agent '{}' returned empty output", agent_cmd).into());
-                }
-                return Ok(response);
-            }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    child.kill().ok();
-                    if let Some(path) = cleanup_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                    return Err(format!(
-                        "Agent '{}' timed out after {}s",
-                        agent_cmd,
-                        timeout.as_secs()
-                    )
-                    .into());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(e) => return Err(format!("Failed to check agent status: {}", e).into()),
+        // Reuse the audited process-tree supervisor: concurrent pipe draining,
+        // Unix group / Windows Job retirement and direct-child reaping. The
+        // existing invocation still controls arguments, authentication and tools.
+        let run = crate::bounded_child::run(
+            &mut command,
+            input,
+            crate::bounded_child::StdoutTarget::Capture {
+                max_bytes: 16 * 1024,
+            },
+            crate::bounded_child::ChildBudget {
+                wall_clock: timeout,
+                stderr_tail: 4096,
+            },
+        )?;
+        if run.timed_out {
+            return Err(format!(
+                "Agent '{}' timed out after {}s",
+                agent_label(agent_cmd),
+                timeout.as_secs()
+            )
+            .into());
         }
+        if !run.output.status.success() {
+            return Err(format!("Agent '{}' exited with error", agent_label(agent_cmd)).into());
+        }
+        let response = String::from_utf8_lossy(&run.output.stdout)
+            .trim()
+            .to_string();
+        if response.is_empty() {
+            return Err(format!("Agent '{}' returned empty output", agent_label(agent_cmd)).into());
+        }
+        Ok(response)
+    })();
+    // Prompt-file agents must clean up after every result, including spawn,
+    // input/output, timeout and retirement failures.
+    if let Some(path) = cleanup_path {
+        let _ = std::fs::remove_file(path);
     }
+    result
 }
 
 // ── Speaker mapping (Level 1) ────────────────────────────────
@@ -3762,14 +3735,14 @@ mod tests {
     #[test]
     fn cancelling_owned_chat_process_stops_descendants_before_timeout() {
         let root = tempfile::tempdir().unwrap();
-        let marker = root.path().join("should-not-exist");
+        let descendant_pid = root.path().join("descendant.pid");
         let invocation = ChatInvocation {
             cmd: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                "(sleep 2; touch \"$1\") & wait".into(),
+                "sleep 30 & printf '%s' \"$!\" > \"$1\"; wait".into(),
                 "fixture".into(),
-                marker.to_string_lossy().into_owned(),
+                descendant_pid.to_string_lossy().into_owned(),
             ],
             stdin_payload: None,
             cleanup_path: None,
@@ -3779,12 +3752,23 @@ mod tests {
             invocation,
             Some(root.path()),
             std::time::Duration::from_secs(20),
-            &|| start.elapsed() > std::time::Duration::from_millis(300),
+            // The old fixture both cancelled and wrote its failure marker at
+            // exactly two seconds, racing successful completion against cancel.
+            &|| descendant_pid.exists(),
         );
-        assert!(result.unwrap_err().starts_with("agent_cancelled:"));
+        let error = result.unwrap_err();
+        assert!(error.starts_with("agent_cancelled:"), "{error}");
         assert!(start.elapsed() < std::time::Duration::from_secs(4));
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        assert!(!marker.exists(), "descendant survived cancellation");
+        let descendant = std::fs::read_to_string(descendant_pid).unwrap();
+        let status = crate::engine_process::command("ps")
+            .args(["-o", "stat=", "-p", &descendant])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "live descendant survived cancellation: {status}"
+        );
     }
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -5562,6 +5546,48 @@ EOF
         assert!(
             start.elapsed() < std::time::Duration::from_secs(30),
             "stdin pipe regression: file-arg agent blocked waiting for EOF"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn title_timeout_retires_descendants_and_reaps_the_direct_child() {
+        let root = tempfile::tempdir().unwrap();
+        let script = write_grandchild_agent(root.path(), "title-timeout.sh",
+            "printf '%s' \"$$\" > \"$0.parent\"\nsleep 30 &\nprintf '%s' \"$!\" > \"$0.descendant\"\nwait");
+        let started = std::time::Instant::now();
+        let error = run_title_refinement_via_agent_timeout(
+            "synthetic title",
+            &script.display().to_string(),
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let parent: i32 = std::fs::read_to_string(format!("{}.parent", script.display()))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant: u32 = std::fs::read_to_string(format!("{}.descendant", script.display()))
+            .unwrap()
+            .parse()
+            .unwrap();
+        // SAFETY: the PID belongs to this synthetic direct child. WNOHANG
+        // cannot block; ECHILD proves the supervisor already reaped it.
+        let result = unsafe { libc::waitpid(parent, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(result, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        let status = crate::engine_process::command("ps")
+            .args(["-o", "stat=", "-p", &descendant.to_string()])
+            .output()
+            .unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.trim().is_empty() || status.trim().starts_with('Z'),
+            "live descendant remains: {status}"
         );
     }
 

@@ -7593,6 +7593,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
   <script src="scripts/shortcut-recorder.js"></script>
   <script src="scripts/recall-contract.js"></script>
+  <script src="scripts/update-offer.js"></script>
   <script src="scripts/recall-chat.js"></script>
   <script>
     const { invoke } = window.__TAURI__.core;
@@ -8542,8 +8543,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       elapsedSecs = 0,
       recording = false,
       stopping = false,
+      disabled = false,
     } = {}) {
       if (stopping) return 'Finishing transcript…';
+      // Off by configuration is a choice, not a failure: no "Preparing" wait.
+      if (disabled) return 'Recording · Live transcript off';
       if (diagnostic) {
         if (recording && elapsedSecs < 4) return 'Preparing transcript…';
         return recording
@@ -8714,6 +8718,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             elapsedSecs: elapsedClockSeconds(status.elapsed),
             recording: true,
             stopping: stopRequested,
+            disabled: recordingLive.disabled === true,
           });
           document.getElementById('btn-stop').disabled = !!stopRequested;
 
@@ -15947,30 +15952,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     }
 
-    try {
-      const stored = localStorage.getItem('minutes-pending-update');
-      if (stored) {
-        // Dev builds disable auto-update (see main.rs). Clear any stale
-        // pending-update from a previous session so it doesn't resurrect
-        // a banner against a now-newer dev build.
-        Promise.all([
-          window.__TAURI__.app.getName?.() ?? Promise.resolve(''),
-          window.__TAURI__.app.getVersion(),
-        ]).then(([name, currentVersion]) => {
-          const isDev = typeof name === 'string' && name.includes('Dev');
-          if (isDev) {
-            localStorage.removeItem('minutes-pending-update');
-            return;
-          }
-          const { version, body, downloadBytes } = JSON.parse(stored);
-          if (version && version !== currentVersion) {
-            showUpdateBanner(version, body, downloadBytes);
-          } else {
-            localStorage.removeItem('minutes-pending-update');
-          }
-        }).catch(() => { });
-      }
-    } catch (_) { }
+    window.MinutesUpdateOffer.restore({
+      storage: localStorage,
+      app: window.__TAURI__.app,
+      show: showUpdateBanner,
+    });
 
     currentWindow.listen('update-ready', (event) => {
       const { version, body, downloadBytes } = event.payload;

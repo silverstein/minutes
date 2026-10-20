@@ -392,7 +392,24 @@ pub struct SessionStatus {
     /// Diagnostic detail when a transcript session is degraded or unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
+    /// Why live text is intentionally off for the active recording, as opposed
+    /// to `diagnostic`, which describes failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<LiveTranscriptDisabled>,
 }
+
+/// Reasons live text is off on purpose while a recording is active.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LiveTranscriptDisabled {
+    /// `[live_transcript] recording_sidecar = false`: the recording captures
+    /// audio only and the transcript is produced after stop.
+    RecordingSidecarConfig,
+}
+
+/// Diagnostic written with the disabled status and surfaced to readers.
+pub const RECORDING_SIDECAR_DISABLED_DIAGNOSTIC: &str =
+    "live transcript is off for this recording (live_transcript.recording_sidecar = false)";
 
 /// Manages writing the JSONL and optional WAV file during a live session.
 struct LiveTranscriptWriter {
@@ -457,6 +474,9 @@ pub enum LiveStatusState {
     Degraded,
     Failed,
     Stopped,
+    /// The recording started with `live_transcript.recording_sidecar = false`;
+    /// no sidecar thread exists to write anything else during the recording.
+    Disabled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3758,6 +3778,19 @@ fn derive_session_status(
         sidecar_diagnostic
     };
 
+    // Only meaningful while a recording is active; a standalone session that
+    // starts over a leftover disabled file reports its own state instead.
+    let disabled = match live_status.as_ref() {
+        Some(status)
+            if status.state == LiveStatusState::Disabled
+                && recording_pid.is_some()
+                && !standalone_active =>
+        {
+            Some(LiveTranscriptDisabled::RecordingSidecarConfig)
+        }
+        _ => None,
+    };
+
     let active = standalone_active || sidecar_active;
     let pid = if standalone_active {
         // `None` when the session is alive but the PID is unreadable (Windows
@@ -3813,6 +3846,7 @@ fn derive_session_status(
         },
         source,
         diagnostic,
+        disabled,
     }
 }
 
@@ -3824,6 +3858,9 @@ fn read_live_status(path: &Path) -> Option<LiveStatus> {
 
 fn write_live_status(status: &LiveStatus) {
     let path = pid::live_transcript_status_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
     let tmp = path.with_extension("json.tmp");
     if let Ok(json) = serde_json::to_string(status) {
         if std::fs::write(&tmp, json).is_ok() {
@@ -3849,6 +3886,39 @@ fn write_live_status_transition(state: LiveStatusState, diagnostic: Option<&str>
         dropped_utterances: existing.as_ref().and_then(|s| s.dropped_utterances),
     };
     write_live_status(&status);
+}
+
+/// Record that the active recording runs without the live sidecar.
+///
+/// Writes a fresh status rather than a transition, so a leftover `Failed` or
+/// `Stopped` file cannot leak its counters into a recording that never had
+/// live text. Like a starting sidecar, it yields to an active standalone
+/// session (#258) and empties the fixed JSONL so readers do not present a
+/// previous session's finals as current.
+pub fn mark_recording_sidecar_disabled() {
+    let lt_pid = pid::live_transcript_pid_path();
+    if pid::inspect_pid_file(&lt_pid).is_active() {
+        tracing::info!("standalone live transcript active; leaving its live status untouched");
+        return;
+    }
+    let jsonl_path = pid::live_transcript_jsonl_path();
+    if jsonl_path.exists() {
+        std::fs::write(&jsonl_path, "").ok();
+    }
+    let now = Local::now();
+    write_live_status(&LiveStatus {
+        start_time: now,
+        updated_at: now,
+        state: LiveStatusState::Disabled,
+        line_count: 0,
+        last_offset_ms: 0,
+        last_duration_ms: 0,
+        last_final_at: None,
+        session_id: crate::copilot::CaptureRelayServer::current_process_session_id(),
+        diagnostic: Some(RECORDING_SIDECAR_DISABLED_DIAGNOSTIC.to_string()),
+        pending_utterances: None,
+        dropped_utterances: None,
+    });
 }
 
 fn evaluate_recording_sidecar_status(
@@ -3908,6 +3978,10 @@ fn evaluate_recording_sidecar_status(
                     .filter(|msg| !msg.trim().is_empty())
                     .unwrap_or_else(|| "sidecar stopped".into()),
             ),
+        ),
+        LiveStatusState::Disabled => (
+            false,
+            Some(RECORDING_SIDECAR_DISABLED_DIAGNOSTIC.to_string()),
         ),
     }
 }
@@ -5579,6 +5653,155 @@ mod tests {
             status.diagnostic.as_deref(),
             Some("sidecar status unavailable")
         );
+        assert_eq!(status.disabled, None);
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn sidecar_disabled_by_config_is_inactive_and_distinct_from_a_failure() {
+        with_temp_home(|| {
+            mark_recording_sidecar_disabled();
+
+            let status = session_status_for_test_recording();
+
+            assert!(!status.active);
+            assert_eq!(status.source, None);
+            assert_eq!(status.pid, None);
+            assert_eq!(status.line_count, 0);
+            assert_eq!(
+                status.disabled,
+                Some(LiveTranscriptDisabled::RecordingSidecarConfig)
+            );
+            assert_eq!(
+                status.diagnostic.as_deref(),
+                Some(RECORDING_SIDECAR_DISABLED_DIAGNOSTIC)
+            );
+            let json = serde_json::to_value(&status).unwrap();
+            assert_eq!(json["disabled"], "recording-sidecar-config");
+            assert_eq!(json["active"], false);
+        });
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn recording_sidecar_off_skips_the_sidecar_and_writes_the_disabled_status() {
+        with_temp_home(|| {
+            let mut config = Config::default();
+            config.live_transcript.recording_sidecar = false;
+            let stop = Arc::new(AtomicBool::new(false));
+
+            let (live_tx, handle) = crate::capture::start_live_sidecar(&config, &stop, None);
+
+            assert!(
+                live_tx.is_none(),
+                "no sender: the pump must not forward audio"
+            );
+            assert!(handle.is_none(), "no sidecar thread may be spawned");
+            let written = read_live_status(&pid::live_transcript_status_path())
+                .expect("the disabled state must be written for live-text readers");
+            assert_eq!(written.state, LiveStatusState::Disabled);
+            let log = std::fs::read_to_string(crate::logging::log_path()).unwrap();
+            assert!(
+                log.lines()
+                    .any(|line| line.contains("\"live_sidecar_skipped\"")),
+                "the skip must be visible in minutes.log"
+            );
+        });
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn disabled_status_is_a_fresh_file_not_a_transition_from_stale_state() {
+        with_temp_home(|| {
+            let mut stale = live_status_with_state(LiveStatusState::Failed);
+            stale.line_count = 7;
+            stale.session_id = Some("old-session".into());
+            stale.diagnostic = Some("recognizer unavailable".into());
+            write_live_status(&stale);
+
+            mark_recording_sidecar_disabled();
+
+            let written = read_live_status(&pid::live_transcript_status_path()).unwrap();
+            assert_eq!(written.state, LiveStatusState::Disabled);
+            assert_eq!(written.line_count, 0);
+            assert_eq!(written.session_id, None);
+            assert_eq!(
+                written.diagnostic.as_deref(),
+                Some(RECORDING_SIDECAR_DISABLED_DIAGNOSTIC)
+            );
+            let status = session_status_for_test_recording();
+            assert_eq!(status.session_id, None);
+            assert_eq!(
+                status.disabled,
+                Some(LiveTranscriptDisabled::RecordingSidecarConfig)
+            );
+        });
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn disabled_status_is_ignored_once_the_recording_has_stopped() {
+        with_temp_home(|| {
+            mark_recording_sidecar_disabled();
+
+            let status = derive_session_status(
+                pid::PidFileState::Inactive,
+                None,
+                &pid::live_transcript_status_path(),
+                &pid::live_transcript_jsonl_path(),
+            );
+
+            assert!(!status.active);
+            assert_eq!(status.disabled, None);
+            assert_eq!(status.diagnostic, None);
+        });
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn standalone_session_over_a_disabled_file_reports_its_own_state() {
+        with_temp_home(|| {
+            mark_recording_sidecar_disabled();
+
+            let status = derive_session_status(
+                pid::PidFileState::Active(std::process::id()),
+                Some(std::process::id()),
+                &pid::live_transcript_status_path(),
+                &pid::live_transcript_jsonl_path(),
+            );
+
+            assert!(status.active);
+            assert_eq!(status.source, Some(TranscriptSource::Standalone));
+            assert_eq!(status.disabled, None);
+            assert_eq!(status.diagnostic, None);
+        });
+    }
+
+    #[cfg(all(feature = "whisper", feature = "streaming"))]
+    #[test]
+    fn disabled_marker_empties_stale_finals_and_yields_to_an_active_standalone_session() {
+        with_temp_home(|| {
+            let jsonl_path = pid::live_transcript_jsonl_path();
+            std::fs::create_dir_all(jsonl_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &jsonl_path,
+                "{\"line\":1,\"text\":\"from an earlier session\"}\n",
+            )
+            .unwrap();
+
+            mark_recording_sidecar_disabled();
+            assert_eq!(std::fs::read_to_string(&jsonl_path).unwrap(), "");
+            assert!(pid::live_transcript_status_path().exists());
+
+            clear_status_file();
+            std::fs::write(&jsonl_path, "{\"line\":1,\"text\":\"standalone\"}\n").unwrap();
+            let _guard = pid::create_pid_guard(&pid::live_transcript_pid_path()).unwrap();
+            mark_recording_sidecar_disabled();
+            assert!(!pid::live_transcript_status_path().exists());
+            assert!(std::fs::read_to_string(&jsonl_path)
+                .unwrap()
+                .contains("standalone"));
+        });
     }
 
     #[cfg(all(feature = "whisper", feature = "streaming"))]

@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "qualification": "Signed Minutes Dev synthetic AirPods system-audio capture; not speech recognition, exact reporter hardware, or every mid-call route transition",
+  "source_backend_sha256": "c80b8602dd8166b220ee620a6a3d987cf87cb89eff89329b6163db1449fda9fd",
+  "runtime_source_snapshot": "95d028897292f7d3a96817bf41e7e153acbd55f0",
+  "app_identity": "com.useminutes.desktop.dev",
+  "signing_team": "63TMLKT8HN",
+  "strict_bundle_seal": "passed",
+  "input_device_kind": "AirPods Pro Bluetooth",
+  "before_recording_microphone_hz": 24000,
+  "before_recording_output_hz": 48000,
+  "saved_format": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "bits_per_sample": 16
+  },
+  "voice_system_and_mix_frames_each": 227200,
+  "voice_system_and_mix_seconds_each": 14.2,
+  "expected_tones": [
+    {
+      "hz": 900,
+      "seconds": 3
+    },
+    {
+      "silence_seconds": 1
+    },
+    {
+      "hz": 600,
+      "seconds": 3
+    }
+  ],
+  "measured_tones": [
+    {
+      "start": 1.08,
+      "end": 4.079999999999999,
+      "hz": 900,
+      "frames": 150,
+      "duration": 2.999999999999999
+    },
+    {
+      "start": 5.08,
+      "end": 8.08,
+      "hz": 600,
+      "frames": 150,
+      "duration": 3.0
+    }
+  ],
+  "frequency_method": "20 ms sine/cosine projections at known tone frequencies; amplitude >= 0.00005 and explained energy fraction >= 0.6",
+  "tone_timing_and_pitch_pass": true,
+  "operator_confirmed_hearing_both": null,
+  "operator_confirmation_correction": "October 19: Mat clarified AirPods were not worn during the initial run. Earlier hearing confirmation withdrawn; automated measurements remain valid. Fresh human confirmation and clean capture repeat are recorded separately below.",
+  "processing": "Isolated profile deliberately had no speech model; expected missing-model error after capture preserved all WAVs",
+  "initial_amplitude_only_detection": "Failed threshold selection because app sounds were louder; frequency-selective analysis recovered both complete tones",
+  "normal_models_and_config": "Untouched; Dev returned to normal profile",
+  "raw_audio_published": false,
+  "worn_headset_repeats": [
+    {
+      "qualification": "Human hearing confirmed; overlapping sound prevents a strict clean-tone timing pass",
+      "operator_confirmed_hearing_both": true,
+      "input_hz_during_capture": 24000,
+      "output_hz_before_capture": 48000,
+      "output_hz_during_capture": 24000,
+      "saved_frames_each": 198400,
+      "saved_seconds_each": 12.4,
+      "tone_timing_and_pitch_pass": false,
+      "detector_limitation": "600 Hz is detected before and after a 0.28-second interval dominated by another sound."
+    },
+    {
+      "qualification": "Clean automated timing repeat; no separate human hearing confirmation requested",
+      "operator_confirmed_hearing_both": null,
+      "input_hz_during_capture": 24000,
+      "output_hz_before_capture": 48000,
+      "output_hz_during_capture": 24000,
+      "saved_frames_each": 219200,
+      "saved_seconds_each": 13.7,
+      "playback_gain": 0.8,
+      "measured_tones": [
+        {
+          "hz": 900,
+          "start": 0.3,
+          "end": 3.28,
+          "duration": 2.98
+        },
+        {
+          "hz": 600,
+          "start": 4.3,
+          "end": 7.28,
+          "duration": 2.98
+        }
+      ],
+      "measured_gap_seconds": 1.02,
+      "tone_timing_and_pitch_pass": true,
+      "detector_thresholds": "Unchanged from initial run"
+    }
+  ],
+  "repeat_executable_sha256": "36538a490df92c95953bd6140c50ad726e6dfb6458f433c1cf07ae4f5d936ec0"
+}

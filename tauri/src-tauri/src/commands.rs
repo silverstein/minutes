@@ -3508,11 +3508,18 @@ fn rescue_paired_stems(original: &std::path::Path, dest_dir: &Path, new_basename
 ///
 /// `start_native_call_recording` returns from several branches, so a drop guard
 /// is more reliable than setting the flag at each one (#576).
-struct LiveTranscriptStopGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+struct LiveTranscriptStopGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// With the sidecar off no thread clears the disabled status on stop.
+    clear_disabled_status: bool,
+}
 
 impl Drop for LiveTranscriptStopGuard {
     fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if self.clear_disabled_status {
+            minutes_core::live_transcript::clear_status_file();
+        }
     }
 }
 
@@ -3575,15 +3582,26 @@ fn start_native_call_recording(
         return Err(error.to_string());
     }
     let relay_epoch = chrono::Utc::now().timestamp_millis().unsigned_abs().max(1);
-    let (publisher, subscriber) = minutes_core::live_partials::channel_with_source(
-        relay_epoch,
-        minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
-        "recording-sidecar",
-    );
-    let mut recording_partial_publisher = Some(publisher);
+    // Same gate as `capture::record_to_wav_with_lifecycle`: no sidecar, no partials.
+    let (mut recording_partial_publisher, recording_partial_subscriber) =
+        if config.live_transcript.recording_sidecar {
+            let (publisher, subscriber) = minutes_core::live_partials::channel_with_source(
+                relay_epoch,
+                minutes_core::live_partials::DEFAULT_PARTIAL_CHANNEL_CAPACITY,
+                "recording-sidecar",
+            );
+            (Some(publisher), Some(subscriber))
+        } else {
+            (None, None)
+        };
+    let relay_evidence_mode = if recording_partial_subscriber.is_some() {
+        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials
+    } else {
+        minutes_core::copilot::CopilotEvidenceMode::FinalOnly
+    };
     let _capture_relay = match minutes_core::copilot::CaptureRelayServer::start(
-        minutes_core::copilot::CopilotEvidenceMode::CaptureRelayPartials,
-        Some(subscriber),
+        relay_evidence_mode,
+        recording_partial_subscriber,
     ) {
         Ok(relay) => Some(relay),
         Err(minutes_core::copilot::CaptureRelayError::AlreadyOwned(owner_pid)) => {
@@ -3686,7 +3704,10 @@ fn start_native_call_recording(
     // Stop the feeder on every exit from this function, including the early
     // returns in the capture-failure branches below, so a finished recording
     // never leaves a thread polling the stems.
-    let _live_stop_guard = LiveTranscriptStopGuard(std::sync::Arc::clone(&live_stop));
+    let _live_stop_guard = LiveTranscriptStopGuard {
+        stop: std::sync::Arc::clone(&live_stop),
+        clear_disabled_status: !config.live_transcript.recording_sidecar,
+    };
     let live_transcript_started = {
         let base = output_path.with_extension("");
         let stem_name = base
@@ -5068,11 +5089,12 @@ pub fn show_user_notification(app_handle: &tauri::AppHandle, title: &str, body: 
             escape_applescript_literal(title)
         );
 
-        if std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .spawn()
-            .is_ok()
+        if minutes_core::spawn_reaped(
+            std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script),
+        )
+        .is_ok()
         {
             return;
         }
@@ -6544,8 +6566,18 @@ pub fn start_recording(
 
     // Inject live transcript context into the assistant workspace so the Recall
     // panel (and any connected agent) can read the live JSONL during recording.
-    if let Ok(workspace) = crate::context::create_workspace(&config) {
-        update_assistant_live_context(&workspace, true);
+    // With the sidecar off nothing writes that JSONL, so the marker stays out.
+    if config.live_transcript.recording_sidecar {
+        if let Ok(workspace) = crate::context::create_workspace(&config) {
+            update_assistant_live_context(&workspace, true);
+        }
+    }
+    let mut capabilities = vec![
+        "audio.capture".to_string(),
+        format!("mode.{}", mode.noun().replace(' ', "-")),
+    ];
+    if config.live_transcript.recording_sidecar {
+        capabilities.insert(1, "live.utterance.final".to_string());
     }
 
     let _desktop_context_collector = context_session_id.as_ref().and_then(|session_id| {
@@ -6570,11 +6602,7 @@ pub fn start_recording(
         Some(minutes_core::capture::RecordingStartedContext {
             session_id: context_session_id.clone(),
             source: "capture".into(),
-            capabilities: vec![
-                "audio.capture".into(),
-                "live.utterance.final".into(),
-                format!("mode.{}", mode.noun().replace(' ', "-")),
-            ],
+            capabilities,
         }),
     ) {
         Ok(()) => {
@@ -7566,6 +7594,7 @@ fn status_value(state: &AppState, include_readiness: bool) -> serde_json::Value 
             "latestFinalAgeSecs": live.latest_final_age_secs,
             "source": live.source.as_ref(),
             "diagnostic": live.diagnostic.as_deref(),
+            "disabled": live.disabled.is_some(),
         })),
     });
 
@@ -15594,6 +15623,8 @@ mod tests {
             "Transcript current",
             "Last transcript update",
             "Recording safely · Live transcript unavailable",
+            "Recording · Live transcript off",
+            "disabled: recordingLive.disabled",
         ] {
             assert!(html.contains(expected), "missing live state: {expected}");
         }
@@ -21489,6 +21520,14 @@ pub fn cmd_start_copilot_surface(
     let provider = config.copilot.resolved_fast_provider();
     if provider == "cloud" && !config.copilot.allow_cloud {
         return Err("Cloud Coach is disabled. Contract v1 uses the local Ollama provider.".into());
+    }
+    // The surface reads `live.utterance.final` events, which only a sidecar
+    // emits; a recording with it off would leave Coach arming forever.
+    if minutes_core::live_transcript::session_status()
+        .disabled
+        .is_some()
+    {
+        return Err(minutes_core::copilot::RECORDING_WITHOUT_LIVE_TEXT.into());
     }
 
     if state

@@ -2,6 +2,14 @@
 
 **When shipping a new version, walk through every item in order.**
 
+**Package with the publisher's runtime.** Run Phase 2 and tag preflight on Linux
+with Node **22.14.0** and npm **11.5.1**, matching `release-publish.yml`. Different
+Node gzip implementations can produce different npm integrity hashes even when
+every file and the uncompressed tar are identical. For example, use
+`npx --yes --package=node@22.14.0 --package=npm@11.5.1 --call 'node scripts/release.mjs phase2 X.Y.Z'`
+and the same prefix for `tag`. Before tagging, resolve any canonical SDK integrity
+mismatch reported by Linux CI; do not publish against a different archive hash.
+
 ### 1. Version bump (every source must match)
 ```bash
 # Preview the complete Domain-1 patch without touching this checkout, then apply it.

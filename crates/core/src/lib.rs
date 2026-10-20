@@ -137,6 +137,8 @@ mod dictation_disfluency;
 pub mod dictation_experience;
 pub mod dictation_memory;
 pub(crate) mod engine_process;
+mod process_reaper;
+pub use process_reaper::spawn_reaped;
 /// Person entity-resolution clustering (issue #385, class 3): suggestion-only
 /// grouping of name-variant fragments. Never merges.
 pub(crate) mod entity_cluster;

@@ -1419,6 +1419,13 @@ pub struct LiveTranscriptConfig {
     pub max_utterance_secs: u64,
     /// Whether to save raw WAV alongside JSONL for post-meeting reprocessing.
     pub save_wav: bool,
+    /// Whether normal and call recordings run the live transcript sidecar.
+    ///
+    /// The final transcript never comes from the sidecar: the pipeline
+    /// re-transcribes the saved WAV after stop. Off, a recording only captures
+    /// audio and live-text readers see an explicit disabled state. Standalone
+    /// Live mode is unaffected.
+    pub recording_sidecar: bool,
     /// What to do with a saved standalone live transcript when the session stops.
     pub promote_on_stop: LiveTranscriptPromoteOnStop,
     /// Whether the keyboard shortcut is enabled.
@@ -1434,6 +1441,7 @@ impl Default for LiveTranscriptConfig {
             model: String::new(), // empty = use dictation model
             max_utterance_secs: 30,
             save_wav: true,
+            recording_sidecar: true,
             promote_on_stop: LiveTranscriptPromoteOnStop::Process,
             shortcut_enabled: false,
             shortcut: "CmdOrCtrl+Shift+L".into(),
@@ -3120,6 +3128,25 @@ backend = "apple-speech"
         assert_eq!(config.live_transcript.backend, "apple-speech");
         assert_eq!(config.effective_live_transcript_backend(), "apple-speech");
         assert_eq!(config.transcription.engine, "whisper");
+    }
+
+    #[test]
+    fn recording_sidecar_defaults_on_and_can_be_turned_off_from_toml() {
+        assert!(LiveTranscriptConfig::default().recording_sidecar);
+
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[live_transcript]
+recording_sidecar = false
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from(&config_path);
+        assert!(!config.live_transcript.recording_sidecar);
     }
 
     #[test]

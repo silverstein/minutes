@@ -118,7 +118,7 @@ const capabilityColumns = [
   },
 ] as const;
 
-// Homepage storage and agent-access rows spot-checked October 18, 2026.
+// Homepage storage and agent-access rows spot-checked October 19, 2026.
 // Sources: granola.ai/security, help.granola.ai/article/granola-mcp,
 // help.otter.ai/hc/en-us/articles/35287607569687-Otter-MCP-Server,
 // otter.ai/pricing, anarlog.so/privacy and anarlog.so.
@@ -379,7 +379,7 @@ export default function Home() {
 
         <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
           <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          preserves distinct statements and improves optional local speaker labeling.{" "}
+          lets you turn off live transcription during recording while keeping the final transcript.{" "}
           <a
             href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
             className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"

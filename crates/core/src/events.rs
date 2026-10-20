@@ -879,6 +879,177 @@ fn latest_event_seq_from_active_log_tail_inner(path: &Path) -> std::io::Result<O
     Ok(None)
 }
 
+// A relay follows only bytes appended after its startup snapshot. Historical
+// queries keep their replay semantics; capture never reparses that history on
+// its 10 ms accept/partial loop.
+struct EventTailFile {
+    file: fs::File,
+    identity: same_file::Handle,
+    offset: u64,
+    pending: Vec<u8>,
+    oversized: bool,
+}
+
+impl EventTailFile {
+    fn open(path: &Path, at_end: bool) -> std::io::Result<Self> {
+        let mut file = fs::File::open(path)?;
+        let identity = same_file::Handle::from_file(file.try_clone()?)?;
+        let offset = if at_end {
+            file.seek(SeekFrom::End(0))?
+        } else {
+            0
+        };
+        Ok(Self {
+            file,
+            identity,
+            offset,
+            pending: Vec::new(),
+            oversized: false,
+        })
+    }
+}
+
+pub(crate) struct EventTail {
+    current: Option<EventTailFile>,
+    queued: std::collections::VecDeque<EventTailFile>,
+    known_archives: std::collections::HashSet<PathBuf>,
+    seq: u64,
+    #[cfg(test)]
+    bytes_read: usize,
+}
+
+impl EventTail {
+    /// Writers use the same lock, so the sequence and starting byte offset are
+    /// one snapshot. Events appended after it cannot fall into a startup gap.
+    pub(crate) fn following_now() -> std::io::Result<Self> {
+        with_event_log_lock(|| {
+            let seq = latest_event_seq_inner()?;
+            let known_archives = event_log_paths()?
+                .into_iter()
+                .filter(|p| *p != events_path())
+                .collect();
+            let current = match EventTailFile::open(&events_path(), true) {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            Ok(Self {
+                current,
+                queued: Default::default(),
+                known_archives,
+                seq,
+                #[cfg(test)]
+                bytes_read: 0,
+            })
+        })
+    }
+
+    pub(crate) fn poll(&mut self) -> std::io::Result<Vec<EventEnvelope>> {
+        // On rotation, keep the old descriptor until EOF. Open new archives in
+        // order before the active log, including multiple rotations between
+        // polls. Identity checks prevent replaying the just-drained old file.
+        if self.current.is_none() {
+            self.discover_successors()?;
+            self.current = self.queued.pop_front();
+        }
+        let Some(current) = self.current.as_mut() else {
+            return Ok(Vec::new());
+        };
+        if current.file.metadata()?.len() < current.offset {
+            current.file.seek(SeekFrom::Start(0))?;
+            current.offset = 0;
+            current.pending.clear();
+            current.oversized = false;
+        }
+        let mut buffer = [0u8; 64 * 1024];
+        let count = current.file.read(&mut buffer)?;
+        current.offset += count as u64;
+        #[cfg(test)]
+        {
+            self.bytes_read += count;
+        }
+        let mut events = Vec::new();
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if !current.oversized {
+                    if let Ok(envelope) = serde_json::from_slice::<EventEnvelope>(&current.pending)
+                    {
+                        if envelope.seq > self.seq {
+                            self.seq = envelope.seq;
+                            events.push(envelope);
+                        }
+                    }
+                }
+                current.pending.clear();
+                current.oversized = false;
+            } else if !current.oversized {
+                // Bound a corrupt / unfinished line without blocking capture or
+                // retaining an unbounded buffer. Normal utterances are tiny.
+                if current.pending.len() == 256 * 1024 {
+                    current.pending.clear();
+                    current.oversized = true;
+                } else {
+                    current.pending.push(*byte);
+                }
+            }
+        }
+        if count == 0 {
+            if !self.queued.is_empty() {
+                self.current = self.queued.pop_front();
+            } else {
+                self.discover_successors()?;
+                if !self.queued.is_empty() {
+                    self.current = self.queued.pop_front();
+                }
+            }
+        }
+        Ok(events)
+    }
+
+    fn discover_successors(&mut self) -> std::io::Result<()> {
+        let active = match EventTailFile::open(&events_path(), false) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| c.identity == active.identity)
+        {
+            return Ok(());
+        }
+        with_event_log_lock(|| self.discover_successors_locked())
+    }
+
+    fn discover_successors_locked(&mut self) -> std::io::Result<()> {
+        let active = EventTailFile::open(&events_path(), false)?;
+        for path in event_log_paths()? {
+            if path == events_path() || self.known_archives.contains(&path) {
+                continue;
+            }
+            let file = match EventTailFile::open(&path, false) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            self.known_archives.insert(path);
+            if !self
+                .current
+                .as_ref()
+                .is_some_and(|c| c.identity == file.identity)
+                && !self.queued.iter().any(|c| c.identity == file.identity)
+            {
+                self.queued.push_back(file);
+            }
+        }
+        if !self.queued.iter().any(|c| c.identity == active.identity) {
+            self.queued.push_back(active);
+        }
+        Ok(())
+    }
+}
+
 fn read_all_event_envelopes_inner() -> std::io::Result<Vec<EventEnvelope>> {
     let paths = event_log_paths()?;
     if paths.is_empty() {
@@ -1496,6 +1667,112 @@ mod tests {
                 }
                 _ => panic!("expected RecordingCompleted"),
             }
+        });
+    }
+
+    fn append_tail_fixture(seq: u64) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(events_path())
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&note_envelope(seq, "tail fixture")).unwrap()
+        )
+        .unwrap();
+    }
+
+    fn drain_tail(tail: &mut EventTail) -> Vec<u64> {
+        (0..12)
+            .flat_map(|_| tail.poll().unwrap().into_iter().map(|e| e.seq))
+            .collect()
+    }
+
+    #[test]
+    fn event_tail_reads_only_appended_complete_lines_and_deduplicates() {
+        with_temp_home(|_| {
+            fs::create_dir_all(Config::minutes_dir()).unwrap();
+            append_tail_fixture(1);
+            write_event_seq_sidecar_inner(1).unwrap();
+            let mut tail = EventTail::following_now().unwrap();
+            for _ in 0..100 {
+                assert!(tail.poll().unwrap().is_empty());
+            }
+            assert_eq!(tail.bytes_read, 0, "idle polls must not reread history");
+            let line = serde_json::to_string(&note_envelope(2, "partial")).unwrap();
+            let mut file = OpenOptions::new().append(true).open(events_path()).unwrap();
+            file.write_all(&line.as_bytes()[..20]).unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            file.write_all(&line.as_bytes()[20..]).unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            file.write_all(b"\n").unwrap();
+            assert_eq!(drain_tail(&mut tail), [2]);
+            append_tail_fixture(2);
+            append_tail_fixture(3);
+            assert_eq!(drain_tail(&mut tail), [3]);
+            assert!(tail.bytes_read < 4096);
+        });
+    }
+
+    #[test]
+    fn event_tail_drains_old_file_and_multiple_rotations_without_gaps() {
+        with_temp_home(|_| {
+            fs::create_dir_all(Config::minutes_dir()).unwrap();
+            append_tail_fixture(1);
+            write_event_seq_sidecar_inner(1).unwrap();
+            let mut tail = EventTail::following_now().unwrap();
+            append_tail_fixture(2);
+            fs::rename(
+                events_path(),
+                Config::minutes_dir().join("events.0001.jsonl"),
+            )
+            .unwrap();
+            append_tail_fixture(3);
+            fs::rename(
+                events_path(),
+                Config::minutes_dir().join("events.0002.jsonl"),
+            )
+            .unwrap();
+            append_tail_fixture(4);
+            assert_eq!(drain_tail(&mut tail), [2, 3, 4]);
+            assert!(drain_tail(&mut tail).is_empty());
+        });
+    }
+
+    #[test]
+    fn event_tail_handles_missing_file_truncation_and_replacement() {
+        with_temp_home(|_| {
+            let mut tail = EventTail::following_now().unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            append_tail_fixture(1);
+            assert_eq!(drain_tail(&mut tail), [1]);
+            // In-place truncation, as opposed to normal rename rotation.
+            fs::write(events_path(), b"").unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            append_tail_fixture(2);
+            assert_eq!(drain_tail(&mut tail), [2]);
+            fs::remove_file(events_path()).unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            append_tail_fixture(3);
+            assert_eq!(drain_tail(&mut tail), [3]);
+        });
+    }
+
+    #[test]
+    fn event_tail_bounds_work_and_memory_for_large_unfinished_lines() {
+        with_temp_home(|_| {
+            let mut tail = EventTail::following_now().unwrap();
+            fs::write(events_path(), vec![b'x'; 512 * 1024]).unwrap();
+            assert!(tail.poll().unwrap().is_empty());
+            assert!(tail.bytes_read <= 64 * 1024);
+            assert!(drain_tail(&mut tail).is_empty());
+            assert!(tail.current.as_ref().unwrap().pending.len() <= 256 * 1024);
+            let mut file = OpenOptions::new().append(true).open(events_path()).unwrap();
+            file.write_all(b"\n").unwrap();
+            append_tail_fixture(1);
+            assert_eq!(drain_tail(&mut tail), [1]);
         });
     }
 

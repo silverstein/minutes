@@ -50,7 +50,9 @@ installed_dev_pids() {
     {
       pid = $1
       sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", $0)
-      if ($0 == executable) print pid
+      # The installed app may have development/test arguments. Match the
+      # executable boundary, excluding similarly named bundles or binaries.
+      if ($0 == executable || index($0, executable " ") == 1) print pid
     }
   '
 }
@@ -70,6 +72,18 @@ stop_idle_installed_dev_app() {
   if [[ -z "$PREVIOUS_DEV_PIDS" ]]; then
     return
   fi
+
+  # A custom launch can use a different data/config root. The CLI status
+  # probe below cannot establish that profile's idle state. Refuse replacement
+  # until its owner has checked and quit it rather than targeting the wrong PID.
+  for existing_pid in $PREVIOUS_DEV_PIDS; do
+    local existing_command
+    existing_command="$(ps -p "$existing_pid" -o command=)"
+    if [[ "$existing_command" != "$INSTALL_APP/Contents/MacOS/minutes-app" ]]; then
+      echo "Error: installed ${DEV_PRODUCT_NAME}.app PID $existing_pid has custom launch arguments; its activity profile is unverified. Check and quit that instance before installing." >&2
+      exit 1
+    fi
+  done
 
   if installed_dev_work_is_active; then
     echo "Error: ${DEV_PRODUCT_NAME}.app is recording or processing. Stop active work before replacing the installed app." >&2

@@ -81,6 +81,54 @@ fn full_pipeline_memo() {
     assert!(content.contains("source: voice-memos"));
 }
 
+/// The pipeline re-transcribes the saved WAV after stop and never reads
+/// `live_transcript.recording_sidecar`, so its output is the same either way.
+#[test]
+fn post_stop_processing_ignores_the_recording_sidecar_flag() {
+    fn process_with(sidecar: bool, dir: &TempDir, wav: &std::path::Path) -> String {
+        let mut config = test_config(dir.path().join(format!("output-{sidecar}")));
+        config.live_transcript.recording_sidecar = sidecar;
+        let result =
+            minutes_core::process(wav, ContentType::Meeting, Some("Sidecar Flag"), &config)
+                .unwrap_or_else(|error| {
+                    panic!("pipeline failed with sidecar={sidecar}: {error:?}")
+                });
+        fs::read_to_string(&result.path).unwrap()
+    }
+    /// Drop the lines each run stamps with its own wall-clock time.
+    fn without_timestamps(content: &str) -> String {
+        fn has_iso_timestamp(line: &str) -> bool {
+            line.as_bytes().windows(11).any(|w| {
+                w[4] == b'-'
+                    && w[7] == b'-'
+                    && w[10] == b'T'
+                    && [0, 1, 2, 3, 5, 6, 8, 9]
+                        .iter()
+                        .all(|i| w[*i].is_ascii_digit())
+            })
+        }
+        content
+            .lines()
+            .filter(|line| !has_iso_timestamp(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let dir = TempDir::new().unwrap();
+    let wav = dir.path().join("sidecar-flag.wav");
+    create_test_wav(&wav, 2.0);
+
+    let with_sidecar = process_with(true, &dir, &wav);
+    let without_sidecar = process_with(false, &dir, &wav);
+
+    assert!(without_sidecar.contains("## Transcript"));
+    assert_eq!(
+        without_timestamps(&with_sidecar),
+        without_timestamps(&without_sidecar),
+        "the post-stop transcript must not depend on the recording sidecar flag"
+    );
+}
+
 #[test]
 fn pipeline_rejects_empty_audio() {
     let dir = TempDir::new().unwrap();

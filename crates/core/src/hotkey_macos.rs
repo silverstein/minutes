@@ -137,9 +137,10 @@ pub fn request_input_monitoring() -> bool {
 
 /// Open System Settings to the Input Monitoring pane.
 pub fn open_input_monitoring_settings() {
-    let _ = crate::engine_process::command("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
-        .spawn();
+    let _ = crate::spawn_reaped(
+        crate::engine_process::command("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
+    );
 }
 
 /// Check if Accessibility permission is granted (NOT needed for CGEventTap,

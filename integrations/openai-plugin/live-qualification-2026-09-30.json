@@ -1,0 +1,37 @@
+{
+  "date_utc": "2026-09-30",
+  "host": "silverbook",
+  "surface": "standalone Node prototype",
+  "agent_display_name": "Minutes",
+  "sign_in": {
+    "status": "verified",
+    "identity_checks": ["signature", "issuer", "audience", "expiry", "nonce"],
+    "chatgpt_plan_scope": "granted",
+    "credentials_survive_process_restart": true,
+    "credentials_included_in_receipt": false
+  },
+  "catalog": {
+    "status": "verified",
+    "visible_models": ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+  },
+  "inference": {
+    "model": "gpt-6-astra",
+    "source_files": ["2026-02-28-pricing-strategy.md", "2026-03-25-pricing-reversal.md"],
+    "real_meeting_reads": 0,
+    "provider_requests": 3,
+    "attempts": [
+      { "purpose": "initial_sample", "result": "client_rejected_missing_content_type", "completion_confirmed": false },
+      { "purpose": "response_format_diagnostic", "http_status": 200, "content_type": null, "request_id": null, "body_bytes": 5074, "sse_like": true, "completion_confirmed": false },
+      { "purpose": "sample_after_missing_header_fix", "http_status": 200, "result": "terminal_stream_error", "error_code": "subscription_sharing_usage_limit_exceeded", "completion_confirmed": false }
+    ],
+    "answer": null,
+    "automatic_retry": false,
+    "provider_or_model_fallback": false,
+    "further_inference_requests": "stopped",
+    "quota_scope_and_reset_time": "unknown"
+  },
+  "remaining_live_checks": ["completed sample response and citation review", "refresh rotation near token expiry", "logout and remote revocation"],
+  "connection_state": "preserved",
+  "native_desktop_integration": "not activated",
+  "public_directory_submission": "not submitted"
+}

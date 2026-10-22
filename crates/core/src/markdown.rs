@@ -349,6 +349,17 @@ pub(crate) enum ActiveCorpusRevisionError {
     Deadline,
 }
 
+impl ActiveCorpusRevisionError {
+    /// Content-free diagnostics for a refused per-file materialization.
+    pub(crate) fn materialization_message(self) -> &'static str {
+        match self {
+            Self::Deadline => "meeting corpus authorization deadline elapsed",
+            Self::Budget => "meeting corpus resource budget exceeded",
+            Self::Unavailable | Self::Traversal => "meeting corpus could not be reverified safely",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StableMarkdownAttestation {
     content_sha256: [u8; 32],
@@ -376,18 +387,25 @@ impl StableActiveCorpusRevision {
 
     /// Re-read one candidate through the descriptor-stable path and require
     /// exact agreement with the pre-operation allowlist.
-    pub(crate) fn read_snapshot(&self, path: &Path) -> Option<StableMarkdownSnapshot> {
-        self.budget.check_deadline().ok()?;
+    pub(crate) fn read_snapshot(
+        &self,
+        path: &Path,
+    ) -> Result<StableMarkdownSnapshot, ActiveCorpusRevisionError> {
+        self.budget.check_deadline()?;
         let snapshot =
-            read_stable_active_markdown_with_budget(path, &self.canonical_root, &self.budget)?;
-        self.budget
-            .consume(1, 0, snapshot.content.len() as u64)
-            .ok()?;
-        self.budget.check_deadline().ok()?;
-        let expected = self.entries.get(&snapshot.path)?;
-        (expected.content_sha256 == snapshot.content_sha256
-            && expected.file_identity == snapshot.file_identity)
-            .then_some(snapshot)
+            try_read_stable_active_markdown_with_budget(path, &self.canonical_root, &self.budget)?;
+        self.budget.consume(1, 0, snapshot.content.len() as u64)?;
+        self.budget.check_deadline()?;
+        let expected = self
+            .entries
+            .get(&snapshot.path)
+            .ok_or(ActiveCorpusRevisionError::Unavailable)?;
+        if expected.content_sha256 != snapshot.content_sha256
+            || expected.file_identity != snapshot.file_identity
+        {
+            return Err(ActiveCorpusRevisionError::Unavailable);
+        }
+        Ok(snapshot)
     }
 }
 
@@ -498,49 +516,63 @@ fn open_markdown_no_follow(path: &Path) -> std::io::Result<File> {
 fn read_bounded_markdown_twice(
     file: &mut File,
     expected_len: u64,
-    mut check_deadline: impl FnMut() -> Option<()>,
+    mut check_deadline: impl FnMut() -> Result<(), ActiveCorpusRevisionError>,
     between_reads: impl FnOnce(),
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, ActiveCorpusRevisionError> {
     if expected_len > crate::policy_fs::MAX_BOUND_TEXT_FILE_BYTES {
-        return None;
+        return Err(ActiveCorpusRevisionError::Unavailable);
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(expected_len).ok()?);
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(expected_len).map_err(|_| ActiveCorpusRevisionError::Unavailable)?,
+    );
     let mut first_chunk = [0u8; 16 * 1024];
     loop {
         check_deadline()?;
-        let read = file.read(&mut first_chunk).ok()?;
+        let read = file
+            .read(&mut first_chunk)
+            .map_err(|_| ActiveCorpusRevisionError::Unavailable)?;
         if read == 0 {
             break;
         }
-        let end = bytes.len().checked_add(read)?;
+        let end = bytes
+            .len()
+            .checked_add(read)
+            .ok_or(ActiveCorpusRevisionError::Unavailable)?;
         if end as u64 > expected_len || end as u64 > crate::policy_fs::MAX_BOUND_TEXT_FILE_BYTES {
-            return None;
+            return Err(ActiveCorpusRevisionError::Unavailable);
         }
         bytes.extend_from_slice(&first_chunk[..read]);
     }
     if bytes.len() as u64 != expected_len
         || bytes.len() as u64 > crate::policy_fs::MAX_BOUND_TEXT_FILE_BYTES
     {
-        return None;
+        return Err(ActiveCorpusRevisionError::Unavailable);
     }
 
     between_reads();
-    file.seek(SeekFrom::Start(0)).ok()?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| ActiveCorpusRevisionError::Unavailable)?;
     let mut offset = 0usize;
     let mut chunk = [0u8; 16 * 1024];
     loop {
         check_deadline()?;
-        let read = file.read(&mut chunk).ok()?;
+        let read = file
+            .read(&mut chunk)
+            .map_err(|_| ActiveCorpusRevisionError::Unavailable)?;
         if read == 0 {
             break;
         }
-        let end = offset.checked_add(read)?;
+        let end = offset
+            .checked_add(read)
+            .ok_or(ActiveCorpusRevisionError::Unavailable)?;
         if end > bytes.len() || bytes[offset..end] != chunk[..read] {
-            return None;
+            return Err(ActiveCorpusRevisionError::Unavailable);
         }
         offset = end;
     }
-    (offset == bytes.len()).then_some(bytes)
+    (offset == bytes.len())
+        .then_some(bytes)
+        .ok_or(ActiveCorpusRevisionError::Unavailable)
 }
 
 fn normalized_absolute_lexical_path(path: &Path) -> Option<PathBuf> {
@@ -630,6 +662,14 @@ pub(crate) fn read_stable_active_markdown_with_budget(
     canonical_root: &Path,
     budget: &ActiveCorpusReadBudget,
 ) -> Option<StableMarkdownSnapshot> {
+    try_read_stable_active_markdown_with_budget(path, canonical_root, budget).ok()
+}
+
+fn try_read_stable_active_markdown_with_budget(
+    path: &Path,
+    canonical_root: &Path,
+    budget: &ActiveCorpusReadBudget,
+) -> Result<StableMarkdownSnapshot, ActiveCorpusRevisionError> {
     read_stable_active_markdown_with_budget_and_hooks(
         path,
         canonical_root,
@@ -655,6 +695,7 @@ fn read_stable_active_markdown_with_hooks(
         between_reads,
         after_second_read,
     )
+    .ok()
 }
 
 fn read_stable_active_markdown_with_budget_and_hooks(
@@ -664,50 +705,51 @@ fn read_stable_active_markdown_with_budget_and_hooks(
     mut after_canonicalize: impl FnMut(&Path),
     mut between_reads: impl FnMut(&Path),
     mut after_second_read: impl FnMut(&Path),
-) -> Option<StableMarkdownSnapshot> {
-    let check_deadline = || {
-        budget
-            .map(|budget| budget.check_deadline().ok())
-            .unwrap_or(Some(()))
-    };
+) -> Result<StableMarkdownSnapshot, ActiveCorpusRevisionError> {
+    // Keep resource failures typed; all source/path failures share one safe
+    // refusal so callers cannot distinguish private file details.
+    let unavailable = ActiveCorpusRevisionError::Unavailable;
+    let check_deadline = || budget.map_or(Ok(()), ActiveCorpusReadBudget::check_deadline);
     check_deadline()?;
-    let canonical_path = bind_lexical_markdown_path(path, canonical_root)?;
+    let canonical_path = bind_lexical_markdown_path(path, canonical_root).ok_or(unavailable)?;
     if let Some(budget) = budget {
-        budget.consume_path(&canonical_path).ok()?;
+        budget.consume_path(&canonical_path)?;
     }
-    canonical_path.to_str()?;
-    let relative = canonical_path.strip_prefix(canonical_root).ok()?;
+    canonical_path.to_str().ok_or(unavailable)?;
+    let relative = canonical_path
+        .strip_prefix(canonical_root)
+        .map_err(|_| unavailable)?;
     if canonical_path.extension().and_then(|value| value.to_str()) != Some("md")
         || relative.components().any(|component| match component {
             std::path::Component::Normal(name) => is_inactive_corpus_dir_name(name),
             _ => true,
         })
     {
-        return None;
+        return Err(unavailable);
     }
 
     after_canonicalize(&canonical_path);
 
-    let mut file = open_markdown_no_follow(&canonical_path).ok()?;
-    let opened_before = file.metadata().ok()?;
+    let mut file = open_markdown_no_follow(&canonical_path).map_err(|_| unavailable)?;
+    let opened_before = file.metadata().map_err(|_| unavailable)?;
     if !crate::policy_fs::opened_regular_file_is_safe(&file)
         || opened_before.len() > crate::policy_fs::MAX_BOUND_TEXT_FILE_BYTES
     {
-        return None;
+        return Err(unavailable);
     }
     if !markdown_path_still_identifies(&file, &canonical_path) {
-        return None;
+        return Err(unavailable);
     }
 
     let bytes =
         read_bounded_markdown_twice(&mut file, opened_before.len(), check_deadline, || {
             between_reads(&canonical_path)
         })?;
-    let opened_mid = file.metadata().ok()?;
+    let opened_mid = file.metadata().map_err(|_| unavailable)?;
     after_second_read(&canonical_path);
 
-    let opened_after = file.metadata().ok()?;
-    let canonical_after = canonical_path.canonicalize().ok()?;
+    let opened_after = file.metadata().map_err(|_| unavailable)?;
+    let canonical_after = canonical_path.canonicalize().map_err(|_| unavailable)?;
     if canonical_after != canonical_path
         || !canonical_after.starts_with(canonical_root)
         || !opened_mid.is_file()
@@ -719,14 +761,14 @@ fn read_stable_active_markdown_with_budget_and_hooks(
         || opened_before.modified().ok() != opened_mid.modified().ok()
         || opened_mid.modified().ok() != opened_after.modified().ok()
     {
-        return None;
+        return Err(unavailable);
     }
 
-    let content = String::from_utf8(bytes).ok()?;
-    Some(StableMarkdownSnapshot {
+    let content = String::from_utf8(bytes).map_err(|_| unavailable)?;
+    Ok(StableMarkdownSnapshot {
         path: canonical_path,
         content_sha256: Sha256::digest(content.as_bytes()).into(),
-        file_identity: stable_markdown_file_identity(&file)?,
+        file_identity: stable_markdown_file_identity(&file).ok_or(unavailable)?,
         content,
     })
 }
@@ -2604,10 +2646,45 @@ mod tests {
             revision.read_snapshot(&stable).unwrap().content,
             "stable aggregate canary"
         );
-        assert!(revision.read_snapshot(&invalid).is_none());
+        assert_eq!(
+            revision.read_snapshot(&invalid).unwrap_err(),
+            ActiveCorpusRevisionError::Unavailable
+        );
 
         fs::write(&stable, "changed aggregate canary").unwrap();
-        assert!(revision.read_snapshot(&stable).is_none());
+        assert_eq!(
+            revision.read_snapshot(&stable).unwrap_err(),
+            ActiveCorpusRevisionError::Unavailable
+        );
+    }
+
+    #[test]
+    fn active_corpus_materialization_refuses_unallowlisted_replaced_and_missing_sources() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("meeting.md");
+        fs::write(&path, "synthetic meeting").unwrap();
+        let revision = stable_active_corpus_revision(temp.path()).unwrap();
+
+        let late = temp.path().join("late.md");
+        fs::write(&late, "synthetic meeting").unwrap();
+        assert_eq!(
+            revision.read_snapshot(&late).unwrap_err(),
+            ActiveCorpusRevisionError::Unavailable
+        );
+
+        // Same bytes, different file identity: the attestation must still fail.
+        fs::rename(&path, temp.path().join("original.md")).unwrap();
+        fs::write(&path, "synthetic meeting").unwrap();
+        assert_eq!(
+            revision.read_snapshot(&path).unwrap_err(),
+            ActiveCorpusRevisionError::Unavailable
+        );
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            revision.read_snapshot(&path).unwrap_err(),
+            ActiveCorpusRevisionError::Unavailable
+        );
     }
 
     #[test]
@@ -2910,7 +2987,7 @@ mod tests {
             |_| std::thread::sleep(Duration::from_millis(10)),
             |_| {},
         );
-        assert!(snapshot.is_none());
+        assert_eq!(snapshot.unwrap_err(), ActiveCorpusRevisionError::Deadline);
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

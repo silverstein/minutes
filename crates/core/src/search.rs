@@ -126,11 +126,9 @@ fn revision_snapshot(
     revision: &StableActiveCorpusRevision,
     path: &Path,
 ) -> Result<StableMarkdownSnapshot, SearchError> {
-    revision.read_snapshot(path).ok_or_else(|| {
-        SearchError::Io(std::io::Error::other(
-            "an allowlisted meeting changed while materializing the result",
-        ))
-    })
+    revision
+        .read_snapshot(path)
+        .map_err(|error| SearchError::Io(std::io::Error::other(error.materialization_message())))
 }
 
 fn policy_verified_result(
@@ -2955,6 +2953,41 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn materialization_reports_deadline_without_claiming_a_meeting_changed() {
+        let temp = TempDir::new().unwrap();
+        create_test_file(temp.path(), "meeting.md", "unchanged synthetic meeting");
+        let revision = stable_active_corpus_revision(temp.path())
+            .unwrap()
+            .with_read_budget(ActiveCorpusReadBudget::new_until(std::time::Instant::now()));
+
+        let error = revision_snapshot(&revision, &temp.path().join("meeting.md")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "I/O error: meeting corpus authorization deadline elapsed"
+        );
+    }
+
+    #[test]
+    fn materialization_reports_resource_limits_without_claiming_a_meeting_changed() {
+        let temp = TempDir::new().unwrap();
+        create_test_file(temp.path(), "meeting.md", "unchanged synthetic meeting");
+        let revision = stable_active_corpus_revision(temp.path()).unwrap();
+        let deadline = std::time::Duration::from_secs(60);
+        for budget in [
+            ActiveCorpusReadBudget::for_test(0, 1, 1024, deadline),
+            ActiveCorpusReadBudget::for_test(1, 1, 0, deadline),
+            ActiveCorpusReadBudget::for_test_with_paths(1, 1, 1024, 0, deadline),
+        ] {
+            let revision = revision.clone().with_read_budget(budget);
+            let error = revision_snapshot(&revision, &temp.path().join("meeting.md")).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "I/O error: meeting corpus resource budget exceeded"
+            );
+        }
     }
 
     fn delete_staging_entries(root: &Path) -> Vec<std::ffi::OsString> {

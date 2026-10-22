@@ -556,15 +556,12 @@ impl SearchIndex {
             // normal file can be reclassified as restricted without changing
             // the metadata values cached in an older index.
             let snapshot = match revision {
-                Some(revision) => revision.read_snapshot(&path),
+                Some(revision) => Some(revision.read_snapshot(&path).map_err(|error| {
+                    SearchIndexError::Io(error.materialization_message().into())
+                })?),
                 None => read_stable_active_markdown(&path, &self.corpus_root),
             };
             let Some(snapshot) = snapshot else {
-                if revision.is_some() {
-                    return Err(SearchIndexError::Io(
-                        "meeting changed while building the authorized search projection".into(),
-                    ));
-                }
                 let _ = self.delete_file_inner(&path);
                 stats.errored += 1;
                 continue;
@@ -1063,11 +1060,9 @@ impl SearchIndex {
         // the outer post-snapshot still rejects publication when membership
         // changed.
         for path in revision.paths() {
-            let snapshot = revision.read_snapshot(path).ok_or_else(|| {
-                SearchIndexError::Io(
-                    "meeting changed while building the authorized restricted projection".into(),
-                )
-            })?;
+            let snapshot = revision
+                .read_snapshot(path)
+                .map_err(|error| SearchIndexError::Io(error.materialization_message().into()))?;
             if let Some(result) = restricted_live_result(snapshot, filters) {
                 results.push(result);
             }
@@ -1738,6 +1733,88 @@ mod tests {
         assert_eq!(authorized.len(), 1);
         assert_eq!(authorized[0].title, "Restricted");
         assert_eq!(raw_counts(&idx, "RESTRICTEDINGESTCANARY"), (0, 0));
+    }
+
+    #[test]
+    fn authorized_projections_report_materialization_resource_limits() {
+        let (dir, config) = temp_config();
+        write_meeting(
+            &config.output_dir,
+            "unchanged",
+            "Synthetic title",
+            "Synthetic body",
+        );
+        let revision = crate::markdown::stable_active_corpus_revision(&config.output_dir).unwrap();
+        let idx = make_index(&dir, &config);
+        let deadline = std::time::Duration::from_secs(60);
+        for (budget, message) in [
+            (
+                ActiveCorpusReadBudget::new_until(std::time::Instant::now()),
+                "meeting corpus authorization deadline elapsed",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test(0, 1, 1024, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test(1, 1, 0, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+            (
+                ActiveCorpusReadBudget::for_test_with_paths(1, 1, 1024, 0, deadline),
+                "meeting corpus resource budget exceeded",
+            ),
+        ] {
+            let normal = revision.clone().with_read_budget(budget.fresh_pass());
+            let error = idx
+                .sync_for_active_corpus(&config, SyncMode::Auto, &normal)
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("I/O error: {message}"));
+
+            let restricted = revision.clone().with_read_budget(budget.fresh_pass());
+            let error = idx
+                .search_restricted_live_for_active_corpus(
+                    "",
+                    &SearchFilters {
+                        include_restricted: true,
+                        ..Default::default()
+                    },
+                    &restricted,
+                )
+                .unwrap_err();
+            assert_eq!(error.to_string(), format!("I/O error: {message}"));
+        }
+    }
+
+    #[test]
+    fn authorized_projections_refuse_changed_sources_without_file_details() {
+        let (dir, config) = temp_config();
+        let path = write_meeting(&config.output_dir, "changed", "Synthetic title", "Before");
+        let revision = crate::markdown::stable_active_corpus_revision(&config.output_dir).unwrap();
+        std::fs::write(path, "After").unwrap();
+        let idx = make_index(&dir, &config);
+
+        let error = idx
+            .sync_for_active_corpus(&config, SyncMode::Auto, &revision)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "I/O error: meeting corpus could not be reverified safely"
+        );
+        let error = idx
+            .search_restricted_live_for_active_corpus(
+                "",
+                &SearchFilters {
+                    include_restricted: true,
+                    ..Default::default()
+                },
+                &revision,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "I/O error: meeting corpus could not be reverified safely"
+        );
     }
 
     #[test]

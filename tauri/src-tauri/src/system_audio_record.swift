@@ -10,7 +10,83 @@ private func availableMicrophones() -> [AVCaptureDevice] {
         deviceTypes: [.microphone],
         mediaType: .audio,
         position: .unspecified
-    ).devices
+    ).devices.filter { $0.isConnected }
+}
+
+// Successful PCM writes, including digital silence, establish source health.
+// Sample amplitude and continued system audio cannot mask a missing microphone.
+private struct MicrophoneProgress {
+    var lastWrite: Double
+    var nextAttempt: Double = 0
+    var inFlight = false
+    var gapStart: Double?
+    var attempts = 0
+
+    mutating func begin(now: Double, disconnected: Bool = false) -> Bool {
+        guard !inFlight, now >= nextAttempt,
+              disconnected || now - lastWrite >= 3 else { return false }
+        if gapStart == nil { gapStart = lastWrite }
+        attempts += 1
+        inFlight = true
+        return true
+    }
+
+    mutating func finish(now: Double) {
+        inFlight = false
+        nextAttempt = now + (attempts >= 3 ? 30 : 5)
+    }
+
+    mutating func wrote(now: Double) -> Double? {
+        lastWrite = now
+        let gap = gapStart.map { max(0, now - $0) }
+        gapStart = nil
+        attempts = 0
+        return gap
+    }
+}
+
+private func recoveryMicrophoneID(devices: [(id: String, name: String)],
+    configuredName: String?, defaultID: String?, failedID: String?) -> String? {
+    // Prefer an available alternative to the failed device, even if macOS has
+    // not yet updated its default. A still-connected sole input can be reset.
+    let alternatives = devices.filter { $0.id != failedID }
+    if let configuredName, let device = alternatives.first(where: { $0.name == configuredName }) {
+        return device.id
+    }
+    return alternatives.first(where: { $0.id == defaultID })?.id
+        ?? alternatives.first?.id ?? devices.first?.id
+}
+
+private func runMicrophoneRecoverySelfTest() -> Bool {
+    var progress = MicrophoneProgress(lastWrite: 0)
+    var checks = [!progress.begin(now: 2)]
+    // Quiet buffers still advance successful writes and must not reconnect.
+    for second in 1...60 {
+        checks.append(progress.wrote(now: Double(second)) == nil)
+        checks.append(!progress.begin(now: Double(second)))
+    }
+    checks.append(progress.begin(now: 63))
+    checks.append(!progress.begin(now: 64))
+    progress.finish(now: 64)
+    checks.append(!progress.begin(now: 68))
+    checks.append(progress.begin(now: 69))
+    checks.append(progress.wrote(now: 70) == 10)
+    progress.finish(now: 70)
+    checks.append(!progress.begin(now: 71))
+    var disconnected = MicrophoneProgress(lastWrite: 10)
+    checks.append(disconnected.begin(now: 10, disconnected: true))
+    let devices = [(id: "airpods", name: "Headset"), (id: "built-in", name: "Mac")]
+    checks.append(recoveryMicrophoneID(devices: devices, configuredName: nil,
+        defaultID: "airpods", failedID: "airpods") == "built-in")
+    checks.append(recoveryMicrophoneID(devices: devices, configuredName: "Headset",
+        defaultID: "built-in", failedID: "airpods") == "built-in")
+    checks.append(recoveryMicrophoneID(devices: [], configuredName: nil,
+        defaultID: nil, failedID: "airpods") == nil)
+    checks.append(recoveryMicrophoneID(devices: [(id: "usb", name: "USB")],
+        configuredName: "USB", defaultID: nil, failedID: "usb") == "usb")
+    emitJSON(["event": "microphone_recovery_self_test", "status": checks.allSatisfy { $0 } ? "ok" : "failed",
+        "checks": checks.count])
+    return checks.allSatisfy { $0 }
 }
 
 private func emitJSON(_ payload: [String: Any]) {
@@ -895,6 +971,10 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
     private let stateLock = NSRecursiveLock()
     private var segments: [CaptureSegment] = []
     private var recoveryTask: Task<Void, Never>?
+    private var failedMicrophoneID: String?
+    private var testDropMicrophoneSamples = false
+    // Only accessed on sampleQueue. Initial startup has an eight-second grace.
+    private var microphoneProgress = MicrophoneProgress(lastWrite: ProcessInfo.processInfo.systemUptime + 5)
     private var interruptedStream: SCStream?
     private var originUptime = ProcessInfo.processInfo.systemUptime
     private var interruptionUptime: Double?
@@ -991,18 +1071,24 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             exceptingWindows: []
         )
 
-        let configuration = SCStreamConfiguration()
-        configuration.width = 2
-        configuration.height = 2
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 2)
-        configuration.queueDepth = 3
-        configuration.capturesAudio = true
-        configuration.captureMicrophone = true
-        configuration.excludesCurrentProcessAudio = true
-        configuration.showsCursor = false
+        let configuration = microphoneConfiguration(deviceID: nil, enabled: true)
 
         let microphone: AVCaptureDevice?
-        if let requestedMicrophoneName {
+        let recoveryID = sampleQueue.sync { failedMicrophoneID }
+        if attempt > 0, let recoveryID {
+            let devices = availableMicrophones().sorted {
+                (UInt32(bitPattern: $0.transportType) == kAudioDeviceTransportTypeBuiltIn ? 0 : 1)
+                    < (UInt32(bitPattern: $1.transportType) == kAudioDeviceTransportTypeBuiltIn ? 0 : 1)
+            }
+            let preferredBuiltIn = devices.first {
+                UInt32(bitPattern: $0.transportType) == kAudioDeviceTransportTypeBuiltIn
+            }
+            let identifier = recoveryMicrophoneID(devices: devices.map { ($0.uniqueID, $0.localizedName) },
+                configuredName: requestedMicrophoneName,
+                defaultID: AVCaptureDevice.default(for: .audio)?.uniqueID,
+                failedID: preferredBuiltIn?.uniqueID == recoveryID ? nil : recoveryID)
+            microphone = devices.first { $0.uniqueID == identifier }
+        } else if let requestedMicrophoneName {
             microphone = availableMicrophones().first {
                 $0.localizedName == requestedMicrophoneName
             } ?? AVCaptureDevice.default(for: .audio)
@@ -1039,11 +1125,12 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
                 microphone.activeFormat.formatDescription
             )?.pointee.mSampleRate
             sampleQueue.sync {
+                testDropMicrophoneSamples = false
                 selectedMicrophoneID = microphone.uniqueID
                 selectedMicrophoneName = microphone.localizedName
                 selectedMicrophoneDeviceSampleRate = deviceRate
             }
-            if requestedMicrophoneName != nil && attempt == 0 {
+            if attempt == 0 {
                 NotificationCenter.default.addObserver(
                     self,
                     selector: #selector(microphoneWasDisconnected(_:)),
@@ -1099,7 +1186,66 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         sampleQueue.async {
             guard identifier == self.selectedMicrophoneID else { return }
             emitJSON(["event": "microphone_disconnected", "name": self.selectedMicrophoneName ?? name])
+            self.scheduleMicrophoneRecovery(disconnected: true)
         }
+    }
+
+    private func microphoneConfiguration(deviceID: String?, enabled: Bool) -> SCStreamConfiguration {
+        let configuration = SCStreamConfiguration()
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 2)
+        configuration.queueDepth = 3
+        configuration.capturesAudio = true
+        configuration.captureMicrophone = enabled
+        configuration.microphoneCaptureDeviceID = deviceID
+        configuration.excludesCurrentProcessAudio = true
+        configuration.showsCursor = false
+        return configuration
+    }
+
+    // Microphone loss does not always reach SCStreamDelegate. Use the same
+    // segmented recovery as a stream interruption: updating a live recording's
+    // configuration can finalize its SCRecordingOutput on macOS.
+    private func scheduleMicrophoneRecovery(disconnected: Bool = false) {
+        guard !stemsClosed, !captureLifecycle.isStopping, !captureLifecycle.isRecovering,
+              let active = withState({ stream }),
+              microphoneProgress.begin(now: ProcessInfo.processInfo.systemUptime, disconnected: disconnected) else { return }
+        let devices = availableMicrophones()
+        guard !devices.isEmpty else {
+            emitJSON(["event": "microphone_recovery_failed", "reason": "no_available_input"])
+            microphoneProgress.finish(now: ProcessInfo.processInfo.systemUptime)
+            return // Preserve the surviving system lane and retry later.
+        }
+        guard captureLifecycle.beginRecovery() else {
+            microphoneProgress.finish(now: ProcessInfo.processInfo.systemUptime)
+            return
+        }
+        failedMicrophoneID = selectedMicrophoneID
+        withState {
+            interruptionUptime = microphoneProgress.gapStart ?? ProcessInfo.processInfo.systemUptime
+            interruptedStream = active
+        }
+        emitJSON(["event": "microphone_reconnecting"])
+        emitJSON(["event": "capture_interrupted", "reason": "microphone_lost", "will_retry": true,
+            "observed_at": ISO8601DateFormatter().string(from: Date()),
+            "attempt": withState { segments.first(where: { $0.stream === active })?.attempt ?? 0 }])
+        withState {
+            guard !captureLifecycle.isStopping else { return }
+            recoveryTask = Task {
+                try? await active.stopCapture()
+                guard !self.captureLifecycle.isStopping, !Task.isCancelled else { return }
+                await self.recoverCapture()
+            }
+        }
+    }
+
+    // Explicit Dev fault injection with unchanged audio topology. Withhold only
+    // microphone buffers; the real missing-write detector must recover them.
+    func injectTestMicrophoneInterruption() async {
+        guard !captureLifecycle.isStopping, !captureLifecycle.isRecovering else { return }
+        emitJSON(["event": "capture_test_microphone_interruption", "injected": true])
+        sampleQueue.sync { testDropMicrophoneSamples = true }
     }
 
     func stop() async {
@@ -1273,6 +1419,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Date()
+            self.scheduleMicrophoneRecovery()
             let systemLive = self.lastSystemAudioSampleAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
             let micLive = self.lastMicSampleAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
             if !systemLive {
@@ -1316,6 +1463,7 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             self.stream === stream && interruptedStream !== stream
                 ? segments.first(where: { $0.stream === stream })?.attempt : nil
         }), !stemsClosed else { return }
+        if outputType == .microphone && testDropMicrophoneSamples { return }
         let sourceKey = outputType == .microphone ? "microphone" : "system"
         let writer = outputType == .microphone ? voiceStemWriter : systemStemWriter
         if sourceAttempts[sourceKey] != attempt {
@@ -1336,8 +1484,19 @@ final class NativeCallRecorder: NSObject, SCRecordingOutputDelegate, SCStreamOut
             break
         }
         let wroteAudio = (writer?.framesWritten ?? 0) - framesBefore > (writer?.framesSilenced ?? 0) - silenceBefore
+        if outputType == .microphone, wroteAudio {
+            if let gap = microphoneProgress.wrote(now: ProcessInfo.processInfo.systemUptime) {
+                emitJSON(["event": "microphone_resumed", "gap_ms": Int(gap * 1000),
+                    "name": selectedMicrophoneName ?? "microphone"])
+            }
+        }
         if wroteAudio { withState { lastCaptureUptime = ProcessInfo.processInfo.systemUptime } }
-        if attempt > 0, wroteAudio, captureLifecycle.resume(attempt: attempt) {
+        // A system buffer alone cannot confirm recovery from microphone loss.
+        let microphoneRequired = failedMicrophoneID != nil
+        if attempt > 0, wroteAudio, (!microphoneRequired || outputType == .microphone),
+           captureLifecycle.resume(attempt: attempt) {
+            failedMicrophoneID = nil
+            microphoneProgress.finish(now: ProcessInfo.processInfo.systemUptime)
             let gap = withState { interruptionUptime.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0 }
             emitJSON(["event": "capture_resumed", "attempt": attempt, "gap_ms": Int(max(0, gap) * 1000)])
         }
@@ -1766,6 +1925,7 @@ struct NativeCallRecordMain {
     // remains installed for the lifetime of the helper.
     nonisolated(unsafe) static var retainedStopSource: DispatchSourceSignal?
     nonisolated(unsafe) static var retainedTestSource: DispatchSourceSignal?
+    nonisolated(unsafe) static var retainedMicrophoneTestSource: DispatchSourceSignal?
 
     static func main() {
         Task {
@@ -1775,6 +1935,10 @@ struct NativeCallRecordMain {
     }
 
     static func run() async {
+        if CommandLine.arguments.count == 2,
+           CommandLine.arguments[1] == "--self-test-microphone-recovery" {
+            exit(runMicrophoneRecoverySelfTest() ? 0 : 1)
+        }
         if CommandLine.arguments.count == 2,
            CommandLine.arguments[1] == "--self-test-capture-lifecycle" {
             exit(runCaptureLifecycleSelfTest() ? 0 : 1)
@@ -1842,6 +2006,11 @@ struct NativeCallRecordMain {
             testSource.setEventHandler { Task { await recorder.injectTestInterruption() } }
             testSource.resume()
             NativeCallRecordMain.retainedTestSource = testSource
+            signal(SIGUSR2, SIG_IGN)
+            let microphoneTestSource = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+            microphoneTestSource.setEventHandler { Task { await recorder.injectTestMicrophoneInterruption() } }
+            microphoneTestSource.resume()
+            NativeCallRecordMain.retainedMicrophoneTestSource = microphoneTestSource
         }
 
         do {

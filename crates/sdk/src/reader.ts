@@ -762,23 +762,28 @@ export async function searchMeetings(
       const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, wanted);
       return retrieval ? [{ meeting, retrieval }] : [];
     });
-    // Stopwords are optional; when nothing matches every term, each meeting
-    // is matched by its best leave-one-term-out query (as the Rust search).
-    let matches = matchAll(meant);
-    if (matches.length === 0) {
+    // Stopwords are optional. Below 10 full matches, meetings that match all
+    // but one term fill in after them (each by its best such query); a title
+    // match still outranks words scattered through a transcript (as Rust).
+    const matches = matchAll(meant).map((match) => ({ ...match, complete: true }));
+    if (matches.length < 10) {
+      const seen = new Set(matches.map((match) => match.meeting.path));
       const best = new Map<string, (typeof matches)[number]>();
       for (const relaxed of relaxedQueries(meant)) {
         for (const match of matchAll(relaxed)) {
-          const seen = best.get(match.meeting.path);
-          if (!seen || compareSearchMatches(
+          if (seen.has(match.meeting.path)) continue;
+          const held = best.get(match.meeting.path);
+          if (!held || compareSearchMatches(
             { tier: match.retrieval.tier, score: match.retrieval.score, date: "", path: "" },
-            { tier: seen.retrieval.tier, score: seen.retrieval.score, date: "", path: "" }
-          ) < 0) best.set(match.meeting.path, match);
+            { tier: held.retrieval.tier, score: held.retrieval.score, date: "", path: "" }
+          ) < 0) best.set(match.meeting.path, { ...match, complete: false });
         }
       }
-      matches = [...best.values()];
+      matches.push(...best.values());
     }
-    matches.sort((a, b) => compareSearchMatches(
+    const rank = (match: (typeof matches)[number]) =>
+      (match.retrieval.tier >= 2 ? 2 : 0) + (match.complete ? 1 : 0);
+    matches.sort((a, b) => rank(b) - rank(a) || compareSearchMatches(
       { tier: a.retrieval.tier, score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
       { tier: b.retrieval.tier, score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
     ));

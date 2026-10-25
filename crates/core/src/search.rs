@@ -245,6 +245,21 @@ fn retain_policy_verified_results(
     query: &str,
     revision: &StableActiveCorpusRevision,
 ) -> Result<(), SearchError> {
+    retain_policy_verified_ranked_results(results, filters, query, revision, &[])
+}
+
+/// `relaxed` names the leave-one-term-out queries some candidates matched
+/// through. Those rank below meetings that matched every term, except that a
+/// title match (tier 2+) still outranks words scattered through a transcript:
+/// "planning chaos desktop" should find *Planning Chaos Harnesses* above a
+/// call that happens to mention all three words.
+fn retain_policy_verified_ranked_results(
+    results: &mut Vec<SearchResult>,
+    filters: &SearchFilters,
+    query: &str,
+    revision: &StableActiveCorpusRevision,
+    relaxed: &[String],
+) -> Result<(), SearchError> {
     let candidates = std::mem::take(results);
     let mut ranked = Vec::new();
     for result in candidates {
@@ -260,15 +275,19 @@ fn retain_policy_verified_results(
             let score =
                 crate::retrieval::lexical_score(&result.title, body, ranked_query).unwrap_or(0.0);
             let tier = crate::retrieval::lexical_tier(&result.title, body, ranked_query);
-            ranked.push((tier, score, result));
+            let complete = !result
+                .matched_via_alias
+                .as_ref()
+                .is_some_and(|alias| relaxed.contains(alias));
+            ranked.push(((tier >= 2, complete, tier), score, result));
         }
     }
     // Empty-query listing retains its existing normal/restricted grouping.
     // Relevance ordering applies only to an actual text query.
     if !query.trim().is_empty() {
-        ranked.sort_by(|(a_tier, a_score, a), (b_tier, b_score, b)| {
-            b_tier
-                .cmp(a_tier)
+        ranked.sort_by(|(a_rank, a_score, a), (b_rank, b_score, b)| {
+            b_rank
+                .cmp(a_rank)
                 .then_with(|| b_score.total_cmp(a_score))
                 .then_with(|| {
                     let epoch = |value: &str| {
@@ -2038,18 +2057,17 @@ fn search_with_mode_and_vocabulary_once(
     // live gate the vocabulary expansions use.
     let query = &crate::retrieval::content_query(query);
     let expansions = vocabulary_search_expansions(query, vocabulary_override);
-    let results = if expansions.len() <= 1 {
-        search_single_query(
+    if expansions.len() <= 1 {
+        return search_single_query(
             query,
             filters,
             &index,
             revision,
             open_duration,
             sync_duration,
-        )?
-    } else {
-        search_expansion_set(query, expansions, filters, &index, revision)?
-    };
+        );
+    }
+    let results = search_expansion_set(query, expansions, filters, &index, revision, false)?;
     if !results.is_empty() {
         return Ok(results);
     }
@@ -2057,8 +2075,12 @@ fn search_with_mode_and_vocabulary_once(
     if relaxed.is_empty() {
         return Ok(results);
     }
-    search_expansion_set(query, relaxed, filters, &index, revision)
+    search_expansion_set(query, relaxed, filters, &index, revision, true)
 }
+
+/// Below this many full matches, leave-one-term-out matches fill in after
+/// them (one misremembered word should not hide the meeting you meant).
+const RELAXED_FILL_BELOW: usize = 10;
 
 fn search_single_query(
     query: &str,
@@ -2070,14 +2092,30 @@ fn search_single_query(
 ) -> Result<Vec<SearchResult>, SearchError> {
     let search_started = std::time::Instant::now();
     let mut results = index.search(query, filters, None)?;
+    let relaxed = if results.len() < RELAXED_FILL_BELOW {
+        crate::retrieval::relaxed_queries(query)
+    } else {
+        Vec::new()
+    };
+    let mut seen_paths: std::collections::HashSet<_> =
+        results.iter().map(|result| result.path.clone()).collect();
+    for relaxed_query in &relaxed {
+        for mut result in index.search(relaxed_query, filters, None)? {
+            if seen_paths.insert(result.path.clone()) {
+                result.matched_via_alias = Some(relaxed_query.clone());
+                results.push(result);
+            }
+        }
+    }
     if filters.include_restricted {
         results.extend(index.search_restricted_live_for_active_corpus(query, filters, revision)?);
     }
     let search_duration = search_started.elapsed();
     // Normal and explicit-override restricted candidates pass through one
-    // identical live-snapshot, filter, and exact-FTS authorization gate.
+    // identical live-snapshot, filter, and exact-FTS authorization gate
+    // (relaxed candidates against the relaxed query they matched).
     let policy_started = std::time::Instant::now();
-    retain_policy_verified_results(&mut results, filters, query, revision)?;
+    retain_policy_verified_ranked_results(&mut results, filters, query, revision, &relaxed)?;
     let policy_duration = policy_started.elapsed();
     tracing::debug!(
         list_mode = query.trim().is_empty(),
@@ -2100,7 +2138,13 @@ fn search_expansion_set(
     filters: &SearchFilters,
     index: &crate::search_index::SearchIndex,
     revision: &StableActiveCorpusRevision,
+    relaxed: bool,
 ) -> Result<Vec<SearchResult>, SearchError> {
+    let relaxed_queries = if relaxed {
+        expansions.clone()
+    } else {
+        Vec::new()
+    };
     let original_key = search_expansion_key(query);
     let mut merged = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
@@ -2152,7 +2196,7 @@ fn search_expansion_set(
         }
     }
 
-    retain_policy_verified_results(&mut merged, filters, query, revision)?;
+    retain_policy_verified_ranked_results(&mut merged, filters, query, revision, &relaxed_queries)?;
     Ok(merged)
 }
 
@@ -3315,7 +3359,23 @@ mod tests {
             titles("planning chaos desktop"),
             vec!["Planning Chaos Harnesses for Codex"]
         );
-        assert!(titles("zzqx desktop").is_empty());
+        // A title that matches all but one word still outranks a transcript
+        // that happens to contain every word.
+        create_test_file(
+            dir.path(),
+            "mentions.md",
+            "---\ntitle: Desktop Release Review\ndate: 2026-05-02\ntype: meeting\n---\n\nWe kept planning around the chaos of the desktop build.",
+        );
+        assert_eq!(
+            titles("planning chaos desktop"),
+            vec![
+                "Planning Chaos Harnesses for Codex",
+                "Desktop Release Review"
+            ]
+        );
+        // A nonsense word is left out; two of them still find nothing.
+        assert_eq!(titles("zzqx desktop"), vec!["Desktop Release Review"]);
+        assert!(titles("zzqx qqzx").is_empty());
     }
 
     #[test]

@@ -6036,7 +6036,7 @@
             id="recall-nudge" aria-label="Recall has new content"></span></button>
         <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
       </div>
-      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" />
+      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
       <div class="search-error" id="search-error" hidden></div>
     </div>
 
@@ -10938,26 +10938,36 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
-    function searchTerms(query) {
-      return [...new Set(
-        query
-          .trim()
-          .split(/\s+/)
-          .map(term => term.trim())
-          .filter(Boolean)
-      )];
+    // Mirrors the search contract (retrieval.rs): stopwords are optional and
+    // not marked, earlier terms match whole words, the final term (still being
+    // typed) matches word starts. Substring marking lit up the "a" in "Ryan".
+    const SEARCH_STOPWORDS = new Set([
+      'a', 'an', 'and', 'are', 'at', 'be', 'by', 'for', 'from', 'in', 'is', 'it', 'of', 'on', 'or',
+      'our', 'the', 'this', 'that', 'to', 'was', 'with', 'my', 'your',
+    ]);
+
+    function contentSearchTokens(query) {
+      const tokens = instantSearchTokens(query);
+      const last = tokens.length - 1;
+      const kept = tokens.filter((token, index) => index === last || !SEARCH_STOPWORDS.has(token));
+      return kept.every((token) => SEARCH_STOPWORDS.has(token)) ? tokens : kept;
     }
 
     function buildHighlightedFragment(text, query) {
       const fragment = document.createDocumentFragment();
-      const terms = searchTerms(query);
+      const tokens = contentSearchTokens(query);
+      const last = tokens.length - 1;
+      const patterns = tokens
+        .map((token, index) => (index === last && token.length >= 2
+          ? `${escapeRegex(token)}[\\p{L}\\p{N}]*`
+          : escapeRegex(token)));
 
-      if (!text || terms.length === 0) {
+      if (!text || patterns.length === 0) {
         fragment.appendChild(document.createTextNode(text || ''));
         return fragment;
       }
 
-      const regex = new RegExp(`(${terms.map(escapeRegex).join('|')})`, 'gi');
+      const regex = new RegExp(`(?<![\\p{L}\\p{N}])(?:${patterns.join('|')})(?![\\p{L}\\p{N}])`, 'giu');
       let lastIndex = 0;
 
       for (const match of text.matchAll(regex)) {
@@ -12231,7 +12241,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function renderInstantTitleMatches(query) {
-      const wanted = instantSearchTokens(query);
+      const wanted = contentSearchTokens(query);
       if (!wanted.length) return;
       const hits = lastMeetingInventory
         .map((meeting) => ({ meeting, tier: instantTitleTier(meeting.title, wanted) }))
@@ -14934,6 +14944,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // dismissed even when a readiness refresh re-sets it. Errors are never
     // auto-dismissed and carry no close control.
     let recallProviderNoticeDismissedText = '';
+    // The "ready, ask here" notice is only news the first time: once it has
+    // been dismissed (or typed past), it stays gone across launches. Sign-in
+    // prompts and errors still show.
+    const RECALL_READY_NOTICE_SEEN_KEY = 'minutes.recallReadyNoticeSeen';
+    let recallReadyNoticeText = '';
+
+    function recallReadyNoticeSeen() {
+      try { return localStorage.getItem(RECALL_READY_NOTICE_SEEN_KEY) === '1'; } catch { return false; }
+    }
 
     function setRecallProviderNotice(message, tone = 'info') {
       if (!recallProviderNotice) return;
@@ -14966,6 +14985,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (recallProviderNotice.dataset.tone === 'error') return;
       recallProviderNoticeDismissedText =
         recallProviderNotice.querySelector('.recall-provider-notice-text')?.textContent || '';
+      if (recallReadyNoticeText && recallProviderNoticeDismissedText === recallReadyNoticeText) {
+        try { localStorage.setItem(RECALL_READY_NOTICE_SEEN_KEY, '1'); } catch {}
+      }
       recallProviderNotice.classList.remove('active');
     }
 
@@ -15034,10 +15056,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return `${assistant} could not be found. Install it or choose an installed assistant in Settings. No meeting was read.`;
       }
       const meeting = pendingRecallTerminalMeetingPath ? 'the selected meeting' : 'meeting context';
-      const auth = readiness.terminalAuthenticated
-        ? `Ask your question here; Minutes will load ${meeting} only when you submit it.`
-        : `Sign in here first. Minutes will not read ${meeting} during sign-in.`;
-      return `${assistant} is open in Terminal. ${auth}`;
+      if (!readiness.terminalAuthenticated) {
+        return `${assistant} is open in Terminal. Sign in here first. Minutes will not read ${meeting} during sign-in.`;
+      }
+      if (recallReadyNoticeSeen()) return '';
+      recallReadyNoticeText = `${assistant} is open in Terminal. Ask your question here; Minutes will load ${meeting} only when you submit it.`;
+      return recallReadyNoticeText;
     }
 
     async function chooseRecallExperience(mode, meetingPath) {

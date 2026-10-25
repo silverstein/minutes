@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { lexicalMatch, queryTokens, compareSearchMatches } from "./retrieval.js";
+import { lexicalMatch, queryTokens, compareSearchMatches, contentQuery, relaxedQueries } from "./retrieval.js";
 import { buildSourceEvidence, evidenceHash, evidenceForSpan } from "./evidence.js";
 import { buildDecisionHistory } from "./decision-history.js";
 import { parseFrontmatter } from "./reader.js";
@@ -47,6 +47,13 @@ describe("literal retrieval contract", () => {
     )).toBeLessThan(0);
     expect(lexicalMatch("Malso let me", "", "also let me")).toBeNull();
     expect(lexicalMatch("pricing", "", "pricing")!.score).toBeGreaterThan(lexicalMatch("", "pricing", "pricing")!.score);
+    // Stopwords are optional except the final (still typed) token; mirrors Rust.
+    expect(contentQuery("Planning a ch")).toBe("planning ch");
+    expect(contentQuery("pricing for")).toBe("pricing for");
+    expect(contentQuery("to be or")).toBe("to be or");
+    expect(lexicalMatch("Planning Chaos Harnesses", "", contentQuery("planning a ch"))!.tier).toBe(3);
+    expect(relaxedQueries("planning chaos desktop")).toEqual(["chaos desktop", "planning desktop", "planning chaos"]);
+    expect(relaxedQueries("planning")).toEqual([]);
   });
 });
 

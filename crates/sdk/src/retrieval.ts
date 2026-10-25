@@ -17,6 +17,30 @@ export function queryTokens(query: string): string[] {
   return searchTokens(query);
 }
 
+/** Function words treated as optional (mirrors Rust `SEARCH_STOPWORDS`). */
+export const SEARCH_STOPWORDS: ReadonlySet<string> = new Set([
+  "a", "an", "and", "are", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or",
+  "our", "the", "this", "that", "to", "was", "with", "my", "your",
+]);
+
+/**
+ * The query a person means (mirrors Rust `content_query`): stopwords dropped
+ * except the final token and except when nothing else would remain.
+ */
+export function contentQuery(query: string): string {
+  const tokens = queryTokens(query);
+  const last = tokens.length - 1;
+  const kept = tokens.filter((token, index) => index === last || !SEARCH_STOPWORDS.has(token));
+  return kept.every((token) => SEARCH_STOPWORDS.has(token)) ? tokens.join(" ") : kept.join(" ");
+}
+
+/** Fallbacks that each leave out one term (mirrors Rust `relaxed_queries`). */
+export function relaxedQueries(query: string): string[] {
+  const tokens = searchTokens(query);
+  if (tokens.length < 2 || tokens.length > 8) return [];
+  return tokens.map((_, skip) => tokens.filter((__, index) => index !== skip).join(" "));
+}
+
 export interface LexicalMatch {
   /** Local lexical relevance; not a probability or a cross-engine BM25 score. */
   score: number;

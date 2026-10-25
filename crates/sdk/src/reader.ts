@@ -13,7 +13,7 @@
 //                      listMeetings()      searchMeetings()
 
 import { realpath, stat } from "fs/promises";
-import { lexicalMatch, compareSearchMatches, queryTokens, type LexicalMatch } from "./retrieval.js";
+import { lexicalMatch, compareSearchMatches, contentQuery, queryTokens, relaxedQueries, type LexicalMatch } from "./retrieval.js";
 import { buildSourceEvidence, type EvidenceBundle } from "./evidence.js";
 import { buildDecisionHistory, type DecisionHistoryEntry, type HistoricalDecision } from "./decision-history.js";
 import { resolvePersonIdentity, meetingHasPersonParticipant, personOwnsAction } from "./identity.js";
@@ -756,11 +756,28 @@ export async function searchMeetings(
   const boundedLimit = normalizeMeetingResultLimit(limit);
   if (queryTokens(query).length === 0) return [];
 
+  const meant = contentQuery(query);
   return stableMeetingOperation(dir, opts, "search_meetings", (meetings) => {
-    const matches = meetings.flatMap((meeting) => {
-      const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, query);
+    const matchAll = (wanted: string) => meetings.flatMap((meeting) => {
+      const retrieval = lexicalMatch(meeting.frontmatter.title, meeting.body, wanted);
       return retrieval ? [{ meeting, retrieval }] : [];
     });
+    // Stopwords are optional; when nothing matches every term, each meeting
+    // is matched by its best leave-one-term-out query (as the Rust search).
+    let matches = matchAll(meant);
+    if (matches.length === 0) {
+      const best = new Map<string, (typeof matches)[number]>();
+      for (const relaxed of relaxedQueries(meant)) {
+        for (const match of matchAll(relaxed)) {
+          const seen = best.get(match.meeting.path);
+          if (!seen || compareSearchMatches(
+            { tier: match.retrieval.tier, score: match.retrieval.score, date: "", path: "" },
+            { tier: seen.retrieval.tier, score: seen.retrieval.score, date: "", path: "" }
+          ) < 0) best.set(match.meeting.path, match);
+        }
+      }
+      matches = [...best.values()];
+    }
     matches.sort((a, b) => compareSearchMatches(
       { tier: a.retrieval.tier, score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
       { tier: b.retrieval.tier, score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }

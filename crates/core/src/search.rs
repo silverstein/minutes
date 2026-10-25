@@ -239,6 +239,7 @@ fn policy_verified_result(
     Some((result, is_restricted))
 }
 
+#[cfg(test)]
 fn retain_policy_verified_results(
     results: &mut Vec<SearchResult>,
     filters: &SearchFilters,

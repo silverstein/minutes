@@ -2634,6 +2634,13 @@ pub struct ProactiveContextBundleView {
     pub losing_touch_count: usize,
 }
 
+/// "Sat Oct 24" instead of an RFC 3339 timestamp; unparseable dates pass through.
+fn weekly_date_label(date: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(date)
+        .map(|date| date.format("%a %b %-d").to_string())
+        .unwrap_or_else(|_| date.to_string())
+}
+
 fn build_weekly_summary_markdown(
     meetings_count: usize,
     recent_titles: &str,
@@ -2642,7 +2649,8 @@ fn build_weekly_summary_markdown(
     open_actions_block: &str,
 ) -> String {
     format!(
-        "# Weekly Summary\n\n## Volume\n\n- {meetings_count} meeting or memo artifact(s) in the last 7 days.\n\n## Recent Meetings\n\n{recent_titles}\n\n## Decision Arcs\n\n{decision_conflicts}\n\n## Stale Commitments\n\n{stale_commitments}\n\n## Open Actions\n\n{open_actions_block}\n\n## Monday Brief\n\n- Confirm the highest-risk open commitment.\n- Review the most important decision conflict before the next meeting.\n- Turn the most important meeting into a durable artifact if it is still only in transcript form.\n"
+        "# Weekly Summary\n\n## Volume\n\n- {meetings_count} {} in the last 7 days.\n\n## Recent Meetings\n\n{recent_titles}\n\n## Decision Arcs\n\n{decision_conflicts}\n\n## Stale Commitments\n\n{stale_commitments}\n\n## Open Actions\n\n{open_actions_block}\n\n## Monday Brief\n\n- Confirm the highest-risk open commitment.\n- Review the most important decision conflict before the next meeting.\n- Turn the most important meeting into a durable artifact if it is still only in transcript form.\n",
+        if meetings_count == 1 { "meeting or memo" } else { "meetings and memos" }
     )
 }
 
@@ -7996,7 +8004,7 @@ fn cmd_weekly_summary_blocking() -> Result<WeeklySummaryView, String> {
         meetings
             .iter()
             .take(6)
-            .map(|meeting| format!("- {} ({})", meeting.title, meeting.date))
+            .map(|meeting| format!("- {} · {}", meeting.title, weekly_date_label(&meeting.date)))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -19490,6 +19498,12 @@ mod tests {
             .related_topics
             .iter()
             .any(|topic| topic == "pricing strategy"));
+    }
+
+    #[test]
+    fn weekly_dates_read_as_days() {
+        assert_eq!(weekly_date_label("2026-10-24T22:33:34-04:00"), "Sat Oct 24");
+        assert_eq!(weekly_date_label("not a date"), "not a date");
     }
 
     #[test]

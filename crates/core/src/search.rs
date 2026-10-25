@@ -262,7 +262,10 @@ fn retain_policy_verified_ranked_results(
     relaxed: &[String],
 ) -> Result<(), SearchError> {
     let candidates = std::mem::take(results);
-    let mut ranked = Vec::new();
+    let read_started = std::time::Instant::now();
+    // Reads stay on this thread, charged to the operation's read budget in
+    // the same order as before.
+    let mut snapshots = Vec::with_capacity(candidates.len());
     for result in candidates {
         // Stale index rows absent from the pre-operation allowlist are
         // ineligible even if the path becomes readable during this query.
@@ -270,37 +273,49 @@ fn retain_policy_verified_ranked_results(
             continue;
         }
         let snapshot = revision_snapshot(revision, &result.path)?;
-        if let Some((result, _)) = policy_verified_result(result, &snapshot, filters, query) {
-            let (_, body) = split_frontmatter(&snapshot.content);
-            let ranked_query = result.matched_via_alias.as_deref().unwrap_or(query);
-            let complete = !result
-                .matched_via_alias
-                .as_ref()
-                .is_some_and(|alias| relaxed.contains(alias));
-            // A relaxed match ranks by the best leave-one-out query it
-            // satisfies, not whichever one found it first.
-            let rank_queries: Vec<&str> = if complete {
-                vec![ranked_query]
-            } else {
-                relaxed.iter().map(String::as_str).collect()
-            };
-            let (tier, score) = rank_queries
-                .into_iter()
-                .filter_map(|candidate| {
-                    let score = crate::retrieval::lexical_score(&result.title, body, candidate)
-                        .or((candidate == ranked_query).then_some(0.0))?;
-                    Some((
-                        crate::retrieval::lexical_tier(&result.title, body, candidate),
-                        score,
-                    ))
-                })
-                .max_by(|(a_tier, a_score), (b_tier, b_score)| {
-                    a_tier.cmp(b_tier).then_with(|| a_score.total_cmp(b_score))
-                })
-                .unwrap_or((0, 0.0));
-            ranked.push(((tier >= 2, complete, tier), score, result));
-        }
+        snapshots.push((result, snapshot));
     }
+    let read_duration = read_started.elapsed();
+    let verify_started = std::time::Instant::now();
+    let candidate_count = snapshots.len();
+    // The live gate, evidence and ranking are pure CPU over those snapshots
+    // (each re-tokenizes a transcript), so they run on a few workers.
+    let mut ranked = parallel_filter_map(snapshots, |(result, snapshot)| {
+        let (result, _) = policy_verified_result(result, &snapshot, filters, query)?;
+        let (_, body) = split_frontmatter(&snapshot.content);
+        let ranked_query = result.matched_via_alias.as_deref().unwrap_or(query);
+        let complete = !result
+            .matched_via_alias
+            .as_ref()
+            .is_some_and(|alias| relaxed.contains(alias));
+        // A relaxed match ranks by the best leave-one-out query it
+        // satisfies, not whichever one found it first.
+        let rank_queries: Vec<&str> = if complete {
+            vec![ranked_query]
+        } else {
+            relaxed.iter().map(String::as_str).collect()
+        };
+        let document = crate::retrieval::LexicalDocument::new(&result.title, body);
+        let (tier, score) = rank_queries
+            .into_iter()
+            .filter_map(|candidate| {
+                let score = document
+                    .score(candidate)
+                    .or((candidate == ranked_query).then_some(0.0))?;
+                Some((document.tier(candidate), score))
+            })
+            .max_by(|(a_tier, a_score), (b_tier, b_score)| {
+                a_tier.cmp(b_tier).then_with(|| a_score.total_cmp(b_score))
+            })
+            .unwrap_or((0, 0.0));
+        Some(((tier >= 2, complete, tier), score, result))
+    });
+    tracing::debug!(
+        candidates = candidate_count,
+        read_duration_ms = read_duration.as_millis() as u64,
+        verify_duration_ms = verify_started.elapsed().as_millis() as u64,
+        "search result verification phases"
+    );
     // Empty-query listing retains its existing normal/restricted grouping.
     // Relevance ordering applies only to an actual text query.
     if !query.trim().is_empty() {
@@ -321,6 +336,46 @@ fn retain_policy_verified_ranked_results(
     }
     results.extend(ranked.into_iter().map(|(_, _, result)| result));
     Ok(())
+}
+
+/// `items.into_iter().filter_map(f)` across a few scoped workers, keeping
+/// input order (list mode relies on it). Small inputs stay on this thread.
+fn parallel_filter_map<T: Send, U: Send>(
+    items: Vec<T>,
+    f: impl Fn(T) -> Option<U> + Sync,
+) -> Vec<U> {
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(items.len() / 4)
+        .max(1);
+    if workers == 1 {
+        return items.into_iter().filter_map(f).collect();
+    }
+    let mut lanes: Vec<Vec<(usize, T)>> = (0..workers).map(|_| Vec::new()).collect();
+    for (index, item) in items.into_iter().enumerate() {
+        lanes[index % workers].push((index, item));
+    }
+    let f = &f;
+    let mut tagged: Vec<(usize, U)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = lanes
+            .into_iter()
+            .map(|lane| {
+                scope.spawn(move || {
+                    lane.into_iter()
+                        .filter_map(|(index, item)| f(item).map(|value| (index, value)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("search verification worker panicked"))
+            .collect()
+    });
+    tagged.sort_by_key(|(index, _)| *index);
+    tagged.into_iter().map(|(_, value)| value).collect()
 }
 
 // ──────────────────────────────────────────────────────────────

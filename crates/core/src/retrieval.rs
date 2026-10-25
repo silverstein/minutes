@@ -82,33 +82,10 @@ pub fn token_matches(token: &str, wanted: &str, final_token: bool) -> bool {
 /// AND across fields; only the final multi-character token is a prefix.
 /// The score is lexical relevance, never a confidence/probability.
 pub fn lexical_score(title: &str, body: &str, query: &str) -> Option<f64> {
-    if !query_is_bounded(query) {
+    if !query_is_bounded(query) || search_tokens(query).is_empty() {
         return None;
     }
-    let wanted = search_tokens(query);
-    if wanted.is_empty() {
-        return None;
-    }
-    let title_tokens = search_tokens(title);
-    let body_tokens = search_tokens(body);
-    let mut score = 0.0;
-    for (index, term) in wanted.iter().enumerate() {
-        let matches = |token: &&String| token_matches(token, term, index + 1 == wanted.len());
-        let title_count = title_tokens.iter().filter(matches).count();
-        let body_count = body_tokens.iter().filter(matches).count();
-        if title_count + body_count == 0 {
-            return None;
-        }
-        score += 4.0 * (1.0 + title_count as f64).log2() + (1.0 + body_count as f64).log2();
-    }
-    let phrase = wanted.join(" ");
-    if title_tokens.join(" ").contains(&phrase) {
-        score += 4.0;
-    }
-    if body_tokens.join(" ").contains(&phrase) {
-        score += 1.0;
-    }
-    Some(score)
+    LexicalDocument::new(title, body).score(query)
 }
 
 /// Relevance tier, compared before [`lexical_score`]. The score alone let a
@@ -118,29 +95,82 @@ pub fn lexical_score(title: &str, body: &str, query: &str) -> Option<f64> {
 /// body, 0 = terms scattered. Phrases match token by token (the final term
 /// as a prefix, like the match itself), not by substring.
 pub fn lexical_tier(title: &str, body: &str, query: &str) -> u8 {
-    if !query_is_bounded(query) {
+    if !query_is_bounded(query) || search_tokens(query).is_empty() {
         return 0;
     }
-    let wanted = search_tokens(query);
-    if wanted.is_empty() {
-        return 0;
+    LexicalDocument::new(title, body).tier(query)
+}
+
+/// A title and body tokenized once. Tokenizing a long transcript dominates
+/// ranking, and search ranks each result against several queries (the
+/// leave-one-out fallbacks), so callers that score repeatedly keep one.
+pub struct LexicalDocument {
+    title: Vec<String>,
+    body: Vec<String>,
+}
+
+impl LexicalDocument {
+    pub fn new(title: &str, body: &str) -> Self {
+        Self {
+            title: search_tokens(title),
+            body: search_tokens(body),
+        }
     }
-    let title_tokens = search_tokens(title);
-    if contains_phrase(&title_tokens, &wanted) {
-        return 3;
+
+    /// Same result as [`lexical_score`] for this title and body.
+    pub fn score(&self, query: &str) -> Option<f64> {
+        if !query_is_bounded(query) {
+            return None;
+        }
+        let wanted = search_tokens(query);
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut score = 0.0;
+        for (index, term) in wanted.iter().enumerate() {
+            let matches = |token: &&String| token_matches(token, term, index + 1 == wanted.len());
+            let title_count = self.title.iter().filter(matches).count();
+            let body_count = self.body.iter().filter(matches).count();
+            if title_count + body_count == 0 {
+                return None;
+            }
+            score += 4.0 * (1.0 + title_count as f64).log2() + (1.0 + body_count as f64).log2();
+        }
+        let phrase = wanted.join(" ");
+        if self.title.join(" ").contains(&phrase) {
+            score += 4.0;
+        }
+        if self.body.join(" ").contains(&phrase) {
+            score += 1.0;
+        }
+        Some(score)
     }
-    let last = wanted.len() - 1;
-    if wanted.iter().enumerate().all(|(index, term)| {
-        title_tokens
-            .iter()
-            .any(|token| tier_token_matches(token, term, index == last))
-    }) {
-        return 2;
+
+    /// Same result as [`lexical_tier`] for this title and body.
+    pub fn tier(&self, query: &str) -> u8 {
+        if !query_is_bounded(query) {
+            return 0;
+        }
+        let wanted = search_tokens(query);
+        if wanted.is_empty() {
+            return 0;
+        }
+        if contains_phrase(&self.title, &wanted) {
+            return 3;
+        }
+        let last = wanted.len() - 1;
+        if wanted.iter().enumerate().all(|(index, term)| {
+            self.title
+                .iter()
+                .any(|token| tier_token_matches(token, term, index == last))
+        }) {
+            return 2;
+        }
+        if contains_phrase(&self.body, &wanted) {
+            return 1;
+        }
+        0
     }
-    if contains_phrase(&search_tokens(body), &wanted) {
-        return 1;
-    }
-    0
 }
 
 fn contains_phrase(tokens: &[String], wanted: &[String]) -> bool {

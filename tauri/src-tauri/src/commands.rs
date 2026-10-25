@@ -3788,8 +3788,49 @@ fn start_native_call_recording(
     let mut safety_guard =
         minutes_core::capture::RecordingSafetyGuard::new(&config.recording, &output_path);
     let mut safety_stop_warning = None;
+    let mut stem_size_guard = minutes_core::capture::StemSizeGuard::new();
+    let mut last_stem_size_check = std::time::Instant::now();
     while !stop_flag.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+        // Stems grow ~200-400 KB/s; checking every 5 s overshoots by at most
+        // ~2 MB, far inside the guard's headroom.
+        if last_stem_size_check.elapsed() >= Duration::from_secs(5) {
+            last_stem_size_check = std::time::Instant::now();
+            let largest = session
+                .stem_paths()
+                .map(|stems| {
+                    [stems.voice, stems.system]
+                        .iter()
+                        .filter_map(|path| std::fs::metadata(path).ok().map(|m| m.len()))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
+            match stem_size_guard.check(largest) {
+                minutes_core::capture::SafetyAction::Warning(message) => {
+                    let notice = OutputNotice {
+                        kind: "warning".into(),
+                        title: "Recording safety warning".into(),
+                        path: output_path.display().to_string(),
+                        detail: message,
+                        job_id: None,
+                    };
+                    set_latest_output(latest_output, Some(notice.clone()));
+                    maybe_show_completion_notification(
+                        app_handle,
+                        completion_notifications_enabled,
+                        &notice,
+                    );
+                }
+                minutes_core::capture::SafetyAction::Stop(reason, message) => {
+                    tracing::warn!(?reason, "{message}");
+                    safety_stop_warning = Some(message);
+                    stop_flag.store(true, Ordering::Relaxed);
+                    break;
+                }
+                _ => {}
+            }
+        }
         match session.check_capture_progress() {
             crate::call_capture::CaptureProgressAction::None => {}
             crate::call_capture::CaptureProgressAction::Recovered(message) => {

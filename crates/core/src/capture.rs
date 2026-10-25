@@ -32,6 +32,51 @@ pub enum StopReason {
     Silence,
     TimeCapReached,
     DiskSpaceLow,
+    StemSizeLimit,
+}
+
+/// Largest file a RIFF/WAVE header can describe: chunk sizes are u32.
+pub const WAV_STEM_BYTE_LIMIT: u64 = u32::MAX as u64;
+
+/// Headroom kept below [`WAV_STEM_BYTE_LIMIT`] when stopping, so stop
+/// latency and the helper's final flush cannot cross it. 64 MiB is about
+/// 2.9 minutes of the fastest stem format we write (96 kHz mono f32).
+const STEM_STOP_HEADROOM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Stops native call capture before a stem outgrows its WAV header (#1219).
+///
+/// Native stems are mono f32 at the device rate, so a time cap cannot stand
+/// in for a size cap: at 48 kHz the 4 GB limit arrives after ~6.2 h (below
+/// the 8 h default `max_duration_secs`), at 96 kHz after ~3.1 h. Past it the
+/// capture needs a manual `minutes recover-stem`. Warns at 90%, stops at the
+/// limit minus headroom, and lets normal finalization process the capture.
+#[derive(Debug, Default)]
+pub struct StemSizeGuard {
+    warned: bool,
+}
+
+impl StemSizeGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn check(&mut self, largest_stem_bytes: u64) -> SafetyAction {
+        let stop_at = WAV_STEM_BYTE_LIMIT - STEM_STOP_HEADROOM_BYTES;
+        if largest_stem_bytes >= stop_at {
+            return SafetyAction::Stop(
+                StopReason::StemSizeLimit,
+                "Call audio reached the 4 GB WAV file limit. Auto-stopped and processing.".into(),
+            );
+        }
+        if !self.warned && largest_stem_bytes >= stop_at / 10 * 9 {
+            self.warned = true;
+            return SafetyAction::Warning(
+                "Call audio is nearing the 4 GB WAV file limit; the recording will auto-stop soon."
+                    .into(),
+            );
+        }
+        SafetyAction::None
+    }
 }
 
 /// Action the caller should take after a safety check.
@@ -4697,6 +4742,29 @@ mod tests {
             guard.check_time_and_disk_at(disk_check_at),
             SafetyAction::Stop(StopReason::DiskSpaceLow, _)
         ));
+    }
+
+    #[test]
+    fn stem_size_guard_warns_once_then_stops_below_the_wav_limit() {
+        let mut guard = StemSizeGuard::new();
+        assert!(matches!(guard.check(1024), SafetyAction::None));
+        let stop_at = WAV_STEM_BYTE_LIMIT - STEM_STOP_HEADROOM_BYTES;
+        assert!(matches!(
+            guard.check(stop_at / 10 * 9),
+            SafetyAction::Warning(_)
+        ));
+        // The warning fires once.
+        assert!(matches!(
+            guard.check(stop_at / 10 * 9 + 1),
+            SafetyAction::None
+        ));
+        assert!(matches!(
+            guard.check(stop_at),
+            SafetyAction::Stop(StopReason::StemSizeLimit, _)
+        ));
+        // Two minutes of 96 kHz mono f32 still fit between the stop point and
+        // the header limit: far more than the 5 s check interval plus stop.
+        assert!(stop_at + 2 * 60 * 96_000 * 4 < WAV_STEM_BYTE_LIMIT);
     }
 
     #[test]

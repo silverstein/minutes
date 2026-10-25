@@ -8455,6 +8455,20 @@ fn archive_meeting_artifacts(
     Ok(moves)
 }
 
+/// Check off (or reopen) one action item from the meeting detail view. Only
+/// Markdown files inside the meetings folder can be edited this way.
+#[tauri::command]
+pub fn cmd_set_action_item_status(path: String, index: usize, done: bool) -> Result<(), String> {
+    let output_dir = std::fs::canonicalize(Config::load().output_dir).map_err(|e| e.to_string())?;
+    let md_path = std::fs::canonicalize(&path).map_err(|_| format!("File not found: {path}"))?;
+    if !md_path.starts_with(&output_dir)
+        || md_path.extension().and_then(|ext| ext.to_str()) != Some("md")
+    {
+        return Err("Only meetings in your meetings folder can be edited".into());
+    }
+    minutes_core::markdown::set_action_item_status(&md_path, index, done).map_err(|e| e.to_string())
+}
+
 /// Archive a meeting and its audio without a confirmation dialog. Archiving
 /// only moves files into `<output_dir>/archive`, so the desktop app offers
 /// Undo instead of asking first; the returned moves are what Undo reverses.

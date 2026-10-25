@@ -2171,6 +2171,69 @@ where
     atomic_rewrite_preserving_mode_guarded(path, &new_content, Some(&original), None)
 }
 
+/// Mark one action item done or open, by its index in `action_items`.
+///
+/// The frontmatter status changes as in [`update_frontmatter`]. The body keeps
+/// a human checklist under `## Action Items`; when exactly one `- [ ]` / `- [x]`
+/// line there contains the item's task text, only its box character changes,
+/// so the rendered checklist agrees with the status. Owners can differ between
+/// the two (withheld assignees are "unassigned" in frontmatter), so the match
+/// is by task. Same atomic, mode-preserving, concurrent-edit-guarded write.
+pub fn set_action_item_status(path: &Path, index: usize, done: bool) -> Result<(), MarkdownError> {
+    let original = fs::read_to_string(path)?;
+    let (fm_str, body) = split_frontmatter(&original);
+    if fm_str.is_empty() {
+        return Err(MarkdownError::RenameRefused(
+            "not a meeting file (no frontmatter)".into(),
+        ));
+    }
+    let mut frontmatter: Frontmatter = serde_yaml::from_str(fm_str)
+        .map_err(|e| MarkdownError::RenameRefused(format!("frontmatter does not parse: {e}")))?;
+    let item = frontmatter
+        .action_items
+        .get_mut(index)
+        .ok_or_else(|| MarkdownError::RenameRefused(format!("no action item {index}")))?;
+    item.status = if done { "done" } else { "open" }.into();
+    let task = item.task.trim().to_string();
+
+    let serialized = serde_yaml::to_string(&frontmatter)
+        .map_err(|e| MarkdownError::SerializationError(e.to_string()))?;
+    let body = set_action_checkbox(body, &task, done);
+    let new_content = format!("---\n{}\n---\n{}", serialized.trim_end_matches('\n'), body);
+    atomic_rewrite_preserving_mode_guarded(path, &new_content, Some(&original), None)
+}
+
+/// The body with the single matching checklist line under `## Action Items`
+/// set to `done`; unchanged when no line or more than one line matches.
+fn set_action_checkbox(body: &str, task: &str, done: bool) -> String {
+    if task.is_empty() {
+        return body.to_string();
+    }
+    let mut in_section = false;
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if trimmed.starts_with("## ") {
+            in_section = trimmed.trim_start_matches("## ").trim() == "Action Items";
+        } else if in_section
+            && (trimmed.starts_with("- [ ] ")
+                || trimmed.starts_with("- [x] ")
+                || trimmed.starts_with("- [X] "))
+            && trimmed.contains(task)
+        {
+            matches.push(offset + 3);
+        }
+        offset += line.len();
+    }
+    let [box_at] = matches[..] else {
+        return body.to_string();
+    };
+    let mut updated = body.to_string();
+    updated.replace_range(box_at..box_at + 1, if done { "x" } else { " " });
+    updated
+}
+
 /// Atomically replace an artifact's full content, preserving its file mode
 /// (modes are not uniformly 0600 — `Visibility::Team` files are 0640).
 ///
@@ -3645,6 +3708,43 @@ mod tests {
         // Hand-edited section must survive.
         assert!(content.contains("## Custom Section From User"));
         assert!(content.contains("Hand-edited stuff"));
+    }
+
+    #[test]
+    fn set_action_item_status_updates_frontmatter_and_the_one_matching_box() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("m.md");
+        std::fs::write(
+            &path,
+            "---\ntitle: Weekly\ntype: meeting\ndate: 2026-10-24T10:00:00-04:00\nduration: 30m\naction_items:\n- assignee: unassigned\n  task: send the deck\n  status: open\n- assignee: mat\n  task: book the room\n  status: open\n---\n\n## Action Items\n\n- [ ] @Ryan: send the deck\n- [ ] @Mat: book the room\n\n## Transcript\n\nWe said send the deck twice.\n",
+        )
+        .unwrap();
+
+        set_action_item_status(&path, 0, true).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let (fm, body) = split_frontmatter(&content);
+        let parsed: Frontmatter = serde_yaml::from_str(fm).unwrap();
+        assert_eq!(parsed.action_items[0].status, "done");
+        assert_eq!(parsed.action_items[1].status, "open");
+        assert!(body.contains("- [x] @Ryan: send the deck\n"));
+        assert!(body.contains("- [ ] @Mat: book the room\n"));
+        assert!(body.ends_with("We said send the deck twice.\n"));
+
+        set_action_item_status(&path, 0, false).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("- [ ] @Ryan: send the deck\n"));
+        assert!(set_action_item_status(&path, 7, true).is_err());
+    }
+
+    #[test]
+    fn ambiguous_or_missing_checklist_lines_are_left_alone() {
+        let body = "## Action Items\n\n- [ ] send it\n- [ ] send it again\n";
+        assert_eq!(set_action_checkbox(body, "send it", true), body);
+        assert_eq!(set_action_checkbox(body, "nothing like it", true), body);
+        // Outside the section, a matching line is not a checklist item.
+        let notes = "## Notes\n\n- [ ] send it\n";
+        assert_eq!(set_action_checkbox(notes, "send it", true), notes);
     }
 
     #[test]

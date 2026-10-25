@@ -3245,6 +3245,7 @@ fn main() {
             commands::cmd_remember_dictation_hud_position,
             commands::cmd_delete_meeting,
             commands::cmd_archive_meeting,
+            commands::cmd_set_action_item_status,
             commands::cmd_restore_archived_meeting,
             commands::cmd_reveal_path,
             commands::cmd_copy_path,

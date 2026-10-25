@@ -3412,7 +3412,11 @@
 
     .detail-action-check {
       flex-shrink: 0;
-      font-size: var(--text-sm);
+      width: 14px;
+      height: 14px;
+      margin: 3px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
     }
 
     .detail-action-text {
@@ -11378,15 +11382,30 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
         const aiList = document.createElement('div');
         aiList.className = 'detail-action-list';
-        for (const item of detail.action_items) {
+        detail.action_items.forEach((item, index) => {
           const row = document.createElement('div');
           row.className = 'detail-action-item';
           const isDone = (item.status || '').toLowerCase() === 'done';
-          const check = isDone ? '\u2611' : '\u2610';
           const due = item.due ? ` \u00b7 ${item.due}` : '';
-          const checkSpan = document.createElement('span');
+          // A real checkbox: writes the item's status (and its line in the
+          // body's checklist) back to the meeting file.
+          const checkSpan = document.createElement('input');
+          checkSpan.type = 'checkbox';
           checkSpan.className = 'detail-action-check';
-          checkSpan.textContent = check;
+          checkSpan.checked = isDone;
+          checkSpan.setAttribute('aria-label', `Done: ${item.task}`);
+          checkSpan.addEventListener('change', async () => {
+            const done = checkSpan.checked;
+            textSpan.style.textDecoration = done ? 'line-through' : '';
+            try {
+              await invoke('cmd_set_action_item_status', { path: detail.path, index, done });
+              item.status = done ? 'done' : 'open';
+            } catch (e) {
+              checkSpan.checked = !done;
+              textSpan.style.textDecoration = done ? '' : 'line-through';
+              showDetailFeedback(`Could not update the action item: ${e}`, 'error');
+            }
+          });
           const textSpan = document.createElement('span');
           textSpan.className = 'detail-action-text';
           setHighlightedText(textSpan, `${item.assignee}: ${item.task}${due}`, activeSearchQuery);
@@ -11394,7 +11413,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           row.appendChild(checkSpan);
           row.appendChild(textSpan);
           aiList.appendChild(row);
-        }
+        });
         aiCard.appendChild(aiList);
         detailScroll.appendChild(aiCard);
       }

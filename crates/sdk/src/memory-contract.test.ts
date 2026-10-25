@@ -35,6 +35,17 @@ describe("literal retrieval contract", () => {
     expect(() => queryTokens("x".repeat(2049))).toThrow(RangeError);
     expect(lexicalMatch("anything", "", "!? ")).toBeNull();
     expect(compareSearchMatches({ score: 1, date: "2020-01-01", path: "a" }, { score: 1, date: "2020-01-01", path: "b" })).toBeLessThan(0);
+    // Tier outranks score: the exact title phrase beats a chatty transcript.
+    const chatty = "let me show you. also the media plan. let me know. ".repeat(200);
+    const titleHit = lexicalMatch("Also let me know if or when there's time", "short note", "also let me")!;
+    const scattered = lexicalMatch("gg media", chatty, "also let me")!;
+    expect(scattered.score).toBeGreaterThan(titleHit.score);
+    expect([titleHit.tier, scattered.tier]).toEqual([3, 0]);
+    expect(compareSearchMatches(
+      { tier: titleHit.tier, score: titleHit.score, date: "2020-01-01", path: "a" },
+      { tier: scattered.tier, score: scattered.score, date: "2026-01-01", path: "b" }
+    )).toBeLessThan(0);
+    expect(lexicalMatch("Malso let me", "", "also let me")).toBeNull();
     expect(lexicalMatch("pricing", "", "pricing")!.score).toBeGreaterThan(lexicalMatch("", "pricing", "pricing")!.score);
   });
 });

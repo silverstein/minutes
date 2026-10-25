@@ -111,6 +111,52 @@ pub fn lexical_score(title: &str, body: &str, query: &str) -> Option<f64> {
     Some(score)
 }
 
+/// Relevance tier, compared before [`lexical_score`]. The score alone let a
+/// long transcript that merely contains the words (hundreds of `me*` hits)
+/// outrank a meeting whose title starts with the exact phrase typed:
+/// 3 = phrase in the title, 2 = every term in the title, 1 = phrase in the
+/// body, 0 = terms scattered. Phrases match token by token (the final term
+/// as a prefix, like the match itself), not by substring.
+pub fn lexical_tier(title: &str, body: &str, query: &str) -> u8 {
+    if !query_is_bounded(query) {
+        return 0;
+    }
+    let wanted = search_tokens(query);
+    if wanted.is_empty() {
+        return 0;
+    }
+    let title_tokens = search_tokens(title);
+    if contains_phrase(&title_tokens, &wanted) {
+        return 3;
+    }
+    let last = wanted.len() - 1;
+    if wanted.iter().enumerate().all(|(index, term)| {
+        title_tokens
+            .iter()
+            .any(|token| token_matches(token, term, index == last))
+    }) {
+        return 2;
+    }
+    if contains_phrase(&search_tokens(body), &wanted) {
+        return 1;
+    }
+    0
+}
+
+fn contains_phrase(tokens: &[String], wanted: &[String]) -> bool {
+    if wanted.is_empty() || tokens.len() < wanted.len() {
+        return false;
+    }
+    let last = wanted.len() - 1;
+    tokens.windows(wanted.len()).any(|window| {
+        window
+            .iter()
+            .zip(wanted)
+            .enumerate()
+            .all(|(index, (token, term))| token_matches(token, term, index == last))
+    })
+}
+
 /// Select a bounded original-text excerpt only after the full match succeeds.
 pub fn lexical_snippet(title: &str, body: &str, query: &str) -> Option<String> {
     lexical_score(title, body, query)?;
@@ -157,6 +203,38 @@ mod tests {
             .find_iter(&reference_fold(value))
             .map(|token| token.as_str().to_string())
             .collect()
+    }
+
+    #[test]
+    fn tiers_put_the_typed_title_phrase_above_scattered_transcript_words() {
+        let chatty = "let me show you. also the media plan. let me know. ".repeat(200);
+        let query = "also let me";
+        // The reported case: the long transcript scores higher on raw counts.
+        assert!(
+            lexical_score("gg media", &chatty, query).unwrap()
+                > lexical_score(
+                    "Also let me know if or when there's time",
+                    "short note",
+                    query
+                )
+                .unwrap()
+        );
+        // The tier fixes the order regardless of counts.
+        assert_eq!(
+            lexical_tier(
+                "Also let me know if or when there's time",
+                "short note",
+                query
+            ),
+            3
+        );
+        assert_eq!(lexical_tier("gg media", &chatty, query), 0);
+        assert_eq!(lexical_tier("Me, also: let it be", "", query), 2);
+        assert_eq!(lexical_tier("Notes", "and also let me explain", query), 1);
+        // Token-wise, not substring: "malso" must not satisfy "also".
+        assert_eq!(lexical_tier("Malso let me", "", query), 0);
+        // Final term is a prefix, like the match itself.
+        assert_eq!(lexical_tier("Also let media go", "", query), 3);
     }
 
     #[test]

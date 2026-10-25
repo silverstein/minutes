@@ -258,21 +258,20 @@ fn retain_policy_verified_results(
         let snapshot = revision_snapshot(revision, &result.path)?;
         if let Some((result, _)) = policy_verified_result(result, &snapshot, filters, query) {
             let (_, body) = split_frontmatter(&snapshot.content);
-            let score = crate::retrieval::lexical_score(
-                &result.title,
-                body,
-                result.matched_via_alias.as_deref().unwrap_or(query),
-            )
-            .unwrap_or(0.0);
-            ranked.push((score, result));
+            let ranked_query = result.matched_via_alias.as_deref().unwrap_or(query);
+            let score =
+                crate::retrieval::lexical_score(&result.title, body, ranked_query).unwrap_or(0.0);
+            let tier = crate::retrieval::lexical_tier(&result.title, body, ranked_query);
+            ranked.push((tier, score, result));
         }
     }
     // Empty-query listing retains its existing normal/restricted grouping.
     // Relevance ordering applies only to an actual text query.
     if !query.trim().is_empty() {
-        ranked.sort_by(|(a_score, a), (b_score, b)| {
-            b_score
-                .total_cmp(a_score)
+        ranked.sort_by(|(a_tier, a_score, a), (b_tier, b_score, b)| {
+            b_tier
+                .cmp(a_tier)
+                .then_with(|| b_score.total_cmp(a_score))
                 .then_with(|| {
                     let epoch = |value: &str| {
                         chrono::DateTime::parse_from_rfc3339(value)
@@ -284,7 +283,7 @@ fn retain_policy_verified_results(
                 .then_with(|| a.path.cmp(&b.path))
         });
     }
-    results.extend(ranked.into_iter().map(|(_, result)| result));
+    results.extend(ranked.into_iter().map(|(_, _, result)| result));
     Ok(())
 }
 

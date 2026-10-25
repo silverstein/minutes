@@ -1199,6 +1199,15 @@ function withoutContextSourceAuthorization<T extends Record<string, unknown>>(
   return publicValue;
 }
 
+
+// Relevance tier from minutes-sdk's lexicalMatch, compared before score. The
+// pinned SDK may predate the field; compareSearchMatches then ignores it, and
+// tiers take effect when the release moves the pin.
+function retrievalTier(match: unknown): number {
+  const tier = (match as { tier?: unknown } | null | undefined)?.tier;
+  return typeof tier === "number" ? tier : 0;
+}
+
 async function policyVerifiedMeetingSnapshots(
   dir: string,
   includeRestricted: boolean
@@ -1273,11 +1282,15 @@ export async function policySearchMeetings(
     (meeting) => reader.lexicalMatch(meeting.frontmatter.title, meeting.body, query) !== null,
     (snapshots) => {
       const results: PolicyVerifiedMeeting[] = [];
-      const ranked = snapshots.map((snapshot) => ({ snapshot, score: reader.lexicalMatch(snapshot.meeting.frontmatter.title, snapshot.meeting.body, query)?.score ?? 0 }));
-      ranked.sort((a, b) => reader.compareSearchMatches(
-        { score: a.score, date: a.snapshot.meeting.frontmatter.date, path: a.snapshot.path },
-        { score: b.score, date: b.snapshot.meeting.frontmatter.date, path: b.snapshot.path }
-      ));
+      const ranked = snapshots.map((snapshot) => {
+        const match = reader.lexicalMatch(snapshot.meeting.frontmatter.title, snapshot.meeting.body, query);
+        return { snapshot, score: match?.score ?? 0, tier: retrievalTier(match) };
+      });
+      ranked.sort((a, b) => {
+        const left = { tier: a.tier, score: a.score, date: a.snapshot.meeting.frontmatter.date, path: a.snapshot.path };
+        const right = { tier: b.tier, score: b.score, date: b.snapshot.meeting.frontmatter.date, path: b.snapshot.path };
+        return reader.compareSearchMatches(left, right);
+      });
       for (const { snapshot } of ranked) {
         results.push(snapshot.meeting);
         if (results.length >= boundedLimit) break;
@@ -1552,10 +1565,11 @@ export function collectPolicyToolSearchSnapshots(
     meeting.retrieval = reader.lexicalMatch(meeting.frontmatter.title, meeting.body, filter.query) ?? undefined;
     matches.push({ path: file.path, content: file.content, meeting });
   }
-  return matches.sort((a, b) => reader.compareSearchMatches(
-    { score: a.meeting.retrieval?.score ?? 0, date: a.meeting.frontmatter.date, path: a.path },
-    { score: b.meeting.retrieval?.score ?? 0, date: b.meeting.frontmatter.date, path: b.path }
-  )).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
+  return matches.sort((a, b) => {
+    const left = { tier: retrievalTier(a.meeting.retrieval), score: a.meeting.retrieval?.score ?? 0, date: a.meeting.frontmatter.date, path: a.path };
+    const right = { tier: retrievalTier(b.meeting.retrieval), score: b.meeting.retrieval?.score ?? 0, date: b.meeting.frontmatter.date, path: b.path };
+    return reader.compareSearchMatches(left, right);
+  }).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
 }
 
 async function policyToolSearchMeetings(

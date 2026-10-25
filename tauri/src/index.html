@@ -7825,6 +7825,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let documentsRefreshTimer = null;
     let documentsRenderedSignature = '';
     let documentsCache = [];
+    let lastMeetingInventory = [];
     let documentsLoadRequestId = 0;
     let userExpandedSidebarThisSession = false;
     let sidebarAutoCollapsed = false;
@@ -12003,6 +12004,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         meetingInventoryFingerprint = nextFingerprint;
         finishMeetingInventoryLoading();
         setSearchError(null);
+        lastMeetingInventory = meetings;
         renderMeetings(meetings);
       } catch (e) {
         if (generation !== meetingInventoryGeneration) return;
@@ -12176,6 +12178,47 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       })();
     }
 
+    // Instant title matches from the meetings already loaded, ranked the way
+    // the backend tiers them (exact phrase, then every word), so the list
+    // responds on the first keystroke and the full-text results that replace
+    // it keep the same title hits on top. (lastMeetingInventory is declared
+    // with the other list state, above loadMeetings.)
+
+    function instantSearchTokens(value) {
+      return (value || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    }
+
+    function instantTitleTier(title, wanted) {
+      const tokens = instantSearchTokens(title);
+      const last = wanted.length - 1;
+      const matches = (token, index) => (index === last && wanted[index].length >= 2
+        ? token.startsWith(wanted[index])
+        : token === wanted[index]);
+      for (let start = 0; start + wanted.length <= tokens.length; start += 1) {
+        if (wanted.every((_, index) => matches(tokens[start + index], index))) return 2;
+      }
+      return wanted.every((_, index) => tokens.some((token) => matches(token, index))) ? 1 : 0;
+    }
+
+    function renderInstantTitleMatches(query) {
+      const wanted = instantSearchTokens(query);
+      if (!wanted.length) return;
+      const hits = lastMeetingInventory
+        .map((meeting) => ({ meeting, tier: instantTitleTier(meeting.title, wanted) }))
+        .filter((hit) => hit.tier > 0)
+        .sort((a, b) => b.tier - a.tier)
+        .map((hit) => hit.meeting);
+      if (hits.length) renderMeetings(hits);
+      else meetingsScroll.replaceChildren();
+      const pending = document.createElement('div');
+      pending.className = 'empty-state search-pending';
+      const copy = document.createElement('div');
+      copy.className = 'sub';
+      copy.textContent = 'Searching all meetings…';
+      pending.append(copy);
+      meetingsScroll.append(pending);
+    }
+
     searchInput.addEventListener('input', (e) => {
       if (documentsViewActive) return;
       clearTimeout(searchTimeout);
@@ -12187,6 +12230,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         scheduleMeetingsRefresh(0);
         return;
       }
+      renderInstantTitleMatches(query);
       searchTimeout = setTimeout(() => runLatestSearch(query, reqId), 250);
     });
 

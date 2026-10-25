@@ -762,8 +762,8 @@ export async function searchMeetings(
       return retrieval ? [{ meeting, retrieval }] : [];
     });
     matches.sort((a, b) => compareSearchMatches(
-      { score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
-      { score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
+      { tier: a.retrieval.tier, score: a.retrieval.score, date: a.meeting.frontmatter.date, path: a.meeting.path },
+      { tier: b.retrieval.tier, score: b.retrieval.score, date: b.meeting.frontmatter.date, path: b.meeting.path }
     ));
     return matches.slice(0, boundedLimit).map(({ meeting, retrieval }) => ({
       ...meeting, retrieval, evidence: evidenceFromMeeting(meeting, query),

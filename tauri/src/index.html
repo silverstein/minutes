@@ -2833,6 +2833,19 @@
       font-weight: 600;
     }
 
+    .meeting-item:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .meeting-list-end {
+      padding: 14px 0 18px;
+      text-align: center;
+      font-size: var(--text-2xs);
+      font-family: var(--font-mono);
+      color: var(--text-tertiary);
+    }
+
     .date-group {
       font-size: var(--text-2xs);
       font-family: var(--font-mono);
@@ -3597,6 +3610,38 @@
       color: var(--text-secondary);
       white-space: pre-wrap;
       word-break: break-word;
+    }
+
+    .detail-section-body.md {
+      white-space: normal;
+    }
+
+    .detail-section-body.md > :first-child { margin-top: 0; }
+    .detail-section-body.md > :last-child { margin-bottom: 0; }
+    .detail-section-body.md p { margin: 0 0 8px; }
+    .detail-section-body.md ul,
+    .detail-section-body.md ol { margin: 0 0 8px; padding-left: 20px; }
+    .detail-section-body.md li { margin: 3px 0; }
+    .detail-section-body.md h1,
+    .detail-section-body.md h2,
+    .detail-section-body.md h3 {
+      font-size: var(--text-body);
+      font-weight: 600;
+      color: var(--text);
+      margin: 12px 0 6px;
+    }
+    .detail-section-body.md strong { color: var(--text); font-weight: 600; }
+    .detail-section-body.md code {
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      background: var(--surface-hover, rgba(127, 127, 127, 0.12));
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+
+    mark.mark-current {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
     }
 
     mark {
@@ -7916,6 +7961,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let documentsRenderedSignature = '';
     let documentsCache = [];
     let lastMeetingInventory = [];
+    // Sidebar rows render in chunks (appendMeetingRows); declared here, with
+    // the other list state, so the first render never hits the TDZ.
+    const MEETING_ROWS_CHUNK = 80;
+    let meetingRowsState = null;
+    let previousRendered = 0;
+    let detailReturnFocusPath = null;
     let documentsLoadRequestId = 0;
     let userExpandedSidebarThisSession = false;
     let sidebarAutoCollapsed = false;
@@ -11082,6 +11133,22 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       element.replaceChildren(buildHighlightedFragment(text || '', query));
     }
 
+    // Same marking inside already-rendered (sanitized) markup: only text
+    // nodes change, so links and list structure survive.
+    function highlightTextNodes(root, query) {
+      if (!query) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {
+        if (!node.nodeValue.trim() || node.parentElement?.closest('mark')) continue;
+        const fragment = buildHighlightedFragment(node.nodeValue, query);
+        if (fragment.childNodes.length > 1 || fragment.firstChild?.nodeName === 'MARK') {
+          node.replaceWith(fragment);
+        }
+      }
+    }
+
     function isRememberableSpeakerName(name) {
       const key = String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
       if (!key || key === 'unknown' || key === 'unknown speaker') return false;
@@ -11089,7 +11156,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function closeDetailView() {
+      const wasOpen = detailOverlay.classList.contains('active');
       detailOverlay.classList.remove('active');
+      if (wasOpen && detailReturnFocusPath) {
+        const row = [...meetingsScroll.querySelectorAll('.meeting-item')]
+          .find((candidate) => candidate.dataset.path === detailReturnFocusPath);
+        row?.focus({ preventScroll: false });
+      }
+      detailReturnFocusPath = null;
       currentMeetingPath = null;
       currentMeetingDetail = null;
       persistRecallWorkspaceState({ currentMeetingPath: '' });
@@ -11659,7 +11733,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
           const body = document.createElement('div');
           body.className = 'detail-section-body';
-          setHighlightedText(body, section.content || 'No content', activeSearchQuery);
+          if (/^transcript$/i.test(section.heading || '') || !section.content) {
+            setHighlightedText(body, section.content || 'No content', activeSearchQuery);
+          } else {
+            // Summary, decisions and notes are markdown; raw `- [ ]` and `**`
+            // read as noise. Same escaped, sanitized renderer as documents.
+            body.classList.add('md');
+            // The sanitizer drops <input>, so task boxes become glyphs here
+            // rather than vanishing (and losing which items are done).
+            renderMarkdownToElement(body, section.content
+              .replace(/^(\s*[-*] )\[ \] /gm, '$1☐ ')
+              .replace(/^(\s*[-*] )\[[xX]\] /gm, '$1☑ '));
+            highlightTextNodes(body, activeSearchQuery);
+          }
 
           sectionEl.appendChild(heading);
           sectionEl.appendChild(body);
@@ -11685,6 +11771,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       detailOverlay.classList.add('active');
       persistRecallWorkspaceState({ currentMeetingPath: detail.path });
+      scrollDetailToFirstMatch();
+    }
+
+    // Opened from a search: land on the first match in the meeting's text
+    // (not the title or chips), so a hit deep in a transcript is visible.
+    function scrollDetailToFirstMatch() {
+      if (!activeSearchQuery) return;
+      const first = detailScroll.querySelector('.detail-section-body mark');
+      if (!first) return;
+      first.classList.add('mark-current');
+      requestAnimationFrame(() => first.scrollIntoView({ block: 'center' }));
     }
 
     // Returns how the open ended, so a caller that wants to touch the view
@@ -11915,6 +12012,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       meetingsScroll.replaceChildren();
+      const sameList = meetingRowsState !== null && meetingRowsState.query === activeSearchQuery;
+      meetingRowsState = null;
 
       if (!meetings || meetings.length === 0) {
         // No matches is not "no meetings": the first-run screen here hid the
@@ -11930,87 +12029,173 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       footer.classList.remove('footer-hidden');
 
-      const groups = groupByDate(meetings);
-      for (const [label, items] of Object.entries(groups)) {
-        const header = document.createElement('div');
-        header.className = 'date-group';
-        header.textContent = label;
-        meetingsScroll.appendChild(header);
+      // Rows are built in chunks as the list scrolls; a refresh of the same
+      // list keeps at least as many rows as were showing (scroll position).
+      meetingRowsState = {
+        query: activeSearchQuery,
+        rows: Object.entries(groupByDate(meetings)).flatMap(([label, items]) =>
+          items.map((m) => ({ label, m }))),
+        rendered: 0,
+        lastLabel: null,
+      };
+      appendMeetingRows(Math.max(MEETING_ROWS_CHUNK, sameList ? previousRendered : 0));
+    }
 
-        for (const m of items) {
-          const item = document.createElement('div');
-          item.className = 'meeting-item';
-          item.addEventListener('click', () => {
-            openMeetingDetail(m.path);
-          });
-          item.addEventListener('contextmenu', async (event) => {
-            event.preventDefault();
-            item.classList.add('is-menu-target');
-            try {
-              await showMeetingActionsMenu(m, { context: 'sidebar' });
-            } catch (e) {
-              console.error('Meeting actions menu:', e);
-            } finally {
-              item.classList.remove('is-menu-target');
-            }
-          });
-
-          const info = document.createElement('div');
-          info.className = 'meeting-info';
-
-          const title = document.createElement('div');
-          title.className = 'meeting-title';
-          setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
-
-          const meta = document.createElement('div');
-          meta.className = 'meeting-meta';
-          meta.textContent = formatTime(m.date);
-
-          info.appendChild(title);
-          info.appendChild(meta);
-
-          if (activeSearchQuery && m.snippet) {
-            const snippet = document.createElement('div');
-            snippet.className = 'meeting-snippet';
-            setHighlightedText(snippet, m.snippet, activeSearchQuery);
-            info.appendChild(snippet);
-          }
-
-          // Lifecycle badges (prepped / recorded / debriefed)
-          if (m.badges && m.badges.length > 0) {
-            const badgeRow = document.createElement('div');
-            badgeRow.className = 'meeting-badges';
-            for (const b of m.badges) {
-              const lb = document.createElement('span');
-              lb.className = 'lifecycle-badge ' + b;
-              lb.textContent = b;
-              lb.setAttribute('aria-label', b);
-              badgeRow.appendChild(lb);
-            }
-            info.appendChild(badgeRow);
-          }
-
-          const badge = document.createElement('span');
-          const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
-          badge.className = 'meeting-badge' + typeClass;
-          badge.textContent = m.content_type || 'meeting';
-
-          const chatBtn = document.createElement('button');
-          chatBtn.className = 'meeting-chat-btn';
-          chatBtn.setAttribute('aria-label', 'Discuss with Agent');
-          chatBtn.setAttribute('title', 'Discuss with Agent');
-          chatBtn.textContent = '\u279C';
-          chatBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            await discussMeetingWithAgent(m.path, m.title);
-          });
-
-          item.appendChild(info);
-          item.appendChild(chatBtn);
-          item.appendChild(badge);
-          meetingsScroll.appendChild(item);
+    function appendMeetingRows(count) {
+      const state = meetingRowsState;
+      if (!state) return;
+      const end = Math.min(state.rows.length, state.rendered + count);
+      meetingsScroll.querySelector('.meeting-list-end')?.remove();
+      for (let index = state.rendered; index < end; index += 1) {
+        const { label, m } = state.rows[index];
+        if (label !== state.lastLabel) {
+          const header = document.createElement('div');
+          header.className = 'date-group';
+          header.textContent = label;
+          meetingsScroll.appendChild(header);
+          state.lastLabel = label;
         }
+        meetingsScroll.appendChild(buildMeetingRow(m));
       }
+      state.rendered = end;
+      previousRendered = end;
+      if (end === state.rows.length && !state.query) {
+        const listEnd = document.createElement('div');
+        listEnd.className = 'meeting-list-end';
+        listEnd.textContent = `${state.rows.length.toLocaleString('en-US')} ${state.rows.length === 1 ? 'meeting' : 'meetings'}`;
+        meetingsScroll.appendChild(listEnd);
+      }
+    }
+
+    function focusMeetingRow(from, step) {
+      const rows = [...meetingsScroll.querySelectorAll('.meeting-item')];
+      if (!rows.length) return false;
+      const index = from ? rows.indexOf(from) : -1;
+      const next = rows[index + step];
+      if (next) {
+        next.focus();
+        next.scrollIntoView({ block: 'nearest' });
+        return true;
+      }
+      if (step < 0 && index === 0) {
+        searchInput.focus();
+        return true;
+      }
+      return false;
+    }
+
+    meetingsScroll.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const row = event.target.closest?.('.meeting-item');
+      if (!row) return;
+      event.preventDefault();
+      focusMeetingRow(row, event.key === 'ArrowDown' ? 1 : -1);
+    });
+
+    searchInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowDown' || event.isComposing) return;
+      if (focusMeetingRow(null, 1)) event.preventDefault();
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'f') return;
+      if (document.activeElement?.closest?.('.recall-terminal') || isOverlayActive() || mdViewer.classList.contains('active')) return;
+      event.preventDefault();
+      if (detailOverlay.classList.contains('active')) closeDetailView();
+      if (document.body.classList.contains('sidebar-collapsed')) document.getElementById('btn-sidebar-expand')?.click();
+      searchInput.focus();
+      searchInput.select();
+    });
+
+    meetingsScroll.addEventListener('scroll', () => {
+      const state = meetingRowsState;
+      if (!state || documentsViewActive || state.rendered >= state.rows.length) return;
+      if (meetingsScroll.scrollTop + meetingsScroll.clientHeight > meetingsScroll.scrollHeight - 600) {
+        appendMeetingRows(MEETING_ROWS_CHUNK);
+      }
+    }, { passive: true });
+
+    function buildMeetingRow(m) {
+      const item = document.createElement('div');
+      item.className = 'meeting-item';
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.dataset.path = m.path;
+      item.addEventListener('click', () => {
+        detailReturnFocusPath = m.path;
+        openMeetingDetail(m.path);
+      });
+      item.addEventListener('keydown', (event) => {
+        if (event.target !== item || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        item.click();
+      });
+      item.addEventListener('contextmenu', async (event) => {
+        event.preventDefault();
+        item.classList.add('is-menu-target');
+        try {
+          await showMeetingActionsMenu(m, { context: 'sidebar' });
+        } catch (e) {
+          console.error('Meeting actions menu:', e);
+        } finally {
+          item.classList.remove('is-menu-target');
+        }
+      });
+
+      const info = document.createElement('div');
+      info.className = 'meeting-info';
+
+      const title = document.createElement('div');
+      title.className = 'meeting-title';
+      setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
+
+      const meta = document.createElement('div');
+      meta.className = 'meeting-meta';
+      meta.textContent = formatTime(m.date);
+
+      info.appendChild(title);
+      info.appendChild(meta);
+
+      if (activeSearchQuery && m.snippet) {
+        const snippet = document.createElement('div');
+        snippet.className = 'meeting-snippet';
+        setHighlightedText(snippet, m.snippet, activeSearchQuery);
+        info.appendChild(snippet);
+      }
+
+      // Lifecycle badges (prepped / recorded / debriefed)
+      if (m.badges && m.badges.length > 0) {
+        const badgeRow = document.createElement('div');
+        badgeRow.className = 'meeting-badges';
+        for (const b of m.badges) {
+          const lb = document.createElement('span');
+          lb.className = 'lifecycle-badge ' + b;
+          lb.textContent = b;
+          lb.setAttribute('aria-label', b);
+          badgeRow.appendChild(lb);
+        }
+        info.appendChild(badgeRow);
+      }
+
+      const badge = document.createElement('span');
+      const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
+      badge.className = 'meeting-badge' + typeClass;
+      badge.textContent = m.content_type || 'meeting';
+
+      const chatBtn = document.createElement('button');
+      chatBtn.className = 'meeting-chat-btn';
+      chatBtn.setAttribute('aria-label', 'Discuss with Agent');
+      chatBtn.setAttribute('title', 'Discuss with Agent');
+      chatBtn.textContent = '\u279C';
+      chatBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await discussMeetingWithAgent(m.path, m.title);
+      });
+
+      item.appendChild(info);
+      item.appendChild(chatBtn);
+      item.appendChild(badge);
+      return item;
     }
 
     let meetingInventoryGeneration = 0;
@@ -12088,13 +12273,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // queued follow-up refresh.
     let meetingInventoryInFlight = null;
     let meetingInventoryRefreshQueued = false;
+    // The whole corpus, not the newest 30: listing is metadata-only (~0.1 s
+    // for 1,100 meetings), older meetings were reachable only by search, and
+    // the instant title filter can only match titles it has.
+    const MEETING_INVENTORY_LIMIT = 5000;
 
     function requestMeetingInventory({ fresh = true } = {}) {
       if (meetingInventoryInFlight) {
         if (fresh) meetingInventoryRefreshQueued = true;
         return meetingInventoryInFlight;
       }
-      meetingInventoryInFlight = invoke('cmd_list_meetings', { limit: 30 }).finally(() => {
+      meetingInventoryInFlight = invoke('cmd_list_meetings', { limit: MEETING_INVENTORY_LIMIT }).finally(() => {
         meetingInventoryInFlight = null;
         if (meetingInventoryRefreshQueued) {
           meetingInventoryRefreshQueued = false;

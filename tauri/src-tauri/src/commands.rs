@@ -8223,12 +8223,19 @@ fn list_meetings_value(limit: usize) -> Result<serde_json::Value, String> {
     let search_duration = search_started.elapsed();
     let limited: Vec<_> = results.into_iter().take(limit).collect();
     let badges_started = Instant::now();
+    // Badges re-read each file, so only the rows a person sees first get them;
+    // the rest of the full inventory stays metadata-only.
     let enriched: Result<Vec<serde_json::Value>, String> = limited
         .iter()
-        .map(|result| {
+        .enumerate()
+        .map(|(index, result)| {
             let mut value = serde_json::to_value(result)
                 .map_err(|error| format!("Meeting inventory could not be encoded: {error}"))?;
-            let badges = compute_lifecycle_badges(&result.path, &prep_slugs);
+            let badges = if index < LIFECYCLE_BADGE_ROWS {
+                compute_lifecycle_badges(&result.path, &prep_slugs)
+            } else {
+                Vec::new()
+            };
             value["badges"] = serde_json::json!(badges);
             Ok(value)
         })
@@ -8244,9 +8251,11 @@ fn list_meetings_value(limit: usize) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!(enriched?))
 }
 
+const LIFECYCLE_BADGE_ROWS: usize = 100;
+
 #[tauri::command]
 pub async fn cmd_list_meetings(limit: Option<usize>) -> Result<serde_json::Value, String> {
-    let requested_limit = limit.unwrap_or(20).clamp(1, 100);
+    let requested_limit = limit.unwrap_or(20).clamp(1, 5000);
     run_json_inventory(&MEETING_INVENTORY, "Meeting inventory", move || {
         list_meetings_value(requested_limit)
     })

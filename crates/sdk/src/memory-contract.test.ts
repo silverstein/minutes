@@ -54,6 +54,8 @@ describe("literal retrieval contract", () => {
     expect(lexicalMatch("Planning Chaos Harnesses", "", contentQuery("planning a ch"))!.tier).toBe(3);
     expect(relaxedQueries("planning chaos desktop")).toEqual(["chaos desktop", "planning desktop", "planning chaos"]);
     expect(relaxedQueries("planning")).toEqual([]);
+    // Plural title words rank like the Rust (stemmed) match; scoring is unchanged.
+    expect(lexicalMatch("Planning Chaos Harnesses for Codex", "chaos harness codex", "chaos harness codex")!.tier).toBe(2);
   });
 });
 

@@ -79,7 +79,7 @@ export function lexicalMatch(title: string, body: string, query: string): Lexica
 function containsPhrase(tokens: string[], wanted: string[]): boolean {
   const last = wanted.length - 1;
   for (let start = 0; start + wanted.length <= tokens.length; start += 1) {
-    if (wanted.every((term, index) => matchesSearchToken(tokens[start + index], term, index === last))) {
+    if (wanted.every((term, index) => tierTokenMatches(tokens[start + index], term, index === last))) {
       return true;
     }
   }
@@ -87,11 +87,18 @@ function containsPhrase(tokens: string[], wanted: string[]): boolean {
 }
 
 /** Token-wise phrase tiers; the final term matches as a prefix, like the match. */
+/** Ranking-only plural leniency (mirrors Rust `tier_token_matches`). */
+function tierTokenMatches(token: string, wanted: string, final: boolean): boolean {
+  if (matchesSearchToken(token, wanted, final)) return true;
+  const rest = token.startsWith(wanted) ? token.slice(wanted.length) : null;
+  return rest === "s" || rest === "es";
+}
+
 function lexicalTier(titleTokens: string[], bodyTokens: string[], wanted: string[]): number {
   if (wanted.length === 0) return 0;
   if (containsPhrase(titleTokens, wanted)) return 3;
   const last = wanted.length - 1;
-  if (wanted.every((term, index) => titleTokens.some((token) => matchesSearchToken(token, term, index === last)))) {
+  if (wanted.every((term, index) => titleTokens.some((token) => tierTokenMatches(token, term, index === last)))) {
     return 2;
   }
   return containsPhrase(bodyTokens, wanted) ? 1 : 0;

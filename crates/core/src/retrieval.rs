@@ -133,7 +133,7 @@ pub fn lexical_tier(title: &str, body: &str, query: &str) -> u8 {
     if wanted.iter().enumerate().all(|(index, term)| {
         title_tokens
             .iter()
-            .any(|token| token_matches(token, term, index == last))
+            .any(|token| tier_token_matches(token, term, index == last))
     }) {
         return 2;
     }
@@ -153,8 +153,17 @@ fn contains_phrase(tokens: &[String], wanted: &[String]) -> bool {
             .iter()
             .zip(wanted)
             .enumerate()
-            .all(|(index, (token, term))| token_matches(token, term, index == last))
+            .all(|(index, (token, term))| tier_token_matches(token, term, index == last))
     })
+}
+
+/// Ranking-only leniency: "harness" ranks a *Harnesses* title like the full
+/// text match does (the FTS projection stems; the literal match does not).
+fn tier_token_matches(token: &str, wanted: &str, final_token: bool) -> bool {
+    token_matches(token, wanted, final_token)
+        || token
+            .strip_prefix(wanted)
+            .is_some_and(|rest| rest == "s" || rest == "es")
 }
 
 /// Function words that make a typed query fail or rank by noise ("planning a
@@ -281,6 +290,14 @@ mod tests {
         assert_eq!(lexical_tier("Malso let me", "", query), 0);
         // Final term is a prefix, like the match itself.
         assert_eq!(lexical_tier("Also let media go", "", query), 3);
+    }
+
+    #[test]
+    fn plural_title_words_rank_like_the_stemmed_full_text_match() {
+        let title = "Planning Chaos Harnesses for Codex";
+        assert_eq!(lexical_tier(title, "", "chaos harness codex"), 2);
+        assert_eq!(lexical_tier(title, "", "chaos harness for"), 3);
+        assert_eq!(lexical_tier("Harnessing Chaos", "", "harness chaos"), 0);
     }
 
     #[test]

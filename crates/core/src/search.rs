@@ -272,13 +272,31 @@ fn retain_policy_verified_ranked_results(
         if let Some((result, _)) = policy_verified_result(result, &snapshot, filters, query) {
             let (_, body) = split_frontmatter(&snapshot.content);
             let ranked_query = result.matched_via_alias.as_deref().unwrap_or(query);
-            let score =
-                crate::retrieval::lexical_score(&result.title, body, ranked_query).unwrap_or(0.0);
-            let tier = crate::retrieval::lexical_tier(&result.title, body, ranked_query);
             let complete = !result
                 .matched_via_alias
                 .as_ref()
                 .is_some_and(|alias| relaxed.contains(alias));
+            // A relaxed match ranks by the best leave-one-out query it
+            // satisfies, not whichever one found it first.
+            let rank_queries: Vec<&str> = if complete {
+                vec![ranked_query]
+            } else {
+                relaxed.iter().map(String::as_str).collect()
+            };
+            let (tier, score) = rank_queries
+                .into_iter()
+                .filter_map(|candidate| {
+                    let score = crate::retrieval::lexical_score(&result.title, body, candidate)
+                        .or((candidate == ranked_query).then_some(0.0))?;
+                    Some((
+                        crate::retrieval::lexical_tier(&result.title, body, candidate),
+                        score,
+                    ))
+                })
+                .max_by(|(a_tier, a_score), (b_tier, b_score)| {
+                    a_tier.cmp(b_tier).then_with(|| a_score.total_cmp(b_score))
+                })
+                .unwrap_or((0, 0.0));
             ranked.push(((tier >= 2, complete, tier), score, result));
         }
     }
@@ -3372,6 +3390,14 @@ mod tests {
                 "Planning Chaos Harnesses for Codex",
                 "Desktop Release Review"
             ]
+        );
+        // Plurals count for title ranking, and a relaxed match ranks by its
+        // best leave-one-out query ("harness" vs the *Harnesses* title).
+        assert_eq!(
+            titles("planning chaos harness desktop")
+                .first()
+                .map(String::as_str),
+            Some("Planning Chaos Harnesses for Codex")
         );
         // A nonsense word is left out; two of them still find nothing.
         assert_eq!(titles("zzqx desktop"), vec!["Desktop Release Review"]);

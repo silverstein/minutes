@@ -838,6 +838,10 @@ pub struct CalendarConfig {
     /// When true, drop events that have neither attendees nor a meeting URL,
     /// such as personal blocks and reminders. Opt-in; defaults to false.
     pub require_attendees_or_url: bool,
+    /// Drop every event from these calendars (case-insensitive name match),
+    /// e.g. a shared family calendar. Only applies when the calendar source
+    /// reports calendar names (the EventKit helper does). Empty by default.
+    pub ignore_calendars: Vec<String>,
 }
 
 impl Default for CalendarConfig {
@@ -847,6 +851,7 @@ impl Default for CalendarConfig {
             use_event_title_for_meeting_title: false,
             ignore_title_contains: Vec::new(),
             require_attendees_or_url: false,
+            ignore_calendars: Vec::new(),
         }
     }
 }

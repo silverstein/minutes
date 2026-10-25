@@ -18,6 +18,7 @@ struct EventOutput: Codable {
     let minutes_until: Int
     let attendees: [String]
     let url: String?
+    let calendar: String?
 }
 
 // `--status` prints the current authorization state WITHOUT prompting, so
@@ -93,7 +94,8 @@ store.requestFullAccessToEvents { granted, error in
             start: startStr,
             minutes_until: mins,
             attendees: attendeeNames,
-            url: event.location
+            url: event.location,
+            calendar: event.calendar?.title
         )
 
         if let data = try? encoder.encode(output), let line = String(data: data, encoding: .utf8) {

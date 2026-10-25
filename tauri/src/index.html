@@ -4570,6 +4570,58 @@
       display: flex;
     }
 
+    .upcoming-dismiss {
+      flex: none;
+      width: 24px;
+      height: 24px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-secondary);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .upcoming-dismiss:hover,
+    .upcoming-dismiss:focus-visible {
+      background: var(--bg-hover);
+      color: var(--text);
+      outline: none;
+    }
+
+    .settings-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .settings-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 4px 3px 10px;
+      border: 1px solid var(--border-mid);
+      border-radius: 999px;
+      font-size: var(--text-xs);
+      color: var(--text);
+    }
+
+    .settings-chip button {
+      border: none;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font: inherit;
+      padding: 0 4px;
+      border-radius: 999px;
+    }
+
+    .settings-chip button:hover {
+      color: var(--text);
+      background: var(--bg-hover);
+    }
+
     .upcoming-icon {
       font-size: var(--text-base);
       flex-shrink: 0;
@@ -6062,6 +6114,7 @@
         <div class="upcoming-time" id="upcoming-time"></div>
       </div>
       <button class="btn btn-primary btn-sm" id="btn-record-upcoming">Record</button>
+      <button class="upcoming-dismiss" id="btn-dismiss-upcoming" type="button" aria-haspopup="menu" aria-label="Hide this suggestion" title="Hide this suggestion">&times;</button>
     </div>
 
     <!-- Call detected banner -->
@@ -7221,6 +7274,32 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="about-controls-meta">Shell command run after each recording is processed. The transcript file path is appended as the final argument. Leave blank to disable.</div>
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Calendar -->
+      <div class="settings-section">
+        <div class="about-item-title">CALENDAR</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Only suggest events with other people or a meeting link</div>
+            <div class="about-controls-meta">Off by default, because events you add yourself for in-person meetings often have no invitees. This only changes upcoming-meeting suggestions and which event a recording is matched to. You can always record.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-calendar-require-attendees">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Hidden calendars</div>
+            <div class="about-controls-meta">Events from these calendars are never suggested. Add one from the × on a suggestion.</div>
+            <div class="settings-chip-list" id="settings-calendar-hidden-calendars"></div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Hidden events</div>
+            <div class="about-controls-meta">Events whose title contains any of these are never suggested.</div>
+            <div class="settings-chip-list" id="settings-calendar-hidden-titles"></div>
           </div>
         </div>
       </div>
@@ -12553,6 +12632,78 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── Upcoming meetings ──
+    // "Not a meeting" hides one occurrence (remembered locally until it has
+    // started); the menu's other choices write the [calendar] filters.
+    const DISMISSED_UPCOMING_KEY = 'minutes.dismissedUpcoming';
+
+    function upcomingKey(event) {
+      return `${event.title}|${event.start}`;
+    }
+
+    function readDismissedUpcoming() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(DISMISSED_UPCOMING_KEY) || '{}');
+        const now = Date.now();
+        // Drop entries a day past their dismissal so the map cannot grow.
+        return Object.fromEntries(Object.entries(stored).filter(([, at]) => now - at < 86400000));
+      } catch {
+        return {};
+      }
+    }
+
+    function isUpcomingDismissed(event) {
+      return Boolean(readDismissedUpcoming()[upcomingKey(event)]);
+    }
+
+    function setUpcomingDismissed(event, dismissed) {
+      const map = readDismissedUpcoming();
+      if (dismissed) map[upcomingKey(event)] = Date.now();
+      else delete map[upcomingKey(event)];
+      try { localStorage.setItem(DISMISSED_UPCOMING_KEY, JSON.stringify(map)); } catch { /* best effort */ }
+    }
+
+    async function dismissUpcoming(event) {
+      const title = event.title || 'this event';
+      const addTo = async (key, value, message) => {
+        await ensureCalendarSettings();
+        const current = calendarSettings[key] || [];
+        if (current.some((entry) => entry.toLowerCase() === value.toLowerCase())) return;
+        await saveCalendarList(key, [...current, value]);
+        showActionToast(message, {
+          onUndo: () => saveCalendarList(key, (calendarSettings[key] || []).filter((entry) => entry !== value)),
+        });
+      };
+      const items = [
+        {
+          text: 'Not a meeting',
+          action: () => {
+            setUpcomingDismissed(event, true);
+            checkUpcoming();
+            showActionToast(`Hid “${title}”`, {
+              onUndo: () => { setUpcomingDismissed(event, false); checkUpcoming(); },
+            });
+          },
+        },
+        {
+          text: `Always hide “${title}”`,
+          action: () => addTo('ignore_title_contains', event.title, `Events titled “${title}” are hidden`)
+            .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
+        },
+      ];
+      if (event.calendar) {
+        items.push({
+          text: `Hide everything from “${event.calendar}”`,
+          action: () => addTo('ignore_calendars', event.calendar, `The “${event.calendar}” calendar is hidden`)
+            .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
+        });
+      }
+      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'capture' }) });
+      const button = document.getElementById('btn-dismiss-upcoming');
+      const rect = button.getBoundingClientRect();
+      const menu = await Menu.new({ items });
+      await menu.popup(new LogicalPosition(rect.left, rect.bottom + 4));
+    }
+
     async function checkUpcoming() {
       const upcoming = document.getElementById('upcoming');
       if (!desktopCapabilities.supportsCalendarIntegration) {
@@ -12561,9 +12712,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
       if (isRecording) return;
       try {
-        const events = await invoke('cmd_upcoming_meetings');
-        if (events && events.length > 0) {
+        const events = (await invoke('cmd_upcoming_meetings') || [])
+          .filter((event) => !isUpcomingDismissed(event));
+        if (events.length > 0) {
           const next = events[0];
+          document.getElementById('btn-dismiss-upcoming').onclick = () => dismissUpcoming(next);
           document.getElementById('upcoming-title').textContent = next.title;
           const mins = next.minutes_until;
           document.getElementById('upcoming-time').textContent =
@@ -12607,8 +12760,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function openSettings(options) {
       if (options?.keepDictationTarget !== true) invoke('cmd_clear_dictation_history_target').catch(() => {});
       settingsOverlay.classList.add('active');
-      // Reset to General tab on every open
-      settingsTabs[0].click();
+      // Open on the requested tab, else General.
+      const tab = options?.tab && document.querySelector(`.settings-tab[data-tab="${options.tab}"]`);
+      (tab || settingsTabs[0]).click();
       loadSettings();
     }
     function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }
@@ -13114,6 +13268,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           console.error('Recall provider readiness:', e);
           recallDevMode = true;
           syncRecallModeControls({ persist: false });
+        }
+        if (s.calendar) {
+          calendarSettings = {
+            ignore_calendars: s.calendar.ignore_calendars || [],
+            ignore_title_contains: s.calendar.ignore_title_contains || [],
+          };
+          calendarSettingsLoaded = true;
+          setSettingsToggle('settings-calendar-require-attendees', Boolean(s.calendar.require_attendees_or_url));
+          renderCalendarHiddenLists();
         }
         // Call detection settings
         if (s.call_detection) {
@@ -14044,6 +14207,81 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         await requestRecallMode(!recallDevMode);
       });
     }
+
+    // ── Calendar suggestion filters ──
+    // Lists edited here and from the × on the upcoming-meeting banner. The
+    // filters live in config.toml ([calendar]) and apply on the next check.
+    let calendarSettings = { ignore_calendars: [], ignore_title_contains: [] };
+    let calendarSettingsLoaded = false;
+
+    // Edits replace the whole list, so start from what config holds now:
+    // a list saved from an unloaded (empty) cache would wipe existing filters.
+    async function ensureCalendarSettings() {
+      if (calendarSettingsLoaded) return;
+      const s = await invoke('cmd_get_settings');
+      calendarSettings = {
+        ignore_calendars: s?.calendar?.ignore_calendars || [],
+        ignore_title_contains: s?.calendar?.ignore_title_contains || [],
+      };
+      calendarSettingsLoaded = true;
+    }
+
+    // Literal keys per list, so the settings-reachability guard sees each.
+    const CALENDAR_LIST_WRITERS = {
+      ignore_calendars: (values) => invoke('cmd_set_setting', { section: 'calendar', key: 'ignore_calendars', value: JSON.stringify(values) }),
+      ignore_title_contains: (values) => invoke('cmd_set_setting', { section: 'calendar', key: 'ignore_title_contains', value: JSON.stringify(values) }),
+    };
+
+    async function saveCalendarList(key, values) {
+      await CALENDAR_LIST_WRITERS[key](values);
+      calendarSettings[key] = values;
+      renderCalendarHiddenLists();
+      checkUpcoming();
+    }
+
+    function renderCalendarHiddenLists() {
+      const lists = [
+        ['settings-calendar-hidden-calendars', 'ignore_calendars', 'No hidden calendars.'],
+        ['settings-calendar-hidden-titles', 'ignore_title_contains', 'No hidden events.'],
+      ];
+      for (const [id, key, emptyText] of lists) {
+        const container = document.getElementById(id);
+        if (!container) continue;
+        const values = calendarSettings[key] || [];
+        if (!values.length) {
+          container.textContent = emptyText;
+          continue;
+        }
+        container.replaceChildren(...values.map((value) => {
+          const chip = document.createElement('span');
+          chip.className = 'settings-chip';
+          chip.append(value);
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.textContent = '×';
+          remove.setAttribute('aria-label', `Stop hiding ${value}`);
+          remove.addEventListener('click', () => {
+            saveCalendarList(key, values.filter((entry) => entry !== value))
+              .catch((e) => showActionToast(`Could not update calendar filters: ${e?.message || e}`, { tone: 'error' }));
+          });
+          chip.append(remove);
+          return chip;
+        }));
+      }
+    }
+
+    document.getElementById('settings-calendar-require-attendees').addEventListener('click', async () => {
+      const btn = document.getElementById('settings-calendar-require-attendees');
+      const currentlyOn = btn.textContent.trim() === 'On';
+      setSettingsToggle('settings-calendar-require-attendees', !currentlyOn);
+      try {
+        await invoke('cmd_set_setting', { section: 'calendar', key: 'require_attendees_or_url', value: String(!currentlyOn) });
+        checkUpcoming();
+      } catch (e) {
+        setSettingsToggle('settings-calendar-require-attendees', currentlyOn);
+        console.error('calendar require_attendees_or_url:', e);
+      }
+    });
 
     // Call detection settings handlers
     document.getElementById('settings-call-detection').addEventListener('click', async () => {

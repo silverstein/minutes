@@ -98,6 +98,10 @@ pub struct CalendarEvent {
     pub attendees: Vec<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// Name of the calendar the event belongs to, when the source reports it
+    /// (the EventKit helper does; the AppleScript fallback does not).
+    #[serde(default)]
+    pub calendar: Option<String>,
 }
 
 /// Apply the `[calendar]` ignore filters to a list of events.
@@ -116,6 +120,14 @@ pub fn filter_events(
         .filter(|event| {
             let title = event.title.to_lowercase();
             if ignored.iter().any(|pattern| title.contains(pattern)) {
+                return false;
+            }
+            if event.calendar.as_deref().is_some_and(|calendar| {
+                config
+                    .ignore_calendars
+                    .iter()
+                    .any(|ignored| ignored.trim().eq_ignore_ascii_case(calendar.trim()))
+            }) {
                 return false;
             }
             !config.require_attendees_or_url || !event.attendees.is_empty() || event.url.is_some()
@@ -540,6 +552,7 @@ fn parse_applescript_output(stdout: &str) -> Vec<CalendarEvent> {
                     minutes_until: parts[2].trim().parse().unwrap_or(0),
                     attendees,
                     url,
+                    calendar: None,
                 })
             } else {
                 None
@@ -783,6 +796,7 @@ mod tests {
             minutes_until: 5,
             attendees: attendees.iter().map(|a| a.to_string()).collect(),
             url: url.map(str::to_string),
+            calendar: None,
         }
     }
 
@@ -830,12 +844,42 @@ mod tests {
     }
 
     #[test]
+    fn ignored_calendars_drop_their_events_and_unknown_calendars_pass() {
+        let mut family = event("Za Hebrew School", &["Mat", "Kid"], None);
+        family.calendar = Some("Family".into());
+        let mut work = event("Standup", &["a"], None);
+        work.calendar = Some("Work".into());
+        let unknown = event("From AppleScript", &[], None);
+        let config = CalendarConfig {
+            ignore_calendars: vec![" family ".into()],
+            ..CalendarConfig::default()
+        };
+        assert_eq!(
+            titles(&filter_events(vec![family, work, unknown], &config)),
+            vec!["Standup", "From AppleScript"]
+        );
+    }
+
+    #[test]
+    fn helper_json_with_and_without_calendar_parses() {
+        let with: CalendarEvent = serde_json::from_str(
+            r#"{"title":"T","start":"s","minutes_until":3,"attendees":[],"url":null,"calendar":"Work"}"#,
+        )
+        .unwrap();
+        assert_eq!(with.calendar.as_deref(), Some("Work"));
+        let older: CalendarEvent =
+            serde_json::from_str(r#"{"title":"T","start":"s","minutes_until":3}"#).unwrap();
+        assert_eq!(older.calendar, None);
+    }
+
+    #[test]
     fn older_calendar_config_keeps_ignore_filters_disabled() {
         let config: CalendarConfig =
             toml::from_str("enabled = true\nuse_event_title_for_meeting_title = true\n").unwrap();
         assert!(config.enabled);
         assert!(config.use_event_title_for_meeting_title);
         assert!(config.ignore_title_contains.is_empty());
+        assert!(config.ignore_calendars.is_empty());
         assert!(!config.require_attendees_or_url);
     }
 

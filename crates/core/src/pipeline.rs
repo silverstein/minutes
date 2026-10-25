@@ -10076,6 +10076,7 @@ mod tests {
                 minutes_until: 0,
                 attendees: vec![],
                 url: None,
+                calendar: None,
             }),
             ..BackgroundPipelineContext::default()
         };
@@ -11335,6 +11336,7 @@ mod tests {
                     minutes_until: 45,
                     attendees: vec![],
                     url: None,
+                    calendar: None,
                 },
                 crate::calendar::CalendarEvent {
                     title: "Closest Event".into(),
@@ -11342,6 +11344,7 @@ mod tests {
                     minutes_until: 5,
                     attendees: vec![],
                     url: None,
+                    calendar: None,
                 },
             ],
             None,
@@ -11360,6 +11363,7 @@ mod tests {
                 minutes_until: 4,
                 attendees: vec!["mat@example.com".into()],
                 url: None,
+                calendar: None,
             }],
             Some("Wesley prep session recovery"),
         );
@@ -11376,6 +11380,7 @@ mod tests {
                 minutes_until: 2,
                 attendees: vec!["wesley@example.com".into()],
                 url: None,
+                calendar: None,
             }],
             Some("Wesley prep session recovery"),
         )
@@ -12129,6 +12134,7 @@ mod tests {
                 minutes_until: 0,
                 attendees: vec!["Matt".into(), "Alex Chen".into()],
                 url: None,
+                calendar: None,
             }),
             ..BackgroundPipelineContext::default()
         };

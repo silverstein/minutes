@@ -13601,6 +13601,12 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "hooks": {
             "post_record": config.hooks.post_record,
         },
+        "calendar": {
+            "enabled": config.calendar.enabled,
+            "require_attendees_or_url": config.calendar.require_attendees_or_url,
+            "ignore_title_contains": config.calendar.ignore_title_contains,
+            "ignore_calendars": config.calendar.ignore_calendars,
+        },
         "call_detection": {
             "enabled": config.call_detection.enabled,
             "poll_interval_secs": config.call_detection.poll_interval_secs,
@@ -13860,6 +13866,25 @@ fn reject_unselectable_live_apple_speech(value: &str) -> Result<(), String> {
     ))
 }
 
+/// Parse a JSON array of calendar filter entries: trimmed, non-empty, and
+/// deduplicated case-insensitively (the filters match case-insensitively).
+fn calendar_filter_list(key: &str, value: &str) -> Result<Vec<String>, String> {
+    let entries: Vec<String> = serde_json::from_str(value)
+        .map_err(|_| format!("{key} must be a JSON array of strings"))?;
+    let mut cleaned: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim().to_string();
+        if !entry.is_empty()
+            && !cleaned
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&entry))
+        {
+            cleaned.push(entry);
+        }
+    }
+    Ok(cleaned)
+}
+
 #[tauri::command]
 pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<String, String> {
     let mut config = Config::load();
@@ -14023,6 +14048,17 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             config.call_detection.auto_record = value
                 .parse::<bool>()
                 .map_err(|_| "auto_record must be true or false")?;
+        }
+        ("calendar", "require_attendees_or_url") => {
+            config.calendar.require_attendees_or_url = value
+                .parse::<bool>()
+                .map_err(|_| "require_attendees_or_url must be true or false")?;
+        }
+        ("calendar", "ignore_title_contains") => {
+            config.calendar.ignore_title_contains = calendar_filter_list(&key, &value)?;
+        }
+        ("calendar", "ignore_calendars") => {
+            config.calendar.ignore_calendars = calendar_filter_list(&key, &value)?;
         }
         ("call_detection", "auto_record_apps") => {
             let names: Vec<String> = serde_json::from_str(&value)

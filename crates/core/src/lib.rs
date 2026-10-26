@@ -12,6 +12,7 @@ pub(crate) mod bounded_child;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_graph_xpc;
 pub mod orukeet;
+pub mod semantic;
 mod source_transcript;
 mod summary_semantics;
 

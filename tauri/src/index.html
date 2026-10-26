@@ -15391,6 +15391,36 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let recallTerminal = null;
     let recallFitAddon = null;
     let recallPtyAlive = false;
+    // A terminal app picks its colours once, at startup (COLORFGBG). While
+    // that session runs the palette stays on the theme it started with:
+    // switching it underneath painted the app's text white-on-white after a
+    // dark-to-light toggle (dark-on-dark the other way).
+    let recallTerminalSessionDark = null;
+
+    function applyRecallTerminalTheme() {
+      const dark = recallPtyAlive && recallTerminalSessionDark !== null
+        ? recallTerminalSessionDark
+        : isEffectiveDarkTheme();
+      const theme = window.getMinutesTheme(dark);
+      // The container paints the padding around xterm's canvas.
+      recallTerminalContainer.style.backgroundColor = theme.background;
+      if (recallTerminal) recallTerminal.options.theme = theme;
+      return theme;
+    }
+
+    function markRecallPtyAlive() {
+      markRecallPtyAlive();
+      invoke('cmd_terminal_info', { sessionId: SESSION_ID })
+        .then((info) => { recallTerminalSessionDark = info?.theme_dark ?? null; })
+        .catch(() => { recallTerminalSessionDark = null; })
+        .finally(applyRecallTerminalTheme);
+    }
+
+    function markRecallPtyEnded() {
+      markRecallPtyEnded();
+      recallTerminalSessionDark = null;
+      applyRecallTerminalTheme();
+    }
     let recallPhase = 'recall';
     let userExplicitlyCollapsed = false;
     let recallInitialized = false;
@@ -15857,17 +15887,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // in which case the OS media query is the wrong authority — following
       // it painted a dark terminal slab into a light UI whenever the two
       // disagreed.
-      const effectiveTerminalDark = isEffectiveDarkTheme;
-
-      // The container paints the padding around xterm's canvas, so it takes
-      // the terminal's background rather than the app's.
-      const applyRecallTerminalTheme = () => {
-        const theme = window.getMinutesTheme(effectiveTerminalDark());
-        recallTerminalContainer.style.backgroundColor = theme.background;
-        if (recallTerminal) recallTerminal.options.theme = theme;
-        return theme;
-      };
-
       recallTerminal = new Terminal({
         theme: applyRecallTerminalTheme(),
         fontFamily: "'Geist Mono', 'SF Mono', Menlo, monospace",
@@ -15881,13 +15900,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       recallThemeHandler = () => {
         applyRecallTerminalTheme();
-        // The palette follows the theme live, but the TUI inside chose its
-        // colours at startup from COLORFGBG, which is fixed for the life of
-        // the process. A mismatched composer with no explanation reads as a
-        // bug; say what happened and what fixes it.
-        if (recallPtyAlive && recallDevMode) {
+        if (recallPtyAlive && recallDevMode && recallTerminalSessionDark !== null
+          && recallTerminalSessionDark !== isEffectiveDarkTheme()) {
           const name = recallReadiness?.assistantName || 'The assistant';
-          setRecallProviderNotice(`Theme changed. ${name} keeps its startup colours until the terminal session restarts (End Session, then reopen).`);
+          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colours until you end this session, so its text stays readable.`);
         }
       };
       // Re-theme when the app's own override flips, not only when the OS does.
@@ -16186,7 +16202,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
 
       await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
-        recallPtyAlive = false;
+        markRecallPtyEnded();
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
       });
@@ -16234,12 +16250,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           // the backend keeps the already-running terminal session intact.
           await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme() });
           recallTerminalContextPending = true;
-          recallPtyAlive = true;
+          markRecallPtyAlive();
           recallEndBtn.classList.add('active');
         } catch (e) {
           const msg = typeof e === 'string' ? e : String(e);
           if (msg.includes('already running') || msg.includes('Already')) {
-            recallPtyAlive = true;
+            markRecallPtyAlive();
             recallEndBtn.classList.add('active');
           } else {
             console.error('Recall terminal spawn:', e);
@@ -16442,7 +16458,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const opts = { mode, themeDark: isEffectiveDarkTheme() };
         if (meetingPath) opts.meetingPath = meetingPath;
         await invoke('cmd_spawn_terminal', opts);
-        recallPtyAlive = true;
+        markRecallPtyAlive();
         recallEndBtn.classList.add('active');
         if (mode === 'assistant' && !meetingPath) {
           try {
@@ -16455,7 +16471,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } catch (e) {
         const msg = typeof e === 'string' ? e : String(e);
         if (msg.includes('already running') || msg.includes('Already')) {
-          recallPtyAlive = true;
+          markRecallPtyAlive();
           recallLoading.classList.remove('active');
           recallTerminalContainer.classList.remove('hidden');
           recallEndBtn.classList.add('active');
@@ -17812,7 +17828,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else {
         setRecallPhase('recall', context || null);
       }
-      recallPtyAlive = true;
+      markRecallPtyAlive();
       recallLoading.classList.remove('active');
       // Only reveal the terminal when it's the active surface (dev mode); in
       // chat mode it must stay hidden so it doesn't steal the panel's height.
@@ -17865,7 +17881,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       resetRecallEndButton();
       try {
         await invoke('cmd_pty_kill', { sessionId: SESSION_ID });
-        recallPtyAlive = false;
+        markRecallPtyEnded();
       } catch (e) {
         console.error('End session:', e);
         showActionToast(`Could not end the session: ${e?.message || e}`, { tone: 'error' });

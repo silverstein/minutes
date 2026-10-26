@@ -120,6 +120,9 @@ pub struct PtySession {
     pub context_dir: PathBuf,
     pub title: String,
     pub command: String,
+    /// The `COLORFGBG` theme the child started with; terminal apps choose
+    /// their colours once, at startup.
+    pub theme_dark: Option<bool>,
 }
 
 pub struct SpawnConfig {
@@ -155,6 +158,12 @@ impl PtyManager {
         self.sessions
             .get(session_id)
             .map(|session| session.title.clone())
+    }
+
+    pub fn session_theme_dark(&self, session_id: &str) -> Option<bool> {
+        self.sessions
+            .get(session_id)
+            .and_then(|session| session.theme_dark)
     }
 
     pub fn session_command(&self, session_id: &str) -> Option<String> {
@@ -306,6 +315,7 @@ impl PtyManager {
                 context_dir: context_dir_for_insert,
                 title: cfg.title,
                 command: cfg.command,
+                theme_dark: cfg.theme_dark,
             },
         );
 

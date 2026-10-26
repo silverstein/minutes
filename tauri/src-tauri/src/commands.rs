@@ -2837,6 +2837,9 @@ pub struct DesktopCapabilities {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TerminalInfo {
     pub title: String,
+    /// Theme the running session started with (`None` when no session or
+    /// none was given), so the desktop palette can stay on it.
+    pub theme_dark: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -13010,13 +13013,13 @@ pub fn cmd_list_agents() -> serde_json::Value {
 
 #[tauri::command]
 pub fn cmd_terminal_info(state: tauri::State<AppState>, session_id: String) -> TerminalInfo {
-    let title = state
-        .pty_manager
-        .lock()
-        .ok()
+    let manager = state.pty_manager.lock().ok();
+    let title = manager
+        .as_ref()
         .and_then(|manager| manager.session_title(&session_id))
         .unwrap_or_else(|| "Minutes Assistant".into());
-    TerminalInfo { title }
+    let theme_dark = manager.and_then(|manager| manager.session_theme_dark(&session_id));
+    TerminalInfo { title, theme_dark }
 }
 
 // ── Settings commands ─────────────────────────────────────────

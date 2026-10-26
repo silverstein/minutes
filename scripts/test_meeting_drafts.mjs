@@ -32,6 +32,7 @@ class Element {
   appendChild(node) { this.children.push(node); }
   replaceChildren(...nodes) { this.children = [...nodes]; }
   addEventListener() {}
+  setAttribute(name, value) { this[name] = value; }
 }
 
 test('draft title is readable while other documents retain their filename', () => {
@@ -104,6 +105,9 @@ test('completed meetings lead with decisions and next steps without losing speak
     detailOverlay: new Element('div'), activeSearchQuery: '',
     formatDetailDate: date => date,
     setHighlightedText: (element, text) => { element.textContent = text; },
+    renderMarkdownToElement: (element, text) => { element.textContent = text; },
+    highlightTextNodes: () => {},
+    scrollDetailToFirstMatch: () => {},
     persistRecallWorkspaceState: () => {},
   });
   vm.runInContext(extract('renderDetailSections'), ctx);

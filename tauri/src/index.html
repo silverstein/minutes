@@ -15522,7 +15522,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     let recallTerminal = null;
     let recallFitAddon = null;
     let recallPtyAlive = false;
-    // A terminal app picks its colours once, at startup (COLORFGBG). While
+    // A terminal app picks its colors once, at startup (COLORFGBG). While
     // that session runs the palette stays on the theme it started with:
     // switching it underneath painted the app's text white-on-white after a
     // dark-to-light toggle (dark-on-dark the other way).
@@ -16034,7 +16034,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (recallPtyAlive && recallDevMode && recallTerminalSessionDark !== null
           && recallTerminalSessionDark !== isEffectiveDarkTheme()) {
           const name = recallReadiness?.assistantName || 'The assistant';
-          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colours until you end this session, so its text stays readable.`);
+          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colors until you end this session, so its text stays readable.`);
         }
       };
       // Re-theme when the app's own override flips, not only when the OS does.

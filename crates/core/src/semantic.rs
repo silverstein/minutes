@@ -416,6 +416,7 @@ impl Drop for EmbedWorker {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     /// A stand-in worker: answers every request with fixed 2-d vectors, one
     /// per line it is sent (one vector per document for a two-document batch).
     fn fake_worker(script: &str) -> Command {
@@ -424,6 +425,7 @@ mod tests {
         command
     }
 
+    #[cfg(unix)]
     #[test]
     fn worker_round_trip_and_width_check() {
         let script = r#"echo '{"ready":true,"dimensions":2}'
@@ -447,6 +449,7 @@ read err; echo '{"error":"nope"}'"#;
         assert!(matches!(worker.embed_query("q"), Err(SemanticError::Worker(e)) if e == "nope"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn startup_errors_and_wrong_dimensions_are_refused() {
         let failing = r#"echo '{"error":"load model: bad file"}'; exit 1"#;
@@ -461,6 +464,7 @@ read err; echo '{"error":"nope"}'"#;
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_worker_that_exits_is_reported_as_stopped() {
         let script = r#"echo '{"ready":true,"dimensions":2}'; exit 0"#;

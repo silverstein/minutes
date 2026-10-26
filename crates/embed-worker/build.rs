@@ -6,12 +6,21 @@
 //! llama-cpp-sys-2 release vendored it, which is why this crate builds its
 //! own. `MINUTES_LLAMA_CPP_SRC` points at an already-extracted source tree for
 //! offline builds; it must be the same tag.
+#[cfg(target_os = "macos")]
 use std::env;
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
 const LLAMA_TAG: &str = "b11889";
+#[cfg(target_os = "macos")]
 const LLAMA_SHA256: &str = "634e76016ffb363659d160acb8ac70852e20b78ef11df43cd3221322c3a68f3b";
 
+#[cfg(not(target_os = "macos"))]
+fn main() {}
+
+// The build dependencies are macOS-only, so so is this build script's body.
+#[cfg(target_os = "macos")]
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MINUTES_LLAMA_CPP_SRC");
@@ -68,6 +77,7 @@ fn main() {
 }
 
 /// Downloads the pinned source archive, verifies its digest, and extracts it.
+#[cfg(target_os = "macos")]
 fn fetch_source(out_dir: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -98,6 +108,7 @@ fn fetch_source(out_dir: &Path) -> PathBuf {
 /// ggml's Metal backend uses `@available`, which compiles to a call into
 /// clang's runtime (`__isPlatformVersionAtLeast`). rustc links with
 /// `-nodefaultlibs`, so that runtime has to be named explicitly.
+#[cfg(target_os = "macos")]
 fn link_clang_runtime() {
     let output = std::process::Command::new("clang")
         .arg("--print-resource-dir")

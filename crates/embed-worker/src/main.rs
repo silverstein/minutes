@@ -13,8 +13,14 @@
 //! The model's retrieval prompts live here, beside the model, so callers send
 //! meaning rather than formatting.
 
+// Elsewhere the worker is a stub that reports it is macOS-only; the request
+// handling below is still compiled so its tests run on every platform.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, Write};
+#[cfg(target_os = "macos")]
+use std::io::BufRead;
+use std::io::Write;
 
 const MAX_ITEMS_PER_REQUEST: usize = 64;
 const MAX_CHARS_PER_ITEM: usize = 16_384;

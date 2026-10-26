@@ -669,6 +669,10 @@ impl CopilotConfig {
 pub struct SearchConfig {
     pub engine: String,
     pub qmd_collection: Option<String>,
+    /// Local semantic search ("Related by meaning"). Off by default: it
+    /// downloads a 310 MB model and keeps a vector index of your meetings
+    /// under `~/.minutes/semantic` (restricted meetings are never indexed).
+    pub semantic: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1801,6 +1805,7 @@ impl Default for SearchConfig {
         Self {
             engine: "builtin".into(),
             qmd_collection: None,
+            semantic: false,
         }
     }
 }

@@ -14,6 +14,7 @@ pub(crate) mod macos_graph_xpc;
 pub mod orukeet;
 pub mod semantic;
 pub mod semantic_index;
+pub mod semantic_search;
 mod source_transcript;
 mod summary_semantics;
 

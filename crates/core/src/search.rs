@@ -24,7 +24,7 @@ use walkdir::WalkDir;
 /// authorization.
 pub use crate::search_index::SyncMode;
 
-fn with_stable_active_corpus<T>(
+pub(crate) fn with_stable_active_corpus<T>(
     dir: &Path,
     operation: impl FnMut(&StableActiveCorpusRevision) -> Result<T, SearchError>,
 ) -> Result<T, SearchError> {

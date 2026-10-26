@@ -380,6 +380,18 @@ impl StableActiveCorpusRevision {
         self.entries.keys().map(PathBuf::as_path)
     }
 
+    /// The content digest this revision attested for `path`, if it is a
+    /// member. Durable derivatives (semantic vectors) are usable only when
+    /// they were computed from exactly these bytes.
+    pub(crate) fn attested_sha256(&self, path: &Path) -> Option<[u8; 32]> {
+        let bound = bind_lexical_markdown_path(path, &self.canonical_root)?;
+        self.entries.get(&bound).map(|entry| entry.content_sha256)
+    }
+
+    pub(crate) fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
     pub(crate) fn contains_path(&self, path: &Path) -> bool {
         bind_lexical_markdown_path(path, &self.canonical_root)
             .is_some_and(|bound| self.entries.contains_key(&bound))

@@ -13929,13 +13929,21 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         // Transcription
         ("transcription", "engine") => {
             reject_unselectable_apple_speech(&value, "transcription engine")?;
-            if !["whisper", "parakeet"].contains(&value.as_str()) {
+            // Settings offers Auto and Parakeet v3 (sherpa); this list predated
+            // them, so choosing either failed and Whisper could not be left.
+            if !["auto", "whisper", "sherpa", "parakeet"].contains(&value.as_str()) {
                 return Err(format!(
-                    "unknown transcription engine '{}'. Valid: whisper, parakeet",
+                    "unknown transcription engine '{}'. Valid: auto, whisper, sherpa, parakeet",
                     value
                 ));
             }
             reject_unselectable_parakeet(&value, "transcription engine")?;
+            if value == "sherpa" && !minutes_core::transcribe::sherpa_selectable(&config) {
+                return Err(
+                    "Parakeet v3 is not installed on this Mac. Install it from Settings first."
+                        .into(),
+                );
+            }
             config.transcription.engine = value.clone();
         }
         ("transcription", "model") => config.transcription.model = value.clone(),
@@ -18224,6 +18232,22 @@ mod tests {
             )
             .unwrap_err();
             assert!(live.contains("Use Whisper"));
+        });
+    }
+
+    #[test]
+    fn desktop_settings_save_auto_and_whisper_engines_and_gate_sherpa() {
+        // Settings offers Auto and Parakeet v3; both used to fail here.
+        with_temp_home(|_| {
+            cmd_set_setting("transcription".into(), "engine".into(), "whisper".into()).unwrap();
+            cmd_set_setting("transcription".into(), "engine".into(), "auto".into()).unwrap();
+            assert_eq!(Config::load().transcription.engine, "auto");
+
+            // The temp home has no Parakeet v3 model installed.
+            let error = cmd_set_setting("transcription".into(), "engine".into(), "sherpa".into())
+                .unwrap_err();
+            assert!(error.contains("Parakeet v3 is not installed"));
+            assert_eq!(Config::load().transcription.engine, "auto");
         });
     }
 

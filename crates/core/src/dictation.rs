@@ -1086,28 +1086,7 @@ fn apple_speech_dictation_ready(_config: &Config) -> bool {
     ready
 }
 
-/// ISO 639-1 codes Parakeet v3 (parakeet-tdt-0.6b-v3) transcribes. Whisper
-/// covers many more, including Chinese, Japanese, Hindi, Urdu and Arabic.
-const PARAKEET_V3_LANGUAGES: &[&str] = &[
-    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
-    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
-];
-
-/// Whether Parakeet v3 handles the language this user dictates in. An explicit
-/// transcription language decides; on auto-detect, a Chinese interface keeps
-/// Whisper, since Parakeet v3 has no Chinese.
-fn parakeet_v3_fits_language(language: Option<&str>, ui_language: &str) -> bool {
-    match language
-        .map(|code| code.trim().to_ascii_lowercase())
-        .filter(|code| !code.is_empty() && code != "auto")
-    {
-        Some(code) => {
-            let base = code.split(['-', '_']).next().unwrap_or("");
-            PARAKEET_V3_LANGUAGES.contains(&base)
-        }
-        None => crate::i18n::resolve_locale(ui_language) != crate::i18n::Locale::ZhCn,
-    }
-}
+use crate::sherpa_engine::parakeet_v3_fits_language;
 
 /// What `dictation.backend = "auto"` resolves to here: Parakeet v3 when the
 /// batch auto rule would pick it (Apple Silicon, plugin and model installed)

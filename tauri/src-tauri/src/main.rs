@@ -28,6 +28,7 @@ mod context;
 mod dictation_experience;
 mod dictation_field;
 mod palette_dispatch;
+mod parakeet_install_commands;
 mod pty;
 mod recording_audio;
 mod secret_store;
@@ -3246,6 +3247,9 @@ fn main() {
             commands::cmd_remember_dictation_hud_position,
             commands::cmd_delete_meeting,
             commands::cmd_archive_meeting,
+            parakeet_install_commands::cmd_parakeet_install_status,
+            parakeet_install_commands::cmd_dismiss_parakeet_invite,
+            parakeet_install_commands::cmd_install_parakeet,
             semantic_commands::cmd_semantic_status,
             semantic_commands::cmd_semantic_set_enabled,
             semantic_commands::cmd_semantic_search,

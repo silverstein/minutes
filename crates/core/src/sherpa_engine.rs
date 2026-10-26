@@ -81,6 +81,178 @@ pub const MODEL_FILES: [(&str, u64); 4] = [
     ("tokens.txt", 10_000),
 ];
 
+/// The int8 Parakeet v3 export the desktop installer downloads, pinned to one
+/// Hugging Face revision so every file can be checked against a known digest.
+const PINNED_MODEL_BASE: &str = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78";
+
+/// `(file, exact bytes, sha256)` at [`PINNED_MODEL_BASE`].
+pub const PINNED_MODEL_FILES: [(&str, u64, &str); 4] = [
+    (
+        "encoder.int8.onnx",
+        652_184_281,
+        "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+    ),
+    (
+        "decoder.int8.onnx",
+        11_845_275,
+        "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+    ),
+    (
+        "joiner.int8.onnx",
+        6_355_277,
+        "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+    ),
+    (
+        "tokens.txt",
+        93_939,
+        "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+    ),
+];
+
+/// Total download size of the pinned model, for the install prompt.
+pub fn pinned_model_bytes() -> u64 {
+    PINNED_MODEL_FILES.iter().map(|(_, bytes, _)| bytes).sum()
+}
+
+/// The directory the pinned installer writes to: the default location only.
+/// A configured or env-overridden `sherpa_model_dir` belongs to the user (or
+/// to a manifest-managed install such as Orukeet) and is never written here.
+pub fn default_model_dir(config: &Config) -> PathBuf {
+    installs_root(config).join(DEFAULT_SHERPA_MODEL)
+}
+
+/// Download and verify the pinned Parakeet v3 model into
+/// [`default_model_dir`]. Files that already match their digest are kept
+/// without a network request; a failed or mismatched download never replaces
+/// a file. `progress` receives `(bytes done, total bytes)`.
+pub fn install_pinned_model(
+    config: &Config,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    let dir = default_model_dir(config);
+    if model_dir(config) != dir {
+        return Err(format!(
+            "a custom Parakeet model directory is configured ({}); install there with `minutes setup --sherpa`",
+            model_dir(config).display()
+        ));
+    }
+    install_pinned_with(&dir, &PINNED_MODEL_FILES, progress, |file| {
+        let response = ureq::get(&format!("{PINNED_MODEL_BASE}/{file}"))
+            .config()
+            .timeout_connect(Some(std::time::Duration::from_secs(15)))
+            .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
+            .timeout_global(Some(std::time::Duration::from_secs(60 * 60)))
+            .build()
+            .call()
+            .map_err(|e| format!("Parakeet model download failed: {e}"))?;
+        Ok(Box::new(response.into_body().into_reader()) as Box<dyn std::io::Read>)
+    })
+}
+
+fn install_pinned_with(
+    dir: &std::path::Path,
+    files: &[(&str, u64, &str)],
+    progress: &mut dyn FnMut(u64, u64),
+    mut fetch: impl FnMut(&str) -> Result<Box<dyn std::io::Read>, String>,
+) -> Result<PathBuf, String> {
+    use fs2::FileExt;
+    use std::io::{Read, Write};
+
+    // The CLI treats `manifest.json` or `.install.lock` inside a model
+    // directory as a manifest-managed install and refuses to write there, so
+    // the lock lives beside the directory, not in it.
+    for marker in ["manifest.json", ".install.lock"] {
+        if dir.join(marker).exists() {
+            return Err(format!(
+                "{} is a manifest-managed model directory; it was left unchanged",
+                dir.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let parent = dir.parent().unwrap_or(dir);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(parent.join(".parakeet-v3-install.lock"))
+        .map_err(|e| e.to_string())?;
+    lock.lock_exclusive().map_err(|e| e.to_string())?;
+
+    let total: u64 = files.iter().map(|(_, bytes, _)| bytes).sum();
+    let mut done = 0u64;
+    progress(done, total);
+    for (name, bytes, sha256) in files {
+        let dest = dir.join(name);
+        if file_verified(&dest, sha256, *bytes)? {
+            done += bytes;
+            progress(done, total);
+            continue;
+        }
+        let mut staging = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+        let mut body = fetch(name)?.take(bytes + 1);
+        let mut buffer = vec![0u8; 1 << 20];
+        let mut written = 0u64;
+        loop {
+            let read = body.read(&mut buffer).map_err(|e| e.to_string())?;
+            if read == 0 {
+                break;
+            }
+            staging
+                .write_all(&buffer[..read])
+                .map_err(|e| e.to_string())?;
+            written += read as u64;
+            progress(done + written.min(*bytes), total);
+        }
+        staging.flush().map_err(|e| e.to_string())?;
+        if !file_verified(staging.path(), sha256, *bytes)? {
+            return Err(format!("Parakeet model file {name} failed its checksum"));
+        }
+        staging.persist(&dest).map_err(|e| e.to_string())?;
+        done += bytes;
+        progress(done, total);
+    }
+    Ok(dir.to_path_buf())
+}
+
+fn file_verified(path: &std::path::Path, sha256: &str, bytes: u64) -> Result<bool, String> {
+    use sha2::{Digest, Sha256};
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    if file.metadata().map_err(|e| e.to_string())?.len() != bytes {
+        return Ok(false);
+    }
+    let mut digest = Sha256::new();
+    std::io::copy(&mut file, &mut digest).map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", digest.finalize()) == sha256)
+}
+
+/// ISO 639-1 codes Parakeet v3 (parakeet-tdt-0.6b-v3) transcribes. Whisper
+/// covers many more, including Chinese, Japanese, Hindi, Urdu and Arabic.
+const PARAKEET_V3_LANGUAGES: &[&str] = &[
+    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu", "it", "lt", "lv", "mt",
+    "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "uk",
+];
+
+/// Whether Parakeet v3 handles the language this user speaks. An explicit
+/// transcription language decides; on auto-detect, a Chinese interface keeps
+/// Whisper, since Parakeet v3 has no Chinese.
+pub fn parakeet_v3_fits_language(language: Option<&str>, ui_language: &str) -> bool {
+    match language
+        .map(|code| code.trim().to_ascii_lowercase())
+        .filter(|code| !code.is_empty() && code != "auto")
+    {
+        Some(code) => {
+            let base = code.split(['-', '_']).next().unwrap_or("");
+            PARAKEET_V3_LANGUAGES.contains(&base)
+        }
+        None => crate::i18n::resolve_locale(ui_language) != crate::i18n::Locale::ZhCn,
+    }
+}
+
 pub const STREAMING_MODEL_FILES: [(&str, u64); 4] = [
     ("encoder-epoch-99-avg-1.int8.onnx", 40_000_000),
     ("decoder-epoch-99-avg-1.onnx", 2_000_000),
@@ -525,6 +697,95 @@ pub fn transcribe_samples(samples: &[f32], config: &Config) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn pinned_install_downloads_verifies_and_skips_verified_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("parakeet");
+        let a = sha256_hex(b"alpha");
+        let b = sha256_hex(b"bravo!");
+        let files = [("a.onnx", 5, a.as_str()), ("b.txt", 6, b.as_str())];
+        let mut fetched = Vec::new();
+        let mut last = (0, 0);
+        install_pinned_with(
+            &dir,
+            &files,
+            &mut |done, total| last = (done, total),
+            |name| {
+                fetched.push(name.to_string());
+                let body: &'static [u8] = if name == "a.onnx" {
+                    b"alpha"
+                } else {
+                    b"bravo!"
+                };
+                Ok(Box::new(body) as Box<dyn std::io::Read>)
+            },
+        )
+        .unwrap();
+        assert_eq!(fetched, ["a.onnx", "b.txt"]);
+        assert_eq!(last, (11, 11));
+        assert_eq!(std::fs::read(dir.join("a.onnx")).unwrap(), b"alpha");
+        assert!(!dir.join(".install.lock").exists());
+
+        // A second run finds both files verified and fetches nothing.
+        install_pinned_with(&dir, &files, &mut |_, _| {}, |name| {
+            panic!("unexpected fetch of {name}")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn pinned_install_rejects_a_mismatched_download_and_keeps_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("parakeet");
+        let want = sha256_hex(b"alpha");
+        let files = [("a.onnx", 5, want.as_str())];
+        let error = install_pinned_with(&dir, &files, &mut |_, _| {}, |_| {
+            Ok(Box::new(&b"omega"[..]) as Box<dyn std::io::Read>)
+        })
+        .unwrap_err();
+        assert!(error.contains("checksum"), "{error}");
+        assert!(!dir.join("a.onnx").exists());
+    }
+
+    #[test]
+    fn pinned_install_leaves_a_manifest_managed_directory_alone() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("manifest.json"), "{}").unwrap();
+        let error = install_pinned_with(root.path(), &[], &mut |_, _| {}, |_| {
+            panic!("no fetch expected")
+        })
+        .unwrap_err();
+        assert!(error.contains("manifest-managed"), "{error}");
+    }
+
+    /// Downloads the real 640 MB model from the pinned revision into a
+    /// temporary directory. Run with `--ignored` after changing the pin.
+    #[test]
+    #[ignore = "downloads 640 MB from Hugging Face"]
+    fn pinned_install_downloads_the_real_model() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.transcription.sherpa_model_dir = String::new();
+        config.transcription.model_path = root.path().to_path_buf();
+        let mut last = (0, 0);
+        let dir = install_pinned_model(&config, &mut |done, total| last = (done, total)).unwrap();
+        assert_eq!(last, (pinned_model_bytes(), pinned_model_bytes()));
+        assert!(model_files_present(&dir));
+    }
+
+    #[test]
+    fn pinned_install_refuses_a_custom_model_directory() {
+        let mut config = Config::default();
+        config.transcription.sherpa_model_dir = "/custom/sherpa".into();
+        let error = install_pinned_model(&config, &mut |_, _| {}).unwrap_err();
+        assert!(error.contains("custom Parakeet model directory"), "{error}");
+    }
 
     #[test]
     fn model_dir_prefers_explicit_config_field() {

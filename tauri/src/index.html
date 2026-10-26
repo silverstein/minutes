@@ -6203,6 +6203,28 @@
       </div>
     </div>
 
+    <!-- Parakeet v3 invitation: once per app version, for Whisper users who can run it -->
+    <div class="update-banner" id="parakeet-banner">
+      <div class="update-banner-info">
+        <div class="update-banner-row">
+          <div class="update-banner-phase">
+            <span class="update-banner-spinner" id="parakeet-banner-spinner" aria-hidden="true"></span>
+            <div class="update-banner-title" id="parakeet-banner-title">Upgrade transcription to Parakeet v3</div>
+          </div>
+          <div class="update-banner-actions">
+            <button class="btn btn-primary btn-sm" id="btn-parakeet-install">Install</button>
+            <button class="btn btn-secondary btn-sm" id="btn-parakeet-dismiss">Not now</button>
+          </div>
+        </div>
+        <div class="update-banner-sub" id="parakeet-banner-sub"></div>
+        <div class="update-banner-meta" id="parakeet-banner-meta"></div>
+        <div class="update-banner-progress" id="parakeet-banner-progress">
+          <div class="update-banner-progress-fill" id="parakeet-banner-progress-fill"></div>
+        </div>
+        <div class="update-banner-error" id="parakeet-banner-error"></div>
+      </div>
+    </div>
+
     <!-- Update available banner -->
     <div class="update-banner" id="update-banner">
       <div class="update-banner-info">
@@ -6817,6 +6839,10 @@
               <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
             <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
+            <div class="about-controls-meta" id="settings-parakeet-install" hidden>
+              <button class="btn btn-secondary btn-sm" id="btn-settings-parakeet-install">Install Parakeet v3</button>
+              <span id="settings-parakeet-install-status"></span>
+            </div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -13494,6 +13520,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
                   ? 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
                   : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.')));
         }
+        refreshParakeetInstall();
         if (engineAppleOpt) {
           engineAppleOpt.disabled = true;
           engineAppleOpt.textContent = eng === 'apple-speech'
@@ -14797,7 +14824,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else if (backend === 'sherpa' && available) {
         detail.textContent = 'Whisper still shows words as you speak; Parakeet v3 writes the final text. If Parakeet cannot, Whisper does.';
       } else if (backend === 'sherpa') {
-        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Run `minutes setup --sherpa` to install it.';
+        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.';
       } else {
         detail.textContent = 'Whisper shows words as you speak and writes the final text, in every language Whisper supports.';
       }
@@ -17295,6 +17322,137 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     maybeShowWhatsNewAfterUpdate();
+
+    // ── Parakeet v3 install: the invitation banner and the Settings button ──
+    // Installing used to need `minutes setup --sherpa` in a terminal. The
+    // banner shows once per app version to Whisper users who can run
+    // Parakeet v3; Settings keeps the button until it is installed.
+    const parakeetBanner = document.getElementById('parakeet-banner');
+    const parakeetBannerSpinner = document.getElementById('parakeet-banner-spinner');
+    const parakeetBannerTitle = document.getElementById('parakeet-banner-title');
+    const parakeetBannerSub = document.getElementById('parakeet-banner-sub');
+    const parakeetBannerMeta = document.getElementById('parakeet-banner-meta');
+    const parakeetBannerProgress = document.getElementById('parakeet-banner-progress');
+    const parakeetBannerFill = document.getElementById('parakeet-banner-progress-fill');
+    const parakeetBannerError = document.getElementById('parakeet-banner-error');
+    const parakeetInstallButton = document.getElementById('btn-parakeet-install');
+    const parakeetDismissButton = document.getElementById('btn-parakeet-dismiss');
+    const settingsParakeetRow = document.getElementById('settings-parakeet-install');
+    const settingsParakeetButton = document.getElementById('btn-settings-parakeet-install');
+    const settingsParakeetStatus = document.getElementById('settings-parakeet-install-status');
+    let parakeetBannerWanted = false;
+    let parakeetLastPhase = 'idle';
+    let parakeetPollTimer = null;
+
+    function renderParakeetInstall(status) {
+      const downloading = status.phase === 'downloading';
+      const done = status.phase === 'done';
+      const failed = status.phase === 'error';
+      const size = formatBytes(status.downloadBytes);
+      const progressText = status.total > 0
+        ? `${formatBytes(status.done) || '0 B'} of ${formatBytes(status.total)}`
+        : '';
+
+      parakeetBanner?.classList.toggle('active', parakeetBannerWanted);
+      parakeetBanner?.classList.toggle('error-state', failed);
+      parakeetBannerSpinner?.classList.toggle('active', downloading);
+      if (parakeetBannerTitle) {
+        parakeetBannerTitle.textContent = downloading ? 'Downloading Parakeet v3'
+          : done ? 'Parakeet v3 is ready'
+            : failed ? 'Parakeet v3 did not install'
+              : 'Upgrade transcription to Parakeet v3';
+      }
+      if (parakeetBannerSub) {
+        parakeetBannerSub.textContent = done
+          ? 'New recordings and dictation use Parakeet v3. Whisper stays as the backup.'
+          : `Parakeet v3 is NVIDIA's speech model, built into Minutes for Apple Silicon. Meetings and dictation switch to it, and Whisper stays as the backup. One-time download: ${size}.`;
+      }
+      if (parakeetBannerMeta) {
+        parakeetBannerMeta.textContent = downloading ? progressText : '';
+        parakeetBannerMeta.classList.toggle('active', downloading);
+      }
+      parakeetBannerProgress?.classList.toggle('active', downloading);
+      if (parakeetBannerFill) {
+        const percent = status.total > 0 ? Math.min(100, (status.done / status.total) * 100) : 0;
+        parakeetBannerFill.style.width = `${percent}%`;
+      }
+      if (parakeetBannerError) {
+        parakeetBannerError.textContent = failed ? (status.error || 'The download failed.') : '';
+        parakeetBannerError.classList.toggle('active', failed);
+      }
+      if (parakeetInstallButton) {
+        parakeetInstallButton.hidden = downloading || done;
+        parakeetInstallButton.textContent = failed ? 'Retry' : 'Install';
+      }
+      if (parakeetDismissButton) {
+        parakeetDismissButton.hidden = downloading;
+        parakeetDismissButton.textContent = done ? 'Done' : 'Not now';
+      }
+
+      if (settingsParakeetRow) settingsParakeetRow.hidden = !(status.offered || downloading || done);
+      if (settingsParakeetButton) {
+        settingsParakeetButton.hidden = downloading || done;
+        settingsParakeetButton.textContent = failed ? 'Retry install' : `Install Parakeet v3 (${size})`;
+      }
+      if (settingsParakeetStatus) {
+        settingsParakeetStatus.textContent = downloading ? `Downloading ${progressText}`
+          : done ? 'Installed. Meetings and dictation now use Parakeet v3.'
+            : failed ? (status.error || 'The download failed.')
+              : status.switchesFromWhisper ? 'Installing also switches the engine from Whisper to Auto.' : '';
+      }
+    }
+
+    // loadSettings can call this before this part of the script has run, so
+    // nothing here touches the state below until after the first await.
+    async function refreshParakeetInstall() {
+      let status;
+      try {
+        status = await invoke('cmd_parakeet_install_status');
+      } catch (e) {
+        console.error('[parakeet-install]', e);
+        return;
+      }
+      clearTimeout(parakeetPollTimer);
+      renderParakeetInstall(status);
+      const finished = parakeetLastPhase === 'downloading' && status.phase !== 'downloading';
+      parakeetLastPhase = status.phase;
+      if (status.phase === 'downloading') {
+        parakeetPollTimer = setTimeout(refreshParakeetInstall, 500);
+      } else if (finished) {
+        await checkSetup();
+        await loadSettings();
+      }
+    }
+
+    async function startParakeetInstall() {
+      try {
+        await invoke('cmd_install_parakeet');
+      } catch (e) {
+        console.error('[parakeet-install/start]', e);
+      }
+      await refreshParakeetInstall();
+    }
+
+    async function maybeShowParakeetInvite() {
+      try {
+        const status = await invoke('cmd_parakeet_install_status');
+        parakeetBannerWanted = status.invite || status.phase === 'downloading';
+        renderParakeetInstall(status);
+      } catch (e) {
+        console.error('[parakeet-install/invite]', e);
+      }
+    }
+
+    parakeetInstallButton?.addEventListener('click', startParakeetInstall);
+    settingsParakeetButton?.addEventListener('click', startParakeetInstall);
+    parakeetDismissButton?.addEventListener('click', async () => {
+      if (parakeetLastPhase !== 'done') {
+        try { await invoke('cmd_dismiss_parakeet_invite'); } catch (e) { console.error('[parakeet-install/dismiss]', e); }
+      }
+      parakeetBannerWanted = false;
+      parakeetBanner?.classList.remove('active');
+    });
+    maybeShowParakeetInvite();
 
     // ══════════════════════════════════════════════════════════════
     // ── Bundled CLI setup ──

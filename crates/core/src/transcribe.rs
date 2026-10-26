@@ -660,6 +660,42 @@ pub fn auto_transcription_engine_resolution(
     )
 }
 
+/// Whether the desktop app should offer to install Parakeet v3: this build and
+/// Mac can run it, the stock model is the only thing missing, the configured
+/// engine would use it (`auto`, `sherpa`, or a saved `whisper` that installing
+/// moves to `auto`), and Parakeet v3 covers the transcription language.
+pub fn parakeet_install_offered(config: &Config) -> bool {
+    parakeet_install_offered_for(
+        &config.transcription.engine,
+        cfg!(feature = "engine-sherpa") && cfg!(all(target_os = "macos", target_arch = "aarch64")),
+        sherpa_plugin_present(config),
+        crate::sherpa_engine::model_dir(config) == crate::sherpa_engine::default_model_dir(config),
+        crate::sherpa_engine::model_files_present(&crate::sherpa_engine::model_dir(config)),
+        crate::sherpa_engine::parakeet_v3_fits_language(
+            config.transcription.language.as_deref(),
+            &config.ui.language,
+        ),
+    )
+}
+
+fn parakeet_install_offered_for(
+    engine: &str,
+    runnable_here: bool,
+    plugin_present: bool,
+    default_model_dir: bool,
+    model_present: bool,
+    language_fits: bool,
+) -> bool {
+    ["auto", "whisper", "sherpa"]
+        .iter()
+        .any(|candidate| engine.eq_ignore_ascii_case(candidate))
+        && runnable_here
+        && plugin_present
+        && default_model_dir
+        && !model_present
+        && language_fits
+}
+
 pub fn transcription_engine_resolution(config: &Config) -> TranscriptionEngineResolution<'_> {
     let requested = config.transcription.engine.as_str();
     if requested.eq_ignore_ascii_case("auto") {
@@ -1133,7 +1169,7 @@ fn transcribe_parakeet_dispatch(
 /// longer implies being runnable. This is the single predicate behind both the
 /// dispatch and `effective_batch_engine`, so planning, the transcript, and the
 /// artifact warning cannot disagree about which engine ran.
-pub(crate) fn sherpa_selectable(config: &Config) -> bool {
+pub fn sherpa_selectable(config: &Config) -> bool {
     cfg!(feature = "engine-sherpa")
         && crate::sherpa_engine::model_files_present(&crate::sherpa_engine::model_dir(config))
         && sherpa_plugin_unavailable_reason(config).is_none()
@@ -4281,6 +4317,26 @@ pub fn warmup_parakeet(config: &Config) -> Result<ParakeetWarmupStats, Transcrib
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parakeet_install_is_offered_only_when_the_model_is_all_that_is_missing() {
+        let offered = |engine, runnable, plugin, default_dir, model, language| {
+            parakeet_install_offered_for(engine, runnable, plugin, default_dir, model, language)
+        };
+        assert!(offered("auto", true, true, true, false, true));
+        assert!(offered("Whisper", true, true, true, false, true));
+        assert!(offered("sherpa", true, true, true, false, true));
+        // Already installed, or a deliberate non-Whisper engine.
+        assert!(!offered("auto", true, true, true, true, true));
+        assert!(!offered("apple-speech", true, true, true, false, true));
+        assert!(!offered("parakeet", true, true, true, false, true));
+        // This Mac or build cannot run it, or the plugin is missing.
+        assert!(!offered("auto", false, true, true, false, true));
+        assert!(!offered("auto", true, false, true, false, true));
+        // A custom model directory, or a language Parakeet v3 lacks.
+        assert!(!offered("auto", true, true, false, false, true));
+        assert!(!offered("auto", true, true, true, false, false));
+    }
 
     #[cfg(feature = "whisper")]
     #[test]

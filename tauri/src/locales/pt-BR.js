@@ -70,6 +70,19 @@ window.__MINUTES_I18N['pt-BR'] = {
     "Release notes": "Notas da versão",
     "Release Notes": "Notas da versão",
     "Dev tools": "Ferramentas de desenvolvimento",
+
+    // ── Parakeet v3 install ─────────────────────────────────────────
+    "Upgrade transcription to Parakeet v3": "Atualize a transcrição para o Parakeet v3",
+    "Downloading Parakeet v3": "Baixando o Parakeet v3",
+    "Parakeet v3 is ready": "O Parakeet v3 está pronto",
+    "Parakeet v3 did not install": "O Parakeet v3 não foi instalado",
+    "Install": "Instalar",
+    "Retry install": "Tentar instalar de novo",
+    "The download failed.": "O download falhou.",
+    "New recordings and dictation use Parakeet v3. Whisper stays as the backup.": "Novas gravações e o ditado usam o Parakeet v3. O Whisper continua como reserva.",
+    "Installed. Meetings and dictation now use Parakeet v3.": "Instalado. Reuniões e ditado agora usam o Parakeet v3.",
+    "Installing also switches the engine from Whisper to Auto.": "A instalação também muda o motor de Whisper para Automático.",
+    "Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.": "O Parakeet v3 não está instalado, então o Whisper escreve o texto final. Instale-o em Ajustes, Transcrição.",
     "Trigger banner": "Disparar aviso",
     "Checking": "Verificando",
     "Downloading": "Baixando",
@@ -1088,6 +1101,10 @@ window.__MINUTES_I18N['pt-BR'] = {
     "Yoruba": "Iorubá"
   },
   patterns: [
+    { re: "^Parakeet v3 is NVIDIA's speech model, built into Minutes for Apple Silicon\\. Meetings and dictation switch to it, and Whisper stays as the backup\\. One-time download: (.+)\\.$", to: "O Parakeet v3 é o modelo de fala da NVIDIA, integrado ao Minutes para Apple Silicon. Reuniões e ditado passam a usá-lo, e o Whisper continua como reserva. Download único: $1." },
+    { re: "^Install Parakeet v3 \\((.+)\\)$", to: "Instalar o Parakeet v3 ($1)" },
+    { re: "^Downloading (.+) of (.+)$", to: "Baixando $1 de $2" },
+    { re: "^(\\S+ \\S+) of (\\S+ \\S+)$", to: "$1 de $2" },
     { re: "^whisper model at (.+?) looks truncated: file is ([\\d.]+) MB but the (.+?) model should be at least ([\\d.]+) MB\\. A previous download was probably interrupted\\. Fix: rm \"(.+?)\" && minutes setup --model (.+?)$", to: "o modelo whisper em $1 parece truncado: o arquivo tem $2 MB, mas o modelo $3 deveria ter pelo menos $4 MB. Provavelmente um download anterior foi interrompido. Correção: rm \"$5\" && minutes setup --model $6" },
     { re: "^(\\d+) utterances$", to: "$1 falas" },
     { re: "^(\\d+) utterance$", to: "$1 fala" },

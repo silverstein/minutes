@@ -13,6 +13,7 @@ pub(crate) mod bounded_child;
 pub(crate) mod macos_graph_xpc;
 pub mod orukeet;
 pub mod semantic;
+pub mod semantic_index;
 mod source_transcript;
 mod summary_semantics;
 

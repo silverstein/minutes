@@ -16,9 +16,11 @@ use std::time::Duration;
 const RESYNC_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESULT_LIMIT: usize = 12;
 /// Cosine similarity below which a "related" meeting is noise. Calibrated on
-/// Mat's corpus: meant meetings scored at or above it, unrelated queries'
-/// best matches below it.
-const SCORE_FLOOR: f32 = 0.0;
+/// Mat's corpus (1,119 meetings, 2026-10-26): the meant meeting ranked first
+/// for 10 of 12 remembered-phrasing queries at 0.772-0.858, while six queries
+/// about things never discussed (lasagna, bicycle chains, cello...) peaked at
+/// 0.722.
+const SCORE_FLOOR: f32 = 0.74;
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

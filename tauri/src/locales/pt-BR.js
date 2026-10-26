@@ -82,6 +82,11 @@ window.__MINUTES_I18N['pt-BR'] = {
     "New recordings and dictation use Parakeet v3. Whisper stays as the backup.": "Novas gravações e o ditado usam o Parakeet v3. O Whisper continua como reserva.",
     "Installed. Meetings and dictation now use Parakeet v3.": "Instalado. Reuniões e ditado agora usam o Parakeet v3.",
     "Installing also switches the engine from Whisper to Auto.": "A instalação também muda o motor de Whisper para Automático.",
+    "Whisper Small (466 MB)": "Whisper Small (466 MB)",
+    "Whisper Base (142 MB, lower resource use)": "Whisper Base (142 MB, menor uso de recursos)",
+    "Choose a meeting model. Parakeet v3 is NVIDIA's speech model for Apple Silicon; it comes with Whisper Base for live transcript and as the backup.": "Escolha um modelo para reuniões. O Parakeet v3 é o modelo de fala da NVIDIA para Apple Silicon; ele vem com o Whisper Base para a transcrição ao vivo e como reserva.",
+    "Downloading Whisper Base for live transcript and backup...": "Baixando o Whisper Base para a transcrição ao vivo e como reserva...",
+    "Parakeet v3 is ready for meetings and dictation. Whisper Base handles live transcript and the backup.": "O Parakeet v3 está pronto para reuniões e ditado. O Whisper Base cuida da transcrição ao vivo e da reserva.",
     "Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.": "O Parakeet v3 não está instalado, então o Whisper escreve o texto final. Instale-o em Ajustes, Transcrição.",
     "Trigger banner": "Disparar aviso",
     "Checking": "Verificando",
@@ -1101,6 +1106,9 @@ window.__MINUTES_I18N['pt-BR'] = {
     "Yoruba": "Iorubá"
   },
   patterns: [
+    { re: "^Parakeet v3 \\((\\d+) MB, recommended\\)$", to: "Parakeet v3 ($1 MB, recomendado)" },
+    { re: "^Downloading Parakeet v3: (.+) of (.+)$", to: "Baixando o Parakeet v3: $1 de $2" },
+    { re: "^Parakeet v3 did not install \\((.+)\\)\\. Whisper Base is ready; you can install Parakeet later in Settings, Transcription\\.$", to: "O Parakeet v3 não foi instalado ($1). O Whisper Base está pronto; você pode instalar o Parakeet depois em Ajustes, Transcrição." },
     { re: "^Parakeet v3 is NVIDIA's speech model, built into Minutes for Apple Silicon\\. Meetings and dictation switch to it, and Whisper stays as the backup\\. One-time download: (.+)\\.$", to: "O Parakeet v3 é o modelo de fala da NVIDIA, integrado ao Minutes para Apple Silicon. Reuniões e ditado passam a usá-lo, e o Whisper continua como reserva. Download único: $1." },
     { re: "^Install Parakeet v3 \\((.+)\\)$", to: "Instalar o Parakeet v3 ($1)" },
     { re: "^Downloading (.+) of (.+)$", to: "Baixando $1 de $2" },

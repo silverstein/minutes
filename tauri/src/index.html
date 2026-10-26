@@ -12825,15 +12825,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             text.textContent = setup.needsSetup
               ? 'Meeting model installed. Another selected speech model still needs setup in Settings.'
               : 'Speech models ready. Live and dictation keep their own selections.';
-
-            root.querySelector('#step-model').classList.toggle('done', !setup.needsSetup);
-            root.querySelector('#step-model-status').textContent = setup.needsSetup ? 'More setup needed' : 'Done';
-            root.querySelector('#step-model-body').classList.toggle('ui-hidden', !setup.needsSetup);
-            if (setup.needsSetup) root.querySelectorAll('.model-btn').forEach(b => b.disabled = false);
-
-            currentSetup = setup;
-            activationState = currentSetup.activation || activationState;
-            applyActivationState(root, currentSetup?.activation || activationState);
+            finishOnboardingModelStep(root, setup);
           } catch (e) {
             clearInterval(progressTimer);
             fill.style.width = '0%';
@@ -12843,6 +12835,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           }
         });
       });
+
+      offerParakeetInOnboarding(root);
 
       root.querySelector('#btn-start-first-recording').addEventListener('click', async () => {
         try {
@@ -12855,6 +12849,97 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           setFooterCaptureMode(false);
         }
       });
+    }
+
+    function finishOnboardingModelStep(root, setup) {
+      root.querySelector('#step-model').classList.toggle('done', !setup.needsSetup);
+      root.querySelector('#step-model-status').textContent = setup.needsSetup ? 'More setup needed' : 'Done';
+      root.querySelector('#step-model-body').classList.toggle('ui-hidden', !setup.needsSetup);
+      if (setup.needsSetup) root.querySelectorAll('.model-btn').forEach(b => b.disabled = false);
+
+      currentSetup = setup;
+      activationState = currentSetup.activation || activationState;
+      applyActivationState(root, currentSetup?.activation || activationState);
+    }
+
+    // Where this Mac can run Parakeet v3, offer it first: otherwise a new user
+    // starts on Whisper and only meets Parakeet later through the banner.
+    // Whisper Base comes with it for standalone live transcript and as the
+    // fallback when Parakeet fails on a recording.
+    async function offerParakeetInOnboarding(root) {
+      let status;
+      try {
+        status = await invoke('cmd_parakeet_install_status');
+      } catch (e) {
+        console.error('[onboarding/parakeet]', e);
+        return;
+      }
+      const options = root.querySelector('.model-options');
+      if (!status?.offered || !options || options.querySelector('[data-model="parakeet"]')) return;
+      const baseMb = 142;
+      const totalMb = Math.round(status.downloadBytes / (1024 * 1024)) + baseMb;
+      const parakeet = document.createElement('button');
+      parakeet.className = 'btn btn-primary btn-sm model-btn';
+      parakeet.dataset.model = 'parakeet';
+      parakeet.textContent = `Parakeet v3 (${totalMb} MB, recommended)`;
+      options.querySelectorAll('.model-btn').forEach((btn) => {
+        btn.classList.replace('btn-primary', 'btn-secondary');
+        if (btn.dataset.model === 'small') btn.textContent = 'Whisper Small (466 MB)';
+        if (btn.dataset.model === 'base') btn.textContent = 'Whisper Base (142 MB, lower resource use)';
+      });
+      options.prepend(parakeet);
+      const intro = root.querySelector('#step-model-body p');
+      if (intro) {
+        intro.textContent = "Choose a meeting model. Parakeet v3 is NVIDIA's speech model for Apple Silicon; it comes with Whisper Base for live transcript and as the backup.";
+      }
+      parakeet.addEventListener('click', () => installOnboardingParakeet(root));
+    }
+
+    async function installOnboardingParakeet(root) {
+      root.querySelectorAll('.model-btn').forEach(b => b.disabled = true);
+      const progress = root.querySelector('.download-progress');
+      const fill = root.querySelector('.progress-fill');
+      const text = root.querySelector('.progress-text');
+      progress.classList.add('is-visible');
+      fill.style.background = '';
+      fill.style.width = '5%';
+      text.textContent = 'Downloading Whisper Base for live transcript and backup...';
+
+      let setup;
+      try {
+        setup = await installOnboardingModels('base');
+      } catch (e) {
+        fill.style.width = '0%';
+        fill.style.background = 'var(--red)';
+        text.textContent = `Error: ${e}`;
+        root.querySelectorAll('.model-btn').forEach(b => b.disabled = false);
+        return;
+      }
+
+      try {
+        await invoke('cmd_install_parakeet');
+        for (;;) {
+          const status = await invoke('cmd_parakeet_install_status');
+          if (status.phase === 'done') break;
+          if (status.phase === 'error') throw new Error(status.error || 'The download failed.');
+          if (status.total > 0) {
+            fill.style.width = `${Math.max(5, Math.min(99, (status.done / status.total) * 100))}%`;
+            text.textContent = `Downloading Parakeet v3: ${formatBytes(status.done) || '0 B'} of ${formatBytes(status.total)}`;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        fill.style.width = '100%';
+        text.textContent = 'Parakeet v3 is ready for meetings and dictation. Whisper Base handles live transcript and the backup.';
+      } catch (e) {
+        // Whisper Base is installed, so recording still works.
+        text.textContent = `Parakeet v3 did not install (${e.message || e}). Whisper Base is ready; you can install Parakeet later in Settings, Transcription.`;
+      }
+      try {
+        setup = await invoke('cmd_needs_setup');
+      } catch (e) {
+        console.error('[onboarding/parakeet]', e);
+      }
+      finishOnboardingModelStep(root, setup);
     }
 
     // Shown when the meeting list could not be read. Deliberately NOT the
@@ -17436,7 +17521,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     async function maybeShowParakeetInvite() {
       try {
         const status = await invoke('cmd_parakeet_install_status');
-        parakeetBannerWanted = status.invite || status.phase === 'downloading';
+        // First-run setup offers Parakeet itself; don't ask twice.
+        const setup = await invoke('cmd_needs_setup');
+        parakeetBannerWanted = !setup?.needsSetup && (status.invite || status.phase === 'downloading');
         renderParakeetInstall(status);
       } catch (e) {
         console.error('[parakeet-install/invite]', e);

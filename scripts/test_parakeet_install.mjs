@@ -29,7 +29,7 @@ function element() {
   };
 }
 
-function harness(statuses) {
+function harness(statuses, { needsSetup = false } = {}) {
   const elements = {};
   const calls = [];
   let reads = 0;
@@ -44,6 +44,7 @@ function harness(statuses) {
     invoke: async (name) => {
       calls.push(name);
       if (name === 'cmd_parakeet_install_status') return statuses[Math.min(reads++, statuses.length - 1)];
+      if (name === 'cmd_needs_setup') return { needsSetup };
       return null;
     },
   });
@@ -107,4 +108,12 @@ test('a failed install explains why and offers Retry', async () => {
   assert.match(elements['parakeet-banner-error'].textContent, /checksum/);
   assert.equal(elements['btn-parakeet-install'].textContent, 'Retry');
   assert.equal(elements['btn-settings-parakeet-install'].textContent, 'Retry install');
+});
+
+test('first-run setup hides the banner, since onboarding offers Parakeet itself', async () => {
+  const { elements, run } = harness([idle], { needsSetup: true });
+  await run('maybeShowParakeetInvite()');
+  assert(!elements['parakeet-banner'].classList.contains('active'));
+  // Settings still offers the install.
+  assert.equal(elements['settings-parakeet-install'].hidden, false);
 });

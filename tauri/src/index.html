@@ -12193,7 +12193,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       const meta = document.createElement('div');
       meta.className = 'meeting-meta';
-      meta.textContent = formatTime(m.date);
+      // Section headers replace date headers in search-by-meaning results.
+      meta.textContent = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
 
       info.appendChild(title);
       info.appendChild(meta);
@@ -12540,10 +12541,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       })();
     }
 
-    // "Related by meaning": meetings the word search did not find, from the
-    // local semantic index, appended under their own heading to the same
-    // chunked row list. Only for queries of two or more words; single words
-    // are what the word search is for.
+    // Search by meaning. When it finds meetings for a query of two or more
+    // words, the results are re-laid out as three sections: meetings whose
+    // titles contain the words, then the semantic hits (pulled up from
+    // wherever the word search ranked them), then everything else the word
+    // search matched. Appending semantic hits below the word results buried
+    // the right answer under loose single-word matches ("team", "getting").
+    // Single words, and searches with the setting off, keep the date-grouped
+    // list.
     let semanticSearchEnabled = false;
 
     async function addRelatedByMeaning(query, reqId, lexical) {
@@ -12556,9 +12561,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       if (reqId !== searchRequestId || activeSearchQuery !== query || documentsViewActive) return;
-      const seen = new Set((lexical || []).map((m) => m.path));
+      const words = contentSearchTokens(query);
+      const titleMatches = (lexical || []).filter((m) => instantTitleTier(m.title, words) > 0);
+      const inTitles = new Set(titleMatches.map((m) => m.path));
       const related = hits
-        .filter((hit) => !seen.has(hit.path))
+        .filter((hit) => !inTitles.has(hit.path))
         .map((hit) => ({
           path: hit.path,
           title: hit.title,
@@ -12567,15 +12574,29 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           snippet: hit.snippet,
         }));
       if (!related.length) return;
-      if (!meetingRowsState || meetingRowsState.query !== activeSearchQuery) {
-        // The word search found nothing: replace "No meetings match".
-        meetingsScroll.replaceChildren();
-        footer.classList.remove('footer-hidden');
-        meetingRowsState = { query: activeSearchQuery, rows: [], rendered: 0, lastLabel: null };
-      }
-      const allShown = meetingRowsState.rendered >= meetingRowsState.rows.length;
-      meetingRowsState.rows.push(...related.map((m) => ({ label: 'Related by meaning', m })));
-      if (allShown) appendMeetingRows(related.length);
+      const inRelated = new Set(related.map((m) => m.path));
+      const others = (lexical || []).filter((m) => !inTitles.has(m.path) && !inRelated.has(m.path));
+      meetingsScroll.replaceChildren();
+      footer.classList.remove('footer-hidden');
+      meetingRowsState = {
+        query: activeSearchQuery,
+        sections: true,
+        rows: [
+          ...titleMatches.map((m) => ({ label: 'Title matches', m })),
+          ...related.map((m) => ({ label: 'Related by meaning', m })),
+          ...others.map((m) => ({ label: 'Other mentions', m })),
+        ],
+        rendered: 0,
+        lastLabel: null,
+      };
+      appendMeetingRows(MEETING_ROWS_CHUNK);
+    }
+
+    function formatSearchRowDate(dateStr) {
+      if (!dateStr) return '';
+      try {
+        return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      } catch { return ''; }
     }
 
     let semanticStatusTimer = null;

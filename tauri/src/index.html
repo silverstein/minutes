@@ -15859,8 +15859,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // disagreed.
       const effectiveTerminalDark = isEffectiveDarkTheme;
 
+      // The container paints the padding around xterm's canvas, so it takes
+      // the terminal's background rather than the app's.
+      const applyRecallTerminalTheme = () => {
+        const theme = window.getMinutesTheme(effectiveTerminalDark());
+        recallTerminalContainer.style.backgroundColor = theme.background;
+        if (recallTerminal) recallTerminal.options.theme = theme;
+        return theme;
+      };
+
       recallTerminal = new Terminal({
-        theme: window.getMinutesTheme(effectiveTerminalDark()),
+        theme: applyRecallTerminalTheme(),
         fontFamily: "'Geist Mono', 'SF Mono', Menlo, monospace",
         fontSize: getTerminalFontSize(),
         lineHeight: 1.2,
@@ -15871,7 +15880,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
 
       recallThemeHandler = () => {
-        if (recallTerminal) recallTerminal.options.theme = window.getMinutesTheme(effectiveTerminalDark());
+        applyRecallTerminalTheme();
         // The palette follows the theme live, but the TUI inside chose its
         // colours at startup from COLORFGBG, which is fixed for the life of
         // the process. A mismatched composer with no explanation reads as a

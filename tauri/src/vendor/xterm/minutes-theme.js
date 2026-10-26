@@ -28,11 +28,14 @@ function getMinutesTheme(isDark) {
     };
   }
 
+  // White, not the app's tan: terminal apps' light themes (Claude Code's
+  // among them) paint exact-colour panels that assume a white terminal, so on
+  // tan their white diff and message boxes showed as patches.
   return {
-    background: '#f8f4ed',
+    background: '#ffffff',
     foreground: '#1a1916',
     cursor: '#c96b4e',
-    cursorAccent: '#f8f4ed',
+    cursorAccent: '#ffffff',
     selectionBackground: 'rgba(201, 107, 78, 0.16)',
     selectionForeground: '#1a1916',
     black: '#1a1916',

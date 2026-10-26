@@ -63,6 +63,10 @@ static PROGRESS: Mutex<SyncProgress> = Mutex::new(SyncProgress {
     error: None,
 });
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Set only by turning the setting off: deleting the index is a response to
+/// that choice, not to the setting merely being off (the CLI can build an
+/// index while the app setting is off).
+static CLEAR_REQUESTED: AtomicBool = AtomicBool::new(false);
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
 fn set_progress(update: impl FnOnce(&mut SyncProgress)) {
@@ -93,7 +97,7 @@ fn background_loop() {
     loop {
         if ENABLED.load(Ordering::SeqCst) {
             run_sync(&Config::load());
-        } else if semantic_index::index_dir(&Config::minutes_dir()).exists() {
+        } else if CLEAR_REQUESTED.swap(false, Ordering::SeqCst) {
             let result = semantic_index::clear(&Config::minutes_dir());
             set_progress(|p| {
                 *p = SyncProgress {
@@ -198,6 +202,7 @@ pub fn cmd_semantic_set_enabled(enabled: bool) -> Result<SemanticStatus, String>
     config.save().map_err(|e| e.to_string())?;
     ensure_background();
     ENABLED.store(enabled, Ordering::SeqCst);
+    CLEAR_REQUESTED.store(!enabled, Ordering::SeqCst);
     wake();
     Ok(cmd_semantic_status())
 }

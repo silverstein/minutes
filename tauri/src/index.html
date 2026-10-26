@@ -7153,6 +7153,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
 </div></div></div>
       <div class="settings-tab-panel" role="tabpanel" id="panel-ai" data-panel="ai" aria-labelledby="tab-ai">
+      <!-- Search by meaning -->
+      <div class="settings-section">
+        <div class="about-item-title">SEARCH BY MEANING</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Find meetings by what they were about, not only the words in them</div>
+            <div class="about-controls-meta" id="settings-semantic-meta">Runs Google's EmbeddingGemma 2 on this Mac. Turning it on downloads a 310 MB model once and keeps a small index in ~/.minutes/semantic. Restricted meetings are never indexed. Turning it off deletes the index.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-semantic-search">Off</button>
+        </div>
+        <div class="about-controls-meta" id="settings-semantic-status" role="status" hidden></div>
+      </div>
       <!-- Coach settings start -->
       <div class="settings-section coach-settings-section" id="settings-coach-section">
         <div class="coach-section-heading">
@@ -12454,6 +12466,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           const results = await invoke('cmd_search', { query: activeSearchQuery });
           setSearchError(null);
           renderMeetings(results);
+          addRelatedByMeaning(activeSearchQuery, searchRequestId, results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           console.error('Search refresh:', e);
@@ -12504,6 +12517,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           if (reqId !== searchRequestId) return; // a newer query superseded this one
           setSearchError(null);
           renderMeetings(results);
+          addRelatedByMeaning(query, reqId, results);
           await refreshOpenMeetingDetail();
         } catch (e) {
           if (reqId !== searchRequestId) return;
@@ -12525,6 +12539,96 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
       })();
     }
+
+    // "Related by meaning": meetings the word search did not find, from the
+    // local semantic index, appended under their own heading to the same
+    // chunked row list. Only for queries of two or more words; single words
+    // are what the word search is for.
+    let semanticSearchEnabled = false;
+
+    async function addRelatedByMeaning(query, reqId, lexical) {
+      if (!semanticSearchEnabled || instantSearchTokens(query).length < 2) return;
+      let hits;
+      try {
+        hits = await invoke('cmd_semantic_search', { query });
+      } catch (e) {
+        console.error('Semantic search:', e);
+        return;
+      }
+      if (reqId !== searchRequestId || activeSearchQuery !== query || documentsViewActive) return;
+      const seen = new Set((lexical || []).map((m) => m.path));
+      const related = hits
+        .filter((hit) => !seen.has(hit.path))
+        .map((hit) => ({
+          path: hit.path,
+          title: hit.title,
+          date: hit.date,
+          content_type: hit.contentType,
+          snippet: hit.snippet,
+        }));
+      if (!related.length) return;
+      if (!meetingRowsState || meetingRowsState.query !== activeSearchQuery) {
+        // The word search found nothing: replace "No meetings match".
+        meetingsScroll.replaceChildren();
+        footer.classList.remove('footer-hidden');
+        meetingRowsState = { query: activeSearchQuery, rows: [], rendered: 0, lastLabel: null };
+      }
+      const allShown = meetingRowsState.rendered >= meetingRowsState.rows.length;
+      meetingRowsState.rows.push(...related.map((m) => ({ label: 'Related by meaning', m })));
+      if (allShown) appendMeetingRows(related.length);
+    }
+
+    let semanticStatusTimer = null;
+
+    function describeSemanticStatus(status) {
+      if (!status.enabled) return '';
+      if (status.phase === 'downloading') return 'Downloading the model…';
+      if (status.phase === 'indexing') {
+        return status.total
+          ? `Indexing meetings… ${status.done.toLocaleString('en-US')} of ${status.total.toLocaleString('en-US')}`
+          : 'Indexing meetings…';
+      }
+      if (status.phase === 'error') return `Indexing stopped: ${status.error || 'unknown error'}`;
+      return `${status.indexedMeetings.toLocaleString('en-US')} meetings indexed.`;
+    }
+
+    function applySemanticStatus(status) {
+      semanticSearchEnabled = status.enabled && status.modelInstalled;
+      setSettingsToggle('settings-semantic-search', status.enabled);
+      const toggle = document.getElementById('settings-semantic-search');
+      toggle.disabled = !status.workerAvailable && !status.enabled;
+      const line = document.getElementById('settings-semantic-status');
+      line.textContent = status.workerAvailable || status.enabled
+        ? describeSemanticStatus(status)
+        : 'Not available in this build of Minutes.';
+      line.hidden = !line.textContent;
+      clearTimeout(semanticStatusTimer);
+      if (status.enabled && (status.phase === 'downloading' || status.phase === 'indexing')) {
+        semanticStatusTimer = setTimeout(refreshSemanticStatus, 2000);
+      }
+    }
+
+    async function refreshSemanticStatus() {
+      try {
+        applySemanticStatus(await invoke('cmd_semantic_status'));
+      } catch (e) {
+        console.error('Semantic status:', e);
+      }
+    }
+
+    document.getElementById('settings-semantic-search').addEventListener('click', async () => {
+      const toggle = document.getElementById('settings-semantic-search');
+      const next = toggle.textContent.trim() !== 'On';
+      toggle.disabled = true;
+      try {
+        applySemanticStatus(await invoke('cmd_semantic_set_enabled', { enabled: next }));
+      } catch (e) {
+        toggle.disabled = false;
+        showActionToast(`Could not change search by meaning: ${e}`, { tone: 'error' });
+      }
+    });
+
+    refreshSemanticStatus();
 
     // Instant title matches from the meetings already loaded, ranked the way
     // the backend tiers them (exact phrase, then every word), so the list

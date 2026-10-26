@@ -583,6 +583,13 @@ enum Commands {
         action: AppleSpeechAction,
     },
 
+    /// Local semantic search: find meetings by meaning (EmbeddingGemma 2,
+    /// on this Mac). Restricted meetings are never indexed.
+    Semantic {
+        #[command(subcommand)]
+        action: SemanticAction,
+    },
+
     /// Print Minutes CLI capabilities as JSON for MCP feature detection.
     ///
     /// Emits a stable schema describing what this CLI build supports. The
@@ -1386,6 +1393,29 @@ enum SensitiveAction {
     },
     /// Stop the active sensitive meeting and write its artifact
     Stop,
+}
+
+#[derive(Subcommand)]
+enum SemanticAction {
+    /// Download and verify the embedding model (~310 MB, pinned)
+    Setup,
+    /// Embed new or changed meetings and drop deleted or restricted ones
+    Sync,
+    /// Find meetings related to a query by meaning
+    Search {
+        /// What the meeting was about, in your own words
+        query: String,
+        /// Maximum number of results
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+        /// One JSON object per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show whether the model, worker and index are present
+    Status,
+    /// Delete the semantic index
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -2227,6 +2257,7 @@ fn main() -> Result<()> {
                 cmd_apple_speech_benchmark(&corpus, out.as_deref(), json, &config)
             }
         },
+        Commands::Semantic { action } => cmd_semantic(action, &config),
         Commands::Capabilities { json } => cmd_capabilities(json),
         Commands::Search {
             query,
@@ -7543,6 +7574,111 @@ fn cmd_capabilities(json: bool) -> Result<()> {
     for (name, supported) in &report.features {
         let marker = if *supported { "yes" } else { "no" };
         println!("    {}: {}", name, marker);
+    }
+    Ok(())
+}
+
+fn semantic_worker(config: &Config) -> Result<minutes_core::semantic::EmbedWorker> {
+    use minutes_core::semantic;
+    let worker = semantic::worker_path().ok_or_else(|| {
+        anyhow::anyhow!(
+            "minutes-embed-worker was not found beside this binary (set MINUTES_EMBED_WORKER)"
+        )
+    })?;
+    let model_root = &config.transcription.model_path;
+    if !semantic::model_installed(model_root) {
+        anyhow::bail!("the semantic search model is not installed; run `minutes semantic setup`");
+    }
+    Ok(semantic::EmbedWorker::spawn(
+        &worker,
+        &semantic::model_path(model_root),
+        semantic::DIMENSIONS,
+    )?)
+}
+
+fn cmd_semantic(action: SemanticAction, config: &Config) -> Result<()> {
+    use minutes_core::{semantic, semantic_index, semantic_search};
+    match action {
+        SemanticAction::Setup => {
+            let path = semantic::install_model(&config.transcription.model_path)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            println!("Semantic search model ready: {}", path.display());
+        }
+        SemanticAction::Sync => {
+            let mut worker = semantic_worker(config)?;
+            let started = std::time::Instant::now();
+            let stats = semantic_search::sync(config, &mut worker, |done, total| {
+                if done % 50 == 0 || done == total {
+                    eprintln!("  {done}/{total} meetings checked");
+                }
+                true
+            })?;
+            println!(
+                "Semantic index: {} meetings, {} embedded ({} chunks), {} unchanged, {} removed in {:.0}s",
+                stats.meetings,
+                stats.embedded,
+                stats.chunks,
+                stats.unchanged,
+                stats.removed,
+                started.elapsed().as_secs_f32()
+            );
+        }
+        SemanticAction::Search { query, limit, json } => {
+            let mut worker = semantic_worker(config)?;
+            let hits = semantic_search::search(
+                config,
+                &mut worker,
+                &query,
+                &minutes_core::search::SearchFilters::default(),
+                limit,
+            )?;
+            for (result, score) in hits {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "score": score,
+                            "title": result.title,
+                            "date": result.date,
+                            "path": result.path,
+                            "snippet": result.snippet,
+                        })
+                    );
+                } else {
+                    println!(
+                        "{score:.3}  {}  ({})",
+                        result.title,
+                        &result.date[..10.min(result.date.len())]
+                    );
+                    println!("       {}", result.snippet);
+                }
+            }
+        }
+        SemanticAction::Status => {
+            let model_root = &config.transcription.model_path;
+            println!("Enabled in config: {}", config.search.semantic);
+            println!(
+                "Model installed:   {}",
+                semantic::model_installed(model_root)
+            );
+            println!(
+                "Worker:            {}",
+                semantic::worker_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "not found".into())
+            );
+            let index = semantic_index::SemanticIndex::open(
+                &Config::minutes_dir(),
+                semantic_search::MODEL_ID,
+                semantic::DIMENSIONS,
+            )?;
+            let (meetings, chunks) = index.counts()?;
+            println!("Index:             {meetings} meetings, {chunks} chunks");
+        }
+        SemanticAction::Clear => {
+            semantic_index::clear(&Config::minutes_dir())?;
+            println!("Semantic index deleted.");
+        }
     }
     Ok(())
 }

@@ -210,6 +210,11 @@ if [[ ",$MINUTES_BUILD_FEATURES," == *,engine-sherpa,* ]]; then
     chmod 755 "$BUILD_APP/Contents/MacOS/$lib"
   done
 fi
+# Semantic search worker: its own process with a pinned llama.cpp, found by
+# the app beside its own binary. Signed below with the other nested binaries.
+(cd crates/embed-worker && cargo build --release --locked)
+cp -f crates/embed-worker/target/release/minutes-embed-worker "$BUILD_APP/Contents/MacOS/minutes-embed-worker"
+chmod 755 "$BUILD_APP/Contents/MacOS/minutes-embed-worker"
 # Inside-out signing (#311): sign every nested executable FIRST (the CLI
 # sidecar with its own entitlements), then the outer bundle WITHOUT --deep.
 # --deep re-signs nested code with the outer entitlements (clobbering the

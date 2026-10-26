@@ -127,6 +127,19 @@ impl SemanticIndex {
         Ok(indexed)
     }
 
+    /// (meetings, chunks) currently stored.
+    pub fn counts(&self) -> Result<(usize, usize), IndexError> {
+        let count = |table: &str| -> Result<usize, IndexError> {
+            let n: i64 =
+                self.conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+            Ok(n as usize)
+        };
+        Ok((count("documents")?, count("chunks")?))
+    }
+
     /// Replace a meeting's vectors in one transaction.
     pub fn upsert(
         &mut self,

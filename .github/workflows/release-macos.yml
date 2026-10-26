@@ -193,6 +193,10 @@ jobs:
         working-directory: crates/sherpa-plugin
         run: cargo build --release --locked
 
+      - name: Build semantic search worker
+        working-directory: crates/embed-worker
+        run: cargo build --release --locked
+
       # The bundle ships the CLI as a sidecar (in-app "Set up CLI" symlinks to
       # it). build.rs stages it from target/release/minutes, so the CLI must be
       # built first or the bundle ships a placeholder stub (#324).
@@ -230,6 +234,10 @@ jobs:
             cp -f "crates/sherpa-plugin/target/release/$lib" "$app/Contents/MacOS/$lib"
             test -f "$app/Contents/MacOS/$lib" || { echo "ERROR: bundled $lib missing" >&2; exit 1; }
           done
+          embed_worker="$app/Contents/MacOS/minutes-embed-worker"
+          cp -f crates/embed-worker/target/release/minutes-embed-worker "$embed_worker"
+          test -f "$embed_worker" || { echo "ERROR: bundled semantic search worker missing" >&2; exit 1; }
+          file "$embed_worker" | grep -q "Mach-O" || { echo "ERROR: bundled semantic search worker is not a Mach-O binary" >&2; exit 1; }
           staged_graph_worker="$app/Contents/MacOS/minutes-graph-worker"
           staged_apple_speech_worker="$app/Contents/MacOS/minutes-apple-speech-worker"
           test -f "$sidecar" || { echo "ERROR: bundled CLI sidecar missing" >&2; exit 1; }
@@ -249,6 +257,8 @@ jobs:
 
           codesign --force --options runtime --timestamp \
             --sign "$APPLE_SIGNING_IDENTITY" "$sherpa_plugin"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$embed_worker"
           for lib in "${sherpa_libs[@]}"; do
             codesign --force --options runtime --timestamp \
               --sign "$APPLE_SIGNING_IDENTITY" "$app/Contents/MacOS/$lib"

@@ -67,6 +67,8 @@ jobs:
               # so `cargo clippy --all` never reaches it and only the filter
               # keeps it covered.
               - 'crates/sherpa-plugin/**'
+              # Also excluded from the workspace (it compiles a pinned llama.cpp).
+              - 'crates/embed-worker/**'
               - 'crates/archive-convert/**'
               - 'crates/archive-core/**'
               - 'crates/archive-ocr/**'
@@ -275,6 +277,16 @@ jobs:
         run: |
           # Both: `cargo test` compiles the lib as a test harness and never
           # emits the cdylib, so the export check below would find nothing.
+          cargo build --release --locked
+          cargo test --release --locked
+
+      - name: Build and test the semantic embedding worker
+        # Excluded from the workspace, so only this step reaches it. On macOS
+        # this compiles the pinned llama.cpp (Metal); elsewhere the worker is a
+        # stub and only its request/prompt tests run.
+        working-directory: crates/embed-worker
+        shell: bash
+        run: |
           cargo build --release --locked
           cargo test --release --locked
 

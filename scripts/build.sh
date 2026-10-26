@@ -118,6 +118,9 @@ if [[ ",$MINUTES_BUILD_FEATURES," == *,engine-sherpa,* ]]; then
         codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/$lib"
     done
 fi
+(cd crates/embed-worker && cargo build --release --locked)
+cp -f crates/embed-worker/target/release/minutes-embed-worker "$APP_BUNDLE/Contents/MacOS/minutes-embed-worker"
+codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/minutes-embed-worker"
 if [[ -f "$SIDECAR" ]]; then
     codesign --force --options runtime \
         --entitlements tauri/src-tauri/minutes-cli.entitlements \

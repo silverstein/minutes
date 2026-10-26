@@ -13,7 +13,9 @@ use crate::markdown::{
     ActiveCorpusReadBudget, Frontmatter, Sensitivity,
 };
 use crate::search::{SearchFilters, SearchResult};
-use crate::semantic::{EmbedWorker, SemanticError, DIMENSIONS};
+#[cfg(test)]
+use crate::semantic::EmbedWorker;
+use crate::semantic::{Embedder, SemanticError, DIMENSIONS};
 use crate::semantic_index::{quantize, SemanticIndex, StoredChunk};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -90,12 +92,13 @@ fn indexable(content: &str) -> Option<(Frontmatter, &str)> {
     Some((parsed, body))
 }
 
-/// Bring the index in step with the corpus. `progress` gets
-/// (meetings checked, meetings total) after each meeting.
+/// Bring the index in step with the corpus. `progress` gets (meetings
+/// checked, meetings total) after each meeting and returns whether to keep
+/// going; stopping early leaves every meeting either fully indexed or not.
 pub fn sync(
     config: &Config,
-    worker: &mut EmbedWorker,
-    mut progress: impl FnMut(usize, usize),
+    worker: &mut impl Embedder,
+    mut progress: impl FnMut(usize, usize) -> bool,
 ) -> Result<SyncStats, SearchError> {
     let revision = stable_active_corpus_revision_with_budget(
         &config.output_dir,
@@ -119,12 +122,16 @@ pub fn sync(
         let attested = revision.attested_sha256(path);
         if attested.is_some() && indexed.get(path) == attested.as_ref() {
             stats.unchanged += 1;
-            progress(done + 1, paths.len());
+            if !progress(done + 1, paths.len()) {
+                break;
+            }
             continue;
         }
         let Some(snapshot) = read_stable_active_markdown(path, revision.canonical_root()) else {
             index.remove(path)?;
-            progress(done + 1, paths.len());
+            if !progress(done + 1, paths.len()) {
+                break;
+            }
             continue;
         };
         let Some((frontmatter, body)) = indexable(&snapshot.content) else {
@@ -132,7 +139,9 @@ pub fn sync(
                 stats.removed += 1;
             }
             index.remove(path)?;
-            progress(done + 1, paths.len());
+            if !progress(done + 1, paths.len()) {
+                break;
+            }
             continue;
         };
         let ranges = chunk_ranges(body);
@@ -154,19 +163,22 @@ pub fn sync(
         stats.chunks += chunks.len();
         index.upsert(path, &snapshot.content_sha256, &frontmatter.title, &chunks)?;
         stats.embedded += 1;
-        progress(done + 1, paths.len());
+        if !progress(done + 1, paths.len()) {
+            break;
+        }
     }
     Ok(stats)
 }
 
-/// Meetings related to `query` by meaning, best first, at most `limit`.
+/// Meetings related to `query` by meaning, best first, at most `limit`,
+/// each with its cosine similarity (best chunk) so callers can apply a floor.
 pub fn search(
     config: &Config,
-    worker: &mut EmbedWorker,
+    worker: &mut impl Embedder,
     query: &str,
     filters: &SearchFilters,
     limit: usize,
-) -> Result<Vec<SearchResult>, SearchError> {
+) -> Result<Vec<(SearchResult, f32)>, SearchError> {
     let query = query.trim();
     if query.is_empty() || limit == 0 {
         return Ok(Vec::new());
@@ -194,7 +206,7 @@ pub fn search(
         ranked.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then_with(|| a.0.cmp(b.0)));
 
         let mut results = Vec::new();
-        for (path, (_, chunk)) in ranked {
+        for (path, (score, chunk)) in ranked {
             if results.len() == limit {
                 break;
             }
@@ -204,7 +216,7 @@ pub fn search(
                 ))
             })?;
             if let Some(result) = verified_hit(&snapshot.path, &snapshot.content, chunk, filters) {
-                results.push(result);
+                results.push((result, score));
             }
         }
         Ok(results)
@@ -308,11 +320,11 @@ mod tests {
             )
             .unwrap()
             .into_iter()
-            .map(|r| r.title)
+            .map(|(r, _)| r.title)
             .collect()
         };
 
-        let stats = sync(&config, &mut worker, |_, _| {}).unwrap();
+        let stats = sync(&config, &mut worker, |_, _| true).unwrap();
         assert_eq!((stats.meetings, stats.embedded), (3, 2), "{stats:?}");
         assert_eq!(titles(&mut worker), vec!["Ops sync", "Ad ideas"]);
 
@@ -331,7 +343,7 @@ mod tests {
             "sensitivity: restricted\n",
             "Brainstorm about pills.",
         );
-        let stats = sync(&config, &mut worker, |_, _| {}).unwrap();
+        let stats = sync(&config, &mut worker, |_, _| true).unwrap();
         assert_eq!(stats.removed, 1, "{stats:?}");
         assert_eq!(titles(&mut worker), vec!["Ops sync"]);
         unsafe { std::env::remove_var("MINUTES_DATA_DIR") };

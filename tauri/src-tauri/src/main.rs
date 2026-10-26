@@ -31,6 +31,7 @@ mod palette_dispatch;
 mod pty;
 mod recording_audio;
 mod secret_store;
+mod semantic_commands;
 mod shortcut_manager;
 mod text_insertion;
 
@@ -3245,6 +3246,9 @@ fn main() {
             commands::cmd_remember_dictation_hud_position,
             commands::cmd_delete_meeting,
             commands::cmd_archive_meeting,
+            semantic_commands::cmd_semantic_status,
+            semantic_commands::cmd_semantic_set_enabled,
+            semantic_commands::cmd_semantic_search,
             commands::cmd_set_action_item_status,
             commands::cmd_restore_archived_meeting,
             commands::cmd_reveal_path,

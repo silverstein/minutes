@@ -12,7 +12,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// EmbeddingGemma 2, Q8_0 GGUF (Apache 2.0), pinned to one Hugging Face
 /// revision; the digest is verified before the file is used.
@@ -292,6 +293,115 @@ impl EmbedWorker {
             Err(RecvTimeoutError::Disconnected) => return Err(SemanticError::Stopped),
         };
         serde_json::from_str(&line).map_err(|e| SemanticError::Protocol(e.to_string()))
+    }
+}
+
+/// Something that turns text into vectors: a worker this caller owns, or the
+/// process-wide [`SharedEmbedder`].
+pub trait Embedder {
+    fn embed_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+    ) -> Result<Vec<Vec<f32>>, SemanticError>;
+    fn embed_query(&mut self, query: &str) -> Result<Vec<f32>, SemanticError>;
+}
+
+impl Embedder for EmbedWorker {
+    fn embed_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+    ) -> Result<Vec<Vec<f32>>, SemanticError> {
+        EmbedWorker::embed_documents(self, documents)
+    }
+
+    fn embed_query(&mut self, query: &str) -> Result<Vec<f32>, SemanticError> {
+        EmbedWorker::embed_query(self, query)
+    }
+}
+
+/// Stop the shared worker after this long unused: the model holds ~300 MB.
+const SHARED_IDLE: Duration = Duration::from_secs(10 * 60);
+
+struct SharedState {
+    worker: Option<EmbedWorker>,
+    last_used: Instant,
+}
+
+fn shared_state() -> &'static Mutex<SharedState> {
+    static STATE: OnceLock<Mutex<SharedState>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("embed-worker-idle".into())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(60));
+                if let Ok(mut state) = shared_state().lock() {
+                    if state.worker.is_some() && state.last_used.elapsed() > SHARED_IDLE {
+                        state.worker = None;
+                    }
+                }
+            })
+            .ok();
+        Mutex::new(SharedState {
+            worker: None,
+            last_used: Instant::now(),
+        })
+    })
+}
+
+/// One warm worker for the whole process, started on first use and stopped
+/// when idle. Each call holds it only for one request, so a search can run
+/// between the batches of a long sync. A worker that fails is discarded and
+/// restarted on the next call.
+pub struct SharedEmbedder {
+    model_root: PathBuf,
+}
+
+impl SharedEmbedder {
+    pub fn new(model_root: &Path) -> Self {
+        Self {
+            model_root: model_root.to_path_buf(),
+        }
+    }
+
+    fn with_worker<T>(
+        &self,
+        call: impl FnOnce(&mut EmbedWorker) -> Result<T, SemanticError>,
+    ) -> Result<T, SemanticError> {
+        let mut state = shared_state().lock().map_err(|_| SemanticError::Stopped)?;
+        if state.worker.is_none() {
+            let worker = worker_path().ok_or(SemanticError::WorkerUnavailable)?;
+            if !model_installed(&self.model_root) {
+                return Err(SemanticError::ModelUnavailable);
+            }
+            state.worker = Some(EmbedWorker::spawn(
+                &worker,
+                &model_path(&self.model_root),
+                DIMENSIONS,
+            )?);
+        }
+        state.last_used = Instant::now();
+        let worker = state.worker.as_mut().ok_or(SemanticError::Stopped)?;
+        let result = call(worker);
+        if matches!(
+            result,
+            Err(SemanticError::Stopped | SemanticError::Timeout | SemanticError::Protocol(_))
+        ) {
+            state.worker = None;
+        }
+        result
+    }
+}
+
+impl Embedder for SharedEmbedder {
+    fn embed_documents(
+        &mut self,
+        documents: &[(&str, &str)],
+    ) -> Result<Vec<Vec<f32>>, SemanticError> {
+        self.with_worker(|worker| worker.embed_documents(documents))
+    }
+
+    fn embed_query(&mut self, query: &str) -> Result<Vec<f32>, SemanticError> {
+        self.with_worker(|worker| worker.embed_query(query))
     }
 }
 

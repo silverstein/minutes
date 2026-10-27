@@ -160,12 +160,42 @@ pub(crate) fn restart_without_destructors(app: &tauri::AppHandle) -> ! {
 
 #[cfg(target_os = "macos")]
 fn restart_macos_without_destructors(app: &tauri::AppHandle) -> ! {
+    // cleanup_before_exit removes the menu-bar status item, and AppKit traps
+    // (EXC_BREAKPOINT in -[BSServiceMainRunLoopQueue assertBarrierOnQueue])
+    // when that happens off the main thread. The updater restarts from a
+    // tokio worker, so hop to the main thread first and park this one.
+    if unsafe { libc::pthread_main_np() } == 0 {
+        let handle = app.clone();
+        if app
+            .run_on_main_thread(move || restart_macos_on_main_thread(&handle))
+            .is_ok()
+        {
+            loop {
+                std::thread::park();
+            }
+        }
+        eprintln!("[restart] main thread unavailable; relaunching without framework cleanup");
+        let env = app.env();
+        let binary = tauri::process::current_binary(&env);
+        cleanup_before_process_exit(app);
+        relaunch_and_exit(&env, binary);
+    }
+    restart_macos_on_main_thread(app)
+}
+
+#[cfg(target_os = "macos")]
+fn restart_macos_on_main_thread(app: &tauri::AppHandle) -> ! {
     // Resolve Tauri state before its cleanup: no Tauri APIs may be used after
     // cleanup_before_exit clears tray, window and webview resources.
     let env = app.env();
     let binary = tauri::process::current_binary(&env);
     cleanup_before_process_exit(app);
     app.cleanup_before_exit();
+    relaunch_and_exit(&env, binary)
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_and_exit(env: &tauri::Env, binary: std::io::Result<std::path::PathBuf>) -> ! {
     match binary {
         Ok(path) => {
             if let Err(error) = std::process::Command::new(path)

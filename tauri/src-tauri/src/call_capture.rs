@@ -184,6 +184,7 @@ impl CaptureInterruption {
         }
         let reason = match value.get("reason")?.as_str()? {
             "stream_error" => "stream_error",
+            "microphone_lost" => "microphone_lost",
             "unexpected_output_finish" => "unexpected_output_finish",
             _ => return None,
         };
@@ -214,6 +215,7 @@ impl CaptureInterruption {
 
     fn message(&self) -> String {
         let detail = match (self.reason, self.error_code) {
+            ("microphone_lost", _) => "Microphone capture stopped delivering audio.".into(),
             ("recovery_failed", _) => "Automatic call audio recovery did not complete.".into(),
             (_, Some(code)) => {
                 format!("macOS reported a call capture interruption (error {code}).")
@@ -244,6 +246,9 @@ struct CaptureProgressMonitor {
     interruption: Option<CaptureInterruption>,
     interruption_reported: bool,
     recovery_notice: Option<String>,
+    last_source_audio: [Instant; 2],
+    source_warned: [bool; 2],
+    source_notice: Option<String>,
 }
 
 impl CaptureProgressMonitor {
@@ -259,6 +264,9 @@ impl CaptureProgressMonitor {
             interruption: None,
             interruption_reported: false,
             recovery_notice: None,
+            last_source_audio: [now; 2],
+            source_warned: [false; 2],
+            source_notice: None,
         }
     }
 
@@ -270,6 +278,15 @@ impl CaptureProgressMonitor {
             .zip(value.get("system_frames_written").and_then(|v| v.as_u64()));
         if let Some(frames) = frames {
             let previous = self.frames.unwrap_or((0, 0));
+            for (index, (current, prior)) in [(frames.0, previous.0), (frames.1, previous.1)]
+                .into_iter()
+                .enumerate()
+            {
+                if current > prior {
+                    self.last_source_audio[index] = now;
+                    self.source_warned[index] = false;
+                }
+            }
             if frames.0 > previous.0 || frames.1 > previous.1 {
                 self.last_audio = now;
                 self.warned = false;
@@ -287,6 +304,9 @@ impl CaptureProgressMonitor {
     }
 
     fn check(&mut self, now: Instant) -> CaptureProgressAction {
+        if let Some(message) = self.source_notice.take() {
+            return CaptureProgressAction::Warning(message);
+        }
         if let Some(message) = self.recovery_notice.take() {
             return CaptureProgressAction::Recovered(message);
         }
@@ -332,6 +352,26 @@ impl CaptureProgressMonitor {
             return CaptureProgressAction::Warning(format!(
                 "{detail} Minutes will stop capture if both stem files also remain stalled for two minutes."
             ));
+        }
+        // Preserve a surviving lane. Only a verified BOTH-source stall can
+        // stop capture, but one progressing source must not hide another loss.
+        if health_age < CAPTURE_PROGRESS_WARNING && audio_age < CAPTURE_PROGRESS_WARNING {
+            if let Some(frames) = self.frames {
+                for (index, source) in ["Microphone", "System audio"].into_iter().enumerate() {
+                    // System audio may legitimately never start in a room meeting.
+                    let expected = index == 0 || frames.1 > 0;
+                    if expected
+                        && !self.source_warned[index]
+                        && now.saturating_duration_since(self.last_source_audio[index])
+                            >= CAPTURE_PROGRESS_WARNING
+                    {
+                        self.source_warned[index] = true;
+                        return CaptureProgressAction::Warning(format!(
+                            "{source} capture has stopped delivering audio. Minutes is preserving the other input, but speech from this source may be missing. Check the recording inputs."
+                        ));
+                    }
+                }
+            }
         }
         CaptureProgressAction::None
     }
@@ -550,10 +590,19 @@ impl NativeCallCaptureSession {
     }
 
     pub(crate) fn check_capture_progress(&self) -> CaptureProgressAction {
-        self.capture_progress
+        let action = self
+            .capture_progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .check(Instant::now())
+            .check(Instant::now());
+        if let CaptureProgressAction::Warning(message) = &action {
+            if let Ok(mut warnings) = self.capture_warnings.lock() {
+                if !warnings.contains(message) {
+                    warnings.push(message.clone());
+                }
+            }
+        }
+        action
     }
 
     pub fn source_health(&self) -> CallSourceHealth {
@@ -1019,13 +1068,41 @@ pub fn start_native_call_capture(
                                 .send(MicrophoneStartupStatus::Selected(name.to_string()));
                         }
                     }
+                    Some(
+                        "microphone_reconnecting"
+                        | "microphone_recovery_failed"
+                        | "microphone_resumed",
+                    ) => {
+                        let message = match value.get("event").and_then(|v| v.as_str()) {
+                            Some("microphone_resumed") => {
+                                let gap = value.get("gap_ms").and_then(|v| v.as_u64()).unwrap_or(0).min(3_600_000);
+                                format!("Microphone capture reconnected. Approximately {:.1} seconds may contain missing speech. Other captured audio was preserved.", gap as f64 / 1000.0)
+                            }
+                            Some("microphone_recovery_failed") => "Microphone capture is unavailable. Minutes is preserving system audio and will retry the microphone. In-room speech may be missing.".into(),
+                            _ => "Microphone capture was interrupted. Minutes is reconnecting an available input and preserving the captured segments. Some speech may be missing.".into(),
+                        };
+                        if let Ok(mut warnings) = warnings_for_thread.lock() {
+                            if !warnings.contains(&message) {
+                                warnings.push(message.clone());
+                            }
+                        }
+                        if let Ok(mut monitor) = capture_progress_for_thread.lock() {
+                            monitor.source_notice = Some(message);
+                        }
+                        minutes_core::logging::log_step(
+                            "native_microphone_recovery",
+                            "native-call",
+                            0,
+                            value.clone(),
+                        );
+                    }
                     Some("microphone_disconnected") => {
                         let name = value
                             .get("name")
                             .and_then(|value| value.as_str())
                             .unwrap_or("configured microphone");
                         let message = format!(
-                            "Configured microphone '{}' disconnected during capture; ScreenCaptureKit continued with its default behavior.",
+                            "Microphone '{}' disconnected during capture. Minutes is reconnecting an available input; speech during the gap may be missing.",
                             name
                         );
                         tracing::warn!(
@@ -1270,6 +1347,87 @@ mod tests {
         assert!(receipt["checks"].as_u64().unwrap() >= 45);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_microphone_recovery_ignores_silence_and_selects_an_available_fallback() {
+        let output = std::process::Command::new(find_native_call_helper_binary().unwrap())
+            .arg("--self-test-microphone-recovery")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["status"], "ok");
+        assert!(receipt["checks"].as_u64().unwrap() >= 130);
+    }
+
+    #[test]
+    fn progressing_system_audio_cannot_hide_a_lost_microphone() {
+        let start = Instant::now();
+        let mut monitor = CaptureProgressMonitor::new(start);
+        monitor.observe(start, &written_frames(48_000, 48_000));
+        for second in 1..=150 {
+            let now = start + Duration::from_secs(second);
+            monitor.observe(now, &written_frames(48_000, (second + 1) * 48_000));
+            monitor.observe_files(now, (192_000, (second + 1) * 192_000));
+            let action = monitor.check(now);
+            if second == 30 {
+                assert!(
+                    matches!(action, CaptureProgressAction::Warning(ref message) if message.starts_with("Microphone"))
+                );
+            } else {
+                assert_eq!(action, CaptureProgressAction::None);
+            }
+        }
+        let resumed = start + Duration::from_secs(151);
+        monitor.observe(resumed, &written_frames(96_000, 7_296_000));
+        assert_eq!(monitor.check(resumed), CaptureProgressAction::None);
+        let lost_again = resumed + Duration::from_secs(30);
+        monitor.observe(lost_again, &written_frames(96_000, 8_736_000));
+        assert!(
+            matches!(monitor.check(lost_again), CaptureProgressAction::Warning(ref message) if message.starts_with("Microphone"))
+        );
+    }
+
+    #[test]
+    fn microphone_loss_uses_the_existing_gap_and_stop_recovery_contract() {
+        let start = Instant::now();
+        let mut monitor = CaptureProgressMonitor::new(start);
+        monitor.interruption = CaptureInterruption::from_helper_event(&serde_json::json!({
+            "event": "capture_interrupted", "reason": "microphone_lost",
+            "will_retry": true, "attempt": 0,
+        }));
+        assert!(
+            matches!(monitor.check(start), CaptureProgressAction::Interrupted(ref message)
+            if message.starts_with("Microphone") && message.contains("keeping this meeting open"))
+        );
+        // An acknowledgement for the failed generation cannot clear the loss.
+        assert!(monitor.resume(0, start, 0).is_none());
+        let resumed = monitor
+            .resume(1, start + Duration::from_secs(4), 4000)
+            .unwrap();
+        assert!(resumed.contains("4.0 seconds") && resumed.contains("missing speech"));
+        assert!(monitor.interruption.is_none());
+    }
+
+    #[test]
+    fn lost_system_source_warns_without_stopping_the_surviving_microphone() {
+        let start = Instant::now();
+        let mut monitor = CaptureProgressMonitor::new(start);
+        monitor.observe(start, &written_frames(48_000, 48_000));
+        let now = start + Duration::from_secs(150);
+        monitor.observe(now, &written_frames(7_248_000, 48_000));
+        monitor.observe_files(now, (28_992_000, 192_000));
+        assert!(
+            matches!(monitor.check(now), CaptureProgressAction::Warning(ref message) if message.starts_with("System audio"))
+        );
+        assert_eq!(monitor.check(now), CaptureProgressAction::None);
+    }
+
     #[test]
     fn recovered_stream_keeps_the_same_monitor_and_rejects_late_resume() {
         let start = Instant::now();
@@ -1352,7 +1510,7 @@ mod tests {
     }
 
     #[test]
-    fn silent_buffers_and_a_single_active_source_keep_capture_running() {
+    fn silent_buffers_and_a_single_active_source_keep_capture_running_with_missing_mic_warning() {
         let start = Instant::now();
         for system_only in [false, true] {
             let mut monitor = CaptureProgressMonitor::new(start);
@@ -1368,7 +1526,14 @@ mod tests {
                         written_frames(count, 0)
                     },
                 );
-                assert_eq!(monitor.check(now), CaptureProgressAction::None);
+                let action = monitor.check(now);
+                if system_only && second == 30 {
+                    assert!(
+                        matches!(action, CaptureProgressAction::Warning(ref message) if message.starts_with("Microphone"))
+                    );
+                } else {
+                    assert_eq!(action, CaptureProgressAction::None);
+                }
             }
         }
     }

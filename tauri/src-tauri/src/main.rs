@@ -35,6 +35,7 @@ mod secret_store;
 mod semantic_commands;
 mod shortcut_manager;
 mod text_insertion;
+mod tray_schedule;
 
 const MINUTES_WEBSITE_URL: &str = "https://useminutes.app";
 const MINUTES_CHANGELOG_URL: &str = "https://github.com/silverstein/minutes/releases";
@@ -1399,34 +1400,22 @@ fn notify_update_available(
 
 // ── Calendar items in tray menu ──────────────────────────────
 
-const MAX_CALENDAR_ITEMS: usize = 3;
 const CALENDAR_REFRESH_SECS: u64 = 60;
-const CALENDAR_LOOKAHEAD_MINUTES: u32 = 240; // 4 hours
 const MEETING_NOTIFY_MINUTES: i64 = 3; // Show prompt this many minutes before
 
 struct CalendarMenuState {
     items: Vec<MenuItem<tauri::Wry>>,
     separator: Option<MenuItem<tauri::Wry>>,
-    /// Event titles we've already sent a notification for (prevents repeat alerts)
+    /// Occurrences (title + start) we've already sent a notification for
+    /// (prevents repeat alerts without silencing a later same-title event).
     notified: std::collections::HashSet<String>,
+    /// The events behind the menu's `cal-ev-{index}` items.
+    events: Vec<minutes_core::calendar::CalendarEvent>,
 }
 
-fn format_calendar_label(event: &minutes_core::calendar::CalendarEvent) -> String {
-    if event.minutes_until <= 0 {
-        format!("{} · now", event.title)
-    } else if event.minutes_until == 1 {
-        format!("{} · in 1 min", event.title)
-    } else if event.minutes_until >= 60 {
-        let h = event.minutes_until / 60;
-        let m = event.minutes_until % 60;
-        if m == 0 {
-            format!("{} · in {}h", event.title, h)
-        } else {
-            format!("{} · in {}h {}m", event.title, h, m)
-        }
-    } else {
-        format!("{} · in {} min", event.title, event.minutes_until)
-    }
+fn calendar_notify_key(event: &minutes_core::calendar::CalendarEvent) -> String {
+    let id = event.uid.as_deref().unwrap_or(&event.title);
+    format!("{}\u{1f}{}", id, event.start)
 }
 
 /// Show a floating overlay prompt for an upcoming meeting.
@@ -1536,14 +1525,26 @@ fn get_top_right_position(width: f64, height: f64) -> (f64, f64) {
     (x, y)
 }
 
+/// Rebuilds the calendar block. Returns how long the calendar query took, the
+/// signal for the caller's back-off (menu edits wait on the main thread and
+/// would otherwise read as a hung Calendar).
 fn refresh_calendar_items(
     app: &tauri::AppHandle,
     menu: &Menu<tauri::Wry>,
     state: &std::sync::Mutex<CalendarMenuState>,
-) {
+) -> std::time::Duration {
+    // Query the schedule: rest of today and tomorrow, plus anything that
+    // started earlier and is still running.
+    let query_started = std::time::Instant::now();
+    let now = chrono::Local::now();
+    let all_events = minutes_core::calendar::schedule_events(
+        tray_schedule::LOOKBACK_MINUTES,
+        tray_schedule::lookahead_minutes(now),
+    );
+    let query_time = query_started.elapsed();
     let mut state = match state.lock() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return query_time,
     };
 
     // Remove old items from menu
@@ -1554,8 +1555,6 @@ fn refresh_calendar_items(
         menu.remove(&sep).ok();
     }
 
-    // Query upcoming events
-    let all_events = minutes_core::calendar::upcoming_events(CALENDAR_LOOKAHEAD_MINUTES);
     // When reads are blocked (Add-Only/denied), an empty menu is a lie:
     // say so, with a clickable line that opens the Calendars privacy pane
     // (#300).
@@ -1572,22 +1571,16 @@ fn refresh_calendar_items(
             }
         }
     }
-    eprintln!(
-        "[calendar] queried {} upcoming events ({}min lookahead)",
-        all_events.len(),
-        CALENDAR_LOOKAHEAD_MINUTES
-    );
-    for e in &all_events {
-        eprintln!("[calendar]   {} — in {} min", e.title, e.minutes_until);
-    }
+    eprintln!("[calendar] queried {} schedule events", all_events.len());
     // Show meeting prompt overlay for meetings starting in ≤ MEETING_NOTIFY_MINUTES (once per event)
     for e in &all_events {
+        let key = calendar_notify_key(e);
         if e.minutes_until >= 0
             && e.minutes_until <= MEETING_NOTIFY_MINUTES
-            && !state.notified.contains(&e.title)
+            && !state.notified.contains(&key)
         {
             show_meeting_prompt(app, e);
-            state.notified.insert(e.title.clone());
+            state.notified.insert(key);
             eprintln!(
                 "[calendar] prompted: {} (in {} min)",
                 e.title, e.minutes_until
@@ -1596,34 +1589,33 @@ fn refresh_calendar_items(
     }
 
     // Clean up old notifications (events that have passed)
-    state.notified.retain(|title| {
+    state.notified.retain(|key| {
         all_events
             .iter()
-            .any(|e| &e.title == title && e.minutes_until >= -5)
+            .any(|e| &calendar_notify_key(e) == key && e.minutes_until >= -5)
     });
 
-    let events: Vec<_> = all_events
-        .into_iter()
-        .filter(|e| e.minutes_until >= 0)
-        .take(MAX_CALENDAR_ITEMS)
-        .collect();
-
-    if events.is_empty() {
-        return;
-    }
-
     // Insert at position 2 (after "Open Minutes" + first separator)
-    for (i, event) in events.iter().enumerate() {
-        let label = format_calendar_label(event);
-        if let Ok(item) = MenuItem::with_id(app, format!("cal-{}", i), &label, true, None::<&str>) {
-            if menu.insert(&item, 2 + i).is_ok() {
+    let rows = tray_schedule::rows(&all_events, now);
+    for (position, row) in rows.iter().enumerate() {
+        let item = match row {
+            tray_schedule::Row::Header(text) => {
+                MenuItem::with_id(app, format!("cal-h-{position}"), text, false, None::<&str>)
+            }
+            tray_schedule::Row::Event { label, index } => {
+                MenuItem::with_id(app, format!("cal-ev-{index}"), label, true, None::<&str>)
+            }
+        };
+        if let Ok(item) = item {
+            if menu.insert(&item, 2 + state.items.len()).is_ok() {
                 state.items.push(item);
             }
         }
     }
+    state.events = all_events;
 
     // Separator after calendar items
-    if !state.items.is_empty() {
+    if !rows.is_empty() && !state.items.is_empty() {
         if let Ok(sep) = MenuItem::with_id(app, "cal-sep", "──────────", false, None::<&str>)
         {
             if menu.insert(&sep, 2 + state.items.len()).is_ok() {
@@ -1631,6 +1623,7 @@ fn refresh_calendar_items(
             }
         }
     }
+    query_time
 }
 
 fn should_refresh_meetings_for_paths(paths: &[std::path::PathBuf]) -> bool {
@@ -2453,7 +2446,9 @@ fn main() {
                 items: Vec::new(),
                 separator: None,
                 notified: std::collections::HashSet::new(),
+                events: Vec::new(),
             }));
+            let cal_click = cal_state.clone();
 
             // Tray menu. Labels go through `tr()` so the tray renders in the
             // configured UI language (the process locale is set at the top of
@@ -2982,16 +2977,32 @@ fn main() {
                         // Mirrors the "record" arm exactly; enabled-state flips
                         // flow through sync_tray_state, not local set_enabled
                         // calls (issue #223 / codex diff-review attack #8).
-                        "cal-0" | "cal-1" | "cal-2" => {
+                        id if id.starts_with("cal-ev-") => {
                             let app_state = app.state::<commands::AppState>();
                             if commands::recording_active(&recording)
                                 || app_state.starting.load(Ordering::Relaxed)
                             {
                                 return;
                             }
+                            let args =
+                                id.strip_prefix("cal-ev-")
+                                    .and_then(|index| index.parse::<usize>().ok())
+                                    .and_then(|index| {
+                                        // try_lock: the refresh thread holds this
+                                        // lock while it edits the menu on the main
+                                        // thread, which is where this runs. On a
+                                        // collision, fall back to a plain recording.
+                                        let state = cal_click.try_lock().ok()?;
+                                        // Title only: the saved audio choice
+                                        // decides the capture route, as for
+                                        // every other start.
+                                        state.events.get(index).map(
+                                            |event| serde_json::json!({ "title": event.title }),
+                                        )
+                                    })
+                                    .unwrap_or_else(|| serde_json::json!({}));
                             show_main_window(app);
-                            app.emit("recording:start-requested", serde_json::json!({}))
-                                .ok();
+                            app.emit("recording:start-requested", args).ok();
                         }
                         _ => {}
                     }
@@ -3121,9 +3132,7 @@ fn main() {
                                                                          // Don't reset counter — one more failure keeps escalating
                         }
 
-                        let start = std::time::Instant::now();
-                        refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
-                        let elapsed = start.elapsed();
+                        let elapsed = refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
 
                         // Subprocess timeout is 3s; anything over 2s means Calendar.app
                         // is unhealthy or hung.

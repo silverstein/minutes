@@ -19,6 +19,10 @@ struct EventOutput: Codable {
     let attendees: [String]
     let url: String?
     let calendar: String?
+    // End time and the iCalendar UID let callers show events in progress and
+    // collapse one invite seen through two accounts into a single entry.
+    let end: String?
+    let uid: String?
 }
 
 // `--status` prints the current authorization state WITHOUT prompting, so
@@ -72,7 +76,11 @@ store.requestFullAccessToEvents { granted, error in
         .filter { !$0.isAllDay }
         .sorted { $0.startDate < $1.startDate }
 
+    // Fixed Gregorian/POSIX output: callers parse these as wall-clock times,
+    // and a Buddhist or Japanese system calendar would shift the year.
     let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
     formatter.dateFormat = "yyyy-MM-dd HH:mm"
 
     for event in events {
@@ -95,7 +103,9 @@ store.requestFullAccessToEvents { granted, error in
             minutes_until: mins,
             attendees: attendeeNames,
             url: event.location,
-            calendar: event.calendar?.title
+            calendar: event.calendar?.title,
+            end: event.endDate.map { formatter.string(from: $0) },
+            uid: event.calendarItemExternalIdentifier
         )
 
         if let data = try? encoder.encode(output), let line = String(data: data, encoding: .utf8) {

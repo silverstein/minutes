@@ -3703,30 +3703,11 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                 .unwrap_or(CaptureMode::Meeting);
             eprintln!("Stopping recording (PID {})...", pid);
 
-            // Write sentinel file (cross-platform stop mechanism)
+            // The sentinel is the whole stop. Every recorder polls it; `minutes
+            // record` ignores SIGTERM, and a desktop app recording in-process is
+            // killed by it before the recording is finalized (#1271).
             minutes_core::pid::write_stop_sentinel()
                 .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
-
-            // On Unix, also send SIGTERM for instant stop
-            #[cfg(unix)]
-            {
-                if minutes_core::desktop_control::desktop_app_owns_pid(pid) {
-                    tracing::info!(
-                        pid,
-                        "recording is owned by the desktop app; using sentinel-only stop"
-                    );
-                } else {
-                    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                    if rc != 0 {
-                        let err = std::io::Error::last_os_error();
-                        tracing::warn!(
-                            "SIGTERM failed (PID {}): {} — sentinel file will stop recording",
-                            pid,
-                            err
-                        );
-                    }
-                }
-            }
 
             // Poll for PID file removal with progress feedback
             let timeout = std::time::Duration::from_secs(120);
@@ -3784,15 +3765,10 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                     Some(pid) => eprintln!("Stopping live transcript (PID {})...", pid),
                     None => eprintln!("Stopping live transcript..."),
                 }
+                // Sentinel only, as for a recording above: a desktop app running
+                // Live in-process would be killed by SIGTERM (#1271).
                 minutes_core::pid::write_stop_sentinel()
                     .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
-                #[cfg(unix)]
-                if let Some(pid) = lt_state.pid() {
-                    let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                    if rc != 0 {
-                        tracing::warn!("SIGTERM failed for live transcript PID {}", pid);
-                    }
-                }
                 // Poll for PID removal
                 let start = std::time::Instant::now();
                 eprint!("Finalizing live transcript");

@@ -1414,21 +1414,8 @@ struct CalendarMenuState {
 }
 
 fn calendar_notify_key(event: &minutes_core::calendar::CalendarEvent) -> String {
-    format!("{}\u{1f}{}", event.title, event.start)
-}
-
-/// Start a recording for a calendar event clicked in the tray. The event's
-/// title names the meeting; a meeting link means it is a call, so capture both
-/// sides. In-person events keep the user's default capture: forcing call
-/// capture there would record silence as "the other side".
-fn calendar_event_recording_args(
-    event: &minutes_core::calendar::CalendarEvent,
-) -> serde_json::Value {
-    let mut args = serde_json::json!({ "title": event.title });
-    if event.url.is_some() {
-        args["intent"] = serde_json::json!("call");
-    }
-    args
+    let id = event.uid.as_deref().unwrap_or(&event.title);
+    format!("{}\u{1f}{}", id, event.start)
 }
 
 /// Show a floating overlay prompt for an upcoming meeting.
@@ -1538,21 +1525,26 @@ fn get_top_right_position(width: f64, height: f64) -> (f64, f64) {
     (x, y)
 }
 
+/// Rebuilds the calendar block. Returns how long the calendar query took, the
+/// signal for the caller's back-off (menu edits wait on the main thread and
+/// would otherwise read as a hung Calendar).
 fn refresh_calendar_items(
     app: &tauri::AppHandle,
     menu: &Menu<tauri::Wry>,
     state: &std::sync::Mutex<CalendarMenuState>,
-) {
+) -> std::time::Duration {
     // Query the schedule: rest of today and tomorrow, plus anything that
     // started earlier and is still running.
+    let query_started = std::time::Instant::now();
     let now = chrono::Local::now();
     let all_events = minutes_core::calendar::schedule_events(
         tray_schedule::LOOKBACK_MINUTES,
         tray_schedule::lookahead_minutes(now),
     );
+    let query_time = query_started.elapsed();
     let mut state = match state.lock() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => return query_time,
     };
 
     // Remove old items from menu
@@ -1631,6 +1623,7 @@ fn refresh_calendar_items(
             }
         }
     }
+    query_time
 }
 
 fn should_refresh_meetings_for_paths(paths: &[std::path::PathBuf]) -> bool {
@@ -2991,18 +2984,23 @@ fn main() {
                             {
                                 return;
                             }
-                            let args = id
-                                .strip_prefix("cal-ev-")
-                                .and_then(|index| index.parse::<usize>().ok())
-                                .and_then(|index| {
-                                    // try_lock: the refresh thread holds this
-                                    // lock while it edits the menu on the main
-                                    // thread, which is where this runs. On a
-                                    // collision, fall back to a plain recording.
-                                    let state = cal_click.try_lock().ok()?;
-                                    state.events.get(index).map(calendar_event_recording_args)
-                                })
-                                .unwrap_or_else(|| serde_json::json!({}));
+                            let args =
+                                id.strip_prefix("cal-ev-")
+                                    .and_then(|index| index.parse::<usize>().ok())
+                                    .and_then(|index| {
+                                        // try_lock: the refresh thread holds this
+                                        // lock while it edits the menu on the main
+                                        // thread, which is where this runs. On a
+                                        // collision, fall back to a plain recording.
+                                        let state = cal_click.try_lock().ok()?;
+                                        // Title only: the saved audio choice
+                                        // decides the capture route, as for
+                                        // every other start.
+                                        state.events.get(index).map(
+                                            |event| serde_json::json!({ "title": event.title }),
+                                        )
+                                    })
+                                    .unwrap_or_else(|| serde_json::json!({}));
                             show_main_window(app);
                             app.emit("recording:start-requested", args).ok();
                         }
@@ -3134,9 +3132,7 @@ fn main() {
                                                                          // Don't reset counter — one more failure keeps escalating
                         }
 
-                        let start = std::time::Instant::now();
-                        refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
-                        let elapsed = start.elapsed();
+                        let elapsed = refresh_calendar_items(&app_cal, &menu_cal, &cal_timer);
 
                         // Subprocess timeout is 3s; anything over 2s means Calendar.app
                         // is unhealthy or hung.

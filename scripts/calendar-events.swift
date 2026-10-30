@@ -76,7 +76,11 @@ store.requestFullAccessToEvents { granted, error in
         .filter { !$0.isAllDay }
         .sorted { $0.startDate < $1.startDate }
 
+    // Fixed Gregorian/POSIX output: callers parse these as wall-clock times,
+    // and a Buddhist or Japanese system calendar would shift the year.
     let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
     formatter.dateFormat = "yyyy-MM-dd HH:mm"
 
     for event in events {

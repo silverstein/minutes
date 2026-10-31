@@ -1,0 +1,39 @@
+name: OpenAI distribution prototype
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/openai-plan/**'
+      - 'integrations/openai-plugin/**'
+      - 'tooling/skills/**'
+      - '.agents/plugins/**'
+      - '.github/workflows/openai-distribution.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'integrations/openai-plan/**'
+      - 'integrations/openai-plugin/**'
+      - 'tooling/skills/**'
+      - '.agents/plugins/**'
+      - '.github/workflows/openai-distribution.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Check OAuth and sample inference boundaries
+        working-directory: integrations/openai-plan
+        run: npm ci --ignore-scripts && npm test
+      - name: Check generated plugin and existing skill surfaces
+        working-directory: tooling/skills
+        run: npm ci --ignore-scripts && npm run ci
+      - name: Check local plugin installation ownership
+        working-directory: integrations/openai-plugin
+        run: npm test

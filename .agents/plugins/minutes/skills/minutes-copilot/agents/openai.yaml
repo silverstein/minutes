@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Copilot"
+  short_description: "Start live meeting coaching with a clear goal."
+  default_prompt: "Use Minutes Copilot to set my meeting goal and open the live Coach HUD."

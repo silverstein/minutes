@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  --font-display: var(--font-instrument-serif), "Iowan Old Style", "Palatino Linotype", serif;
+  --font-display: var(--font-sans);
   --font-sans: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: var(--font-geist-mono), "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
   --bg: #f8f4ed;
@@ -21,6 +21,7 @@
   --green: #2e7d46;
   --purple: #bf5af2;
   --orange: #d4832a;
+  --capture: #2f6f8f;
   --shadow-panel: 0 18px 40px rgba(26, 25, 22, 0.08);
   --marketing-button-text: #171411;
   --marketing-proof-bg: #171714;
@@ -46,6 +47,7 @@
     --accent-soft: rgba(48, 209, 88, 0.1);
     --red: #ff453a;
     --green: #30d158;
+    --capture: #62bce9;
     --shadow-panel: 0 18px 40px rgba(0, 0, 0, 0.34);
     color-scheme: dark;
   }
@@ -89,7 +91,13 @@ summary:focus-visible {
   color: var(--text);
 }
 
-.marketing-header {
+/* Headings that used to set in a display serif now use Geist at a heading
+   weight. The class name stays because many pages use it. */
+.font-serif {
+  font-weight: 600;
+}
+
+.site-header {
   position: sticky;
   top: 0;
   z-index: 50;
@@ -97,15 +105,15 @@ summary:focus-visible {
   background: var(--bg);
 }
 
-.marketing-nav {
+.site-nav {
   display: flex;
   min-height: 64px;
-  max-width: 1240px;
+  max-width: 1200px;
   margin: 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 0 32px;
+  padding: 0 24px;
 }
 
 .marketing-mobile-menu {
@@ -116,11 +124,9 @@ summary:focus-visible {
   cursor: pointer;
   list-style: none;
   border: 1px solid var(--border-mid);
-  border-radius: 4px;
-  padding: 8px 12px;
-  font: 600 11px/1 var(--font-mono);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: 500 13px/1 var(--font-sans);
 }
 
 .marketing-mobile-menu summary::-webkit-details-marker {
@@ -145,507 +151,63 @@ summary:focus-visible {
   width: min(82vw, 320px);
   flex-direction: column;
   border: 1px solid var(--border-mid);
+  border-radius: 12px;
   background: var(--bg);
   padding: 10px 18px 18px;
   box-shadow: var(--shadow-panel);
 }
 
-.marketing-hero {
-  display: grid;
-  max-width: 1320px;
-  margin: 0 auto;
-  grid-template-columns: minmax(0, 0.95fr) minmax(560px, 1.05fr);
-  gap: clamp(48px, 4.5vw, 64px);
-  align-items: center;
-  padding: 48px 32px 40px;
-}
-
-.marketing-hero-copy {
-  align-self: center;
-}
-
-.marketing-eyebrow,
-.marketing-product-kicker {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--accent);
-}
-
-.marketing-hero h1 {
-  margin-top: 24px;
-  max-width: 650px;
-  font-family: var(--font-display);
-  font-size: clamp(52px, 4.9vw, 72px);
-  font-weight: 400;
-  line-height: 0.92;
-  letter-spacing: -0.052em;
-  color: var(--text);
-}
-
-.marketing-hero h1 span {
-  display: block;
-  margin-top: 8px;
-  font-style: italic;
-  color: var(--accent);
-}
-
-.marketing-lede {
-  max-width: 560px;
-  margin-top: 28px;
-  font-size: 17px;
-  line-height: 1.7;
-  color: var(--text-secondary);
-}
-
-.marketing-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 32px;
-}
-
-.marketing-primary-action,
-.marketing-secondary-action {
-  display: inline-flex;
-  min-height: 48px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  padding: 0 22px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-}
-
-.marketing-primary-action {
-  background: var(--accent);
-  color: var(--marketing-button-text);
-}
-
-.marketing-primary-action:hover {
-  background: var(--accent-hover);
-  transform: translateY(-1px);
-}
-
-.marketing-secondary-action {
-  border: 1px solid var(--border-mid);
-  color: var(--text);
-}
-
-.marketing-secondary-action:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.marketing-proof-line {
-  margin-top: 24px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.8;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-
-.marketing-works-with {
-  margin-top: 38px;
-  border-top: 1px solid var(--border);
-  padding-top: 20px;
-}
-
-.marketing-works-with > span {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-
-.marketing-works-with div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 22px;
-  margin-top: 12px;
-}
-
-.marketing-works-with strong {
-  font-family: var(--font-display);
-  font-size: 19px;
-  font-weight: 400;
-  color: var(--text);
-}
-
-.marketing-works-with strong svg {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  margin-right: 7px;
-  vertical-align: -1px;
-}
-
-.marketing-hero-product {
-  min-width: 0;
-  scroll-margin-top: 96px;
-}
-
-.memory-sequence {
-  position: relative;
-  margin-top: 20px;
-  border-left: 1px solid var(--accent);
-  padding-left: 24px;
-}
-
-.memory-step {
-  display: grid;
-  grid-template-columns: 86px minmax(0, 1fr);
-  gap: 16px;
-  padding: 0 0 12px;
-}
-
-.memory-step:last-child {
-  padding-bottom: 0;
-}
-
-.memory-step-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding-top: 12px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.4;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-
-.memory-step-meta span:first-child {
-  color: var(--accent);
-}
-
-.memory-step-meta strong {
-  font-weight: 600;
-  color: var(--text);
-}
-
-.memory-artifact {
-  min-width: 0;
+/* Desktop app window recreated in HTML for the hero. Same tokens as the app,
+   so it follows light and dark mode the way the app does. */
+.app-window {
   overflow: hidden;
   border: 1px solid var(--border-mid);
-  border-radius: 5px;
-  background: var(--bg-elevated);
-  box-shadow: 0 12px 32px var(--marketing-shadow-soft);
-}
-
-.memory-artifact-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-  padding: 8px 12px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-
-.memory-artifact-bar span:first-child {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.memory-capture p {
-  padding: 12px 16px 6px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text);
-}
-
-.memory-capture-meta {
-  display: block;
-  padding: 0 16px 12px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--text-secondary);
-}
-
-.memory-file pre {
-  max-height: none;
-  overflow: visible;
-  padding: 12px 14px 14px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--text);
-  white-space: pre-wrap;
-}
-
-.memory-recall {
-  padding: 12px;
-}
-
-.memory-recall-header {
-  display: flex;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 10px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-
-.memory-prompt {
-  margin: 10px 2px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--text);
-}
-
-.memory-answer {
-  border: 1px solid var(--border);
+  border-radius: 12px;
   background: var(--bg);
-  padding: 10px;
+  box-shadow: var(--shadow-panel);
 }
 
-.memory-answer-mark {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent);
+.app-window-dots span {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 7px;
+  border-radius: 999px;
+  background: var(--border-mid);
 }
 
-.memory-answer p {
-  margin-top: 7px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--text);
+.app-wave {
+  display: flex;
+  height: 22px;
+  align-items: center;
+  gap: 3px;
 }
 
-.memory-source {
-  display: block;
-  margin-top: 9px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  line-height: 1.5;
-  color: var(--text-secondary);
+.app-wave span {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--capture);
 }
 
-.marketing-proof-band {
-  background: var(--marketing-proof-bg);
-  color: var(--marketing-proof-text);
-}
-
-.marketing-proof-band-inner {
-  display: grid;
-  max-width: 1320px;
-  margin: 0 auto;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  padding: 0 32px;
-}
-
-.marketing-proof-band-inner > div,
-.marketing-proof-band-inner > a {
-  min-height: 190px;
-  border-left: 1px solid rgba(248, 244, 237, 0.13);
-  padding: 32px 24px;
-}
-
-.marketing-proof-band-inner > :last-child {
-  border-right: 1px solid rgba(248, 244, 237, 0.13);
-}
-
-.marketing-proof-band-inner span {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #c96b4e;
-}
-
-.marketing-proof-band-inner strong {
-  display: block;
-  margin-top: 18px;
-  font-family: var(--font-display);
-  font-size: 28px;
-  font-weight: 400;
-  line-height: 1;
-}
-
-.marketing-proof-band-inner p {
-  margin-top: 14px;
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--marketing-proof-muted);
-}
-
-.marketing-proof-band-inner > a:hover {
-  background: var(--marketing-proof-bg-elevated);
-}
-
-@media (max-width: 1023px) {
-  .marketing-hero {
-    grid-template-columns: 1fr;
-    gap: 64px;
-    padding-top: 72px;
-  }
-
-  .marketing-hero-copy,
-  .marketing-lede {
-    max-width: 760px;
-  }
-
-  .marketing-hero h1 {
-    max-width: 800px;
-  }
-
-  .marketing-hero-product {
-    max-width: 760px;
-  }
-
-  .marketing-proof-band-inner {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .marketing-proof-band-inner > :nth-child(odd) {
-    border-left: 1px solid rgba(248, 244, 237, 0.13);
-  }
-
-  .marketing-proof-band-inner > :last-child {
-    border-right: 1px solid rgba(248, 244, 237, 0.13);
-  }
-}
-
-@media (max-width: 640px) {
-  .marketing-nav {
-    min-height: 58px;
-    padding: 0 20px;
-  }
-
-  .marketing-hero {
-    gap: 48px;
-    padding: 52px 20px 64px;
-  }
-
-  .marketing-hero h1 {
-    margin-top: 18px;
-    font-size: clamp(45px, 14vw, 60px);
-    line-height: 0.95;
-  }
-
-  .marketing-lede {
-    margin-top: 22px;
-    font-size: 16px;
-  }
-
-  .marketing-actions {
-    flex-direction: column;
-  }
-
-  .marketing-primary-action,
-  .marketing-secondary-action {
-    width: 100%;
-  }
-
-  .marketing-proof-line {
-    font-size: 10px;
-  }
-
-  .memory-sequence {
-    padding-left: 14px;
-  }
-
-  .memory-step {
-    grid-template-columns: 1fr;
-    gap: 8px;
-  }
-
-  .memory-step-meta {
-    flex-direction: row;
-    gap: 10px;
-    padding-top: 4px;
-  }
-
-  .memory-file pre {
-    max-height: 246px;
-    font-size: 9px;
-  }
-
-  .marketing-proof-band-inner {
-    grid-template-columns: 1fr;
-    padding: 0 20px;
-  }
-
-  .marketing-proof-band-inner > div,
-  .marketing-proof-band-inner > a {
-    min-height: auto;
-    border-right: 1px solid rgba(248, 244, 237, 0.13);
-    border-bottom: 1px solid rgba(248, 244, 237, 0.13);
-    padding: 28px 22px;
-  }
-}
-
-.transcript-grid {
-  display: grid;
-  grid-template-columns: 72px 88px minmax(0, 1fr);
-  gap: 10px 14px;
-}
-
-@media (max-width: 640px) {
-  .transcript-grid {
-    grid-template-columns: 60px 78px minmax(0, 1fr);
-    gap: 8px 10px;
-  }
-}
-
-/* Streaming-transcript hero reveal. Product-grounded, not decorative: it mirrors
-   how Minutes streams real transcription in. Plays
-   once on load, and only when the user has not asked to reduce motion — under
-   `reduce`, no rule applies and every line is visible immediately. */
+/* Live waveform in the recording bar: it shows audio arriving, as the app's
+   does. Static under reduced motion. */
 @media (prefers-reduced-motion: no-preference) {
-  .stream-card .transcript-grid > span,
-  .stream-card .stream-actions {
-    opacity: 0;
-    animation: stream-in 200ms ease forwards;
+  .app-wave span {
+    animation: app-wave 1.1s ease-in-out infinite alternate;
   }
-  .stream-card .transcript-grid > span:nth-child(-n + 3) {
-    animation-delay: 0.35s;
+  .app-wave span:nth-child(3n) {
+    animation-delay: -0.4s;
   }
-  .stream-card .transcript-grid > span:nth-child(n + 4):nth-child(-n + 6) {
-    animation-delay: 1s;
-  }
-  .stream-card .transcript-grid > span:nth-child(n + 7) {
-    animation-delay: 1.65s;
-  }
-  .stream-card .stream-actions {
-    animation-delay: 2.35s;
-    animation-duration: 260ms;
+  .app-wave span:nth-child(3n + 1) {
+    animation-delay: -0.75s;
   }
 }
 
-@keyframes stream-in {
+@keyframes app-wave {
   from {
-    opacity: 0;
-    transform: translateY(3px);
+    transform: scaleY(0.45);
   }
   to {
-    opacity: 1;
-    transform: none;
+    transform: scaleY(1);
   }
 }

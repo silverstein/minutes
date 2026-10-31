@@ -268,7 +268,7 @@ export default function ForAgentsPage() {
         </p>
         <h1 className="mt-4 font-serif text-[42px] leading-[0.98] tracking-[-0.045em] text-[var(--text)] sm:text-[56px]">
           Local conversation memory your agents{" "}
-          <span className="italic text-[var(--accent)]">can actually use</span>.
+          <span className="text-[var(--text-tertiary)]">can actually use</span>.
         </h1>
         <p className="mt-5 text-[17px] leading-8 text-[var(--text-secondary)]">
           Most meeting tools optimize for notes inside their app. Minutes

@@ -50,5 +50,10 @@
   "Meetings": "Reuniões",
   "Upcoming Meeting": "Próxima reunião",
   "Minutes Palette": "Paleta do Minutes",
-  "Minutes command palette": "Paleta de comandos do Minutes"
+  "Minutes command palette": "Paleta de comandos do Minutes",
+  "Now": "Agora",
+  "Today": "Hoje",
+  "Tomorrow": "Amanhã",
+  "Starts in {}": "Começa em {}",
+  "Starting now": "Começando agora"
 }

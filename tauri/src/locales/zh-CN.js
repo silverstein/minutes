@@ -373,6 +373,7 @@ window.__MINUTES_I18N['zh-CN'] = {
 
     // ── Settings: privacy / consent ─────────────────────────────────
     "Hide windows from screen sharing": "在屏幕共享中隐藏窗口",
+    "Also keeps them out of screenshots. Coach stays hidden either way.": "截图中也不会出现这些窗口。Coach 始终保持隐藏。",
     "Recording consent reminder": "录音同意提醒",
     "Recording disclosed": "已告知录音",
     "Remind me (default)": "提醒我（默认）",

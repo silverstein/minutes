@@ -402,7 +402,7 @@ For dictation, the recommended path is the standard shortcut in the desktop app
 (`Cmd/Ctrl + Shift + D` by default). The raw-key path for keys like `Caps Lock`
 is available as an advanced option but remains more fragile and permission-heavy.
 
-**Privacy:** All Minutes windows are hidden from screen sharing by default — other participants on Zoom/Meet/Teams won't see the app. Toggle via the tray menu: "Hide from Screen Share ✓".
+**Privacy:** All Minutes windows are hidden from screen sharing by default — other participants on Zoom/Meet/Teams won't see the app. This also keeps Minutes out of screenshots. Toggle it in Settings → Privacy or via the tray menu: "Hide from Screen Share ✓".
 
 ### Troubleshooting
 

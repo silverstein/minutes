@@ -391,6 +391,7 @@ window.__MINUTES_I18N['pt-BR'] = {
 
     // ── Settings: privacy / consent ─────────────────────────────────
     "Hide windows from screen sharing": "Ocultar janelas do compartilhamento de tela",
+    "Also keeps them out of screenshots. Coach stays hidden either way.": "Também as deixa fora das capturas de tela. O Coach continua oculto de qualquer forma.",
     "Recording consent reminder": "Lembrete de consentimento de gravação",
     "Recording disclosed": "Gravação informada",
     "Remind me (default)": "Lembrar-me (padrão)",

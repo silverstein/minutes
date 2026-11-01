@@ -515,7 +515,7 @@ For real desktop validation of the Windows and Linux collectors, use
 
 | key | default | meaning |
 |---|---|---|
-| `hide_from_screen_share` | `true` | Exclude the Minutes window from screen sharing |
+| `hide_from_screen_share` | `true` | Exclude Minutes windows from screen sharing and screenshots (the Coach HUD is always excluded) |
 
 ### `[assistant]` — Claude / Codex / Gemini integration
 

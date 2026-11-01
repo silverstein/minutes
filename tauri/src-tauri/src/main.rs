@@ -2957,11 +2957,11 @@ fn main() {
                             // Update menu label
                             if new_state {
                                 screen_share_item_ref
-                                    .set_text("Hide from Screen Share ✓")
+                                    .set_text(minutes_core::i18n::tr("Hide from Screen Share ✓"))
                                     .ok();
                             } else {
                                 screen_share_item_ref
-                                    .set_text("Hide from Screen Share")
+                                    .set_text(minutes_core::i18n::tr("Hide from Screen Share"))
                                     .ok();
                             }
 

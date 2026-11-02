@@ -270,9 +270,9 @@ retention, nothing is deleted automatically unless `auto_cleanup` is enabled.
 | key | default | meaning |
 |---|---|---|
 | `backend` | `"auto"` | Final transcription backend. `"auto"` uses Parakeet v3 when it is installed (Apple Silicon, plugin and model) and the transcription language is one of its 25 European languages (on auto-detect, a Chinese interface keeps Whisper); otherwise Whisper. Existing configs that still held the old `"whisper"` default move to `"auto"` once (`auto_engine_migrated`). `"sherpa"` uses the in-process Parakeet v3 model (install with `minutes setup --sherpa`) for each utterance's final text while Whisper still streams partials; if Parakeet v3 is missing or fails, Whisper writes the text. Retained `"apple-speech"` and `"parakeet"` values resolve to sealed Whisper while their secure private-audio release gates remain closed. |
-| `destination` | `"insert"` | `"insert"` puts the final text in the active app and on the clipboard; `"clipboard"`, `"file"`, and `"command"` remain available for explicit delivery workflows |
-| `destination_file` | unset | Target file when `destination = "file"` |
-| `destination_command` | unset | Shell command when `destination = "command"` |
+| `destination` | `"insert"` | `"insert"` puts the final text in the active app and on the clipboard; `"clipboard"` only copies it; `"stdout"` prints it; `"daily_note"` writes only to the daily note. `"file"` skips the clipboard and writes only the Markdown file. Every destination except `"daily_note"` writes a Markdown file to `dictations/` and emits a `dictation.completed` event. |
+| `destination_file` | unset | Ignored. Older configs still load, with a one-time warning. Dictation files always go to `dictations/` under `output_dir`. |
+| `destination_command` | unset | Ignored, as is `destination = "command"`, with a one-time warning. Dictation never ran these commands. |
 | `accumulate` | `true` | Append successive utterances rather than replacing |
 | `daily_note_log` | `true` | Append every dictation to the daily note |
 | `auto_paste` | `false` | Paste the result immediately after dictation ends when the platform can do that honestly |
@@ -340,6 +340,10 @@ Dictation clipboard behavior is platform-specific:
 | key | default | meaning |
 |---|---|---|
 | `post_record` | unset | Shell command run after each recording; transcript path appended as final arg |
+| `post_dictation` | unset | Shell command run after each dictation; file path appended as final arg, JSON with the text on stdin. See the [post-dictation hook guide](../integration/post-dictation-hook.md) |
+
+Hooks run one at a time on a background queue and are killed after 5 minutes.
+Failures are logged to `~/.minutes/logs/minutes.log`.
 
 ### `[call_detection]` — automatic call awareness
 

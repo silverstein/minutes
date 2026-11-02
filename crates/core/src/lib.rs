@@ -159,6 +159,7 @@ pub mod ffmpeg;
 pub mod graph;
 pub mod graph_worker;
 pub mod health;
+pub mod hooks;
 pub mod i18n;
 pub mod interaction;
 pub mod jobs;

@@ -3793,6 +3793,8 @@ fn cmd_stop(_config: &Config) -> Result<()> {
 
 fn cmd_process_queue(config: &Config) -> Result<()> {
     minutes_core::jobs::process_pending_jobs(config, |_| {})?;
+    // Hooks run on a background thread, which ends when this process exits.
+    minutes_core::hooks::drain(minutes_core::hooks::HOOK_DEADLINE);
     Ok(())
 }
 
@@ -18585,7 +18587,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
         config.dictation.destination = "clipboard".into();
     }
 
-    minutes_core::dictation::run(
+    let outcome = minutes_core::dictation::run(
         stop_flag,
         &config,
         |event| {
@@ -18676,8 +18678,15 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                 }
             }
         },
-    )?;
+    );
 
+    // Hooks run on a background thread, which ends when this process exits.
+    if !minutes_core::hooks::drain(std::time::Duration::ZERO) {
+        eprintln!("[minutes] Waiting for the post_dictation hook to finish...");
+        minutes_core::hooks::drain(minutes_core::hooks::HOOK_DEADLINE);
+    }
+
+    outcome?;
     Ok(())
 }
 

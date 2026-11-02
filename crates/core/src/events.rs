@@ -350,6 +350,15 @@ pub enum MinutesEvent {
         offset_ms: u64,
         duration_ms: u64,
     },
+    /// A dictation's Markdown file was written. Carries no text fields, so a
+    /// subscriber reads the file at `path` for the words. The file name does
+    /// hold a slug of the dictation's first words, like every Minutes output.
+    #[serde(rename = "dictation.completed")]
+    DictationCompleted {
+        /// File stem of the dictation's Markdown file.
+        id: String,
+        path: String,
+    },
     /// Screen-context capture could not start for a recording (e.g. the macOS
     /// Screen Recording permission is missing, or stale after the app's
     /// signature changed). Recording continues without screenshots; agents

@@ -271,14 +271,12 @@ export function HomeHero() {
       <div className="mt-8 flex flex-wrap items-center gap-3">
         <a
           href={APPLE_SILICON_DOWNLOAD_PATH}
-          data-download-target="mac"
           className="inline-flex h-12 items-center rounded-full bg-[var(--accent)] px-6 text-[16px] font-medium text-[var(--marketing-button-text)] hover:bg-[var(--accent-hover)]"
         >
           Download for Mac
         </a>
         <a
           href={WINDOWS_INSTALLER_DOWNLOAD_URL}
-          data-download-target="windows"
           className="inline-flex h-12 items-center rounded-full border border-[color:var(--border-mid)] px-6 text-[16px] font-medium text-[var(--text)] hover:bg-[var(--bg-hover)]"
         >
           Windows

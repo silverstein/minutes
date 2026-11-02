@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { WebsiteAnalytics } from "@/components/website-analytics";
-import { AcquisitionEvents } from "@/components/acquisition-events";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import "./globals.css";
@@ -73,8 +71,6 @@ export default function RootLayout({
       </head>
       <body className="font-sans antialiased">
         {children}
-        <AcquisitionEvents />
-        <WebsiteAnalytics />
       </body>
     </html>
   );

@@ -336,7 +336,7 @@ signups get monthly.`}</code>
                 write them on your existing subscription, with no API key.
               </p>
               <div className="mt-8 flex flex-wrap items-center gap-3">
-                <CopyButton label="Try it with five sample meetings" cmd="npx minutes-mcp --demo" acquisitionTarget="mcp" />
+                <CopyButton label="Try it with five sample meetings" cmd="npx minutes-mcp --demo" />
               </div>
               <p className="mt-6 text-[15px]">
                 <a href="/for-agents" className={linkClass}>
@@ -451,14 +451,12 @@ signups get monthly.`}</code>
           <div className="mt-10 flex flex-wrap justify-center gap-3">
             <a
               href={APPLE_SILICON_DOWNLOAD_PATH}
-              data-download-target="mac"
               className="inline-flex h-12 items-center rounded-full bg-[var(--accent)] px-7 text-[16px] font-medium text-[var(--marketing-button-text)] hover:bg-[var(--accent-hover)]"
             >
               Download for Mac
             </a>
             <a
               href={WINDOWS_INSTALLER_DOWNLOAD_URL}
-              data-download-target="windows"
               className="inline-flex h-12 items-center rounded-full border border-[color:var(--border-mid)] px-7 text-[16px] font-medium text-[var(--text)] hover:bg-[var(--bg-hover)]"
             >
               Download for Windows
@@ -470,12 +468,12 @@ signups get monthly.`}</code>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <CopyButton
               label="Homebrew (desktop)"
-              acquisitionTarget="desktop_cli"
+             
               cmd="brew install --cask silverstein/tap/minutes"
             />
             <CopyButton
               label="Homebrew (CLI)"
-              acquisitionTarget="desktop_cli"
+             
               cmd="brew tap silverstein/tap && brew install minutes"
             />
           </div>

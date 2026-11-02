@@ -4834,11 +4834,14 @@
       font-size: 12px;
       line-height: 1.5;
     }
+    .config-warning.is-repaired { background: var(--green-tint); border-bottom-color: var(--green-glow); }
     .config-warning[hidden], .config-warning [hidden] { display: none !important; }
     .config-warning strong { display: block; margin-bottom: 4px; }
     .config-warning p { margin: 4px 0; }
     .config-warning code { overflow-wrap: anywhere; font-size: 11px; }
     .config-warning-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .config-warning .config-warning-status { margin: 8px 0 0; font-weight: 600; }
+    .config-warning .config-warning-status.error { border-left: 2px solid var(--red); padding-left: 8px; }
 
     /* ── Update available banner ── */
     .update-banner {
@@ -6157,13 +6160,13 @@
       <p id="config-warning-message"></p>
       <p><code id="config-warning-path"></code></p>
       <p id="config-warning-defaults"></p>
-      <p id="config-warning-action-error" hidden></p>
       <div class="config-warning-actions">
+        <button class="btn btn-primary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-open">Open settings file</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-check">Check again</button>
-        <button class="btn btn-secondary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-help">Get help</button>
       </div>
+      <p class="config-warning-status" id="config-warning-action-error" hidden></p>
     </section>
 
     <!-- Upcoming meeting suggestion -->
@@ -8791,6 +8794,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (fingerprint === configWarningFingerprint) return;
       configWarningFingerprint = fingerprint;
       const banner = document.getElementById('config-warning');
+      document.getElementById('config-warning-action-error').hidden = true;
       if (warning) lastConfigWarning = warning;
       if (!lastConfigWarning) { banner.hidden = true; return; }
       banner.hidden = false;
@@ -8804,12 +8808,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         ? `Fallback transcription: ${warning.engine} · ${warning.model}. Recordings folder: ${warning.outputDir}`
         : '';
       document.getElementById('config-warning-restart').hidden = !!warning;
+      document.getElementById('config-warning-check').hidden = !warning;
+      document.getElementById('config-warning-help').hidden = !warning;
+      banner.classList.toggle('is-repaired', !warning);
+      banner.setAttribute('role', warning ? 'alert' : 'status');
     }
     async function configWarningAction(action) {
       const errorEl = document.getElementById('config-warning-action-error');
       errorEl.hidden = true;
+      errorEl.classList.remove('error');
       try { await action(); }
-      catch (error) { errorEl.textContent = String(error); errorEl.hidden = false; }
+      catch (error) { errorEl.textContent = String(error); errorEl.classList.add('error'); errorEl.hidden = false; }
     }
     document.getElementById('config-warning-open').addEventListener('click', () =>
       configWarningAction(() => invoke('cmd_open_file', { path: lastConfigWarning.path })));
@@ -8817,6 +8826,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       configWarningAction(async () => {
         const status = await invoke('cmd_capture_status');
         renderConfigWarning(status.configWarning);
+        if (status.configWarning) {
+          const errorEl = document.getElementById('config-warning-action-error');
+          errorEl.textContent = 'Still can\'t read the file.';
+          errorEl.classList.add('error');
+          errorEl.hidden = false;
+        }
       }));
     document.getElementById('config-warning-restart').addEventListener('click', (event) =>
       configWarningAction(() => {

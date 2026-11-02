@@ -1724,7 +1724,9 @@ fn handle_utterance<G>(
     }
 
     if let Some(result) = write_result_outputs(result, config) {
+        let hook = post_dictation_hook_request(&result, config);
         on_result(result);
+        enqueue_hook(hook);
     }
 }
 
@@ -1748,9 +1750,11 @@ fn flush_accumulated_results<F, G>(
 
     if let Some(result) = finish_session(accumulated_results.as_slice(), config) {
         on_event(DictationEvent::Success);
+        let hook = post_dictation_hook_request(&result, config);
         if config.dictation.destination != "stdout" {
             on_result(result);
         }
+        enqueue_hook(hook);
     }
     accumulated_results.clear();
 }
@@ -2233,6 +2237,47 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
     }
 }
 
+/// Build the post_dictation hook run for a result, when one is configured.
+///
+/// The text goes on stdin only, never in argv or the environment, where other
+/// local processes could read it.
+fn post_dictation_hook_request(
+    result: &DictationResult,
+    config: &Config,
+) -> Option<crate::hooks::HookRequest> {
+    let command = config
+        .hooks
+        .post_dictation
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())?;
+    let path = result.file_path.as_deref();
+    let payload = serde_json::json!({
+        "id": path.and_then(|path| path.file_stem()).map(|stem| stem.to_string_lossy()),
+        "path": path.map(|path| path.display().to_string()),
+        "text": result.text,
+        "raw_text": result.raw_text,
+        "text_mode": result.text_mode.as_str(),
+        "engine_id": result.engine_id,
+        "duration_secs": result.duration_secs,
+    });
+    Some(crate::hooks::HookRequest {
+        name: "post_dictation",
+        command: command.to_string(),
+        argument: path
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        stdin: Some(payload.to_string().into_bytes()),
+    })
+}
+
+/// Hand a hook to the background queue once delivery has returned.
+fn enqueue_hook(request: Option<crate::hooks::HookRequest>) {
+    if let Some(request) = request {
+        crate::hooks::enqueue(request);
+    }
+}
+
 fn dictation_completed_event(path: &std::path::Path) -> crate::events::MinutesEvent {
     crate::events::MinutesEvent::DictationCompleted {
         id: path
@@ -2553,6 +2598,109 @@ mod tests {
             assert!(output.file_path.is_none());
             assert!(crate::events::read_events(None, None).is_empty());
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn post_dictation_hook_runs_after_delivery_with_json_on_stdin() {
+        with_temp_home(|| {
+            for accumulate in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let captured = dir.path().join("stdin.json");
+                let argument = dir.path().join("argument");
+                let mut config = test_config(dir.path());
+                config.dictation.destination = "file".into();
+                config.dictation.accumulate = accumulate;
+                let script = dir.path().join("hook.sh");
+                std::fs::write(
+                    &script,
+                    format!(
+                        "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\ncat > '{}'\n",
+                        argument.display(),
+                        captured.display()
+                    ),
+                )
+                .unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                config.hooks.post_dictation = Some(script.display().to_string());
+
+                let options = DictationRunOptions::default();
+                let mut accumulated = Vec::new();
+                let mut delivered = 0;
+                let mut on_result = |result: DictationResult| {
+                    assert!(result.file_path.is_some());
+                    assert!(
+                        !captured.exists(),
+                        "the hook must not start before delivery returns"
+                    );
+                    delivered += 1;
+                };
+                assert!(decode_and_handle_utterance(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut on_result,
+                    || Some(finalized_for_cancellation_test()),
+                ));
+                flush_accumulated_results(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |_| {},
+                    &mut on_result,
+                );
+                assert_eq!(delivered, 1);
+                assert!(crate::hooks::drain(std::time::Duration::from_secs(30)));
+
+                let path = std::fs::read_to_string(&argument).unwrap();
+                assert!(path.contains("dictations"), "unexpected path {path}");
+                let payload: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&captured).unwrap()).unwrap();
+                assert_eq!(payload["path"], path.as_str());
+                assert_eq!(
+                    payload["id"],
+                    std::path::Path::new(&path)
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                );
+                assert!(payload["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()));
+                assert!(payload["raw_text"].is_string());
+                assert_eq!(payload["text_mode"], "unknown");
+                assert!(payload["engine_id"].is_string());
+                assert!(payload["duration_secs"].is_number());
+            }
+        });
+    }
+
+    #[test]
+    fn post_dictation_hook_is_off_unless_set_and_handles_a_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        let result = prepare_result(
+            "just a note",
+            1.0,
+            DictationFinalBackend::Whisper,
+            &config,
+            DictationTextMode::TerminalCode,
+        )
+        .unwrap();
+        assert!(post_dictation_hook_request(&result, &config).is_none());
+
+        config.hooks.post_dictation = Some("   ".into());
+        assert!(post_dictation_hook_request(&result, &config).is_none());
+
+        config.hooks.post_dictation = Some("/bin/true".into());
+        let request = post_dictation_hook_request(&result, &config).unwrap();
+        assert_eq!(request.argument, "");
+        let payload: serde_json::Value = serde_json::from_slice(&request.stdin.unwrap()).unwrap();
+        assert!(payload["path"].is_null());
+        assert!(payload["id"].is_null());
+        assert_eq!(payload["text_mode"], "terminal_code");
     }
 
     #[test]

@@ -34,7 +34,7 @@ Release process, platform-specific release guidance, version channels, and relea
 ### `docs/integration/`
 Agent integration guides and agent-specific documentation.
 - When to add: Integration with a new agent system, agent capability documentation
-- Examples: `agent-integrations.md`, `pi-agent.md`
+- Examples: `agent-integrations.md`, `pi-agent.md`, `post-dictation-hook.md`
 
 ### `docs/plans/`, `docs/designs/`, `docs/rfcs/`, `docs/eval/`
 Already organized by type — keep as-is. Plans are forward-looking implementation plans, designs are spike results and benchmarks, RFCs are design proposals, and eval contains evaluation results.

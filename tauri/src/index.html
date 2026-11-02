@@ -7384,6 +7384,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
           </div>
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Post-dictation command</div>
+            <div class="about-controls-meta">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</div>
+            <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
+            <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+          </div>
         </div>
       </div>
 
@@ -13690,6 +13696,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         document.getElementById('settings-hooks-post-record').value = postRecord;
         document.getElementById('settings-hooks-post-record-status').textContent =
           postRecord ? 'Active. Transcript path is appended on every recording.' : '';
+        const postDictation = (s.hooks && s.hooks.post_dictation) || '';
+        document.getElementById('settings-hooks-post-dictation').value = postDictation;
+        document.getElementById('settings-hooks-post-dictation-status').textContent =
+          postDictation ? 'Active. Runs after every dictation.' : '';
         try {
           const agentCmdSel = document.getElementById('settings-agent-command');
           const sumAgents = await invoke('cmd_list_agents');
@@ -14588,6 +14598,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } catch (err) {
         document.getElementById('settings-hooks-post-record-status').textContent = String(err);
         document.getElementById('settings-hooks-post-record-status').style.color = 'var(--red)';
+      }
+    });
+    document.getElementById('settings-hooks-post-dictation').addEventListener('change', async (e) => {
+      const value = e.target.value;
+      const status = document.getElementById('settings-hooks-post-dictation-status');
+      try {
+        await invoke('cmd_set_setting', { section: 'hooks', key: 'post_dictation', value });
+        status.textContent = value.trim() ? 'Active. Runs after every dictation.' : 'Disabled.';
+        status.style.color = '';
+      } catch (err) {
+        status.textContent = String(err);
+        status.style.color = 'var(--red)';
       }
     });
     document.getElementById('settings-screen-context').addEventListener('click', async () => {

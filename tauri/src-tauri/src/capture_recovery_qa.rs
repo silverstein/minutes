@@ -35,6 +35,7 @@ pub fn configure(identifier: &str) -> Result<(), String> {
         || config.knowledge.enabled
         || config.daily_notes.enabled
         || config.hooks.post_record.is_some()
+        || config.hooks.post_dictation.is_some()
     {
         return Err("test output must stay inside the test directory with exports disabled".into());
     }

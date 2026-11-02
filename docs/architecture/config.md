@@ -340,6 +340,10 @@ Dictation clipboard behavior is platform-specific:
 | key | default | meaning |
 |---|---|---|
 | `post_record` | unset | Shell command run after each recording; transcript path appended as final arg |
+| `post_dictation` | unset | Shell command run after each dictation; file path appended as final arg, JSON with the text on stdin. See the [post-dictation hook guide](../integration/post-dictation-hook.md) |
+
+Hooks run one at a time on a background queue and are killed after 5 minutes.
+Failures are logged to `~/.minutes/logs/minutes.log`.
 
 ### `[call_detection]` — automatic call awareness
 

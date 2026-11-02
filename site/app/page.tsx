@@ -207,12 +207,13 @@ export default function Home() {
             <Panel title="~/meetings/2026-02-28-pricing-strategy.md" meta="0600">
               <pre className="overflow-x-auto font-mono text-[12px] leading-6 text-[var(--text-secondary)]">
                 <code>{`---
-title: Pricing Strategy; Monthly Test
+title: Pricing Strategy — Monthly Billing Test
 type: meeting
 consent: verbal_all_parties
 decisions:
-  - text: Launch monthly billing for
-      the next 3 consultant signups
+  - text: Launch monthly billing alongside
+      annual, starting with the next three
+      consultant signups
     authority: high
 ---
 
@@ -223,7 +224,7 @@ signups get monthly.`}</code>
             </Panel>
             <Panel title="Any MCP client" meta="minutes">
               <p className="text-[14px] text-[var(--text-secondary)]">
-                What did we decide about consultant pricing?
+                What did we decide in the February 28 pricing meeting?
               </p>
               <p className="mt-4 text-[15px] leading-7 text-[var(--text)]">
                 Launch monthly billing for the next three consultant signups.
@@ -346,15 +347,15 @@ signups get monthly.`}</code>
             <Panel title="claude" meta="~/projects/pricing">
               <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px] leading-6 text-[var(--text-secondary)]">
                 <code>
-                  <span className="text-[var(--text)]">&gt; what did we decide about consultant pricing?</span>
+                  <span className="text-[var(--text)]">&gt; what did we decide about pricing?</span>
                   {"\n\n"}
                   <span className="text-[var(--accent)]">⏺</span>
-                  {" minutes - search_meetings (MCP)(query: \"consultant pricing\")\n  ⎿  2 results\n\n"}
+                  {" minutes - search_meetings (MCP)(query: \"pricing\")\n  ⎿  2 results\n\n"}
                   <span className="text-[var(--accent)]">⏺</span>
                   <span className="text-[var(--text)]">
                     {" Annual-only billing, decided March 25. It reversed the\n  February 28 test of monthly billing for the next three\n  consultant signups."}
                   </span>
-                  {"\n\n  Source: 2026-03-25-pricing-follow-up.md"}
+                  {"\n\n  Source: 2026-03-25-pricing-reversal.md"}
                 </code>
               </pre>
             </Panel>

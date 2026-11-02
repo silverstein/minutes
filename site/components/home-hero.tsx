@@ -225,7 +225,7 @@ function AppWindow() {
               It replaces the February 28 decision to test monthly billing with the next three consultant signups.
             </p>
             <p className="font-mono text-[11px] leading-5 text-[var(--text-tertiary)]">
-              Source: 2026-03-25-pricing-follow-up.md · SPEAKER_0 at 0:47 · decision
+              Source: 2026-03-25-pricing-reversal.md · SPEAKER_0 at 0:47 · decision
             </p>
           </div>
           <div className="mt-5 flex gap-2 md:mt-auto">

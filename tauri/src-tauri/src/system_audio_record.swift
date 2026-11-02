@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import AudioToolbox
 import CoreMedia
@@ -2235,6 +2236,13 @@ struct NativeCallRecordMain {
     nonisolated(unsafe) static var retainedTestSource: DispatchSourceSignal?
 
     static func main() {
+        // This helper runs from Minutes.app/Contents/MacOS, so it shares the
+        // app's bundle identity. Once ScreenCaptureKit connects it to the
+        // window server, LaunchServices registers it as a second foreground
+        // "Minutes" app that never finishes launching, and its Dock tile
+        // bounces for the whole capture. Declare it a background process
+        // before any capture API runs.
+        NSApplication.shared.setActivationPolicy(.prohibited)
         Task {
             await run()
         }

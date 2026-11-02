@@ -7399,7 +7399,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       </div>
 
       <!-- Calendar -->
-      <div class="settings-section">
+      <div class="settings-section" id="settings-calendar-section">
         <div class="about-item-title">CALENDAR</div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -13193,7 +13193,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
         });
       }
-      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'capture' }) });
+      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'ai', section: 'settings-calendar-section' }) });
       const button = document.getElementById('btn-dismiss-upcoming');
       const rect = button.getBoundingClientRect();
       const menu = await Menu.new({ items });
@@ -13259,6 +13259,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // Open on the requested tab, else General.
       const tab = options?.tab && document.querySelector(`.settings-tab[data-tab="${options.tab}"]`);
       (tab || settingsTabs[0]).click();
+      if (options?.section) {
+        requestAnimationFrame(() => document.getElementById(options.section)?.scrollIntoView({ block: 'start' }));
+      }
       loadSettings();
     }
     function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }

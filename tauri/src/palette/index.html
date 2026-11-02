@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Minutes Palette</title>
+  <script src="../scripts/customize-theme.js"></script>
   <script src="../scripts/ui-zoom.js"></script>
   <script src="../locales/zh-CN.js"></script>
   <script src="../locales/pt-BR.js"></script>
@@ -23,10 +24,34 @@
       --row-hover: rgba(255, 255, 255, 0.04);
       --row-focus: rgba(77, 168, 217, 0.16);
       --section-label: #6e6e73;
+      --fill: rgba(255, 255, 255, 0.06);
+      --fill-strong: rgba(255, 255, 255, 0.08);
       --shadow:
         0 24px 48px rgba(0, 0, 0, 0.32),
         0 6px 14px rgba(0, 0, 0, 0.24),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      color-scheme: light dark;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --panel: rgba(248, 244, 237, 0.98);
+        --panel-edge: rgba(26, 25, 22, 0.12);
+        --text: #1a1916;
+        --text-secondary: #5f5b54;
+        --text-tertiary: #6f6b63;
+        --accent: #2f6f8f;
+        --accent-soft: rgba(47, 111, 143, 0.14);
+        --row-hover: rgba(26, 25, 22, 0.05);
+        --row-focus: rgba(47, 111, 143, 0.14);
+        --section-label: #6b6760;
+        --fill: rgba(26, 25, 22, 0.06);
+        --fill-strong: rgba(26, 25, 22, 0.08);
+        --shadow:
+          0 24px 48px rgba(26, 25, 22, 0.16),
+          0 6px 14px rgba(26, 25, 22, 0.10),
+          inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
     }
 
     html, body {
@@ -63,7 +88,7 @@
 
     .input-row {
       padding: 14px 18px 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      border-bottom: 1px solid var(--panel-edge);
       display: flex;
       align-items: center;
       gap: 10px;
@@ -108,7 +133,7 @@
       width: 6px;
     }
     .list::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--fill-strong);
       border-radius: 3px;
     }
 
@@ -133,7 +158,7 @@
       width: 22px;
       height: 22px;
       border-radius: 5px;
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--fill);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -173,7 +198,7 @@
       flex-shrink: 0;
       padding: 2px 6px;
       border-radius: 4px;
-      background: rgba(255, 255, 255, 0.04);
+      background: var(--row-hover);
     }
 
     .empty {
@@ -184,7 +209,7 @@
     }
 
     .footer {
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      border-top: 1px solid var(--panel-edge);
       padding: 8px 18px;
       display: flex;
       gap: 16px;
@@ -193,7 +218,7 @@
     }
 
     .footer kbd {
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--fill);
       border-radius: 3px;
       padding: 1px 5px;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;

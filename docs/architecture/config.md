@@ -554,6 +554,31 @@ Default: `~/meetings` on Unix, `%USERPROFILE%\meetings` on Windows. Change to ro
 
 Runtime-only signals (detected audio devices, model provenance metadata, speaker voice embeddings) live under `~/.minutes/` and aren't user-configurable via TOML. Most are regenerated on demand; a few (voice profiles) persist across rebuilds via `~/.minutes/voices.db`.
 
+## Customization file
+
+`customize.toml`, beside `config.toml`, holds cosmetic choices for the desktop app. It's optional, and you, an agent, or Settings → General → Appearance can edit it.
+
+```toml
+[theme]
+mode = "auto"            # auto | light | dark
+accent_light = "#C96B4E"
+accent_dark = "#30D158"
+```
+
+| key | default | meaning |
+|---|---|---|
+| `mode` | `"auto"` | `"auto"` follows the OS. `"light"` or `"dark"` keeps every Minutes window in that appearance. |
+| `accent_light` | unset | Accent color in the light appearance, as `#RRGGBB`. Unset keeps the built-in color. |
+| `accent_dark` | unset | Accent color in the dark appearance, as `#RRGGBB`. Unset keeps the built-in color. |
+
+An accent needs at least 3:1 contrast against that appearance's background. Recording blue and error red can't be changed, because they carry meaning.
+
+This file can't stop Minutes launching. A bad value loses only that value, and a file that won't parse is ignored. Settings lists whatever was ignored and why. Unknown keys are ignored silently, so a file written for a newer version still works on an older one.
+
+Saved changes apply right away. A hand edit applies when the main window next regains focus or any window next opens.
+
+A new `[section]` belongs here only if its worst failure is cosmetic. Commands, paths, permissions, consent, privacy, capture, and hooks stay in `config.toml`.
+
 ## Contributing
 
 If you add a config field, please update this reference so the Advanced → View docs surface doesn't drift. The CI guard in `tauri/src-tauri/src/commands.rs` (`every_cmd_set_setting_arm_has_a_caller`) catches one specific class of drift — arms with no UI AND no internal caller — but it doesn't enforce documentation. That's on us.

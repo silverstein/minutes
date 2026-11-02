@@ -10,6 +10,7 @@
       document.documentElement.dataset.platform = 'macos';
     }
   </script>
+  <script src="scripts/customize-theme.js"></script>
   <script src="scripts/ui-zoom.js"></script>
   <script src="locales/zh-CN.js"></script>
   <script src="locales/pt-BR.js"></script>
@@ -6698,6 +6699,33 @@
       </nav>
 
       <div class="settings-tab-panel is-active" role="tabpanel" id="panel-general" data-panel="general" aria-labelledby="tab-general">
+      <!-- Appearance -->
+      <div class="settings-section">
+        <div class="about-item-title">APPEARANCE</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-mode">Theme</label>
+            <select id="settings-theme-mode" class="settings-field">
+              <option value="auto">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-accent-light">Accent color in light mode</label>
+            <div class="about-controls-meta">A hex color like #C96B4E. Leave blank for the default.</div>
+            <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#C96B4E" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-accent-dark">Accent color in dark mode</label>
+            <div class="about-controls-meta">A hex color like #30D158. Leave blank for the default.</div>
+            <input type="text" id="settings-theme-accent-dark" class="settings-field" placeholder="#30D158" spellcheck="false" autocomplete="off">
+          </div>
+          <div class="about-controls-meta" id="settings-theme-status" role="status"></div>
+          <div class="about-controls-meta">Saved in <span id="settings-theme-path"></span>. You or an agent can edit that file directly. Recording and error colors stay fixed.</div>
+        </div>
+      </div>
+
       <!-- Identity -->
       <div class="settings-section">
         <div class="about-item-title">IDENTITY</div>
@@ -14576,6 +14604,37 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       updateSumStatus(s);
       renderOpenAiCompatibleSettings(s);
     });
+    function renderThemeSettings(theme) {
+      document.getElementById('settings-theme-mode').value = theme.mode;
+      document.getElementById('settings-theme-accent-light').value = theme.accent_light || '';
+      document.getElementById('settings-theme-accent-dark').value = theme.accent_dark || '';
+      document.getElementById('settings-theme-path').textContent = theme.path;
+      const status = document.getElementById('settings-theme-status');
+      status.textContent = theme.problems.join(' ');
+      status.style.color = theme.problems.length ? 'var(--red)' : '';
+    }
+    async function saveThemeSettings() {
+      const status = document.getElementById('settings-theme-status');
+      try {
+        renderThemeSettings(await invoke('cmd_set_theme', {
+          mode: document.getElementById('settings-theme-mode').value,
+          accentLight: document.getElementById('settings-theme-accent-light').value,
+          accentDark: document.getElementById('settings-theme-accent-dark').value,
+        }));
+      } catch (err) {
+        status.textContent = String(err);
+        status.style.color = 'var(--red)';
+      }
+    }
+    ['settings-theme-mode', 'settings-theme-accent-light', 'settings-theme-accent-dark'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', saveThemeSettings);
+    });
+    document.addEventListener('minutes-theme-changed', () => {
+      if (window.__MINUTES_THEME__) renderThemeSettings(window.__MINUTES_THEME__);
+    });
+    invoke('cmd_get_customization').then(renderThemeSettings).catch((err) => {
+      console.error('Load appearance settings:', err);
+    });
     // Post-record hook — empty string clears the hook (Rust side maps "" → None).
     document.getElementById('settings-hooks-post-record').addEventListener('change', async (e) => {
       const value = e.target.value;
@@ -16158,6 +16217,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colors until you end this session, so its text stays readable.`);
         }
       };
+      document.addEventListener('minutes-theme-changed', () => {
+        if (recallThemeHandler) recallThemeHandler();
+      });
       // Re-theme when the app's own override flips, not only when the OS does.
       recallThemeObserver = new MutationObserver(recallThemeHandler);
       recallThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });

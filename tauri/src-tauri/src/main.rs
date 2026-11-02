@@ -25,6 +25,7 @@ mod capture_recovery_qa;
 mod cli_setup;
 mod commands;
 mod context;
+mod customize_theme;
 mod dictation_experience;
 mod dictation_field;
 mod palette_dispatch;
@@ -452,8 +453,8 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
         // cached state is stale. Reseed + repaint here is idempotent
         // when the cache is already correct (codex diff-review P2).
         if let Some(state) = app.try_state::<TrayAppearanceState>() {
-            if let Ok(theme) = win.theme() {
-                state.set(TrayAppearance::from_theme(theme));
+            if let Some(appearance) = customize_theme::tray_appearance(app, win.theme().ok()) {
+                state.set(appearance);
                 sync_tray_appearance(app);
             }
         }
@@ -1944,6 +1945,8 @@ fn main() {
     let countdown_terminal_state_for_detector = call_end_countdown_terminal_state.clone();
     let stop_for_detector = stop_flag.clone();
 
+    let initial_customization = minutes_core::customize::load();
+
     tauri::Builder::default()
         .menu(build_app_menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -2127,6 +2130,8 @@ fn main() {
                 })
                 .build(),
         )
+        .plugin(customize_theme::plugin(&initial_customization))
+        .manage(customize_theme::ThemeState::new(initial_customization))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -2216,6 +2221,7 @@ fn main() {
             shortcut_manager::ShortcutManager::new(),
         )))
         .setup(move |app| {
+            customize_theme::apply_at_startup(app.handle());
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
 
@@ -3044,11 +3050,11 @@ fn main() {
             // 2c9d26d). After this seed the `WindowEvent::ThemeChanged`
             // listener in the run loop keeps the state updated and triggers
             // `sync_tray_appearance` so the icon variant tracks the system.
-            let initial_appearance = app
-                .get_webview_window("main")
-                .and_then(|w| w.theme().ok())
-                .map(TrayAppearance::from_theme)
-                .unwrap_or(TrayAppearance::Light);
+            let initial_appearance = customize_theme::tray_appearance(
+                app.handle(),
+                app.get_webview_window("main").and_then(|w| w.theme().ok()),
+            )
+            .unwrap_or(TrayAppearance::Light);
             app.manage(TrayAppearanceState::new(initial_appearance));
 
             // `sync_tray_state` reads the PID-aware `recording_active`
@@ -3210,6 +3216,10 @@ fn main() {
                         commands::close_palette_window(&app_handle);
                     }
                 }
+                // Pick up hand and agent edits to customize.toml.
+                tauri::WindowEvent::Focused(true) if window.label() == "main" => {
+                    customize_theme::refresh(window.app_handle());
+                }
                 // Track macOS system appearance changes via the main
                 // window's ThemeChanged event. Tao registers an
                 // `AppleInterfaceThemeChangedNotification` observer on
@@ -3222,8 +3232,11 @@ fn main() {
                 // windows would otherwise re-fire the same event).
                 tauri::WindowEvent::ThemeChanged(theme) if window.label() == "main" => {
                     let app_handle = window.app_handle().clone();
-                    if let Some(state) = app_handle.try_state::<TrayAppearanceState>() {
-                        state.set(TrayAppearance::from_theme(*theme));
+                    if let (Some(state), Some(appearance)) = (
+                        app_handle.try_state::<TrayAppearanceState>(),
+                        customize_theme::tray_appearance(&app_handle, Some(*theme)),
+                    ) {
+                        state.set(appearance);
                     }
                     // Re-paint the tray icon for the new appearance; do
                     // NOT emit `palette:refresh` (codex plan-review #4 —
@@ -3331,6 +3344,8 @@ fn main() {
             commands::cmd_clear_openai_compatible_api_key,
             commands::cmd_set_setting,
             commands::cmd_set_screen_share_hidden,
+            customize_theme::cmd_get_customization,
+            customize_theme::cmd_set_theme,
             commands::cmd_get_autostart,
             commands::cmd_set_autostart,
             commands::cmd_get_storage_stats,

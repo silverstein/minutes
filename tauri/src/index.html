@@ -6711,18 +6711,22 @@
               <option value="dark">Dark</option>
             </select>
           </div>
+        </div>
+        <div class="about-controls">
           <div class="about-controls-group">
             <label class="about-controls-copy" for="settings-theme-accent-light">Accent color in light mode</label>
             <div class="about-controls-meta">A hex color like #C96B4E. Leave blank for the default.</div>
             <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#C96B4E" spellcheck="false" autocomplete="off">
           </div>
+        </div>
+        <div class="about-controls">
           <div class="about-controls-group">
             <label class="about-controls-copy" for="settings-theme-accent-dark">Accent color in dark mode</label>
             <div class="about-controls-meta">A hex color like #30D158. Leave blank for the default.</div>
             <input type="text" id="settings-theme-accent-dark" class="settings-field" placeholder="#30D158" spellcheck="false" autocomplete="off">
+            <div class="about-controls-meta" id="settings-theme-status" role="status"></div>
+            <div class="about-controls-meta">Saved in <span id="settings-theme-path"></span>. You or an agent can edit that file directly. Recording and error colors stay fixed.</div>
           </div>
-          <div class="about-controls-meta" id="settings-theme-status" role="status"></div>
-          <div class="about-controls-meta">Saved in <span id="settings-theme-path"></span>. You or an agent can edit that file directly. Recording and error colors stay fixed.</div>
         </div>
       </div>
 
@@ -7412,6 +7416,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
           </div>
+        </div>
+        <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Post-dictation command</div>
             <div class="about-controls-meta">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</div>

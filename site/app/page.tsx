@@ -443,6 +443,31 @@ signups get monthly.`}</code>
           </div>
         </Section>
 
+        <Section id="why">
+          <SectionHeading title="Why it's free." muted="Memory you don't rent." />
+          <div className="mt-10 max-w-[680px] space-y-5 text-[17px] leading-8 text-[var(--text-secondary)]">
+            <p>
+              Soon your agents will run on what you&apos;ve said out loud: meetings, calls, the idea you talked
+              through on a walk. That&apos;s the most personal data you&apos;ll ever make. You shouldn&apos;t have
+              to rent access to it, and nobody should get to read it just because you used their app.
+            </p>
+            <p>
+              So it&apos;s a file. Plain Markdown on your disk, MIT licensed. Switch agents next year and nothing
+              has to move. Share it with whoever you want, or with no one. There&apos;s no Minutes cloud for it to
+              sit in.
+            </p>
+            <p>
+              Good tools outlive the people who make them. If I stopped tomorrow, your meetings would still open
+              and the code would still run.
+            </p>
+            <p className="text-[var(--text)]">
+              <a href="https://github.com/silverstein" className="hover:underline">
+                Mat Silverstein
+              </a>
+            </p>
+          </div>
+        </Section>
+
         <section id="install" className="scroll-mt-20 border-t border-[color:var(--border)] py-20 text-center sm:py-28">
           <h2 className="mx-auto max-w-[760px] text-[36px] font-semibold leading-[1.05] tracking-[-0.04em] text-[var(--text)] sm:text-[56px]">
             Free, open source, and yours.{" "}

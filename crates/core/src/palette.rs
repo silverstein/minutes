@@ -134,6 +134,14 @@ pub enum ActionId {
         #[serde(default, alias = "new_title", alias = "newTitle")]
         new_title: Option<String>,
     },
+
+    /// Open one meeting in the main window. Not a registry command: the
+    /// palette sends it when the user picks a row from a result list
+    /// (search, research, action items, decisions).
+    OpenMeeting {
+        #[serde(default)]
+        path: Option<PathBuf>,
+    },
 }
 
 impl ActionId {
@@ -173,6 +181,7 @@ impl ActionId {
             }
             ActionId::ConfirmCurrentSpeaker { .. } => "confirm-current-speaker",
             ActionId::RenameCurrentMeeting { .. } => "rename-current-meeting",
+            ActionId::OpenMeeting { .. } => "open-meeting",
         }
     }
 }
@@ -1419,6 +1428,26 @@ mod tests {
             ActionId::ConfirmCurrentSpeaker {
                 confirmation: Some("SPEAKER_0 = Alex".into())
             }
+        );
+    }
+
+    #[test]
+    fn open_meeting_round_trips_and_stays_out_of_the_registry() {
+        let id: ActionId =
+            serde_json::from_str(r#"{"id":"open-meeting","path":"/tmp/m.md"}"#).unwrap();
+        assert_eq!(
+            id,
+            ActionId::OpenMeeting {
+                path: Some(PathBuf::from("/tmp/m.md"))
+            }
+        );
+        let json = serde_json::to_value(&id).unwrap();
+        assert_eq!(json["id"], id.as_kebab());
+        assert!(
+            commands()
+                .iter()
+                .all(|cmd| !matches!(cmd.id, ActionId::OpenMeeting { .. })),
+            "open-meeting is a result follow-up, not a listed command"
         );
     }
 

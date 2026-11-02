@@ -572,10 +572,10 @@ accent_dark = "#30D158"
 | key | default | meaning |
 |---|---|---|
 | `mode` | `"auto"` | `"auto"` follows the OS. `"light"` or `"dark"` keeps every Minutes window in that appearance. |
-| `accent_light` | unset | Accent color in the light appearance, as `#RRGGBB`. Unset keeps the built-in color. |
-| `accent_dark` | unset | Accent color in the dark appearance, as `#RRGGBB`. Unset keeps the built-in color. |
+| `accent_light` | unset | Accent color in the light appearance, as `#RRGGBB` or `oklch(L C H)`. Unset keeps the built-in color. |
+| `accent_dark` | unset | Accent color in the dark appearance, as `#RRGGBB` or `oklch(L C H)`. Unset keeps the built-in color. |
 
-An accent needs at least 3:1 contrast against that appearance's background. Recording blue and error red can't be changed, because they carry meaning.
+`oklch()` takes lightness (0-1 or a percentage), chroma (a number or a percentage of 0.4), and hue in degrees, without alpha. Minutes displays accents in sRGB, so a color outside sRGB keeps its lightness and hue and loses just enough chroma to fit. An accent needs at least 3:1 contrast against that appearance's background. Recording blue and error red can't be changed, because they carry meaning.
 
 This file can't stop Minutes launching. A bad value loses only that value, and a file that won't parse is ignored. Settings lists whatever was ignored and why. Unknown keys are ignored silently, so a file written for a newer version still works on an older one.
 

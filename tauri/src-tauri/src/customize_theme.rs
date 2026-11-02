@@ -47,6 +47,8 @@ pub struct ResolvedTheme {
     mode: ThemeMode,
     accent_light: Option<String>,
     accent_dark: Option<String>,
+    accent_light_hex: Option<String>,
+    accent_dark_hex: Option<String>,
     css: String,
     problems: Vec<String>,
     path: String,
@@ -57,6 +59,16 @@ fn resolved(customization: &Customization) -> ResolvedTheme {
         mode: customization.theme.mode,
         accent_light: customization.theme.accent_light.clone(),
         accent_dark: customization.theme.accent_dark.clone(),
+        accent_light_hex: customization
+            .theme
+            .accent_light
+            .as_deref()
+            .and_then(customize::accent_hex),
+        accent_dark_hex: customization
+            .theme
+            .accent_dark
+            .as_deref()
+            .and_then(customize::accent_hex),
         css: customize::theme_css(&customization.theme),
         problems: customization.problems.clone(),
         path: customize::customize_path().display().to_string(),

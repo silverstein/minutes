@@ -5587,6 +5587,33 @@
       cursor: pointer;
     }
 
+    .settings-color-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .settings-color-row .settings-field {
+      margin-top: 0;
+    }
+
+    .settings-color-swatch {
+      flex: none;
+      width: 44px;
+      height: 34px;
+      padding: 2px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-mid);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .settings-color-swatch:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     .settings-field {
       margin-top: 6px;
       width: 100%;
@@ -6720,15 +6747,21 @@
         <div class="about-controls">
           <div class="about-controls-group">
             <label class="about-controls-copy" for="settings-theme-accent-light">Accent color in light mode</label>
-            <div class="about-controls-meta">A hex color like #C96B4E. Leave blank for the default.</div>
-            <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#C96B4E" spellcheck="false" autocomplete="off">
+            <div class="about-controls-meta">Pick a color, or enter a hex or oklch() value. Leave blank for the default.</div>
+            <div class="settings-color-row">
+              <input type="color" id="settings-theme-accent-light-picker" class="settings-color-swatch" value="#C96B4E" aria-label="Pick the accent color for light mode">
+              <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#C96B4E" spellcheck="false" autocomplete="off">
+            </div>
           </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
             <label class="about-controls-copy" for="settings-theme-accent-dark">Accent color in dark mode</label>
-            <div class="about-controls-meta">A hex color like #30D158. Leave blank for the default.</div>
-            <input type="text" id="settings-theme-accent-dark" class="settings-field" placeholder="#30D158" spellcheck="false" autocomplete="off">
+            <div class="about-controls-meta">Pick a color, or enter a hex or oklch() value. Leave blank for the default.</div>
+            <div class="settings-color-row">
+              <input type="color" id="settings-theme-accent-dark-picker" class="settings-color-swatch" value="#30D158" aria-label="Pick the accent color for dark mode">
+              <input type="text" id="settings-theme-accent-dark" class="settings-field" placeholder="#30D158" spellcheck="false" autocomplete="off">
+            </div>
             <div class="about-controls-meta" id="settings-theme-status" role="status"></div>
             <div class="about-controls-meta">Saved in <span id="settings-theme-path"></span>. You or an agent can edit that file directly. Recording and error colors stay fixed.</div>
           </div>
@@ -14632,6 +14665,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       document.getElementById('settings-theme-mode').value = theme.mode;
       document.getElementById('settings-theme-accent-light').value = theme.accent_light || '';
       document.getElementById('settings-theme-accent-dark').value = theme.accent_dark || '';
+      document.getElementById('settings-theme-accent-light-picker').value = theme.accent_light_hex || '#C96B4E';
+      document.getElementById('settings-theme-accent-dark-picker').value = theme.accent_dark_hex || '#30D158';
       document.getElementById('settings-theme-path').textContent = theme.path;
       const status = document.getElementById('settings-theme-status');
       status.textContent = theme.problems.join(' ');
@@ -14652,6 +14687,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
     ['settings-theme-mode', 'settings-theme-accent-light', 'settings-theme-accent-dark'].forEach((id) => {
       document.getElementById(id).addEventListener('change', saveThemeSettings);
+    });
+    ['light', 'dark'].forEach((appearance) => {
+      const text = document.getElementById(`settings-theme-accent-${appearance}`);
+      document.getElementById(`settings-theme-accent-${appearance}-picker`).addEventListener('change', (e) => {
+        text.value = e.target.value.toUpperCase();
+        saveThemeSettings();
+      });
     });
     document.addEventListener('minutes-theme-changed', () => {
       if (window.__MINUTES_THEME__) renderThemeSettings(window.__MINUTES_THEME__);

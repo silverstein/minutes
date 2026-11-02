@@ -58,7 +58,7 @@ function getBaseMinutesTheme(isDark) {
 function getMinutesTheme(isDark) {
   const theme = getBaseMinutesTheme(isDark);
   const custom = window.__MINUTES_THEME__;
-  const accent = custom && (isDark ? custom.accent_dark : custom.accent_light);
+  const accent = custom && (isDark ? custom.accent_dark_hex : custom.accent_light_hex);
   if (!accent) return theme;
   const channels = [1, 3, 5].map((start) => parseInt(accent.slice(start, start + 2), 16));
   const selectionAlpha = isDark ? 0.18 : 0.16;

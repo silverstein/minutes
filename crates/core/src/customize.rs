@@ -59,9 +59,9 @@ impl ThemeMode {
 pub struct ThemeSettings {
     /// Forced appearance, if any.
     pub mode: ThemeMode,
-    /// `#RRGGBB` accent for the light appearance.
+    /// Accent for the light appearance, as `#RRGGBB` or `oklch(L C H)`.
     pub accent_light: Option<String>,
-    /// `#RRGGBB` accent for the dark appearance.
+    /// Accent for the dark appearance, as `#RRGGBB` or `oklch(L C H)`.
     pub accent_dark: Option<String>,
 }
 
@@ -156,7 +156,7 @@ fn decode_theme(table: &toml::Table, problems: &mut Vec<String>) -> ThemeSetting
         Some(value) => {
             match value
                 .as_str()
-                .ok_or_else(|| "use a color like \"#C96B4E\"".to_string())
+                .ok_or_else(|| ACCENT_FORMAT_HELP.to_string())
                 .and_then(|text| validate_accent(text, appearance))
             {
                 Ok(color) => Some(color),
@@ -199,21 +199,124 @@ impl Appearance {
     }
 }
 
-/// Check an accent and return it as uppercase `#RRGGBB`, or say why it's
-/// unusable. Only hex is accepted because the value ends up in a stylesheet,
-/// where CSS syntax could load remote URLs.
+const ACCENT_FORMAT_HELP: &str = "use a color like \"#C96B4E\" or \"oklch(0.63 0.14 40)\"";
+
+/// Check an accent and return it in canonical spelling, or say why it's
+/// unusable. Only hex and `oklch()` numbers are accepted because the result
+/// ends up in a stylesheet, where other CSS syntax could load remote URLs.
 pub fn validate_accent(value: &str, appearance: Appearance) -> Result<String, String> {
-    let color =
-        Rgb::parse(value.trim()).ok_or_else(|| "use a color like \"#C96B4E\"".to_string())?;
+    let value = value.trim();
+    let (canonical, color) = parse_accent(value).ok_or_else(|| ACCENT_FORMAT_HELP.to_string())?;
     let contrast = color.contrast(appearance.background());
     if contrast < MIN_ACCENT_CONTRAST {
         return Err(format!(
-            "{} has {contrast:.1}:1 contrast against the {} background, and it needs at least {MIN_ACCENT_CONTRAST:.0}:1",
-            color.hex(),
+            "{value} has {contrast:.1}:1 contrast against the {} background, and it needs at least {MIN_ACCENT_CONTRAST:.0}:1",
             appearance.name()
         ));
     }
-    Ok(color.hex())
+    Ok(canonical)
+}
+
+/// The sRGB `#RRGGBB` for an accent in either accepted format.
+pub fn accent_hex(value: &str) -> Option<String> {
+    parse_accent(value.trim()).map(|(_, color)| color.hex())
+}
+
+fn parse_accent(value: &str) -> Option<(String, Rgb)> {
+    if let Some(color) = Rgb::parse(value) {
+        return Some((color.hex(), color));
+    }
+    let (lightness, chroma, hue, canonical) = parse_oklch(value)?;
+    Some((canonical, oklch_to_srgb(lightness, chroma, hue)))
+}
+
+/// Parse `oklch(L C H)`, where L is 0-1 or a percentage, C is a number or a
+/// percentage of 0.4, and H is in degrees. Alpha, `none`, and `calc()` are
+/// rejected: an accent is one solid color.
+fn parse_oklch(value: &str) -> Option<(f64, f64, f64, String)> {
+    let lower = value.to_ascii_lowercase();
+    let inner = lower.strip_prefix("oklch(")?.strip_suffix(')')?;
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    let [lightness_text, chroma_text, hue_text] = parts.as_slice() else {
+        return None;
+    };
+    let number = |text: &str| -> Option<f64> {
+        let plain = text.strip_prefix(['-', '+']).unwrap_or(text);
+        if plain.is_empty()
+            || !plain
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return None;
+        }
+        text.parse::<f64>().ok().filter(|parsed| parsed.is_finite())
+    };
+    let lightness = match lightness_text.strip_suffix('%') {
+        Some(percent) => number(percent)? / 100.0,
+        None => number(lightness_text)?,
+    };
+    let chroma = match chroma_text.strip_suffix('%') {
+        Some(percent) => number(percent)? / 100.0 * 0.4,
+        None => number(chroma_text)?,
+    };
+    let hue = number(hue_text.strip_suffix("deg").unwrap_or(hue_text))?;
+    if !(0.0..=1.0).contains(&lightness) || !(0.0..=0.5).contains(&chroma) {
+        return None;
+    }
+    let canonical = format!("oklch({lightness_text} {chroma_text} {hue_text})");
+    Some((lightness, chroma, hue, canonical))
+}
+
+/// Convert OKLCH to sRGB. Colors outside sRGB keep their lightness and hue and
+/// lose just enough chroma to fit, which is the approach CSS gamut mapping uses.
+fn oklch_to_srgb(lightness: f64, chroma: f64, hue: f64) -> Rgb {
+    let in_gamut = |channels: [f64; 3]| {
+        channels
+            .iter()
+            .all(|channel| (-0.0001..=1.0001).contains(channel))
+    };
+    let mut channels = oklch_to_linear_srgb(lightness, chroma, hue);
+    if !in_gamut(channels) {
+        let (mut low, mut high) = (0.0, chroma);
+        for _ in 0..24 {
+            let middle = (low + high) / 2.0;
+            if in_gamut(oklch_to_linear_srgb(lightness, middle, hue)) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        channels = oklch_to_linear_srgb(lightness, low, hue);
+    }
+    let encode = |linear: f64| {
+        let linear = linear.clamp(0.0, 1.0);
+        let gamma = if linear <= 0.003_130_8 {
+            12.92 * linear
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        (gamma * 255.0).round() as u8
+    };
+    Rgb(
+        encode(channels[0]),
+        encode(channels[1]),
+        encode(channels[2]),
+    )
+}
+
+fn oklch_to_linear_srgb(lightness: f64, chroma: f64, hue: f64) -> [f64; 3] {
+    let (a, b) = (
+        chroma * hue.to_radians().cos(),
+        chroma * hue.to_radians().sin(),
+    );
+    let l = (lightness + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+    let m = (lightness - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+    let s = (lightness - 0.089_484_177_5 * a - 1.291_485_548_0 * b).powi(3);
+    [
+        4.076_741_662_1 * l - 3.307_711_591_3 * m + 0.230_969_929_2 * s,
+        -1.268_438_004_6 * l + 2.609_757_401_1 * m - 0.341_319_396_5 * s,
+        -0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701_0 * s,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,7 +375,7 @@ impl Rgb {
 /// regardless of source order.
 pub fn theme_css(theme: &ThemeSettings) -> String {
     let mut css = String::new();
-    if let Some(color) = theme.accent_light.as_deref().and_then(Rgb::parse) {
+    if let Some((_, color)) = theme.accent_light.as_deref().and_then(parse_accent) {
         css.push_str(&accent_block(
             "light",
             color,
@@ -291,7 +394,7 @@ pub fn theme_css(theme: &ThemeSettings) -> String {
             ],
         ));
     }
-    if let Some(color) = theme.accent_dark.as_deref().and_then(Rgb::parse) {
+    if let Some((_, color)) = theme.accent_dark.as_deref().and_then(parse_accent) {
         css.push_str(&accent_block(
             "dark",
             color,
@@ -515,6 +618,62 @@ mod tests {
     }
 
     #[test]
+    fn oklch_converts_to_the_expected_srgb() {
+        // Reference values from the CSS Color 4 conversion.
+        for (value, expected) in [
+            ("oklch(1 0 0)", (255, 255, 255)),
+            ("oklch(0 0 0)", (0, 0, 0)),
+            ("oklch(0.62796 0.25768 29.234)", (255, 0, 0)),
+            ("oklch(0.45201 0.31321 264.052)", (0, 0, 255)),
+            ("oklch(62.796% 64.42% 29.234deg)", (255, 0, 0)),
+        ] {
+            let Rgb(r, g, b) = parse_accent(value).unwrap().1;
+            for (channel, wanted) in [(r, expected.0), (g, expected.1), (b, expected.2)] {
+                assert!(
+                    channel.abs_diff(wanted) <= 1,
+                    "{value} became {r} {g} {b}, wanted {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oklch_outside_srgb_keeps_its_hue_instead_of_clipping() {
+        let Rgb(r, g, b) = parse_accent("oklch(0.7 0.4 150)").unwrap().1;
+        assert!(g > r && g > b, "a green hue should stay green: {r} {g} {b}");
+        assert!(
+            r > 0 || b > 0,
+            "chroma should be reduced, not clipped: {r} {g} {b}"
+        );
+    }
+
+    #[test]
+    fn oklch_is_accepted_saved_as_written_and_checked_for_contrast() {
+        let parsed = parse("[theme]\naccent_dark = \"OKLCH(0.8 0.15 150)\"\n");
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert_eq!(
+            parsed.theme.accent_dark.as_deref(),
+            Some("oklch(0.8 0.15 150)")
+        );
+        assert!(theme_css(&parsed.theme).contains("--accent: #"));
+        assert!(accent_hex("oklch(0.8 0.15 150)").is_some());
+
+        let too_dark = validate_accent("oklch(0.1 0.02 150)", Appearance::Dark).unwrap_err();
+        assert!(too_dark.contains("contrast"), "{too_dark}");
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("customize.toml");
+        let wanted = ThemeSettings {
+            accent_dark: Some("oklch(0.8 0.15 150)".into()),
+            ..ThemeSettings::default()
+        };
+        save_theme(&path, &wanted).unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("accent_dark = \"oklch(0.8 0.15 150)\""));
+    }
+
+    #[test]
     fn accents_cannot_smuggle_css() {
         for hostile in [
             "#fff; background: url(https://example.com/x)",
@@ -525,6 +684,19 @@ mod tests {
             "rgb(1,2,3)",
             "url(x)",
             "#12345é",
+            "oklch(0.5 0.1 200); background: url(https://example.com/x)",
+            "oklch(0.8 0.1 200) url(x)",
+            "oklch(0.8 0.1 200 / 0.5)",
+            "oklch(calc(1) 0 0)",
+            "oklch(none 0.1 200)",
+            "oklch(nan 0.1 200)",
+            "oklch(inf 0.1 200)",
+            "oklch(0.8 1e0 200)",
+            "oklch(0.8, 0.1, 200)",
+            "oklch(0.8 0.1)",
+            "oklch(2 0.1 200)",
+            "oklch(0.8 -0.1 200)",
+            "oklab(0.8 0.1 0.1)",
         ] {
             assert!(
                 validate_accent(hostile, Appearance::Dark).is_err(),

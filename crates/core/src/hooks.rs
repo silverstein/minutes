@@ -209,8 +209,10 @@ fn shell_command(user_command: &str, argument: &str) -> BoundedCommand {
     if argument.is_empty() {
         command.raw_arg(format!("\"{user_command}\""));
     } else {
-        // cmd.exe does not rescan an expanded variable, so a file name cannot
-        // inject syntax here, and double quotes cannot appear in Windows paths.
+        // cmd.exe expands the variable before parsing, so the surrounding
+        // quotes are what keep `&` and similar characters in a file name from
+        // acting as syntax. Double quotes cannot appear in Windows paths, so
+        // the name cannot close them.
         command
             .env("MINUTES_HOOK_ARGUMENT", argument)
             .raw_arg(format!("\"{user_command} \"%MINUTES_HOOK_ARGUMENT%\"\""));
@@ -389,13 +391,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let out = dir.path().join("out.txt");
         let script = dir.path().join("hook.cmd");
+        // `%1` keeps the quotes the runner added. `%~1` would strip them and
+        // let the script itself run whatever follows an `&` in the name.
         std::fs::write(
             &script,
-            format!("@echo off\r\necho %~1> \"{}\"\r\n", out.display()),
+            format!("@echo off\r\necho %1>\"{}\"\r\n", out.display()),
         )
         .unwrap();
         let command = format!("\"{}\"", script.display());
-        let argument = r"C:\tmp\a b & c.md";
+        let argument = r"C:\tmp\a b & c %PATH% d.md";
         let run = run_request(
             request(command, argument, Some("{}")),
             Duration::from_secs(30),
@@ -406,7 +410,10 @@ mod tests {
             "stderr: {}",
             String::from_utf8_lossy(&run.output.stderr)
         );
-        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), argument);
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap().trim(),
+            format!("\"{argument}\"")
+        );
     }
 
     #[test]

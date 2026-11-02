@@ -51,7 +51,9 @@ treat the path as a second URL.
 - `minutes dictate` waits for running hooks before it exits, for up to 5 minutes.
 - If you quit the desktop app, queued hooks don't run. Re-transcribing a failed
   dictation from Recent Dictations doesn't run the hook either.
-- Hooks run through `sh -c` on macOS and Linux, and `cmd /C` on Windows.
+- Hooks run through `sh -c` on macOS and Linux, and `cmd /C` on Windows. In a
+  Windows batch script, use `%1` rather than `%~1`: `%~1` strips the quotes, so an
+  `&` in a file name would run as a command.
 - `PATH` also includes `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and
   `/usr/local/bin`, because apps opened from the Mac desktop start with a minimal
   `PATH`. Other tools need absolute paths.

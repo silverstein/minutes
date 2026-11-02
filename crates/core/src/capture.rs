@@ -3544,7 +3544,10 @@ mod tests {
             std::fs::read(path).unwrap()
         };
 
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
+        // The pump drops chunks when a sidecar falls behind, by design. Room for
+        // every possible chunk keeps a slow runner's drain thread from turning
+        // that into a failure of this test, which is about WAV integrity.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(samples.len());
         let drain = std::thread::spawn(move || rx.iter().map(|chunk| chunk.len()).sum::<usize>());
         let with_sidecar = record("with-sidecar.wav", Some(tx));
         let forwarded = drain.join().unwrap();

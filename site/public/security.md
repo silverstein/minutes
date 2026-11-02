@@ -10,7 +10,7 @@ The recording and transcription pipeline processes audio on your device. Minutes
 
 ## What can use the network
 
-Setup and updates can download models and software. Connected cloud assistants and summarizers receive authorized meeting context. Files copied into synced folders follow the sync provider's settings. The website uses analytics separately from the desktop recording pipeline. Website download and setup events contain an action category and page path, not meeting content or clipboard text.
+Setup and updates can download models and software. Connected cloud assistants and summarizers receive authorized meeting context. Files copied into synced folders follow the sync provider's settings. This website counts visits with Cloudflare Web Analytics, which sets no cookies and does not identify you. It is separate from the desktop app, which sends nothing to us.
 
 ## Your responsibilities
 

@@ -1006,7 +1006,9 @@ pub struct DictationConfig {
     pub auto_paste_restore: bool,
     pub silence_timeout_ms: u64,
     pub max_utterance_secs: u64,
+    /// Parsed so older configs still load. Dictation does not read it.
     pub destination_file: String,
+    /// Parsed so older configs still load. Dictation does not read it.
     pub destination_command: String,
     pub model: String,
     pub shortcut_enabled: bool,

@@ -1521,7 +1521,7 @@ function boundedPolicyIntentResult(result: PolicyIntentResult): PolicyIntentResu
 
 export type PolicyToolSearchFilter = {
   query: string;
-  contentType?: "meeting" | "memo";
+  contentType?: "meeting" | "memo" | "dictation";
   since?: string;
   intentKind?: string;
   owner?: string;
@@ -1572,7 +1572,7 @@ export function collectPolicyToolSearchSnapshots(
   }).slice(0, MCP_POLICY_MEETING_RESULT_MAX);
 }
 
-async function policyToolSearchMeetings(
+export async function policyToolSearchMeetings(
   dir: string,
   includeRestricted: boolean,
   filter: PolicyToolSearchFilter,
@@ -5284,7 +5284,7 @@ registerTool(
 registerDocsAppTool(
   "list_meetings",
   {
-    description: "List recent meetings and voice memos. Restricted meetings are excluded. An override requires both an operator launch grant and include_restricted=true, and is durably audited.",
+    description: "List recent meetings, voice memos, and dictations. Restricted meetings are excluded. An override requires both an operator launch grant and include_restricted=true, and is durably audited.",
     inputSchema: {
       limit: z
         .number()
@@ -5294,7 +5294,7 @@ registerDocsAppTool(
         .optional()
         .default(10)
         .describe(`Maximum results (1-${MCP_MEETING_RESULT_MAX})`),
-      type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
+      type: z.enum(["meeting", "memo", "dictation"]).optional().describe("Filter by type"),
       include_restricted: z
         .boolean()
         .optional()
@@ -5349,10 +5349,10 @@ registerDocsAppTool(
 registerDocsAppTool(
   "search_meetings",
   {
-    description: "Search meeting transcripts and voice memos. Restricted meetings are excluded. An override requires both an operator launch grant and include_restricted=true, and is durably audited.",
+    description: "Search meeting transcripts, voice memos, and dictations. Restricted meetings are excluded. An override requires both an operator launch grant and include_restricted=true, and is durably audited.",
     inputSchema: {
       query: z.string().max(MCP_QUERY_MAX_CHARS).describe("Text to search for"),
-      type: z.enum(["meeting", "memo"]).optional().describe("Filter by type"),
+      type: z.enum(["meeting", "memo", "dictation"]).optional().describe("Filter by type"),
       since: z.string().optional().describe("Only results after this date (ISO)"),
       limit: z
         .number()

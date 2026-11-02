@@ -84,6 +84,7 @@ and dotted agent-facing names used by new or normalized events.
 | `recording.completed` | canonical, shipped | Emitted by recording completion paths. Legacy `RecordingCompleted` is accepted as an alias. |
 | `meeting.insight.detected` | canonical, shipped | Emitted by semantic insight extraction. Legacy `MeetingInsightExtracted` is accepted as an alias. |
 | `recording.started` | canonical, shipped | Emitted after capture/live/dictation/watch processing actually starts. |
+| `dictation.completed` | canonical, shipped | Emitted after a dictation's Markdown file is written, with `id` (file stem) and `path` only. Destinations that write no file, such as `daily_note`, emit nothing. |
 | `transcript.delta` | punted from v0 | Partial streaming revisions are high-volume and model-specific. Keep v0 on final utterances; revisit deltas in a gated v1 design. |
 | `agent.annotation` | canonical, shipped | Append-only attributed agent commentary. Gated by `~/.minutes/agents.allow`; never mutates human-authored meeting markdown/frontmatter. |
 

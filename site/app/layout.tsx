@@ -1,18 +1,9 @@
 import type { Metadata } from "next";
 import { WebsiteAnalytics } from "@/components/website-analytics";
 import { AcquisitionEvents } from "@/components/acquisition-events";
-import { Instrument_Serif } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import "./globals.css";
-
-const instrumentSerif = Instrument_Serif({
-  subsets: ["latin"],
-  weight: "400",
-  style: ["normal", "italic"],
-  variable: "--font-instrument-serif",
-  display: "swap",
-});
 
 // Title and description target the queries that actually drive impressions
 // here ("minutes app", "minute app"), which were converting at 1.5% CTR from
@@ -65,7 +56,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${GeistSans.variable} ${GeistMono.variable} ${instrumentSerif.variable}`}
+      className={`${GeistSans.variable} ${GeistMono.variable}`}
     >
       <head>
         <link rel="alternate" type="text/plain" href="/llms.txt" />

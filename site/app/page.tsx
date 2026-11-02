@@ -1,122 +1,131 @@
+import type { ReactNode } from "react";
 import { CopyButton } from "@/components/copy-button";
-import { DemoPlayer } from "@/components/demo-player";
-import { MemoryCompoundsHero } from "@/components/memory-compounds-hero";
+import { HomeHero, SiteHeader } from "@/components/home-hero";
 import {
   APPLE_SILICON_DOWNLOAD_PATH,
   WINDOWS_INSTALLER_DOWNLOAD_URL,
 } from "@/lib/downloads";
-import {
-  MINUTES_MCP_TOOL_COUNT,
-  MINUTES_RELEASE_VERSION,
-  MINUTES_TEST_COUNT,
-} from "@/lib/release";
+import { MINUTES_MCP_TOOL_COUNT, MINUTES_TEST_COUNT } from "@/lib/release";
 import { organizationSchema, softwareApplicationSchema } from "@/lib/schema";
-import { NumberedSectionLabel as SectionLabel } from "@/components/section-label";
 
-const featureGrid = [
+const linkClass =
+  "text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-4 hover:decoration-[color:var(--text)]";
+
+function SectionHeading({ title, muted }: { title: string; muted: string }) {
+  return (
+    <h2 className="max-w-[880px] text-[32px] font-semibold leading-[1.08] tracking-[-0.035em] text-[var(--text)] sm:text-[44px]">
+      {title} <span className="text-[var(--text-tertiary)]">{muted}</span>
+    </h2>
+  );
+}
+
+function Section({ id, children }: { id?: string; children: ReactNode }) {
+  return (
+    <section id={id} className="scroll-mt-20 border-t border-[color:var(--border)] py-20 sm:py-28">
+      {children}
+    </section>
+  );
+}
+
+function Panel({ title, meta, children }: { title: string; meta?: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col overflow-hidden rounded-[12px] border border-[color:var(--border)] bg-[var(--bg-elevated)]">
+      <div className="flex items-center justify-between gap-3 border-b border-[color:var(--border)] px-4 py-2.5 font-mono text-[11px] text-[var(--text-secondary)]">
+        <span className="truncate">{title}</span>
+        {meta ? <span className="shrink-0 text-[var(--text-tertiary)]">{meta}</span> : null}
+      </div>
+      <div className="flex-1 p-4">{children}</div>
+    </div>
+  );
+}
+
+const steps = [
   {
-    label: "For agents",
-    title: "Searchable local context",
-    description:
-      `${MINUTES_MCP_TOOL_COUNT} MCP tools, live transcript reads, and policy-aware search across meetings and notes let Claude, Codex, Gemini CLI, and Cowork work from what was actually said.`,
+    n: "1",
+    title: "Capture",
+    body: "Record a meeting, drop in a voice memo from your iPhone, or dictate. Transcription runs on your machine.",
   },
   {
-    label: "For developers",
-    title: "Local and inspectable",
-    description:
-      "On-device transcription, diarized markdown, YAML frontmatter, and a plain-files workflow that still works with grep and git.",
+    n: "2",
+    title: "One Markdown file",
+    body: "Speakers, transcript, decisions, and action items, in a file you can open, grep, and keep for ten years.",
   },
   {
-    label: "For meetings",
-    title: "Capture what matters",
-    description:
-      "One-click recording keeps voice and system audio failure-isolated, reports source dropouts and mostly-zero stems, and preserves the WAV for recovery.",
-  },
-  {
-    label: "For voice memos",
-    title: "Phone to desktop",
-    description:
-      "Minutes watches for iPhone Voice Memos, transcribes them on your Mac, and makes them available to the same memory layer.",
-  },
-  {
-    label: "For daily work",
-    title: "Dictation that stays useful",
-    description:
-      "Speak, correct yourself, and get usable text. Choose natural cleanup or literal transcription, then insert it where you are working or recover it from recent dictations.",
-  },
-  {
-    label: "For recall",
-    title: "Answers from raw output",
-    description:
-      "Minutes keeps timestamps, speakers, and action items visible so you can check an answer against the source.",
+    n: "3",
+    title: "Recall with a source",
+    body: "Ask Recall in the app, or your own AI assistant, and the answer points back to the file it came from.",
   },
 ] as const;
 
-const capabilityColumns = [
-  {
-    label: "Capture",
-    items: [
-      [
-        "Local transcription",
-        "Whisper or Parakeet, depending on your platform and installed models. Your audio stays on your machine.",
-      ],
-      [
-        "Streaming results",
-        "Text appears as you speak, with partial updates every few seconds.",
-      ],
-      [
-        "Speaker diarization",
-        "pyannote separates who said what in multi-person meetings.",
-      ],
-      [
-        "Dictation mode",
-        "Natural or literal text, clipboard recovery, and a daily note for short thoughts and commands.",
-      ],
-    ],
-  },
-  {
-    label: "Intelligence",
-    items: [
-      [
-        "Structured extraction",
-        "Action items, decisions, and commitments become queryable markdown.",
-      ],
-      [
-        "People memory",
-        "Who said what, what they committed to, and what you owe them, built only from meetings you let agents read.",
-      ],
-      [
-        "Cross-meeting search",
-        "Search your own history, or ask your assistant to pull the thread across months of meetings.",
-      ],
-      [
-        "Voice memo pipeline",
-        "iPhone recordings land on your Mac and join the same searchable folder.",
-      ],
-    ],
-  },
-  {
-    label: "Integration",
-    items: [
-      [
-        "Desktop app",
-        "Tauri menu bar app with recording, dictation hotkey, and meeting prompts.",
-      ],
-      [
-        "Claude-native",
-        `${MINUTES_MCP_TOOL_COUNT} MCP tools for Claude Desktop, Cowork, Dispatch, and Claude Code.`,
-      ],
-      [
-        "Any LLM",
-        "Use Ollama, OpenAI-compatible gateways, local servers, or skip summarization entirely.",
-      ],
-      [
-        "Markdown is truth",
-        "YAML frontmatter, plain files, and a workflow that works outside Minutes.",
-      ],
-    ],
-  },
+// Both pairs are verbatim cases from the dictation cleanup tests
+// (crates/core/src/dictation_cleanup.rs), so the demo shows real output.
+const corrections = [
+  ["Meet on Tuesday, actually Thursday.", "Meet on Thursday."],
+  ["This is a recording test—actually, a dictation test.", "This is a dictation test."],
 ] as const;
+
+const dictationEditing = [
+  ["Self-corrections", "Say “actually” or “scratch that” and the earlier words go."],
+  ["Voice commands", "“New line”, “new paragraph”, “bullet”, and your own snippets."],
+  ["Fits the app", "On a Mac, terminals get exactly what you said; chats and AI prompts get tidied prose."],
+  ["No AI rewriting", "Every edit is a rule on your device. Nothing is sent anywhere to clean it up."],
+] as const;
+
+// Brand marks from Simple Icons (CC0, v16.36.0), drawn in the text color so
+// they read as labels. Codex has no mark: OpenAI's logo is not in Simple
+// Icons, and it is not redrawn here.
+const agentSurfaces = [
+  { name: "Claude", logo: "m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" },
+  { name: "Codex" },
+  { name: "Gemini CLI", logo: "M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" },
+  { name: "OpenCode", logo: "M22 24H2V0h20zM17 4.8H7v14.4h10z" },
+  { name: "Cursor" },
+  { name: "Pi" },
+  { name: "Any MCP client" },
+] as const;
+
+type FlowStep = { label: string; detail: string; offDevice?: boolean; yourChoice?: boolean };
+
+const cloudFlow: FlowStep[] = [
+  { label: "Capture", detail: "your mic" },
+  { label: "Transcribe", detail: "their servers", offDevice: true },
+  { label: "Summarize", detail: "hosted AI", offDevice: true },
+  { label: "Store", detail: "their workspace", offDevice: true },
+];
+
+const minutesFlow: FlowStep[] = [
+  { label: "Capture", detail: "your mic and system audio" },
+  { label: "Transcribe", detail: "on-device speech model" },
+  { label: "Store", detail: "Markdown in ~/meetings" },
+  { label: "Recall", detail: "the assistant you pick sees what you share", yourChoice: true },
+];
+
+function FlowList({ name, steps: flow }: { name: string; steps: FlowStep[] }) {
+  return (
+    <div className="rounded-[12px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5">
+      <p className="text-[15px] font-semibold text-[var(--text)]">{name}</p>
+      <ol className="mt-4 space-y-2">
+        {flow.map((step) => (
+          <li
+            key={step.label}
+            className="flex items-center justify-between gap-4 rounded-[8px] border border-[color:var(--border)] bg-[var(--bg)] px-3 py-2.5"
+          >
+            <span className="text-[14px] text-[var(--text)]">
+              {step.label} <span className="text-[var(--text-tertiary)]">· {step.detail}</span>
+            </span>
+            <span
+              className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] ${
+                step.offDevice || step.yourChoice ? "text-[var(--text-tertiary)]" : "text-[var(--accent)]"
+              }`}
+            >
+              {step.offDevice ? "Cloud" : step.yourChoice ? "Your choice" : "Your machine"}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
 
 // Homepage storage and agent-access rows spot-checked October 19, 2026.
 // Sources: granola.ai/security, help.granola.ai/article/granola-mcp,
@@ -129,768 +138,398 @@ const comparisons = [
   ["Local AI", "Cloud transcription", "Cloud transcription", "With local providers", "Local transcription; AI provider of your choice"],
 ] as const;
 
-
-function TranscriptCard() {
-  return (
-    <div className="stream-card overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
-      <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-            Transcript Output
-          </p>
-          <p className="mt-1 font-mono text-[12px] text-[var(--text-secondary)]">
-            2026-04-08-strategy-sync.md
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <span className="rounded-full bg-[var(--accent-soft)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--accent)]">
-            2 speakers
-          </span>
-          <span className="rounded-full bg-[var(--bg-hover)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-            42 min
-          </span>
-          <span className="rounded-full bg-[var(--bg-hover)] px-2 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-            3 actions
-          </span>
-        </div>
-      </div>
-
-      <div className="space-y-6 px-5 py-5 font-mono text-[12px] leading-6 text-[var(--text)] sm:px-6">
-        <div className="transcript-grid">
-          <span className="text-[var(--text-tertiary)]">09:02</span>
-          <span className="text-[var(--accent)]">mat</span>
-          <span>
-            We should switch consultants to monthly billing instead of annual.
-          </span>
-
-          <span className="text-[var(--text-tertiary)]">09:04</span>
-          <span className="text-[var(--accent)]">dana</span>
-          <span>
-            Test it on the next three signups first and compare retention.
-          </span>
-
-          <span className="text-[var(--text-tertiary)]">09:11</span>
-          <span className="text-[var(--accent)]">mat</span>
-          <span>
-            Minutes, capture that as a pricing experiment and link it to Q2
-            planning.
-          </span>
-        </div>
-
-        <div className="stream-actions border-t border-[color:var(--border)] pt-5">
-          <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
-            Action Items
-          </p>
-          <div className="space-y-2 text-[var(--text)]">
-            <div>
-              <span className="mr-2 text-[var(--accent)]">☐</span>
-              Test monthly billing with the next three consultant signups
-            </div>
-            <div>
-              <span className="mr-2 text-[var(--accent)]">☐</span>
-              Compare retention and payback against annual billing
-            </div>
-            <div>
-              <span className="mr-2 text-[var(--accent)]">☐</span>
-              Review experiment results in next week&apos;s pricing sync
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const dictationEntries = [
-  ["08:14", "Remind me to send the Q3 numbers to the board before Friday."],
-  ["11:02", "Onboarding idea: defer the model download until the first recording."],
-  ["15:47", "Dana owns the pricing experiment; review the results next week."],
+const compareLinks = [
+  ["Granola", "/compare/granola-vs-minutes"],
+  ["Otter", "/compare/otter-vs-minutes"],
+  ["Fathom", "/compare/fathom-vs-minutes"],
+  ["Anarlog", "/compare/hyprnote-vs-minutes"],
+  ["Wispr Flow", "/compare/wispr-flow-vs-minutes"],
 ] as const;
 
-function DictationCard() {
-  return (
-    <div className="overflow-hidden rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] text-left shadow-[var(--shadow-panel)]">
-      <div className="flex flex-col gap-3 border-b border-[color:var(--border)] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-            Dictation
-          </p>
-          <p className="mt-1 font-mono text-[12px] text-[var(--text-secondary)]">
-            daily-note.md · 2026-07-10
-          </p>
-        </div>
-        <div className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-secondary)]">
-          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
-            ⌥
-          </kbd>
-          <kbd className="rounded-[4px] border border-[color:var(--border-mid)] bg-[var(--bg-hover)] px-2 py-1 text-[var(--text)]">
-            Space
-          </kbd>
-          <span>hold to talk</span>
-        </div>
-      </div>
-
-      <div className="space-y-3 px-5 py-5 font-mono text-[12px] leading-6 text-[var(--text)] sm:px-6">
-        {dictationEntries.map(([time, text]) => (
-          <div key={time} className="flex gap-4">
-            <span className="shrink-0 text-[var(--text-tertiary)]">{time}</span>
-            <span>{text}</span>
-          </div>
-        ))}
-      </div>
-
-      <div className="border-t border-[color:var(--border)] px-5 py-3 font-mono text-[11px] leading-5 text-[var(--text-tertiary)] sm:px-6">
-        Transcribed on-device · appended locally · searchable by your AI later
-      </div>
-    </div>
-  );
-}
-
-type HomeFlowStep = { label: string; detail: string; offDevice?: boolean };
-
-const cloudFlow: HomeFlowStep[] = [
-  { label: "Capture from your mic", detail: "device audio, on your Mac" },
-  { label: "Transcribe", detail: "cloud providers", offDevice: true },
-  { label: "Enhance notes", detail: "hosted AI", offDevice: true },
-  { label: "Store transcripts + notes", detail: "their servers", offDevice: true },
-];
-
-const minutesFlow: HomeFlowStep[] = [
-  { label: "Capture from your mic", detail: "device audio, on your Mac" },
-  { label: "Transcribe", detail: "on-device speech model" },
-  { label: "Store transcripts + notes", detail: "your disk; markdown in ~/meetings" },
-];
-
-function HomeFlowCard({
-  name,
-  leavesDevice,
-  steps,
-  footnote,
-}: {
-  name: string;
-  leavesDevice: boolean;
-  steps: HomeFlowStep[];
-  footnote: string;
-}) {
-  return (
-    <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 text-left shadow-[var(--shadow-panel)]">
-      <div className="flex items-center justify-between gap-3">
-        <p className="font-mono text-[13px] font-medium text-[var(--text)]">{name}</p>
-        <span
-          className={`rounded-full px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] ${
-            leavesDevice
-              ? "bg-[var(--bg-hover)] text-[var(--text-secondary)]"
-              : "bg-[var(--accent-soft)] text-[var(--accent)]"
-          }`}
-        >
-          {leavesDevice ? "Leaves your device" : "Stays on device"}
-        </span>
-      </div>
-      <ol className="mt-5">
-        {steps.map((step, i) => (
-          <li key={step.label}>
-            <div
-              className={`rounded-[6px] px-4 py-3 ${
-                step.offDevice
-                  ? "border border-dashed border-[color:var(--border-mid)] bg-transparent"
-                  : "border border-[color:var(--border)] bg-[var(--bg)]"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-mono text-[13px] text-[var(--text)]">
-                  {step.label}
-                </span>
-                <span
-                  className={`shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] ${
-                    step.offDevice
-                      ? "text-[var(--text-tertiary)]"
-                      : "text-[var(--accent)]"
-                  }`}
-                >
-                  {step.offDevice ? "☁ cloud" : "on-device"}
-                </span>
-              </div>
-              <p className="mt-1 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
-                {step.detail}
-              </p>
-            </div>
-            {i < steps.length - 1 ? (
-              <div
-                className="flex justify-center py-1.5 text-[15px] text-[var(--text-tertiary)]"
-                aria-hidden="true"
-              >
-                ↓
-              </div>
-            ) : null}
-          </li>
-        ))}
-      </ol>
-      <p className="mt-5 border-t border-[color:var(--border)] pt-4 text-[13px] leading-7 text-[var(--text-secondary)]">
-        {footnote}
-      </p>
-    </div>
-  );
-}
+const trust = [
+  {
+    title: "Consent in every file",
+    body: "Each recording stamps its consent basis into the file. Sensitive meetings keep structured notes without audio, and Require mode blocks recording until consent is confirmed.",
+    href: "/writing/governance-built-in-not-retrofitted",
+    cta: "Why we built it this way",
+  },
+  {
+    title: `${MINUTES_TEST_COUNT.toLocaleString()} tests and a public eval`,
+    body: "Run the demo, read the test suite, and check the limits we publish before you trust it with a real meeting.",
+    href: "/proof",
+    cta: "See the proof",
+  },
+  {
+    title: "Files that outlast the app",
+    body: "Plain Markdown with YAML frontmatter. Working Mem0 and Graphiti examples read the same folder.",
+    href: "https://github.com/silverstein/minutes/tree/main/examples",
+    cta: "Browse the examples",
+  },
+] as const;
 
 export default function Home() {
   return (
-    <div className="pb-16">
+    <div>
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{
-          __html: JSON.stringify([
-            organizationSchema(),
-            softwareApplicationSchema(),
-          ]),
+          __html: JSON.stringify([organizationSchema(), softwareApplicationSchema()]),
         }}
       />
-      <MemoryCompoundsHero />
-      <main className="mx-auto max-w-[840px] px-6 sm:px-8">
+      <SiteHeader />
+      <HomeHero />
 
-      <section
-        id="product"
-        className="scroll-mt-24 pb-16 pt-16 text-center sm:pb-20 sm:pt-24"
-      >
-        <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-          The product, in motion
-        </p>
-        <h2 className="mx-auto max-w-[680px] font-serif text-[36px] leading-[1.02] tracking-[-0.04em] text-[var(--text)] sm:text-[48px]">
-          Watch it transcribe a meeting. Then read the file it wrote.
-        </h2>
-        <p className="mx-auto mt-5 max-w-[650px] text-[15px] leading-7 text-[var(--text-secondary)] sm:text-[16px]">
-          Minutes captures locally, writes one inspectable Markdown file, and
-          lets your agents recall the decision with a source. No proprietary
-          workspace stands between you and your own history.
-        </p>
-
-        <div className="mt-12">
-          <DemoPlayer />
-        </div>
-
-        <div className="mt-12">
-          <TranscriptCard />
-        </div>
-
-        <p className="mx-auto mt-4 max-w-[560px] text-[14px] leading-6 text-[var(--text-secondary)]">
-          Minutes keeps the raw transcript visible. Timestamps, speakers,
-          action items, and decisions stay readable even before an assistant
-          touches them.
-        </p>
-
-        <p className="mx-auto mt-12 max-w-[620px] rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 font-mono text-[12px] leading-5 text-[var(--text-secondary)]">
-          <span className="text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>{" "}
-          adds one-click Parakeet v3 and search by meaning on Mac.{" "}
-          <a
-            href={`https://github.com/silverstein/minutes/releases/tag/v${MINUTES_RELEASE_VERSION}`}
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
-          >
-            Release notes
-          </a>
-          {" · "}
-          <a
-            href="https://github.com/silverstein/minutes/releases.atom"
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
-          >
-            Feed
-          </a>
-        </p>
-
-        <div
-          id="install"
-          className="mt-12 scroll-mt-24 border-t border-[color:var(--border)] pt-10"
-        >
-          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-            Download
-          </p>
-          <h2 className="mt-3 font-serif text-[32px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[38px]">
-            Start building your folder of truth.
-          </h2>
-          <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <a
-            href={APPLE_SILICON_DOWNLOAD_PATH}
-            data-download-target="mac"
-            className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
-          >
-            Mac (Apple Silicon)
-          </a>
-          <a
-            href={WINDOWS_INSTALLER_DOWNLOAD_URL}
-            data-download-target="windows"
-            className="inline-flex items-center gap-2 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-5 py-2.5 font-mono text-[11px] uppercase tracking-[0.1em] text-[var(--text)] shadow-[var(--shadow-panel)] hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
-          >
-            Windows
-          </a>
-          </div>
-          <p className="mt-4 text-[14px] leading-6 text-[var(--text-secondary)]">
-            Minutes won&apos;t open?{" "}
-            <a
-              href="/download/recover"
-              className="text-[var(--text)] underline underline-offset-4 hover:text-[var(--accent)]"
-            >
-              Reinstall the app and keep your meetings.
-            </a>
-          </p>
-        </div>
-
-        <p className="mt-4 text-[13px] text-[var(--text-secondary)]">
-          Download, install, done. First launch downloads a speech model. Run
-          <span className="mx-1 font-mono text-[var(--text)]">minutes setup --demo</span>
-          to try the pipeline on five bundled fixture meetings.
-        </p>
-
-        <div className="mt-8 flex flex-wrap justify-center gap-3">
-          <CopyButton
-            label="Homebrew (desktop)"
-            acquisitionTarget="desktop_cli"
-            cmd="brew install --cask silverstein/tap/minutes"
+      <main className="mx-auto max-w-[1200px] px-6">
+        <Section id="product">
+          <SectionHeading
+            title="One conversation. One file."
+            muted="Recall with a source, months later."
           />
-          <CopyButton
-            label="Homebrew (CLI)"
-            acquisitionTarget="desktop_cli"
-            cmd="brew tap silverstein/tap && brew install minutes"
-          />
-          <CopyButton label="MCP server" cmd="npx minutes-mcp" acquisitionTarget="mcp" />
-        </div>
-
-        <p className="mt-3 text-[12px] text-[var(--text-secondary)]">
-          Newer Homebrew distrusts third-party taps by default; if brew warns
-          about silverstein/tap, run{" "}
-          <span className="font-mono text-[var(--text)]">brew trust silverstein/tap</span>{" "}
-          once.
-        </p>
-
-        <div className="mt-8 rounded-[5px] border border-[color:var(--border)] bg-[var(--bg-elevated)] px-4 py-3 text-[13px] leading-6 text-[var(--text-secondary)] sm:hidden">
-          Reading on your phone? Minutes installs on Mac and Windows.{" "}
-          <a
-            href="https://github.com/silverstein/minutes"
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2"
-          >
-            Star the repo
-          </a>{" "}
-          so it is waiting when you are back at your desk.
-        </div>
-
-        <div className="mt-10 border-t border-[color:var(--border)] pt-8">
-          <p className="mb-4 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--text-secondary)]">
-            Works with any MCP client
-          </p>
-          <div className="flex flex-wrap items-center justify-center gap-4 text-sm text-[var(--text-secondary)]">
-            <span>Claude Code</span>
-            <span className="text-[var(--text-tertiary)]">/</span>
-            <span>Codex</span>
-            <span className="text-[var(--text-tertiary)]">/</span>
-            <span>Gemini CLI</span>
-            <span className="text-[var(--text-tertiary)]">/</span>
-            <span>Claude Desktop</span>
-            <span className="text-[var(--text-tertiary)]">/</span>
-            <span>Cowork</span>
+          <div className="mt-10 grid gap-4 md:grid-cols-3">
+            {steps.map((step) => (
+              <div key={step.n} className="border-t border-[color:var(--border-mid)] pt-5">
+                <p className="font-mono text-[12px] text-[var(--text-tertiary)]">{step.n}</p>
+                <p className="mt-2 text-[18px] font-semibold text-[var(--text)]">{step.title}</p>
+                <p className="mt-2 text-[15px] leading-7 text-[var(--text-secondary)]">{step.body}</p>
+              </div>
+            ))}
           </div>
-        </div>
-      </section>
-
-      <section id="dictation" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="01" label="Dictation" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          The fastest way in is your voice.
-        </h2>
-        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Hold the hotkey, speak, release. The text lands at your cursor on a
-          Mac (on the clipboard on Windows and Linux) and is saved as a Markdown
-          file, plus your daily note if you turn that on. Dictation uses the same
-          local transcription pipeline as your meetings and memos.
-        </p>
-        <p className="mt-4 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          On Apple Silicon Macs, Minutes can run NVIDIA&rsquo;s Parakeet v3, a
-          one-click install. On 39 of our own dictation clips it decoded a
-          typical clip in 51&nbsp;ms, against 168&nbsp;ms for Whisper small, the
-          engine Minutes uses otherwise.{" "}
-          <a
-            href="/writing/whisper-cpp-vs-parakeet-cpp"
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
-          >
-            How we measured
-          </a>
-          .
-        </p>
-        <p className="mt-4 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Minutes saves your dictation locally so it can become part of the
-          history your AI searches later. You choose which context to share
-          with a connected assistant.
-        </p>
-        <div className="mt-8">
-          <DictationCard />
-        </div>
-      </section>
-
-      <section id="local" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="02" label="On-device" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          Local capture. You choose what to share.
-        </h2>
-        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Capture, transcription, and storage run locally. Your recordings become
-          Markdown files on your own disk. If you choose a cloud AI assistant
-          or summarizer, the meeting context you authorize is sent to that provider.
-        </p>
-        <div className="mt-8 grid gap-5 lg:grid-cols-2">
-          <HomeFlowCard
-            name="Cloud notetakers"
-            leavesDevice
-            steps={cloudFlow}
-            footnote="A hosted transcription workflow sends audio to a provider. Other tools also offer local processing; check the model and storage settings you select."
-          />
-          <HomeFlowCard
-            name="Minutes"
-            leavesDevice={false}
-            steps={minutesFlow}
-            footnote="Recording and transcription stay local. Use local AI or skip summarization to keep processing on-device. Cloud assistants receive the context you authorize; file sync and backups have their own settings."
-          />
-        </div>
-      </section>
-
-      <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="03" label="Proof" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          See it work before you believe it.
-        </h2>
-        <div className="mt-8 grid gap-4 md:grid-cols-3">
-          <a
-            href="/for-agents#try"
-            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
-          >
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Try it in two minutes
-            </p>
-            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              One command installs five sample meetings and connects them to
-              your AI. Ask Claude what was decided, without recording anything.
-            </p>
-          </a>
-          <a
-            href="/proof"
-            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
-          >
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              How we test it
-            </p>
-            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              {MINUTES_TEST_COUNT.toLocaleString()} automated test declarations
-              and a public eval harness, with the limits stated plainly. Read
-              the receipts before you trust it.
-            </p>
-          </a>
-          <a
-            href="https://github.com/silverstein/minutes/tree/main/examples"
-            className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)] transition hover:border-[color:var(--border-mid)] hover:bg-[var(--bg-hover)]"
-          >
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Build on the files
-            </p>
-            <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">
-              Working Mem0 and Graphiti examples show how other tools read the
-              same markdown. Your data, everyone&apos;s integration.
-            </p>
-          </a>
-        </div>
-      </section>
-
-      <section id="pipeline" className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="04" label="Pipeline" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          How it works
-        </h2>
-        <pre className="mt-6 overflow-x-auto rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 font-mono text-[13px] leading-7 text-[var(--text-secondary)] shadow-[var(--shadow-panel)]">
-{`Audio -> Transcribe -> Diarize -> Summarize -> Markdown -> Recall
-       (local)      (local)    (your LLM)  (decisions,   (agents read
-      speech model  pyannote   Claude /     action items)  what you allow)
-                                Ollama`}
-        </pre>
-        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Transcription runs locally. The engine depends on your platform, build,
-          and installed models.
-          Summarization is optional; Claude can do it conversationally when
-          you ask, using your existing subscription. No API keys are required
-          to get useful output.
-        </p>
-      </section>
-
-      <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="05" label="Audience" heading={false} />
-        <h2 className="max-w-[620px] font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          Capture it anywhere. Find it everywhere.
-        </h2>
-        <p className="mt-3 font-mono text-[12px] uppercase tracking-[0.14em] text-[var(--text-secondary)]">
-          From meetings to memos to agents
-        </p>
-        <div className="mt-8 grid gap-px bg-[var(--border)] sm:grid-cols-2">
-          <div className="bg-[var(--bg)] px-6 py-6">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent)]">
-              If your agent is the interface
-            </p>
-            <h3 className="mt-3 font-serif text-[20px] leading-6 text-[var(--text)]">
-              Minutes is the capture layer of a memory you own
-            </h3>
-            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Wait for the call banner, record, and never open the app again.
-              Claude Code, Cursor, Codex, or OpenCode call{" "}
-              <span className="font-mono text-[13px]">search_meetings</span> over
-              MCP, and the markdown folds into your own vault or wiki. The recap
-              is optional; the agent is the reader.
-            </p>
-          </div>
-          <div className="bg-[var(--bg)] px-6 py-6">
-            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent)]">
-              If you read the results yourself
-            </p>
-            <h3 className="mt-3 font-serif text-[20px] leading-6 text-[var(--text)]">
-              Minutes is a complete local notetaker
-            </h3>
-            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Transcript, speakers, summary, and action items in one inspectable
-              file, with Recall to ask about the meeting afterwards. No account,
-              no server, and no agent required.
-            </p>
-          </div>
-        </div>
-        <div className="mt-px grid gap-px bg-[var(--border)] sm:grid-cols-2 lg:grid-cols-3">
-          {featureGrid.map((item) => (
-            <div key={item.title} className="bg-[var(--bg)] px-6 py-6">
-              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--accent)]">
-                {item.label}
+          <div className="mt-10 grid gap-4 lg:grid-cols-[minmax(0,4fr)_minmax(0,5fr)_minmax(0,4fr)]">
+            <Panel title="pricing-idea.m4a" meta="0:46">
+              <p className="text-[15px] leading-7 text-[var(--text)]">
+                &ldquo;Next three consultant signups get monthly. Annual stays the
+                enterprise default.&rdquo;
               </p>
-              <h3 className="mt-3 font-serif text-[20px] leading-6 text-[var(--text)]">
-                {item.title}
-              </h3>
-              <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-                {item.description}
+              <p className="mt-3 font-mono text-[11px] text-[var(--text-tertiary)]">
+                Voice memo · transcribed on your Mac
               </p>
-            </div>
-          ))}
-        </div>
-      </section>
+            </Panel>
+            <Panel title="~/meetings/2026-02-28-pricing-strategy.md" meta="0600">
+              <pre className="overflow-x-auto font-mono text-[12px] leading-6 text-[var(--text-secondary)]">
+                <code>{`---
+title: Pricing Strategy — Monthly Billing Test
+type: meeting
+consent: verbal_all_parties
+decisions:
+  - text: Launch monthly billing alongside
+      annual, starting with the next three
+      consultant signups
+    authority: high
+---
 
-      <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="06" label="Features" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          What you get
-        </h2>
-        <div className="mt-10 grid gap-10 lg:grid-cols-3">
-          {capabilityColumns.map((column) => (
-            <div key={column.label}>
-              <p className="mb-5 font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--accent)]">
-                {column.label}
+## Transcript
+[SPEAKER_0 1:02] Next three consultant
+signups get monthly.`}</code>
+              </pre>
+            </Panel>
+            <Panel title="Any MCP client" meta="minutes">
+              <p className="text-[14px] text-[var(--text-secondary)]">
+                What did we decide in the February 28 pricing meeting?
               </p>
-              <div className="space-y-4">
-                {column.items.map(([title, description]) => (
-                  <div key={title} className="flex gap-3 text-sm">
-                    <span className="mt-0.5 font-mono text-[12px] text-[var(--accent)]">
-                      &gt;
-                    </span>
-                    <p className="leading-6 text-[var(--text-secondary)]">
-                      <strong className="font-medium text-[var(--text)]">
-                        {title}.
-                      </strong>{" "}
-                      {description}
-                    </p>
+              <p className="mt-4 text-[15px] leading-7 text-[var(--text)]">
+                Launch monthly billing for the next three consultant signups.
+                Annual remains the enterprise default.
+              </p>
+              <p className="mt-3 font-mono text-[11px] leading-5 text-[var(--text-tertiary)]">
+                Source: 2026-02-28-pricing-strategy.md · decision
+              </p>
+            </Panel>
+          </div>
+        </Section>
+
+        <Section id="dictation">
+          <div className="grid gap-12 lg:grid-cols-2">
+            <div>
+              <SectionHeading
+                title="Dictation that stays on your computer."
+                muted="Hold a key, talk, and the text lands where you're typing."
+              />
+              <p className="mt-6 max-w-[540px] text-[16px] leading-8 text-[var(--text-secondary)]">
+                On a Mac it types at your cursor; on Windows and Linux it goes to
+                the clipboard. Every dictation is also saved as a Markdown file, so
+                your AI assistant can find it later with your meetings and memos.
+              </p>
+              <dl className="mt-8 grid gap-x-8 gap-y-6 sm:grid-cols-2">
+                {dictationEditing.map(([term, detail]) => (
+                  <div key={term}>
+                    <dt className="text-[15px] font-semibold text-[var(--text)]">{term}</dt>
+                    <dd className="mt-1 text-[14px] leading-6 text-[var(--text-secondary)]">{detail}</dd>
                   </div>
                 ))}
-              </div>
+              </dl>
+              <p className="mt-8 text-[15px] text-[var(--text-secondary)]">
+                Coming from Wispr Flow?{" "}
+                <a href="/compare/wispr-flow-vs-minutes" className={linkClass}>
+                  See how they compare
+                </a>{" "}
+                or{" "}
+                <a href="/resources/open-source-wispr-flow-alternatives" className={linkClass}>
+                  open-source alternatives
+                </a>
+                .
+              </p>
             </div>
-          ))}
-        </div>
-      </section>
 
-      <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="07" label="Comparison" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          How it compares
-        </h2>
-        <div className="mt-8 overflow-x-auto rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] shadow-[var(--shadow-panel)]">
-          <table className="w-full min-w-[620px] border-collapse text-[13px]">
-            <thead>
-              <tr className="bg-[var(--bg-hover)]">
-                <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--text-secondary)]" />
-                <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
-                  Granola
-                </th>
-                <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
-                  Otter.ai
-                </th>
-                <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
-                  Anarlog
-                </th>
-                <th className="p-3 text-left font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--accent)]">
-                  minutes
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {comparisons.map(([feature, ...values]) => (
-                <tr key={feature} className="hover:bg-[var(--bg-hover)]">
-                  <td className="border-b border-[color:var(--border)] p-3 font-medium text-[var(--text)]">
-                    {feature}
-                  </td>
-                  {values.map((value, index) => {
-                    const isMinutes = index === 3;
-                    return (
+            <div className="space-y-4">
+              <Panel title="What you said → what lands" meta="on-device cleanup">
+                <div className="space-y-4">
+                  {corrections.map(([raw, cleaned]) => (
+                    <div key={raw} className="font-mono text-[13px] leading-6">
+                      <p className="text-[var(--text-tertiary)] line-through decoration-[color:var(--border-mid)]">{raw}</p>
+                      <p className="text-[var(--text)]">{cleaned}</p>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+              <Panel title="Time to decode one dictation" meta="Apple Silicon">
+                <div className="space-y-4">
+                  {[
+                    ["Parakeet v3", "51 ms", "30%"],
+                    ["Whisper small", "168 ms", "100%"],
+                  ].map(([engine, ms, width]) => (
+                    <div key={engine}>
+                      <div className="flex justify-between text-[14px]">
+                        <span className="text-[var(--text)]">{engine}</span>
+                        <span className="font-mono text-[var(--text-secondary)]">{ms}</span>
+                      </div>
+                      <div className="mt-2 h-2 rounded-full bg-[var(--bg-hover)]">
+                        <div className="h-2 rounded-full bg-[var(--accent)]" style={{ width }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-4 text-[13px] leading-6 text-[var(--text-secondary)]">
+                  Median model time on 39 of our own dictation clips, M4 Max.
+                  Parakeet v3 is a one-click install on Apple Silicon.{" "}
+                  <a href="/writing/whisper-cpp-vs-parakeet-cpp" className={linkClass}>
+                    How we measured
+                  </a>
+                </p>
+              </Panel>
+            </div>
+          </div>
+        </Section>
+
+        <Section id="agents">
+          <div className="grid gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:items-center">
+            <div>
+              <SectionHeading
+                title="Your AI reads the folder."
+                muted="And cites the file it read."
+              />
+              <ul className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-[15px] text-[var(--text)]" aria-label="Works with">
+                {agentSurfaces.map((surface) => (
+                  <li key={surface.name} className="inline-flex items-center gap-2">
+                    {"logo" in surface ? (
+                      <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor" className="h-4 w-4">
+                        <path d={surface.logo} />
+                      </svg>
+                    ) : null}
+                    {surface.name}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-6 max-w-[520px] text-[16px] leading-8 text-[var(--text-secondary)]">
+                {MINUTES_MCP_TOOL_COUNT} MCP tools let your assistant search
+                meetings, memos, and dictation, follow a live transcript, and cite
+                the file every answer came from. Summaries are optional: Claude can
+                write them on your existing subscription, with no API key.
+              </p>
+              <div className="mt-8 flex flex-wrap items-center gap-3">
+                <CopyButton label="Try it with five sample meetings" cmd="npx minutes-mcp --demo" acquisitionTarget="mcp" />
+              </div>
+              <p className="mt-6 text-[15px]">
+                <a href="/for-agents" className={linkClass}>
+                  Set up your agent
+                </a>
+              </p>
+            </div>
+            <Panel title="claude" meta="~/projects/pricing">
+              <pre className="overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px] leading-6 text-[var(--text-secondary)]">
+                <code>
+                  <span className="text-[var(--text)]">&gt; what did we decide about pricing?</span>
+                  {"\n\n"}
+                  <span className="text-[var(--accent)]">⏺</span>
+                  {" minutes - search_meetings (MCP)(query: \"pricing\")\n  ⎿  2 results\n\n"}
+                  <span className="text-[var(--accent)]">⏺</span>
+                  <span className="text-[var(--text)]">
+                    {" Annual-only billing, decided March 25. It reversed the\n  February 28 test of monthly billing for the next three\n  consultant signups."}
+                  </span>
+                  {"\n\n  Source: 2026-03-25-pricing-reversal.md"}
+                </code>
+              </pre>
+            </Panel>
+          </div>
+        </Section>
+
+        <Section id="local">
+          <SectionHeading
+            title="Recording and transcription run on your machine."
+            muted="Your history is Markdown on your own disk."
+          />
+          <div className="mt-10 grid gap-4 md:grid-cols-2">
+            <FlowList name="A cloud notetaker" steps={cloudFlow} />
+            <FlowList name="Minutes" steps={minutesFlow} />
+          </div>
+          <p className="mt-5 max-w-[760px] text-[14px] leading-7 text-[var(--text-secondary)]">
+            If you pick a cloud model for summaries, or ask a cloud assistant about
+            a meeting, the context you share goes to that provider. Skip
+            summaries or use a local model and nothing leaves.
+          </p>
+        </Section>
+
+        <Section id="compare">
+          <SectionHeading title="How it compares." muted="Where your meetings live, and who can read them." />
+          <div className="mt-10 overflow-x-auto rounded-[12px] border border-[color:var(--border)]">
+            <table className="w-full min-w-[680px] border-collapse text-[14px]">
+              <thead>
+                <tr className="bg-[var(--bg-elevated)] text-left">
+                  <th className="p-4" />
+                  {["Granola", "Otter.ai", "Anarlog"].map((name) => (
+                    <th key={name} className="p-4 font-medium text-[var(--text-secondary)]">
+                      {name}
+                    </th>
+                  ))}
+                  <th className="p-4 font-semibold text-[var(--text)]">Minutes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparisons.map(([feature, ...values]) => (
+                  <tr key={feature} className="border-t border-[color:var(--border)]">
+                    <td className="p-4 font-medium text-[var(--text)]">{feature}</td>
+                    {values.map((value, index) => (
                       <td
-                        key={`${feature}-${index}-${value}`}
-                        className={`border-b border-[color:var(--border)] p-3 ${
-                          isMinutes
-                            ? "font-semibold text-[var(--text)]"
-                            : "text-[var(--text-secondary)]"
+                        key={`${feature}-${index}`}
+                        className={`p-4 ${
+                          index === 3 ? "font-medium text-[var(--text)]" : "text-[var(--text-secondary)]"
                         }`}
                       >
                         {value}
                       </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3 text-[13px] text-[var(--text-secondary)]">
-          <a
-            href="/compare"
-            className="font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--accent)] underline decoration-[color:var(--border-mid)] underline-offset-4"
-          >
-            Explore all Minutes comparisons
-          </a>
-          <a href="/compare/granola-vs-minutes" className="hover:text-[var(--text)]">
-            Granola
-          </a>
-          <a href="/compare/otter-vs-minutes" className="hover:text-[var(--text)]">
-            Otter
-          </a>
-          <a href="/compare/fathom-vs-minutes" className="hover:text-[var(--text)]">
-            Fathom
-          </a>
-          <a href="/compare/hyprnote-vs-minutes" className="hover:text-[var(--text)]">
-            Anarlog
-          </a>
-        </div>
-      </section>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-2 text-[14px] text-[var(--text-secondary)]">
+            <a href="/compare" className={linkClass}>
+              All comparisons
+            </a>
+            {compareLinks.map(([name, href]) => (
+              <a key={href} href={href} className="hover:text-[var(--text)]">
+                vs {name}
+              </a>
+            ))}
+          </div>
+        </Section>
 
-      <section className="border-t border-[color:var(--border)] py-16">
-        <SectionLabel n="08" label="Governance" heading={false} />
-        <h2 className="font-serif text-[30px] leading-tight tracking-[-0.035em] text-[var(--text)] sm:text-[32px]">
-          Built in, not retrofitted.
-        </h2>
-        <p className="mt-5 max-w-[660px] text-[15px] leading-7 text-[var(--text-secondary)]">
-          Client conversations need deliberate choices about recording, access,
-          storage, and AI providers. Minutes keeps capture and transcription
-          local and records consent metadata alongside the conversation. Local
-          processing alone does not establish legal or regulatory compliance.
-        </p>
-        <div className="mt-8 grid gap-4 md:grid-cols-3">
-          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Shipped
-            </p>
-            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Every recording stamps its consent basis into the file&apos;s
-              frontmatter. Sensitive meetings capture no audio but keep
-              structured notes, and Require mode blocks every desktop and CLI
-              entry point until consent is confirmed.
-            </p>
+        <Section>
+          <SectionHeading title="Built to be checked." muted="Not just trusted." />
+          <div className="mt-10 grid gap-4 md:grid-cols-3">
+            {trust.map((item) => (
+              <a
+                key={item.title}
+                href={item.href}
+                className="group rounded-[12px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-6 hover:border-[color:var(--border-mid)]"
+              >
+                <p className="text-[17px] font-semibold text-[var(--text)]">{item.title}</p>
+                <p className="mt-3 text-[14px] leading-7 text-[var(--text-secondary)]">{item.body}</p>
+                <p className="mt-4 text-[14px] text-[var(--text)]">
+                  {item.cta} <span aria-hidden="true" className="inline-block group-hover:translate-x-0.5">→</span>
+                </p>
+              </a>
+            ))}
           </div>
-          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              Next
-            </p>
-            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Retention rules the folder enforces on its own audio, and the
-              same restrictions applied everywhere an agent reads, not just in
-              one command.
-            </p>
-          </div>
-          <div className="rounded-[8px] border border-[color:var(--border)] bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-panel)]">
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--accent)]">
-              The point
-            </p>
-            <p className="mt-3 text-[14px] leading-6 text-[var(--text-secondary)]">
-              Sensitivity metadata your agents are required to respect: a
-              restricted meeting is excluded from agent search, people
-              profiles, and anything an agent assembles.
-            </p>
-          </div>
-        </div>
-        <p className="mt-6 text-[13px] leading-6 text-[var(--text-secondary)]">
-          A disclosure aid, not legal advice; make sure everyone present has
-          agreed where required. The design is public:{" "}
-          <a
-            href="/writing/governance-built-in-not-retrofitted"
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
-          >
-            why we built it this way
-          </a>
-          {" and the "}
-          <a
-            href="https://github.com/silverstein/minutes/blob/main/docs/plans/consent-layer-phase2-2026-06-10.md"
-            className="text-[var(--text)] underline decoration-[color:var(--border-mid)] underline-offset-2 hover:text-[var(--accent)]"
-          >
-            phase 2 plan
-          </a>
-          .
-        </p>
-      </section>
+        </Section>
 
-      <footer className="border-t border-[color:var(--border)] py-14 text-center text-[13px] text-[var(--text-secondary)]">
-        <p>minutes is MIT licensed and free forever.</p>
-        <p className="mt-1">
-          Built by{" "}
-          <a
-            href="https://github.com/silverstein"
-            className="text-[var(--text)] hover:text-[var(--accent)]"
-          >
-            Mat Silverstein
-          </a>
-          , founder of{" "}
-          <a
-            href="https://x1wealth.com"
-            className="text-[var(--text)] hover:text-[var(--accent)]"
-          >
-            X1 Wealth
-          </a>
-        </p>
-        <p className="mt-3">
-          <a href="/for-agents" className="hover:text-[var(--accent)]">
-            For agents
-          </a>
-          {" · "}
-          <a href="/docs/mcp/tools" className="hover:text-[var(--accent)]">
-            MCP docs
-          </a>
-          {" · "}
-          <a href="/docs/errors" className="hover:text-[var(--accent)]">
-            Errors
-          </a>
-        </p>
-        <p className="mt-1">
-          <a href="/compare" className="hover:text-[var(--accent)]">
-            Compare
-          </a>
-          {" · "}
-          <a
-            href="https://github.com/silverstein/minutes"
-            className="hover:text-[var(--accent)]"
-          >
-            GitHub
-          </a>
-          {" · "}
-          <a href="/llms.txt" className="hover:text-[var(--accent)]">
-            llms.txt
-          </a>
-          {" · "}
-          <a
-            href="https://github.com/silverstein/minutes/blob/main/CONTRIBUTING.md"
-            className="hover:text-[var(--accent)]"
-          >
-            Contribute
-          </a>
-        </p>
-      </footer>
+        <section id="install" className="scroll-mt-20 border-t border-[color:var(--border)] py-20 text-center sm:py-28">
+          <h2 className="mx-auto max-w-[760px] text-[36px] font-semibold leading-[1.05] tracking-[-0.04em] text-[var(--text)] sm:text-[56px]">
+            Free, open source, and yours.{" "}
+            <span className="text-[var(--text-tertiary)]">No account, no API key, no subscription.</span>
+          </h2>
+          <div className="mt-10 flex flex-wrap justify-center gap-3">
+            <a
+              href={APPLE_SILICON_DOWNLOAD_PATH}
+              data-download-target="mac"
+              className="inline-flex h-12 items-center rounded-full bg-[var(--accent)] px-7 text-[16px] font-medium text-[var(--marketing-button-text)] hover:bg-[var(--accent-hover)]"
+            >
+              Download for Mac
+            </a>
+            <a
+              href={WINDOWS_INSTALLER_DOWNLOAD_URL}
+              data-download-target="windows"
+              className="inline-flex h-12 items-center rounded-full border border-[color:var(--border-mid)] px-7 text-[16px] font-medium text-[var(--text)] hover:bg-[var(--bg-hover)]"
+            >
+              Download for Windows
+            </a>
+          </div>
+          <p className="mt-5 text-[14px] text-[var(--text-secondary)]">
+            Apple Silicon Macs and Windows. The first launch downloads a speech model.
+          </p>
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <CopyButton
+              label="Homebrew (desktop)"
+              acquisitionTarget="desktop_cli"
+              cmd="brew install --cask silverstein/tap/minutes"
+            />
+            <CopyButton
+              label="Homebrew (CLI)"
+              acquisitionTarget="desktop_cli"
+              cmd="brew tap silverstein/tap && brew install minutes"
+            />
+          </div>
+          <p className="mx-auto mt-4 max-w-[640px] text-[13px] leading-6 text-[var(--text-tertiary)]">
+            If Homebrew warns about the tap, run{" "}
+            <span className="font-mono text-[var(--text-secondary)]">brew trust silverstein/tap</span> once.
+            Minutes won&apos;t open?{" "}
+            <a href="/download/recover" className={linkClass}>
+              Reinstall and keep your meetings
+            </a>
+            .
+          </p>
+          <p className="mx-auto mt-6 max-w-[420px] rounded-[12px] border border-[color:var(--border)] px-4 py-3 text-[14px] leading-6 text-[var(--text-secondary)] sm:hidden">
+            Reading on your phone? Minutes installs on Mac and Windows.{" "}
+            <a href="https://github.com/silverstein/minutes" className={linkClass}>
+              Star the repo
+            </a>{" "}
+            so it is waiting at your desk.
+          </p>
+        </section>
+
+        <footer className="flex flex-col gap-6 border-t border-[color:var(--border)] py-12 text-[14px] text-[var(--text-secondary)] sm:flex-row sm:justify-between">
+          <div>
+            <p className="text-[var(--text)]">Minutes is MIT licensed and free.</p>
+            <p className="mt-1">
+              Built by{" "}
+              <a href="https://github.com/silverstein" className="hover:text-[var(--text)]">
+                Mat Silverstein
+              </a>
+              , founder of{" "}
+              <a href="https://x1wealth.com" className="hover:text-[var(--text)]">
+                X1 Wealth
+              </a>
+              .
+            </p>
+          </div>
+          <nav aria-label="Footer" className="grid grid-cols-2 gap-x-10 gap-y-2 sm:grid-cols-3">
+            {[
+              ["For agents", "/for-agents"],
+              ["MCP docs", "/docs/mcp/tools"],
+              ["Errors", "/docs/errors"],
+              ["Compare", "/compare"],
+              ["Resources", "/resources"],
+              ["Writing", "/writing"],
+              ["GitHub", "https://github.com/silverstein/minutes"],
+              ["llms.txt", "/llms.txt"],
+              ["Contribute", "https://github.com/silverstein/minutes/blob/main/CONTRIBUTING.md"],
+            ].map(([label, href]) => (
+              <a key={label} href={href} className="hover:text-[var(--text)]">
+                {label}
+              </a>
+            ))}
+          </nav>
+        </footer>
       </main>
     </div>
   );

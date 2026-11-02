@@ -1006,7 +1006,9 @@ pub struct DictationConfig {
     pub auto_paste_restore: bool,
     pub silence_timeout_ms: u64,
     pub max_utterance_secs: u64,
+    /// Parsed so older configs still load. Dictation does not read it.
     pub destination_file: String,
+    /// Parsed so older configs still load. Dictation does not read it.
     pub destination_command: String,
     pub model: String,
     pub shortcut_enabled: bool,
@@ -1411,6 +1413,11 @@ pub struct HooksConfig {
     /// Example: "/path/to/script.sh" → executed as: /path/to/script.sh /path/to/meeting.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_record: Option<String>,
+    /// Shell command to run after each delivered dictation. The dictation
+    /// file path is appended as the last argument (empty when no file was
+    /// written), and JSON with the text arrives on stdin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_dictation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

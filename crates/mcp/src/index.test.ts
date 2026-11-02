@@ -117,6 +117,7 @@ import {
   parsePolicyVerifiedMeeting,
   policyVerifiedExactMeetingSnapshot,
   policyListMeetings,
+  policyToolSearchMeetings,
   policySearchMeetings,
   registerDocsAppToolWithRestrictedPolicy,
   registerLiveEventsSubscriptionHandlers,
@@ -4834,6 +4835,58 @@ describe("restricted content policy", () => {
           .slice(0, 2)
           .map((item) => item.frontmatter.title)
       ).toEqual(["Newest memo", "New meeting"]);
+    } finally {
+      rmSync(meetingsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("finds dictations through the list and search type filters", async () => {
+    const meetingsDir = mkdtempSync(join(tmpdir(), "minutes-policy-dictation-"));
+    mkdirSync(join(meetingsDir, "dictations"));
+    const file = (title: string, type: string, date: string) =>
+      [
+        "---",
+        `title: ${title}`,
+        `type: ${type}`,
+        `date: ${date}`,
+        "source: dictation",
+        "status: complete",
+        "tags: []",
+        "attendees: []",
+        "people: []",
+        "action_items: []",
+        "decisions: []",
+        "intents: []",
+        "---",
+        "",
+        "shared dictated topic",
+      ].join("\n");
+    writeFileSync(
+      join(meetingsDir, "dictations", "2026-05-02-spoken-note.md"),
+      file("Spoken note", "dictation", "2026-05-02T09:00:00Z")
+    );
+    writeFileSync(
+      join(meetingsDir, "2026-05-01-standup.md"),
+      file("Standup", "meeting", "2026-05-01T09:00:00Z")
+    );
+
+    try {
+      const listed = await policyListMeetings(meetingsDir, 10, false);
+      expect(
+        listed
+          .filter((item) => item.frontmatter.type === "dictation")
+          .map((item) => item.frontmatter.title)
+      ).toEqual(["Spoken note"]);
+      expect(
+        (
+          await policyToolSearchMeetings(
+            meetingsDir,
+            false,
+            { query: "shared dictated", contentType: "dictation" },
+            10
+          )
+        ).map((item) => item.frontmatter.title)
+      ).toEqual(["Spoken note"]);
     } finally {
       rmSync(meetingsDir, { recursive: true, force: true });
     }

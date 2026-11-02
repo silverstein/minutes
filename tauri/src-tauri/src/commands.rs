@@ -13890,6 +13890,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "hooks": {
             "post_record": config.hooks.post_record,
+            "post_dictation": config.hooks.post_dictation,
         },
         "calendar": {
             "enabled": config.calendar.enabled,
@@ -14487,6 +14488,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         // Hooks
         ("hooks", "post_record") => {
             config.hooks.post_record = parse_optional_string_setting(&value);
+        }
+        ("hooks", "post_dictation") => {
+            config.hooks.post_dictation = parse_optional_string_setting(&value);
         }
 
         // Palette — persistence arms for the in-memory AppState writes

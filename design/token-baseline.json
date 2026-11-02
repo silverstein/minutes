@@ -1,11 +1,6 @@
 [
   {
     "file": "site/app/globals.css",
-    "property": "--font-display",
-    "value": "var(--font-instrument-serif), \"Iowan Old Style\", \"Palatino Linotype\", serif"
-  },
-  {
-    "file": "site/app/globals.css",
     "property": "--font-mono",
     "value": "var(--font-geist-mono), \"SFMono-Regular\", \"SF Mono\", Menlo, Consolas, monospace"
   },

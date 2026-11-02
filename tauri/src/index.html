@@ -1268,6 +1268,11 @@
       display: none;
     }
 
+    /* Still hidden by default, but the dictation permission nudge needs it visible. */
+    .header-chip.readiness.active {
+      display: inline-flex;
+    }
+
     .status-pill {
       font-size: 0;
       font-weight: 600;

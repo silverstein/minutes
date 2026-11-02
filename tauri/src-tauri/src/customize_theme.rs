@@ -263,6 +263,33 @@ mod tests {
     }
 
     #[test]
+    fn post_dictation_command_is_visible_in_the_dictation_tab() {
+        let index = include_str!("../../src/index.html");
+        let (_, dictation) = index
+            .split_once("id=\"panel-dictation\"")
+            .expect("dictation tab should exist");
+        let setup = dictation
+            .split("id=\"dictation-pane-words\"")
+            .next()
+            .expect("dictation setup pane should be bounded");
+        let (before, _) = setup
+            .split_once("id=\"settings-hooks-post-dictation\"")
+            .expect("post-dictation field should be in the dictation setup pane");
+        assert_eq!(
+            before.matches("<details").count(),
+            before.matches("</details>").count(),
+            "post-dictation field should not be inside a closed disclosure"
+        );
+    }
+
+    #[test]
+    fn dictation_actions_use_the_accent_not_a_fixed_color() {
+        assert!(!include_str!("../../src/index.html").contains("--dictation-action-bg"));
+        assert!(!include_str!("../../src/styles/dictation-experience.css")
+            .contains("--dictation-action-bg"));
+    }
+
+    #[test]
     fn every_window_loads_the_theme_script() {
         for html in [
             include_str!("../../src/index.html"),

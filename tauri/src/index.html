@@ -74,8 +74,6 @@
     }
 
     :root {
-      --dictation-action-bg: #2F6F8F;
-      --dictation-action-text: #F8F4ED;
       color-scheme: light dark;
       --bg: #0D0D0B;
       --bg-elevated: #141412;
@@ -7188,6 +7186,11 @@
           <div class="dictation-form-actions"><button type="submit" class="btn btn-secondary btn-sm">Add preference</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="rule" hidden>Cancel</button></div><p id="dictation-rule-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-rules" class="dictation-list"></div>
         </section>
 </details>
+<section class="dictation-block"><h3>After each dictation</h3><p class="dictation-note">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</p>
+          <label class="about-controls-copy" for="settings-hooks-post-dictation">Post-dictation command</label>
+          <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
+          <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+        </section>
 <details class="dictation-disclosure" id="dictation-recovery-settings"><summary>Delivery and recovery shortcuts</summary>        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Anything you copy after a paste takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
           <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
           <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
@@ -7456,14 +7459,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="about-controls-meta">Shell command run after each recording is processed. The transcript file path is appended as the final argument. Leave blank to disable.</div>
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Post-dictation command</div>
-            <div class="about-controls-meta">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</div>
-            <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
-            <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+            <div class="about-controls-meta">Commands that run after a dictation are in Settings, Dictation.</div>
           </div>
         </div>
       </div>
@@ -13707,7 +13703,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
               : (resolvedBatchEngine === 'sherpa'
                 ? 'Parakeet v3 runs on this Mac for batch, recording, and recording-sidecar transcription. Whisper takes over if Parakeet fails on a recording.'
                 : (eng === 'sherpa'
-                  ? 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
+                  ? (s.transcription?.sherpa_in_build === false
+                    ? "This build of Minutes doesn't include Parakeet v3; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription."
+                    : 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.')
                   : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.')));
         }
         refreshParakeetInstall();
@@ -15059,9 +15057,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const backend = ['auto', 'whisper', 'sherpa'].includes(dictation.backend) ? dictation.backend : 'whisper';
       autoOption.textContent = autoParakeet ? 'Auto (Parakeet v3)' : 'Auto (Whisper)';
       sherpaOption.disabled = !available && backend !== 'sherpa';
+      const parakeetInBuild = dictation.sherpa_in_build !== false;
       sherpaOption.textContent = available
         ? 'Parakeet v3 — most accurate final text'
-        : 'Parakeet v3 — not installed';
+        : (parakeetInBuild ? 'Parakeet v3 — not installed' : 'Parakeet v3 — not in this build');
       select.value = backend;
       if (backend === 'auto') {
         detail.textContent = autoParakeet
@@ -15070,7 +15069,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else if (backend === 'sherpa' && available) {
         detail.textContent = 'Whisper still shows words as you speak; Parakeet v3 writes the final text. If Parakeet cannot, Whisper does.';
       } else if (backend === 'sherpa') {
-        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.';
+        detail.textContent = parakeetInBuild
+          ? 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.'
+          : "This build of Minutes doesn't include Parakeet v3, so Whisper writes the final text.";
       } else {
         detail.textContent = 'Whisper shows words as you speak and writes the final text, in every language Whisper supports.';
       }

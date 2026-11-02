@@ -9,7 +9,7 @@ agent or post to a webhook.
 post_dictation = "/Users/you/bin/minutes-dictation-hook.sh"
 ```
 
-You can also set it in **Settings → AI & Privacy → Pipeline Hooks**. It's off until you set it.
+You can also set it in **Settings → Dictation**, under "After each dictation". It's off until you set it.
 
 ## What your command receives
 

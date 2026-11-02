@@ -4625,26 +4625,12 @@ pub fn request_stop(
                 // unaddressed sentinel is read by whoever gets there first,
                 // which is how this path terminated a CLI recording the app
                 // had never started (#804).
+                //
+                // The sentinel is the whole stop. Every recorder polls it, and
+                // a CLI recorder ignores SIGTERM, so a signal could only ever
+                // land on another desktop app recording in-process, where it
+                // kills the app before the recording is finalized (#1271).
                 minutes_core::pid::write_stop_sentinel_for(pid).map_err(|e| e.to_string())?;
-
-                #[cfg(unix)]
-                {
-                    if desktop_owns {
-                        eprintln!(
-                            "recording PID {} is owned by the desktop app; using sentinel-only stop",
-                            pid
-                        );
-                    } else {
-                        let rc = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                        if rc != 0 {
-                            let err = std::io::Error::last_os_error();
-                            eprintln!(
-                                "SIGTERM failed (PID {}): {} — sentinel file will stop recording",
-                                pid, err
-                            );
-                        }
-                    }
-                }
 
                 Ok(())
             }
@@ -23229,21 +23215,16 @@ pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), Str
             .store(true, Ordering::Relaxed);
         return Ok(());
     }
-    // Check for external live transcript (started from CLI). `inspect_pid_file`
-    // so a session holding the PID under a mandatory Windows lock is detected; the
-    // stop sentinel (polled inline by the live loop) stops it on any platform, and
-    // the Unix SIGTERM is sent only when the PID is readable. See #258.
+    // Check for external live transcript (started from CLI or another desktop
+    // app). `inspect_pid_file` so a session holding the PID under a mandatory
+    // Windows lock is detected (#258). The stop sentinel, polled inline by the
+    // live loop, is the only signal: a CLI session ignores SIGTERM and another
+    // desktop app would be killed by it (#1271).
     let lt_pid = minutes_core::pid::live_transcript_pid_path();
     let lt_state = minutes_core::pid::inspect_pid_file(&lt_pid);
     if lt_state.is_active() {
         minutes_core::pid::write_stop_sentinel()
             .map_err(|e| format!("failed to write stop sentinel: {}", e))?;
-        #[cfg(unix)]
-        if let Some(pid) = lt_state.pid() {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
-        }
         return Ok(());
     }
     Err("No live transcript session active".into())

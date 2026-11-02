@@ -102,6 +102,19 @@ pub struct CalendarEvent {
     /// (the EventKit helper does; the AppleScript fallback does not).
     #[serde(default)]
     pub calendar: Option<String>,
+    /// End time in the same local `YYYY-MM-DD HH:MM` form as `start`, when the
+    /// source reports it (EventKit only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// The event's location as written, for display. `url` holds only a
+    /// meeting link extracted from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    /// iCalendar UID. Shared by every copy of one invite, including copies
+    /// that reach the Mac through two accounts, and by every occurrence of a
+    /// recurring event (pair it with `start`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 /// Apply the `[calendar]` ignore filters to a list of events.
@@ -339,10 +352,34 @@ pub fn upcoming_events(lookahead_minutes: u32) -> Vec<CalendarEvent> {
             // (empty means no events, not a failure). Don't fall through
             // to AppleScript, which would double the timeout if Calendar
             // is hung since both paths talk to the same backend.
-            return apply_configured_filters(events);
+            return dedup_occurrences(apply_configured_filters(events));
         }
         // AppleScript fallback: only reached when EventKit helper is missing
-        apply_configured_filters(query_via_applescript(lookahead_minutes))
+        dedup_occurrences(apply_configured_filters(query_via_applescript(
+            lookahead_minutes,
+        )))
+    }
+}
+
+/// Events for a schedule view: everything starting within the next
+/// `lookahead_minutes`, plus events that started up to `lookback_minutes` ago
+/// so a caller can show the ones still in progress (check `end`). Sorted by
+/// start, filtered with the `[calendar]` settings, one entry per occurrence.
+/// The AppleScript fallback reports neither end times nor past events.
+pub fn schedule_events(lookback_minutes: u32, lookahead_minutes: u32) -> Vec<CalendarEvent> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (lookback_minutes, lookahead_minutes);
+        Vec::new()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !calendar_integration_enabled() {
+            return Vec::new();
+        }
+        let events = query_via_eventkit_window(lookback_minutes, lookahead_minutes)
+            .unwrap_or_else(|| query_via_applescript(lookahead_minutes));
+        dedup_occurrences(apply_configured_filters(events))
     }
 }
 
@@ -545,14 +582,20 @@ fn parse_applescript_output(stdout: &str) -> Vec<CalendarEvent> {
                 } else {
                     Vec::new()
                 };
-                let url = parts.get(4).and_then(|loc| extract_meeting_url(loc.trim()));
+                let location = parts
+                    .get(4)
+                    .map(|loc| loc.trim())
+                    .filter(|loc| !loc.is_empty() && *loc != "missing value");
                 Some(CalendarEvent {
                     title: parts[0].trim().to_string(),
                     start: parts[1].trim().to_string(),
                     minutes_until: parts[2].trim().parse().unwrap_or(0),
                     attendees,
-                    url,
+                    url: location.and_then(extract_meeting_url),
                     calendar: None,
+                    end: None,
+                    location: location.map(str::to_string),
+                    uid: None,
                 })
             } else {
                 None
@@ -571,7 +614,14 @@ fn parse_eventkit_output(stdout: &str) -> Vec<CalendarEvent> {
             let mut event: CalendarEvent = serde_json::from_str(line).ok()?;
             // The helper outputs the raw location string as url —
             // extract an actual meeting URL (Zoom, Meet, Teams, etc.) or set to None.
+            event.location = event
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|loc| !loc.is_empty())
+                .map(str::to_string);
             event.url = event.url.as_deref().and_then(extract_meeting_url);
+            event.uid = event.uid.filter(|uid| !uid.is_empty());
             Some(event)
         })
         .collect()
@@ -586,13 +636,87 @@ fn dedup_events(events: &mut Vec<CalendarEvent>) {
     events.sort_by_key(|e| e.minutes_until.abs());
 }
 
+/// Collapse copies of the same occurrence, keeping start order.
+///
+/// One invite often reaches the Mac twice (the same Google account added
+/// twice, or once as Google and once as CalDAV), so every event shows up
+/// twice. Two entries are one occurrence when they start at the same time and
+/// either share an iCalendar UID or match on title, end and location (a field
+/// only one copy reports counts as a match). Run it after the `[calendar]`
+/// filters, so a copy in an ignored calendar cannot hide the kept one. Unlike
+/// `dedup_events`, distinct same-title events at different times all survive.
+/// The kept copy picks up a meeting link, location or attendees the first one
+/// lacked.
+pub fn dedup_occurrences(events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
+    fn same_occurrence(a: &CalendarEvent, b: &CalendarEvent) -> bool {
+        if a.start != b.start {
+            return false;
+        }
+        if let (Some(x), Some(y)) = (&a.uid, &b.uid) {
+            if x == y {
+                return true;
+            }
+        }
+        let norm = |s: &str| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        // A field only one copy reports (AppleScript has no end; one account
+        // may drop the location) does not tell the copies apart.
+        let agree = |x: Option<String>, y: Option<String>| x.is_none() || y.is_none() || x == y;
+        norm(&a.title) == norm(&b.title)
+            && agree(a.end.clone(), b.end.clone())
+            && agree(
+                a.location.as_deref().map(norm),
+                b.location.as_deref().map(norm),
+            )
+    }
+
+    let mut kept: Vec<CalendarEvent> = Vec::with_capacity(events.len());
+    for event in events {
+        match kept.iter_mut().find(|k| same_occurrence(k, &event)) {
+            Some(existing) => {
+                if existing.url.is_none() {
+                    existing.url = event.url;
+                }
+                if existing.location.is_none() {
+                    existing.location = event.location;
+                }
+                if existing.end.is_none() {
+                    existing.end = event.end;
+                }
+                if existing.attendees.len() < event.attendees.len() {
+                    existing.attendees = event.attendees;
+                }
+            }
+            None => kept.push(event),
+        }
+    }
+    kept
+}
+
 /// Query via compiled Swift EventKit helper (if available and permitted).
 #[cfg(target_os = "macos")]
 fn query_via_eventkit(lookahead_minutes: u32) -> Option<Vec<CalendarEvent>> {
+    query_via_eventkit_window(0, lookahead_minutes)
+}
+
+/// Like `query_via_eventkit`, but also returns events that started up to
+/// `lookback_minutes` ago (negative `minutes_until`).
+#[cfg(target_os = "macos")]
+fn query_via_eventkit_window(
+    lookback_minutes: u32,
+    lookahead_minutes: u32,
+) -> Option<Vec<CalendarEvent>> {
     let helper = find_calendar_helper()?;
 
     let mut cmd = crate::engine_process::command(&helper);
     cmd.arg(lookahead_minutes.to_string());
+    if lookback_minutes > 0 {
+        cmd.arg(lookback_minutes.to_string());
+    }
     let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
     if !output.status.success() {
@@ -779,9 +903,9 @@ return output"#,
 
     let mut events = parse_applescript_output(&output);
 
-    // Deduplicate by title (same event can appear in multiple calendars)
-    events.sort_by_key(|e| (e.minutes_until, e.title.clone()));
-    events.dedup_by(|a, b| a.title == b.title && a.minutes_until == b.minutes_until);
+    // The same event can appear in multiple calendars; callers merge the
+    // copies with `dedup_occurrences` after filtering.
+    events.sort_by_key(|e| e.minutes_until);
     events
 }
 
@@ -797,6 +921,9 @@ mod tests {
             attendees: attendees.iter().map(|a| a.to_string()).collect(),
             url: url.map(str::to_string),
             calendar: None,
+            end: None,
+            location: None,
+            uid: None,
         }
     }
 
@@ -1117,6 +1244,121 @@ mod tests {
 
         let args = std::fs::read_to_string(&args_path).unwrap();
         assert_eq!(args.lines().collect::<Vec<_>>(), ["120", "120"]);
+    }
+
+    fn occurrence(title: &str, start: &str, uid: Option<&str>) -> CalendarEvent {
+        CalendarEvent {
+            start: start.to_string(),
+            end: Some("2026-10-30 10:30".to_string()),
+            location: Some("Betaworks, 29 Little West 12th".to_string()),
+            uid: uid.map(str::to_string),
+            ..event(title, &["Samir"], None)
+        }
+    }
+
+    #[test]
+    fn dedup_occurrences_collapses_one_invite_seen_through_two_accounts() {
+        let mut second = occurrence(
+            "Coffee: Samir / Mat",
+            "2026-10-30 09:30",
+            Some("abc@google.com"),
+        );
+        second.url = Some("https://meet.google.com/abc-defg-hij".to_string());
+        second.attendees = vec!["Samir".to_string(), "Mat".to_string()];
+        let events = super::dedup_occurrences(vec![
+            occurrence(
+                "Coffee: Samir / Mat",
+                "2026-10-30 09:30",
+                Some("abc@google.com"),
+            ),
+            second,
+            occurrence("buffer", "2026-10-30 10:30", None),
+        ]);
+        assert_eq!(titles(&events), vec!["Coffee: Samir / Mat", "buffer"]);
+        // The kept copy picks up what only the duplicate had.
+        assert_eq!(
+            events[0].url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        assert_eq!(events[0].attendees.len(), 2);
+    }
+
+    #[test]
+    fn dedup_occurrences_matches_on_title_end_and_location_without_a_uid() {
+        let mut spaced = occurrence("  Coffee:  samir / Mat ", "2026-10-30 09:30", None);
+        spaced.location = Some("betaworks,  29 Little West 12th".to_string());
+        let events = super::dedup_occurrences(vec![
+            occurrence("Coffee: Samir / Mat", "2026-10-30 09:30", None),
+            spaced,
+        ]);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn dedup_occurrences_keeps_distinct_occurrences() {
+        let mut other_end = occurrence("block", "2026-10-30 09:30", None);
+        other_end.end = Some("2026-10-30 11:00".to_string());
+        let events = super::dedup_occurrences(vec![
+            // Same title at different times: two real blocks.
+            occurrence("block", "2026-10-30 09:30", None),
+            occurrence("block", "2026-10-30 17:30", None),
+            // Same start, different title.
+            occurrence("Claude", "2026-10-30 09:30", None),
+            // Same title and start but a different length, no shared UID.
+            other_end,
+            // A recurring series shares one UID across occurrences.
+            occurrence("Standup", "2026-10-30 09:30", Some("series@x")),
+            occurrence("Standup", "2026-10-31 09:30", Some("series@x")),
+        ]);
+        assert_eq!(events.len(), 6);
+    }
+
+    #[test]
+    fn dedup_occurrences_treats_a_field_only_one_copy_reports_as_a_match() {
+        // AppleScript copies carry no end; one account dropped the location.
+        let mut bare = occurrence("Sync", "2026-10-30 09:30", None);
+        bare.end = None;
+        bare.location = None;
+        let events =
+            super::dedup_occurrences(vec![occurrence("Sync", "2026-10-30 09:30", None), bare]);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].location.is_some());
+    }
+
+    #[test]
+    fn filtering_before_merging_keeps_the_copy_in_a_visible_calendar() {
+        let mut hidden = occurrence("Sync", "2026-10-30 09:30", Some("u@x"));
+        hidden.calendar = Some("Jax".to_string());
+        let mut work = occurrence("Sync", "2026-10-30 09:30", Some("u@x"));
+        work.calendar = Some("Work".to_string());
+        let config = CalendarConfig {
+            ignore_calendars: vec!["Jax".to_string()],
+            ..CalendarConfig::default()
+        };
+        let events = super::dedup_occurrences(super::filter_events(vec![hidden, work], &config));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].calendar.as_deref(), Some("Work"));
+    }
+
+    #[test]
+    fn parse_eventkit_output_keeps_location_end_and_uid() {
+        let line = r#"{"title":"Sync","start":"2026-10-30 09:30","minutes_until":6,"attendees":["Samir"],"url":"Zoom https://us02web.zoom.us/j/123 ","calendar":"Work","end":"2026-10-30 10:00","uid":"abc@google.com"}"#;
+        let events = super::parse_eventkit_output(&format!("{line}\n"));
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(
+            event.location.as_deref(),
+            Some("Zoom https://us02web.zoom.us/j/123")
+        );
+        assert_eq!(event.url.as_deref(), Some("https://us02web.zoom.us/j/123"));
+        assert_eq!(event.end.as_deref(), Some("2026-10-30 10:00"));
+        assert_eq!(event.uid.as_deref(), Some("abc@google.com"));
+
+        // Output from an older helper without the new fields still parses.
+        let old = r#"{"title":"Sync","start":"2026-10-30 09:30","minutes_until":6,"attendees":[],"url":null,"calendar":null}"#;
+        let events = super::parse_eventkit_output(old);
+        assert_eq!(events[0].end, None);
+        assert_eq!(events[0].location, None);
     }
 }
 

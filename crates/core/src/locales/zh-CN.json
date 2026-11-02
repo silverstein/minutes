@@ -50,5 +50,10 @@
   "Meetings": "会议",
   "Upcoming Meeting": "即将开始的会议",
   "Minutes Palette": "Minutes 命令面板",
-  "Minutes command palette": "Minutes 命令面板"
+  "Minutes command palette": "Minutes 命令面板",
+  "Now": "进行中",
+  "Today": "今天",
+  "Tomorrow": "明天",
+  "Starts in {}": "{}后开始",
+  "Starting now": "即将开始"
 }

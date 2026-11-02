@@ -2703,7 +2703,7 @@
       line-height: 1.25;
     }
 
-    /* DESIGN.md sizes app headings at 18-22px. --text-2xl is the landing
+    /* App headings are 18-22px. --text-2xl is the landing
        hero scale and read as a headline in a 300px pane. */
     .md-viewer-content h1 {
       font-size: var(--text-xl);
@@ -11368,8 +11368,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // .detail-title is `white-space: nowrap; text-overflow: ellipsis`, so a
       // long title is only ever readable in full on hover. The native tooltip
       // is the whole mechanism — same one .dictation-recent-text already uses
-      // for the same reason. It adds no font, colour or radius, so DESIGN.md
-      // has nothing to say about it. Set unconditionally rather than only when
+      // for the same reason. It adds no font, colour or radius. Set unconditionally rather than only when
       // truncated: whether it truncates depends on the card width at the moment
       // of measurement, and the window is resizable.
       detailTitle.title = detailTitleText;

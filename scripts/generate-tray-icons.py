@@ -7,8 +7,7 @@ Three states (per `tauri/src-tauri/src/main.rs:188-194`):
   this based on menubar appearance so a single solid color works for both
   dark and light menubars.
 - `icon-recording.png` — full color. m + prominent red dot, ~25% canvas so
-  it survives 44px rendering. The red is the recording semantic per
-  DESIGN.md.
+  it survives 44px rendering. The red is the recording semantic.
 - `icon-live.png` — full color. m + prominent green dot in a different
   position so a glance distinguishes it from recording.
 
@@ -29,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ITALIC_TTF = REPO_ROOT / "tauri" / "src-tauri" / "dmg" / "fonts" / "InstrumentSerif-Italic.ttf"
 ICONS_DIR = REPO_ROOT / "tauri" / "src-tauri" / "icons"
 
-# DESIGN.md palette
+# Brand palette
 CREAM = (232, 228, 218)  # #E8E4DA — used for non-template recording/live
 BLACK = (0, 0, 0)        # template uses black silhouette; macOS auto-tints
 RED = (255, 69, 58)      # #FF453A — recording state

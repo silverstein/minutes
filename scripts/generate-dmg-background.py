@@ -25,7 +25,7 @@ OUTPUT_PATH = REPO_ROOT / "tauri" / "src-tauri" / "dmg-background.png"
 # 2x the DMG window (660x400 in tauri.conf.json bundle.macOS.dmg.windowSize).
 OUTPUT_SIZE = (1320, 800)
 
-# Palette pulled from DESIGN.md (light mode).
+# Brand palette (light mode).
 CREAM = (248, 244, 237)        # #F8F4ED — --bg
 CREAM_LIFT = (252, 249, 244)   # gentle highlight at vertical center
 NEAR_BLACK = (26, 25, 22)      # #1A1916 — --text

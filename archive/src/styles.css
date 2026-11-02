@@ -1,5 +1,5 @@
-/* Bundled, not fetched. DESIGN.md specifies Instrument Serif for display and
-   Geist for body, and requires the desktop app to load them from local WOFF2
+/* Bundled, not fetched. Archive uses Instrument Serif for display and
+   Geist for body, and the desktop app needs to load them from local WOFF2
    so it works offline -- which for this app is not a preference but part of
    the boundary it claims: it must not reach the network for anything. Archive
    shipped with no fonts at all and fell back to Georgia and Iowan Old Style,
@@ -55,7 +55,7 @@
      This interface had reading content -- metric labels, coverage signals, the
      paragraph explaining what the build is about to open, the error banner --
      at 9px and 10px. That is below both, and below the 13px body / 10-12px
-     mono-label floor DESIGN.md sets for the app.
+     mono-label floor the app uses.
 
      Density was the intent and density is still the aesthetic; it is bought
      with spacing and restraint, not by shrinking the words. Every size lives
@@ -298,7 +298,7 @@ a:focus-visible {
   max-width: 760px;
   margin: 0;
   font-family: "Instrument Serif", Iowan Old Style, Baskerville, Georgia, serif;
-  /* DESIGN.md's section-heading scale, not its hero scale. The 56px hero row
+  /* The section-heading scale, not the hero scale. The 56px hero row
      is for the landing site; this is a desktop tool, where the stated
      aesthetic is information density. */
   font-size: clamp(26px, 2.4vw, 32px);

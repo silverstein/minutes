@@ -130,19 +130,12 @@ Two traps that bite hardest (the rest are in the doc):
 - Push to `main` and wait for CI green **before** tagging. Create the GitHub release as a `--draft`, wait for release workflows, then `--draft=false`. Never `git tag` locally.
 - After tagging: upload `.mcpb`, publish npm packages (sdk first, then mcp — and `crates/mcp/package.json` must depend on the npm version of `minutes-sdk`, not `file:../sdk`), verify the Cloudflare Pages site deploy after the validated `site/` changes reach `main`, and update the Homebrew tap if CLI changed.
 
-## Design System
+## UI rules
 
-Always read `DESIGN.md` before making any visual or UI decisions.
-All font choices, colors, spacing, border radius, and aesthetic direction are defined there.
-Do not deviate without explicit user approval.
-
-Key rules:
-- Landing site defaults to **light cream** (#F8F4ED). Dark mode is opt-in via system preference.
-- Accent: **coral** (#C96B4E) in light, **green** (#30D158) in dark. Used sparingly — 5 specific spots only.
-- Headings: **Instrument Serif**. Body: **Instrument Sans**. UI/labels/transcript: **Geist Mono**.
-- No gradients, no decorative elements, no illustrations. Information density is the aesthetic.
-- The transcript output card (diarized speaker labels + action items in Geist Mono) is the primary product demo.
-- In QA or design review: flag any code that introduces fonts, colors, or radius values not defined in DESIGN.md.
+- Colors and fonts are tokens: `site/app/globals.css` for the site, the `:root` block in `tauri/src/index.html` for the app. CI's design-token check rejects raw color and font literals outside the token files, so add a token rather than a literal.
+- Capture blue (`--capture`) means routine recording or dictation. Red is for errors and destructive actions only. A test in `tauri/src-tauri/src/main.rs` enforces this.
+- WCAG AA contrast, keyboard access, and `prefers-reduced-motion` on every surface.
+- Product demos on the site show real behavior and the real output format, never invented features.
 
 ## GitHub Discussions
 

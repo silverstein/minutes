@@ -10291,6 +10291,9 @@ mod tests {
                 attendees: vec![],
                 url: None,
                 calendar: None,
+                end: None,
+                location: None,
+                uid: None,
             }),
             ..BackgroundPipelineContext::default()
         };
@@ -11822,6 +11825,9 @@ mod tests {
                     attendees: vec![],
                     url: None,
                     calendar: None,
+                    end: None,
+                    location: None,
+                    uid: None,
                 },
                 crate::calendar::CalendarEvent {
                     title: "Closest Event".into(),
@@ -11830,6 +11836,9 @@ mod tests {
                     attendees: vec![],
                     url: None,
                     calendar: None,
+                    end: None,
+                    location: None,
+                    uid: None,
                 },
             ],
             None,
@@ -11849,6 +11858,9 @@ mod tests {
                 attendees: vec!["mat@example.com".into()],
                 url: None,
                 calendar: None,
+                end: None,
+                location: None,
+                uid: None,
             }],
             Some("Wesley prep session recovery"),
         );
@@ -11866,6 +11878,9 @@ mod tests {
                 attendees: vec!["wesley@example.com".into()],
                 url: None,
                 calendar: None,
+                end: None,
+                location: None,
+                uid: None,
             }],
             Some("Wesley prep session recovery"),
         )
@@ -12663,6 +12678,9 @@ mod tests {
                 attendees: vec!["Matt".into(), "Alex Chen".into()],
                 url: None,
                 calendar: None,
+                end: None,
+                location: None,
+                uid: None,
             }),
             ..BackgroundPipelineContext::default()
         };

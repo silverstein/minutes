@@ -4,7 +4,7 @@
 Design: warm-dark rounded square (`#0D0D0B`, the dark-mode `--bg`) with a
 cream italic 'm' set in Instrument Serif (`#E8E4DA`, the dark-mode `--text`)
 and a small recording dot in the upper-right corner using the dark-mode
-`--red` (`#FF453A`). Per DESIGN.md the red is reserved for recording state,
+`--red` (`#FF453A`). The red marks recording state,
 so its use here is semantic — the icon literally tells you the app records.
 
 Outputs `tauri/src-tauri/icons/app-icon.png` and the MCP bundle `icon.png`
@@ -24,7 +24,7 @@ ITALIC_TTF = REPO_ROOT / "tauri" / "src-tauri" / "dmg" / "fonts" / "InstrumentSe
 OUTPUT_PATH = REPO_ROOT / "tauri" / "src-tauri" / "icons" / "app-icon.png"
 MCP_ICON_PATH = REPO_ROOT / "icon.png"
 
-# DESIGN.md palette
+# Brand palette
 WARM_DARK = (13, 13, 11)        # #0D0D0B — dark-mode --bg
 CREAM     = (232, 228, 218)     # #E8E4DA — dark-mode --text
 RED       = (255, 69, 58)       # #FF453A — dark-mode --red, recording state

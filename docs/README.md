@@ -49,7 +49,6 @@ Already organized by type — keep as-is. Plans are forward-looking implementati
 - **`README.md`** — Project landing page
 - **`CLAUDE.md`** — Developer guide (tool setup, build commands, architecture decisions, ecosystem integration)
 - **`AGENTS.md`** — Agent-specific instructions
-- **`DESIGN.md`** — Design system (fonts, colors, spacing, visual direction)
 - **`CONTRIBUTING.md`** — Contributing guidelines
 
 ## Live Assistance Design and Implementation Truth

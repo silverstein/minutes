@@ -33,8 +33,7 @@ function compactCount(value: string): string {
 
 const GITHUB_STARS_COMPACT = compactCount(GITHUB_STARS);
 
-/** GitHub's mark (Primer Octicons `mark-github`, MIT). The one icon the site
- * uses, approved as a DESIGN.md exception: the mark is what readers scan for
+/** GitHub's mark (Primer Octicons `mark-github`, MIT): what readers scan for
  * next to a star count. Inherits text color, so it follows the theme and hover.
  */
 function GitHubMark() {

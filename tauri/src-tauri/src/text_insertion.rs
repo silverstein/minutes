@@ -325,6 +325,7 @@ fn target_prefers_clipboard_paste(target: Option<&ActiveTargetContext>) -> bool 
             "alacritty",
             "kitty",
             "warp",
+            "herdr",
         ]
         .iter()
         .any(|marker| bundle_id.contains(marker) || app_name.contains(marker))
@@ -1994,6 +1995,7 @@ mod tests {
             ("Terminal", "com.apple.Terminal"),
             ("iTerm2", "com.googlecode.iterm2"),
             ("Warp", "dev.warp.Warp-Stable"),
+            ("Herdr", "dev.herdr.app"),
             ("Minutes", "com.useminutes.desktop"),
             ("Minutes Dev", "com.useminutes.desktop.dev"),
         ] {

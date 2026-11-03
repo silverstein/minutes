@@ -19,7 +19,7 @@ exclude = ["crates/sherpa-plugin", "crates/embed-worker"]
 resolver = "2"
 
 [workspace.package]
-version = "0.31.1"
+version = "0.32.0"
 edition = "2021"
 license = "MIT"
 authors = ["Mat Silverstein"]

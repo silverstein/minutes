@@ -2660,8 +2660,10 @@
     }
 
     .input-modal-title {
-      font-family: var(--font-display);
-      font-size: var(--text-xl);
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
     }
 
@@ -3818,11 +3820,11 @@
     }
 
     .about-copy h2 {
-      font-size: var(--text-2xl);
-      font-family: var(--font-display);
-      font-weight: 400;
-      line-height: 1;
-      letter-spacing: -0.4px;
+      font-size: var(--text-xl);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      line-height: 1.1;
+      letter-spacing: -0.01em;
       margin-bottom: 6px;
     }
 
@@ -4058,9 +4060,9 @@
 
     .readiness-title {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.2px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin-bottom: 6px;
     }
@@ -4226,9 +4228,9 @@
 
     .recovery-title {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.2px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin-bottom: 6px;
     }
@@ -5261,9 +5263,9 @@
 
     .cli-setup-header h2 {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.3px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }
 
     .cli-setup-body {
@@ -5372,9 +5374,10 @@
       flex-shrink: 0;
     }
     .whats-new-header h2 {
-      font-family: var(--font-display);
-      font-size: var(--text-xl);
-      font-weight: 400;
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin: 0;
     }
@@ -5561,9 +5564,13 @@
       max-height: calc(100vh - 40px);
     }
 
+    /* Dialog titles are interface chrome, so they use the sans. The serif
+       stays for editorial content such as meeting titles. */
     .settings-title {
-      font-size: var(--text-xl);
-      font-family: var(--font-display);
+      font-size: var(--text-lg);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }
 
     .settings-section {
@@ -7103,7 +7110,7 @@
           <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
         </div>
         <div class="dictation-gestures" aria-label="How to dictate"><p><strong>Hold</strong> to speak. Release to finish.</p><p><strong>Tap</strong> to keep listening. Tap again or choose Finish.</p><p><strong>Escape</strong> cancels without inserting.</p></div>
-        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Try: Let’s meet on Thursday at ten." spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
+        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Dictated text appears here. Try saying: “Let’s meet on Thursday at ten.”" spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Where dictated text goes</div>

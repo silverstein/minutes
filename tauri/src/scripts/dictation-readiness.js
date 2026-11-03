@@ -128,7 +128,7 @@
   // "Try dictation here" starts a real dictation into the practice box, the
   // same as pressing the shortcut with the box focused, so the button does
   // what it says instead of leaving an empty field that invites typing.
-  const practiceLabel = document.querySelector('label[for="dictation-practice-text"]');
+  const practiceLabel = $('dictation-practice-label');
   const practiceIdle = practiceLabel.textContent;
   const resetPractice = () => { practiceLabel.textContent = practiceIdle; practiceLabel.classList.remove('error'); };
   $('dictation-ready-practice').addEventListener('click', async () => {

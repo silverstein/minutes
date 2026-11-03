@@ -120,10 +120,17 @@ test('slow inventory expires without freezing the recheck control', async () => 
   blocked.resolve({ model: { name: 'base', ready: true } }); await settle();
   assert.equal(h.get('dictation-ready-practice').disabled, true);
 });
-test('practice reveals and focuses the actual text field without changing history', async () => {
+test('practice focuses the text field and starts one dictation without changing settings', async () => {
   const h = readiness(); await h.api.refresh(); await h.get('dictation-ready-practice').emit('click');
   assert.equal(h.get('dictation-practice').open, true); assert.equal(h.document.activeElement.id, 'dictation-practice-text');
-  assert.equal(h.calls.some(x => /save|set_setting|start/.test(x.command)), false);
+  assert.deepEqual(h.calls.filter(x => /start/.test(x.command)).map(x => x.command), ['cmd_start_dictation']);
+  assert.equal(h.calls.some(x => /save|set_setting/.test(x.command)), false);
+  assert.match(h.get('dictation-practice-label').textContent, /Listening/);
+});
+test('practice explains a failed start and offers the shortcut', async () => {
+  const h = readiness({ cmd_start_dictation: new Error('microphone busy') });
+  await h.api.refresh(); await h.get('dictation-ready-practice').emit('click');
+  assert.match(h.get('dictation-practice-label').textContent, /didn't start: .*microphone busy.*shortcut/);
 });
 test('download failure stays visible and preserves the selected model', async () => {
   const h = readiness({ cmd_dictation_preferences: { model: { name: 'small', ready: false }, experience: {} }, cmd_download_model: new Error('network unavailable') });

@@ -313,7 +313,7 @@ export default function ForAgentsPage() {
             <code className="flex-1 overflow-x-auto">
               npx minutes-mcp --demo
             </code>
-            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" acquisitionTarget="demo" compact />
+            <CopyButton label="Copy" cmd="npx minutes-mcp --demo" compact />
           </div>
           <p className="mt-4 text-[12px] leading-6 text-[var(--text-secondary)]">
             Paste the printed config into your agent host. Try:{" "}
@@ -643,7 +643,7 @@ export default function ForAgentsPage() {
             <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--text-secondary)]">
               MCP config
             </span>
-            <CopyButton label="Copy" cmd={mcpConfig} acquisitionTarget="agent_config" compact />
+            <CopyButton label="Copy" cmd={mcpConfig} compact />
           </div>
           <pre className="overflow-x-auto px-5 py-4 font-mono text-[12px] leading-6 text-[var(--text)]">
             {mcpConfig}
@@ -682,7 +682,7 @@ export default function ForAgentsPage() {
               </p>
               <div className="mt-3 flex items-center gap-2 rounded-[4px] bg-[var(--bg)] px-3 py-2 font-mono text-[12px] text-[var(--text)]">
                 <code className="flex-1 overflow-x-auto">{s.install}</code>
-                <CopyButton label="Copy" cmd={s.install} acquisitionTarget="agent_config" compact />
+                <CopyButton label="Copy" cmd={s.install} compact />
               </div>
               <p className="mt-3 text-[13px] leading-6 text-[var(--text-secondary)]">
                 {s.note}

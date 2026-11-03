@@ -1268,6 +1268,11 @@
       display: none;
     }
 
+    /* Still hidden by default, but the dictation permission nudge needs it visible. */
+    .header-chip.readiness.active {
+      display: inline-flex;
+    }
+
     .status-pill {
       font-size: 0;
       font-weight: 600;
@@ -4834,11 +4839,14 @@
       font-size: 12px;
       line-height: 1.5;
     }
+    .config-warning.is-repaired { background: var(--green-tint); border-bottom-color: var(--green-glow); }
     .config-warning[hidden], .config-warning [hidden] { display: none !important; }
     .config-warning strong { display: block; margin-bottom: 4px; }
     .config-warning p { margin: 4px 0; }
     .config-warning code { overflow-wrap: anywhere; font-size: 11px; }
     .config-warning-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .config-warning .config-warning-status { margin: 8px 0 0; font-weight: 600; }
+    .config-warning .config-warning-status.error { border-left: 2px solid var(--red); padding-left: 8px; }
 
     /* ── Update available banner ── */
     .update-banner {
@@ -6157,13 +6165,13 @@
       <p id="config-warning-message"></p>
       <p><code id="config-warning-path"></code></p>
       <p id="config-warning-defaults"></p>
-      <p id="config-warning-action-error" hidden></p>
       <div class="config-warning-actions">
+        <button class="btn btn-primary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-open">Open settings file</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-check">Check again</button>
-        <button class="btn btn-secondary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-help">Get help</button>
       </div>
+      <p class="config-warning-status" id="config-warning-action-error" hidden></p>
     </section>
 
     <!-- Upcoming meeting suggestion -->
@@ -7384,11 +7392,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
           </div>
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Post-dictation command</div>
+            <div class="about-controls-meta">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</div>
+            <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
+            <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+          </div>
         </div>
       </div>
 
       <!-- Calendar -->
-      <div class="settings-section">
+      <div class="settings-section" id="settings-calendar-section">
         <div class="about-item-title">CALENDAR</div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -8794,6 +8808,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (fingerprint === configWarningFingerprint) return;
       configWarningFingerprint = fingerprint;
       const banner = document.getElementById('config-warning');
+      document.getElementById('config-warning-action-error').hidden = true;
       if (warning) lastConfigWarning = warning;
       if (!lastConfigWarning) { banner.hidden = true; return; }
       banner.hidden = false;
@@ -8807,12 +8822,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         ? `Fallback transcription: ${warning.engine} · ${warning.model}. Recordings folder: ${warning.outputDir}`
         : '';
       document.getElementById('config-warning-restart').hidden = !!warning;
+      document.getElementById('config-warning-check').hidden = !warning;
+      document.getElementById('config-warning-help').hidden = !warning;
+      banner.classList.toggle('is-repaired', !warning);
+      banner.setAttribute('role', warning ? 'alert' : 'status');
     }
     async function configWarningAction(action) {
       const errorEl = document.getElementById('config-warning-action-error');
       errorEl.hidden = true;
+      errorEl.classList.remove('error');
       try { await action(); }
-      catch (error) { errorEl.textContent = String(error); errorEl.hidden = false; }
+      catch (error) { errorEl.textContent = String(error); errorEl.classList.add('error'); errorEl.hidden = false; }
     }
     document.getElementById('config-warning-open').addEventListener('click', () =>
       configWarningAction(() => invoke('cmd_open_file', { path: lastConfigWarning.path })));
@@ -8820,6 +8840,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       configWarningAction(async () => {
         const status = await invoke('cmd_capture_status');
         renderConfigWarning(status.configWarning);
+        if (status.configWarning) {
+          const errorEl = document.getElementById('config-warning-action-error');
+          errorEl.textContent = 'Still can\'t read the file.';
+          errorEl.classList.add('error');
+          errorEl.hidden = false;
+        }
       }));
     document.getElementById('config-warning-restart').addEventListener('click', (event) =>
       configWarningAction(() => {
@@ -13182,7 +13208,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
         });
       }
-      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'capture' }) });
+      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'ai', section: 'settings-calendar-section' }) });
       const button = document.getElementById('btn-dismiss-upcoming');
       const rect = button.getBoundingClientRect();
       const menu = await Menu.new({ items });
@@ -13248,6 +13274,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // Open on the requested tab, else General.
       const tab = options?.tab && document.querySelector(`.settings-tab[data-tab="${options.tab}"]`);
       (tab || settingsTabs[0]).click();
+      if (options?.section) {
+        requestAnimationFrame(() => document.getElementById(options.section)?.scrollIntoView({ block: 'start' }));
+      }
       loadSettings();
     }
     function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }
@@ -13690,6 +13719,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         document.getElementById('settings-hooks-post-record').value = postRecord;
         document.getElementById('settings-hooks-post-record-status').textContent =
           postRecord ? 'Active. Transcript path is appended on every recording.' : '';
+        const postDictation = (s.hooks && s.hooks.post_dictation) || '';
+        document.getElementById('settings-hooks-post-dictation').value = postDictation;
+        document.getElementById('settings-hooks-post-dictation-status').textContent =
+          postDictation ? 'Active. Runs after every dictation.' : '';
         try {
           const agentCmdSel = document.getElementById('settings-agent-command');
           const sumAgents = await invoke('cmd_list_agents');
@@ -14588,6 +14621,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } catch (err) {
         document.getElementById('settings-hooks-post-record-status').textContent = String(err);
         document.getElementById('settings-hooks-post-record-status').style.color = 'var(--red)';
+      }
+    });
+    document.getElementById('settings-hooks-post-dictation').addEventListener('change', async (e) => {
+      const value = e.target.value;
+      const status = document.getElementById('settings-hooks-post-dictation-status');
+      try {
+        await invoke('cmd_set_setting', { section: 'hooks', key: 'post_dictation', value });
+        status.textContent = value.trim() ? 'Active. Runs after every dictation.' : 'Disabled.';
+        status.style.color = '';
+      } catch (err) {
+        status.textContent = String(err);
+        status.style.color = 'var(--red)';
       }
     });
     document.getElementById('settings-screen-context').addEventListener('click', async () => {

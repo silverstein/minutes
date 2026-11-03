@@ -1,6 +1,6 @@
 // Shared xterm.js theme for Minutes — used by both index.html (Recall panel)
 // and terminal.html (standalone fallback).
-function getMinutesTheme(isDark) {
+function getBaseMinutesTheme(isDark) {
   if (isDark) {
     return {
       background: '#0d0d0b',
@@ -51,6 +51,21 @@ function getMinutesTheme(isDark) {
     brightMagenta: '#9b6cff',
     brightCyan: '#63a39a',
     brightWhite: '#ffffff',
+  };
+}
+
+// Follows the accent from customize.toml, which customize-theme.js publishes.
+function getMinutesTheme(isDark) {
+  const theme = getBaseMinutesTheme(isDark);
+  const custom = window.__MINUTES_THEME__;
+  const accent = custom && (isDark ? custom.accent_dark_hex : custom.accent_light_hex);
+  if (!accent) return theme;
+  const channels = [1, 3, 5].map((start) => parseInt(accent.slice(start, start + 2), 16));
+  const selectionAlpha = isDark ? 0.18 : 0.16;
+  return {
+    ...theme,
+    cursor: accent,
+    selectionBackground: `rgba(${channels.join(', ')}, ${selectionAlpha})`,
   };
 }
 

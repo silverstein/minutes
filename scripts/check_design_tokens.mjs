@@ -26,7 +26,7 @@ const TOKEN_DEFINITION_FILES = new Set([
   "site/app/globals.css",
   "tauri/src/index.html",
   "tauri/src/dictation-overlay.html",
-  "tauri/src/styles/theme-tokens.css",
+  "tauri/src/palette/index.html",
 ]);
 const SOURCE_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
 const CSS_NAMED_COLORS = new Set([

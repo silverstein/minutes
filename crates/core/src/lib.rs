@@ -129,6 +129,7 @@ pub mod capture;
 pub mod config;
 pub mod context_store;
 pub mod copilot;
+pub mod customize;
 pub mod daily_notes;
 pub mod derived;
 pub mod desktop_context;

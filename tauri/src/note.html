@@ -53,13 +53,14 @@
     :root {
       color-scheme: light dark;
       --bg: #0D0D0B;
+      --on-accent: var(--bg);
       --bg-elevated: #141412;
       --bg-hover: #1C1C1A;
       --border: rgba(255, 255, 255, 0.06);
       --border-mid: #2A2924;
       --text: #E8E4DA;
-      --text-secondary: #6B6760;
-      --text-tertiary: #3D3B38;
+      --text-secondary: #AAA49A;
+      --text-tertiary: #716C64;
       --accent: #30D158;
       --accent-hover: #4ADE70;
       --accent-soft: rgba(48, 209, 88, 0.12);
@@ -80,11 +81,11 @@
         --border:         rgba(0, 0, 0, 0.07);
         --border-mid:     rgba(0, 0, 0, 0.13);
         --text:           #1A1916;
-        --text-secondary: #8C8880;
-        --text-tertiary:  #BDB9B0;
-        --accent:         #C96B4E;
-        --accent-hover:   #B85A3E;
-        --accent-soft:    rgba(201, 107, 78, 0.10);
+        --text-secondary: #6F6A62;
+        --text-tertiary:  #958F85;
+        --accent:         #AE5337;
+        --accent-hover:   #9E4428;
+        --accent-soft:    rgba(174, 83, 55, 0.10);
         --red:            #C0392B;
         --surface-fill:   rgba(239, 235, 226, 0.96);
         --surface-fill-soft: rgba(0, 0, 0, 0.03);
@@ -213,7 +214,7 @@
 
     .btn-primary {
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       box-shadow: inset 0 -1px 0 var(--inset-shadow);
     }
 
@@ -234,7 +235,7 @@
       left: 50%;
       transform: translateX(-50%) translateY(40px);
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       font-size: var(--text-xs);
       font-weight: 600;
       padding: 6px 14px;

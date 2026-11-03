@@ -565,7 +565,7 @@ Runtime-only signals (detected audio devices, model provenance metadata, speaker
 ```toml
 [theme]
 mode = "auto"            # auto | light | dark
-accent_light = "#C96B4E"
+accent_light = "#AE5337"
 accent_dark = "#30D158"
 ```
 

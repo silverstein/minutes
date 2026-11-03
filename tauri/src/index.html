@@ -74,17 +74,16 @@
     }
 
     :root {
-      --dictation-action-bg: #2F6F8F;
-      --dictation-action-text: #F8F4ED;
       color-scheme: light dark;
       --bg: #0D0D0B;
+      --on-accent: var(--bg);
       --bg-elevated: #141412;
       --bg-hover: #1C1C1A;
       --border: rgba(255, 255, 255, 0.06);
       --border-mid: #2A2924;
       --text: #E8E4DA;
-      --text-secondary: #6B6760;
-      --text-tertiary: #3D3B38;
+      --text-secondary: #AAA49A;
+      --text-tertiary: #716C64;
       --accent: #30D158;
       --accent-hover: #4ADE70;
       --accent-soft: rgba(48, 209, 88, 0.10);
@@ -161,11 +160,11 @@
         --border: rgba(0, 0, 0, 0.07);
         --border-mid: rgba(0, 0, 0, 0.13);
         --text: #1A1916;
-        --text-secondary: #8C8880;
-        --text-tertiary: #BDB9B0;
-        --accent: #C96B4E;
-        --accent-hover: #B85A3E;
-        --accent-soft: rgba(201, 107, 78, 0.10);
+        --text-secondary: #6F6A62;
+        --text-tertiary: #958F85;
+        --accent: #AE5337;
+        --accent-hover: #9E4428;
+        --accent-soft: rgba(174, 83, 55, 0.10);
         --capture: #2F6F8F;
         --capture-tint: rgba(47, 111, 143, 0.10);
         --capture-tint-soft: rgba(47, 111, 143, 0.05);
@@ -178,10 +177,10 @@
         --orange: #B8731E;
         --purple-solid-soft: rgba(139, 92, 246, 0.58);
         --purple-solid-strong: rgba(139, 92, 246, 0.72);
-        --accent-tint: rgba(201, 107, 78, 0.10);
-        --accent-tint-soft: rgba(201, 107, 78, 0.05);
-        --accent-border: rgba(201, 107, 78, 0.15);
-        --accent-border-strong: rgba(201, 107, 78, 0.28);
+        --accent-tint: rgba(174, 83, 55, 0.10);
+        --accent-tint-soft: rgba(174, 83, 55, 0.05);
+        --accent-border: rgba(174, 83, 55, 0.15);
+        --accent-border-strong: rgba(174, 83, 55, 0.28);
         --green-tint: rgba(46, 125, 70, 0.10);
         --green-tint-soft: rgba(46, 125, 70, 0.06);
         --green-border: rgba(46, 125, 70, 0.14);
@@ -218,9 +217,9 @@
         --neutral-border: rgba(0, 0, 0, 0.10);
         --overlay-scrim: rgba(248, 244, 237, 0.78);
         --modal-scrim: rgba(248, 244, 237, 0.82);
-        --focus-ring: rgba(201, 107, 78, 0.16);
-        --focus-ring-soft: rgba(201, 107, 78, 0.10);
-        --focus-ring-subtle: rgba(201, 107, 78, 0.07);
+        --focus-ring: rgba(174, 83, 55, 0.16);
+        --focus-ring-soft: rgba(174, 83, 55, 0.10);
+        --focus-ring-subtle: rgba(174, 83, 55, 0.07);
         --info-ring: rgba(98, 188, 233, 0.24);
         --muted-badge: rgba(140, 136, 128, 0.16);
         --success-contrast: #F8F4ED;
@@ -708,7 +707,7 @@
       border: none;
       border-radius: 999px;
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       cursor: pointer;
       box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
       opacity: 0.95;
@@ -3503,7 +3502,7 @@
 
     .speaker-confirm-btn:hover {
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       border-color: var(--accent);
     }
 
@@ -3786,7 +3785,11 @@
       padding-top: 6vh;
     }
 
+    /* One width for every tab, so switching tabs never resizes the dialog.
+       The Dictation tab sets the floor: its recovery comparison needs two
+       columns. */
     #settings-overlay .about-card {
+      width: min(720px, calc(100vw - 32px));
       max-height: calc(100vh - 6vh - 40px);
     }
 
@@ -3835,7 +3838,7 @@
       gap: 8px;
       margin-top: 10px;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.5;
     }
 
@@ -3862,7 +3865,7 @@
       font-weight: 700;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       margin-bottom: 6px;
     }
 
@@ -3876,7 +3879,7 @@
       padding-top: 14px;
       border-top: 1px solid var(--border);
       font-size: var(--text-xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -3931,7 +3934,7 @@
     .about-controls-meta {
       margin-top: 8px;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -3969,7 +3972,7 @@
     .dictation-recent-meta {
       margin-top: 3px;
       font-size: var(--text-2xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.35;
     }
 
@@ -4134,7 +4137,7 @@
 
     .readiness-optional {
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       margin-top: 8px;
       letter-spacing: 0.15px;
     }
@@ -4153,7 +4156,7 @@
     .readiness-action-status {
       width: 100%;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -4518,7 +4521,7 @@
 
     .btn-primary {
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       box-shadow: inset 0 -1px 0 var(--border);
     }
 
@@ -5148,7 +5151,7 @@
       font-weight: 700;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
     }
 
     .about-cli-status {
@@ -5163,7 +5166,7 @@
 
     .about-cli-detail {
       font-size: var(--text-xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.5;
       margin-bottom: 8px;
     }
@@ -5326,8 +5329,8 @@
     .cli-setup-warning {
       padding: 10px 12px;
       border-radius: 10px;
-      background: rgba(201, 107, 78, 0.1);
-      border: 1px solid rgba(201, 107, 78, 0.3);
+      background: rgba(174, 83, 55, 0.1);
+      border: 1px solid rgba(174, 83, 55, 0.3);
       color: #c96b4e;
       font-size: var(--text-xs);
       line-height: 1.5;
@@ -5586,7 +5589,7 @@
 
     .settings-hint-link {
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       cursor: pointer;
     }
 
@@ -5627,6 +5630,12 @@
       color: var(--text);
       font-size: var(--text-body);
       box-sizing: border-box;
+    }
+
+    /* Placeholders are examples, not saved values: keep them visibly fainter. */
+    .settings-field::placeholder {
+      color: var(--text-tertiary);
+      opacity: 1;
     }
 
     .settings-secret-row {
@@ -5675,7 +5684,7 @@
     .settings-footer {
       padding-top: 14px;
       border-top: 1px solid var(--border);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -5725,7 +5734,7 @@
       font-family: var(--font-mono);
       font-size: var(--text-meta);
       font-weight: 500;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       white-space: nowrap;
       letter-spacing: 0.01em;
       transition: color 0.15s ease;
@@ -6752,8 +6761,8 @@
             <label class="about-controls-copy" for="settings-theme-accent-light">Accent color in light mode</label>
             <div class="about-controls-meta">Pick a color, or enter a hex or oklch() value. Leave blank for the default.</div>
             <div class="settings-color-row">
-              <input type="color" id="settings-theme-accent-light-picker" class="settings-color-swatch" value="#C96B4E" aria-label="Pick the accent color for light mode">
-              <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#C96B4E" spellcheck="false" autocomplete="off">
+              <input type="color" id="settings-theme-accent-light-picker" class="settings-color-swatch" value="#AE5337" aria-label="Pick the accent color for light mode">
+              <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#AE5337" spellcheck="false" autocomplete="off">
             </div>
           </div>
         </div>
@@ -6911,7 +6920,7 @@
               <option value="parakeet" disabled>Parakeet — unavailable</option>
               <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
-            <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
+            <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting under Capture.</div>
             <div class="about-controls-meta" id="settings-parakeet-install" hidden>
               <button class="btn btn-secondary btn-sm" id="btn-settings-parakeet-install">Install Parakeet v3</button>
               <span id="settings-parakeet-install-status"></span>
@@ -6920,7 +6929,7 @@
         </div>
         <div class="about-controls" id="settings-whisper-section">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Whisper model</div>
+            <div class="about-controls-copy" id="settings-whisper-model-label">Whisper model</div>
             <select id="settings-whisper-model" class="settings-field">
               <option value="base">base — 142 MB, lower resource use</option>
               <option value="small">small — 466 MB, good quality (recommended)</option>
@@ -7188,6 +7197,11 @@
           <div class="dictation-form-actions"><button type="submit" class="btn btn-secondary btn-sm">Add preference</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="rule" hidden>Cancel</button></div><p id="dictation-rule-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-rules" class="dictation-list"></div>
         </section>
 </details>
+<section class="dictation-block"><h3>After each dictation</h3><p class="dictation-note">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</p>
+          <label class="about-controls-copy" for="settings-hooks-post-dictation">Post-dictation command</label>
+          <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
+          <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+        </section>
 <details class="dictation-disclosure" id="dictation-recovery-settings"><summary>Delivery and recovery shortcuts</summary>        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Anything you copy after a paste takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
           <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
           <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
@@ -7456,14 +7470,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="about-controls-meta">Shell command run after each recording is processed. The transcript file path is appended as the final argument. Leave blank to disable.</div>
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
-          </div>
-        </div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Post-dictation command</div>
-            <div class="about-controls-meta">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</div>
-            <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
-            <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+            <div class="about-controls-meta">Commands that run after a dictation are in Settings, Dictation.</div>
           </div>
         </div>
       </div>
@@ -13707,8 +13714,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
               : (resolvedBatchEngine === 'sherpa'
                 ? 'Parakeet v3 runs on this Mac for batch, recording, and recording-sidecar transcription. Whisper takes over if Parakeet fails on a recording.'
                 : (eng === 'sherpa'
-                  ? 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
-                  : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.')));
+                  ? (s.transcription?.sherpa_in_build === false
+                    ? "This build of Minutes doesn't include Parakeet v3; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription."
+                    : 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.')
+                  : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting under Capture.')));
         }
         refreshParakeetInstall();
         if (engineAppleOpt) {
@@ -13746,8 +13755,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             Boolean(appleSpeechStatus && appleSpeechStatus.selectable),
           );
         }
+        // Whisper stays visible under Parakeet: it still takes over when
+        // Parakeet fails, so its model has to be chosen and downloaded.
         const batchUsesWhisper = resolvedBatchEngine === 'whisper';
-        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', !batchUsesWhisper);
+        document.getElementById('settings-whisper-model-label').textContent = batchUsesWhisper
+          ? 'Whisper model'
+          : 'Whisper model (used if Parakeet fails)';
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
         renderParakeetSettingsStatus(parakeetStatus, parakeetSelectable, parakeetUnavailableReason);
@@ -14680,7 +14693,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       document.getElementById('settings-theme-mode').value = theme.mode;
       document.getElementById('settings-theme-accent-light').value = theme.accent_light || '';
       document.getElementById('settings-theme-accent-dark').value = theme.accent_dark || '';
-      document.getElementById('settings-theme-accent-light-picker').value = theme.accent_light_hex || '#C96B4E';
+      document.getElementById('settings-theme-accent-light-picker').value = theme.accent_light_hex || '#AE5337';
       document.getElementById('settings-theme-accent-dark-picker').value = theme.accent_dark_hex || '#30D158';
       document.getElementById('settings-theme-path').textContent = theme.path;
       const status = document.getElementById('settings-theme-status');
@@ -14888,7 +14901,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (!container) continue;
         const values = calendarSettings[key] || [];
         if (!values.length) {
-          container.textContent = emptyText;
+          const empty = document.createElement('span');
+          empty.className = 'about-controls-meta';
+          empty.textContent = emptyText;
+          container.replaceChildren(empty);
           continue;
         }
         container.replaceChildren(...values.map((value) => {
@@ -15059,9 +15075,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const backend = ['auto', 'whisper', 'sherpa'].includes(dictation.backend) ? dictation.backend : 'whisper';
       autoOption.textContent = autoParakeet ? 'Auto (Parakeet v3)' : 'Auto (Whisper)';
       sherpaOption.disabled = !available && backend !== 'sherpa';
+      const parakeetInBuild = dictation.sherpa_in_build !== false;
       sherpaOption.textContent = available
         ? 'Parakeet v3 — most accurate final text'
-        : 'Parakeet v3 — not installed';
+        : (parakeetInBuild ? 'Parakeet v3 — not installed' : 'Parakeet v3 — not in this build');
       select.value = backend;
       if (backend === 'auto') {
         detail.textContent = autoParakeet
@@ -15070,7 +15087,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else if (backend === 'sherpa' && available) {
         detail.textContent = 'Whisper still shows words as you speak; Parakeet v3 writes the final text. If Parakeet cannot, Whisper does.';
       } else if (backend === 'sherpa') {
-        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.';
+        detail.textContent = parakeetInBuild
+          ? 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.'
+          : "This build of Minutes doesn't include Parakeet v3, so Whisper writes the final text.";
       } else {
         detail.textContent = 'Whisper shows words as you speak and writes the final text, in every language Whisper supports.';
       }

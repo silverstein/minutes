@@ -6,13 +6,17 @@ cd "$ROOT_DIR"
 
 export CXXFLAGS="${CXXFLAGS:-"-I$(xcrun --show-sdk-path)/usr/include/c++/v1"}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
-# engine-sherpa / vad-ort stay OPT-IN for app builds pending the #369 release
-# decision. Opt-in engine-sherpa builds ship the isolated plugin and its private
-# shared libraries together.
-# Opt in explicitly:
-#   MINUTES_BUILD_FEATURES=parakeet,metal,engine-sherpa
+# Match release builds where possible, so dogfooding exercises what ships.
+# engine-sherpa needs cmake to build sherpa-onnx, and its builds ship the isolated
+# plugin and its private shared libraries together. To choose explicitly:
+#   MINUTES_BUILD_FEATURES=parakeet,metal
 if [ -z "${MINUTES_BUILD_FEATURES+x}" ]; then
-    MINUTES_BUILD_FEATURES="parakeet,metal"
+    if command -v cmake >/dev/null 2>&1; then
+        MINUTES_BUILD_FEATURES="parakeet,metal,engine-sherpa"
+    else
+        MINUTES_BUILD_FEATURES="parakeet,metal"
+        echo "cmake not found: building without Parakeet v3 (engine-sherpa)." >&2
+    fi
 fi
 
 # Match scripts/build.sh: route cargo through rustup so rust-toolchain.toml

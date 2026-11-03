@@ -20,6 +20,8 @@ const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MIN_ACCENT_CONTRAST: f64 = 3.0;
 const LIGHT_BACKGROUND: Rgb = Rgb(0xF8, 0xF4, 0xED);
 const DARK_BACKGROUND: Rgb = Rgb(0x0D, 0x0D, 0x0B);
+const LIGHT_TEXT: Rgb = Rgb(0x1A, 0x19, 0x16);
+const DARK_TEXT: Rgb = Rgb(0xE8, 0xE4, 0xDA);
 
 /// Whether windows follow the OS or stay in one appearance.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -191,6 +193,13 @@ impl Appearance {
         }
     }
 
+    fn text(self) -> Rgb {
+        match self {
+            Self::Light => LIGHT_TEXT,
+            Self::Dark => DARK_TEXT,
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -199,7 +208,7 @@ impl Appearance {
     }
 }
 
-const ACCENT_FORMAT_HELP: &str = "use a color like \"#C96B4E\" or \"oklch(0.63 0.14 40)\"";
+const ACCENT_FORMAT_HELP: &str = "use a color like \"#AE5337\" or \"oklch(0.55 0.13 38)\"";
 
 /// Check an accent and return it in canonical spelling, or say why it's
 /// unusable. Only hex and `oklch()` numbers are accepted because the result
@@ -377,7 +386,7 @@ pub fn theme_css(theme: &ThemeSettings) -> String {
     let mut css = String::new();
     if let Some((_, color)) = theme.accent_light.as_deref().and_then(parse_accent) {
         css.push_str(&accent_block(
-            "light",
+            Appearance::Light,
             color,
             color.mix(0, 0.08),
             &[
@@ -396,7 +405,7 @@ pub fn theme_css(theme: &ThemeSettings) -> String {
     }
     if let Some((_, color)) = theme.accent_dark.as_deref().and_then(parse_accent) {
         css.push_str(&accent_block(
-            "dark",
+            Appearance::Dark,
             color,
             color.mix(255, 0.15),
             &[
@@ -416,11 +425,27 @@ pub fn theme_css(theme: &ThemeSettings) -> String {
     css
 }
 
-fn accent_block(scheme: &str, color: Rgb, hover: Rgb, tints: &[(&str, f64)]) -> String {
+/// The label color for text drawn on the accent: the window's background or
+/// its text color, whichever reads better. The accent only has to stand out
+/// from the background, so a mid-tone accent can need dark text in light mode
+/// or light text in dark mode.
+fn on_accent(appearance: Appearance, color: Rgb) -> Rgb {
+    let background = appearance.background();
+    let text = appearance.text();
+    if color.contrast(background) >= color.contrast(text) {
+        background
+    } else {
+        text
+    }
+}
+
+fn accent_block(appearance: Appearance, color: Rgb, hover: Rgb, tints: &[(&str, f64)]) -> String {
     let mut block = format!(
-        "@media (prefers-color-scheme: {scheme}) {{ :root:root:root {{ --accent: {}; --accent-hover: {};",
+        "@media (prefers-color-scheme: {}) {{ :root:root:root {{ --accent: {}; --accent-hover: {}; --on-accent: {};",
+        appearance.name(),
         color.hex(),
-        hover.hex()
+        hover.hex(),
+        on_accent(appearance, color).hex()
     );
     for (token, alpha) in tints {
         block.push_str(&format!(" {token}: {};", color.rgba(*alpha)));
@@ -533,8 +558,8 @@ mod tests {
     #[test]
     fn built_in_accents_pass_their_own_contrast_check() {
         assert_eq!(
-            validate_accent("#c96b4e", Appearance::Light).unwrap(),
-            "#C96B4E"
+            validate_accent("#ae5337", Appearance::Light).unwrap(),
+            "#AE5337"
         );
         assert_eq!(
             validate_accent("#30D158", Appearance::Dark).unwrap(),
@@ -719,6 +744,37 @@ mod tests {
         assert!(css.contains("--accent-border-strong: rgba(98, 188, 233, 0.40);"));
         assert!(!css.contains("--capture"));
         assert!(!css.contains("--red"));
+    }
+
+    #[test]
+    fn built_in_accents_keep_their_button_labels_readable() {
+        // Buttons draw the window background on the accent. WCAG AA asks
+        // 4.5:1 for their 12px labels.
+        for (accent, appearance) in [
+            (Rgb(0xAE, 0x53, 0x37), Appearance::Light),
+            (Rgb(0x30, 0xD1, 0x58), Appearance::Dark),
+        ] {
+            let contrast = accent.contrast(appearance.background());
+            assert!(contrast >= 4.5, "{} has {contrast:.2}:1", accent.hex());
+            assert_eq!(on_accent(appearance, accent), appearance.background());
+        }
+    }
+
+    #[test]
+    fn custom_accents_get_whichever_label_color_reads_better() {
+        // A mid-tone blue passes the 3:1 accent check in light mode, but the
+        // cream background on it would be hard to read; dark text wins.
+        let css = theme_css(&ThemeSettings {
+            accent_light: Some("#4A90D9".into()),
+            ..ThemeSettings::default()
+        });
+        assert!(css.contains("--on-accent: #1A1916;"), "{css}");
+        // A deep accent keeps the cream label.
+        let css = theme_css(&ThemeSettings {
+            accent_light: Some("#2F6F8F".into()),
+            ..ThemeSettings::default()
+        });
+        assert!(css.contains("--on-accent: #F8F4ED;"), "{css}");
     }
 
     #[test]

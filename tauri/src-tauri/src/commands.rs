@@ -13822,6 +13822,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "resolved_engine": batch_readiness.resolved_backend,
             "auto_engine_reason": auto_engine.reason,
             "sherpa_selectable": sherpa_selectable,
+            "sherpa_in_build": cfg!(feature = "engine-sherpa"),
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
             "language": config.transcription.language,
@@ -13913,6 +13914,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "dictation": {
             "backend": config.dictation.backend,
             "sherpa_available": minutes_core::dictation::sherpa_dictation_available(&config),
+            "sherpa_in_build": cfg!(feature = "engine-sherpa"),
             "auto_uses_parakeet": minutes_core::dictation::auto_dictation_uses_parakeet(&config),
             "model": config.dictation.model,
             "destination": config.dictation.destination,
@@ -14196,10 +14198,12 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             }
             reject_unselectable_parakeet(&value, "transcription engine")?;
             if value == "sherpa" && !minutes_core::transcribe::sherpa_selectable(&config) {
-                return Err(
+                return Err(if cfg!(feature = "engine-sherpa") {
                     "Parakeet v3 is not installed on this Mac. Install it from Settings first."
-                        .into(),
-                );
+                } else {
+                    "This build of Minutes doesn't include Parakeet v3."
+                }
+                .into());
             }
             config.transcription.engine = value.clone();
         }
@@ -14402,9 +14406,12 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             reject_unselectable_apple_speech(&value, "dictation backend")?;
             reject_unselectable_parakeet(&value, "dictation backend")?;
             if value == "sherpa" && !minutes_core::dictation::sherpa_dictation_available(&config) {
-                return Err(
-                    "Parakeet v3 is not installed, so it cannot write dictation text yet. Run `minutes setup --sherpa`, or keep Whisper.".into(),
-                );
+                return Err(if cfg!(feature = "engine-sherpa") {
+                    "Parakeet v3 is not installed, so it cannot write dictation text yet. Run `minutes setup --sherpa`, or keep Whisper."
+                } else {
+                    "This build of Minutes doesn't include Parakeet v3."
+                }
+                .into());
             }
             config.dictation.backend = value.clone();
             // A choice made here is deliberate; the one-time move from the old
@@ -18586,10 +18593,11 @@ mod tests {
             cmd_set_setting("transcription".into(), "engine".into(), "auto".into()).unwrap();
             assert_eq!(Config::load().transcription.engine, "auto");
 
-            // The temp home has no Parakeet v3 model installed.
+            // The temp home has no Parakeet v3 model installed, and a build
+            // without the engine says so instead.
             let error = cmd_set_setting("transcription".into(), "engine".into(), "sherpa".into())
                 .unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
             assert_eq!(Config::load().transcription.engine, "auto");
         });
     }
@@ -18600,8 +18608,16 @@ mod tests {
         with_temp_home(|_| {
             let error =
                 cmd_set_setting("dictation".into(), "backend".into(), "sherpa".into()).unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
         });
+    }
+
+    fn missing_parakeet_message() -> &'static str {
+        if cfg!(feature = "engine-sherpa") {
+            "Parakeet v3 is not installed"
+        } else {
+            "doesn't include Parakeet v3"
+        }
     }
 
     #[test]

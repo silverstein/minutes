@@ -132,11 +132,6 @@
   {
     "file": "tauri/src/copilot-hud.html",
     "property": "--accent-soft",
-    "value": "rgba(201, 107, 78, 0.11)"
-  },
-  {
-    "file": "tauri/src/copilot-hud.html",
-    "property": "--accent-soft",
     "value": "rgba(48, 209, 88, 0.12)"
   },
   {
@@ -183,11 +178,6 @@
     "file": "tauri/src/copilot-hud.html",
     "property": "--line",
     "value": "rgba(244, 240, 231, 0.13)"
-  },
-  {
-    "file": "tauri/src/copilot-hud.html",
-    "property": "--line",
-    "value": "rgba(26, 25, 22, 0.12)"
   },
   {
     "file": "tauri/src/copilot-hud.html",
@@ -312,11 +302,6 @@
   {
     "file": "tauri/src/copilot-hud.html",
     "property": "--text",
-    "value": "#1a1916"
-  },
-  {
-    "file": "tauri/src/copilot-hud.html",
-    "property": "--text",
     "value": "#f4f0e7"
   },
   {
@@ -327,17 +312,7 @@
   {
     "file": "tauri/src/copilot-hud.html",
     "property": "font-family",
-    "value": "'Geist Mono'"
-  },
-  {
-    "file": "tauri/src/copilot-hud.html",
-    "property": "font-family",
     "value": "'Geist Mono', ui-monospace, monospace"
-  },
-  {
-    "file": "tauri/src/copilot-hud.html",
-    "property": "font-family",
-    "value": "'Geist'"
   },
   {
     "file": "tauri/src/copilot-hud.html",
@@ -347,17 +322,7 @@
   {
     "file": "tauri/src/dictation-overlay.html",
     "property": "--accent-glow",
-    "value": "rgba(201, 107, 78, 0.20)"
-  },
-  {
-    "file": "tauri/src/dictation-overlay.html",
-    "property": "--accent-glow",
     "value": "rgba(48, 209, 88, 0.28)"
-  },
-  {
-    "file": "tauri/src/dictation-overlay.html",
-    "property": "--accent-ring",
-    "value": "rgba(201, 107, 78, 0.14)"
   },
   {
     "file": "tauri/src/dictation-overlay.html",
@@ -422,11 +387,6 @@
   {
     "file": "tauri/src/dictation-overlay.html",
     "property": "--spinner-track",
-    "value": "rgba(201, 107, 78, 0.14)"
-  },
-  {
-    "file": "tauri/src/dictation-overlay.html",
-    "property": "--spinner-track",
     "value": "rgba(48, 209, 88, 0.18)"
   },
   {
@@ -467,17 +427,7 @@
   {
     "file": "tauri/src/index.html",
     "property": "--accent-border",
-    "value": "rgba(201, 107, 78, 0.15)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--accent-border",
     "value": "rgba(48, 209, 88, 0.15)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--accent-border-strong",
-    "value": "rgba(201, 107, 78, 0.28)"
   },
   {
     "file": "tauri/src/index.html",
@@ -492,17 +442,7 @@
   {
     "file": "tauri/src/index.html",
     "property": "--accent-tint-soft",
-    "value": "rgba(201, 107, 78, 0.05)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--accent-tint-soft",
     "value": "rgba(48, 209, 88, 0.06)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--focus-ring",
-    "value": "rgba(201, 107, 78, 0.16)"
   },
   {
     "file": "tauri/src/index.html",
@@ -513,11 +453,6 @@
     "file": "tauri/src/index.html",
     "property": "--focus-ring-soft",
     "value": "rgba(48, 209, 88, 0.12)"
-  },
-  {
-    "file": "tauri/src/index.html",
-    "property": "--focus-ring-subtle",
-    "value": "rgba(201, 107, 78, 0.07)"
   },
   {
     "file": "tauri/src/index.html",
@@ -961,83 +896,8 @@
   },
   {
     "file": "tauri/src/meeting-prompt.html",
-    "property": "--accent",
-    "value": "#30D158"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--accent",
-    "value": "#C96B4E"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--accent-hover",
-    "value": "#4ADE70"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--accent-hover",
-    "value": "#B85A3E"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--accent-soft",
-    "value": "rgba(201, 107, 78, 0.10)"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
     "property": "--accent-soft",
     "value": "rgba(48, 209, 88, 0.12)"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg",
-    "value": "#0D0D0B"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg",
-    "value": "#F8F4ED"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg-elevated",
-    "value": "#141412"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg-elevated",
-    "value": "#EFEBE2"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg-hover",
-    "value": "#1C1C1A"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--bg-hover",
-    "value": "#E8E2D8"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--border",
-    "value": "rgba(0, 0, 0, 0.07)"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--border",
-    "value": "rgba(255, 255, 255, 0.06)"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--border-mid",
-    "value": "#2A2924"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--border-mid",
-    "value": "rgba(0, 0, 0, 0.13)"
   },
   {
     "file": "tauri/src/meeting-prompt.html",
@@ -1051,23 +911,8 @@
   },
   {
     "file": "tauri/src/meeting-prompt.html",
-    "property": "--red",
-    "value": "#C0392B"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--red",
-    "value": "#FF453A"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
     "property": "--red-bg",
     "value": "rgba(192, 57, 43, 0.12)"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--red-bg",
-    "value": "rgba(255, 69, 58, 0.12)"
   },
   {
     "file": "tauri/src/meeting-prompt.html",
@@ -1101,48 +946,8 @@
   },
   {
     "file": "tauri/src/meeting-prompt.html",
-    "property": "--text",
-    "value": "#1A1916"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--text",
-    "value": "#E8E4DA"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--text-secondary",
-    "value": "#6B6760"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--text-secondary",
-    "value": "#8C8880"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--text-tertiary",
-    "value": "#3D3B38"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "--text-tertiary",
-    "value": "#BDB9B0"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "font-family",
-    "value": "'Geist'"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
     "property": "font-family",
     "value": "'Geist', -apple-system, BlinkMacSystemFont, sans-serif"
-  },
-  {
-    "file": "tauri/src/meeting-prompt.html",
-    "property": "font-family",
-    "value": "'Instrument Serif'"
   },
   {
     "file": "tauri/src/meeting-prompt.html",
@@ -1151,83 +956,8 @@
   },
   {
     "file": "tauri/src/note.html",
-    "property": "--accent",
-    "value": "#30D158"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--accent",
-    "value": "#C96B4E"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--accent-hover",
-    "value": "#4ADE70"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--accent-hover",
-    "value": "#B85A3E"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--accent-soft",
-    "value": "rgba(201, 107, 78, 0.10)"
-  },
-  {
-    "file": "tauri/src/note.html",
     "property": "--accent-soft",
     "value": "rgba(48, 209, 88, 0.12)"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg",
-    "value": "#0D0D0B"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg",
-    "value": "#F8F4ED"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg-elevated",
-    "value": "#141412"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg-elevated",
-    "value": "#EFEBE2"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg-hover",
-    "value": "#1C1C1A"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--bg-hover",
-    "value": "#E8E2D8"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--border",
-    "value": "rgba(0, 0, 0, 0.07)"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--border",
-    "value": "rgba(255, 255, 255, 0.06)"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--border-mid",
-    "value": "#2A2924"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--border-mid",
-    "value": "rgba(0, 0, 0, 0.13)"
   },
   {
     "file": "tauri/src/note.html",
@@ -1238,16 +968,6 @@
     "file": "tauri/src/note.html",
     "property": "--inset-shadow",
     "value": "rgba(0, 0, 0, 0.14)"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--red",
-    "value": "#C0392B"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--red",
-    "value": "#FF453A"
   },
   {
     "file": "tauri/src/note.html",
@@ -1291,58 +1011,13 @@
   },
   {
     "file": "tauri/src/note.html",
-    "property": "--text",
-    "value": "#1A1916"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--text",
-    "value": "#E8E4DA"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--text-secondary",
-    "value": "#6B6760"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--text-secondary",
-    "value": "#8C8880"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--text-tertiary",
-    "value": "#3D3B38"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "--text-tertiary",
-    "value": "#BDB9B0"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "font-family",
-    "value": "'Geist Mono'"
-  },
-  {
-    "file": "tauri/src/note.html",
     "property": "font-family",
     "value": "'Geist Mono', 'SF Mono', monospace"
   },
   {
     "file": "tauri/src/note.html",
     "property": "font-family",
-    "value": "'Geist'"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "font-family",
     "value": "'Geist', -apple-system, BlinkMacSystemFont, sans-serif"
-  },
-  {
-    "file": "tauri/src/note.html",
-    "property": "font-family",
-    "value": "'Instrument Serif'"
   },
   {
     "file": "tauri/src/note.html",
@@ -1416,56 +1091,6 @@
   },
   {
     "file": "tauri/src/terminal.html",
-    "property": "--accent",
-    "value": "#30D158"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--accent",
-    "value": "#C96B4E"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg",
-    "value": "#0D0D0B"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg",
-    "value": "#F8F4ED"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg-elevated",
-    "value": "#141412"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg-elevated",
-    "value": "#EFEBE2"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg-hover",
-    "value": "#1C1C1A"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--bg-hover",
-    "value": "#E8E2D8"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--border",
-    "value": "#2A2924"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--border",
-    "value": "rgba(0,0,0,0.13)"
-  },
-  {
-    "file": "tauri/src/terminal.html",
     "property": "--font-mono",
     "value": "'Geist Mono', 'SF Mono', 'Menlo', monospace"
   },
@@ -1473,66 +1098,6 @@
     "file": "tauri/src/terminal.html",
     "property": "--font-sans",
     "value": "'Geist', -apple-system, BlinkMacSystemFont, sans-serif"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--green",
-    "value": "#2E7D46"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--green",
-    "value": "#30D158"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--red",
-    "value": "#C0392B"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--red",
-    "value": "#FF453A"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text",
-    "value": "#1A1916"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text",
-    "value": "#E8E4DA"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text-secondary",
-    "value": "#6B6760"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text-secondary",
-    "value": "#8C8880"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text-tertiary",
-    "value": "#3D3B38"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "--text-tertiary",
-    "value": "#BDB9B0"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "font-family",
-    "value": "'Geist Mono'"
-  },
-  {
-    "file": "tauri/src/terminal.html",
-    "property": "font-family",
-    "value": "'Geist'"
   },
   {
     "file": "tauri/src/vendor/xterm/xterm.css",

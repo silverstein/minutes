@@ -199,8 +199,8 @@ export default function Post() {
           <p>
             On an Apple Silicon Mac with Parakeet v3 installed, Parakeet writes the final text.
             Whisper covers everything else and steps in if Parakeet fails. Every dictation is saved
-            as a Markdown file you own. The next release adds a hook that can hand each dictation to
-            your own agent, a script or a webhook.
+            as a Markdown file you own. Minutes 0.32.0 added a setting that runs a command of yours
+            after every dictation, so each one can go to your own agent, a script or a webhook.
           </p>
           <p>
             What is still open: rare names on Parakeet, typing at the cursor on Windows, and a

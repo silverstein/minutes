@@ -18593,10 +18593,11 @@ mod tests {
             cmd_set_setting("transcription".into(), "engine".into(), "auto".into()).unwrap();
             assert_eq!(Config::load().transcription.engine, "auto");
 
-            // The temp home has no Parakeet v3 model installed.
+            // The temp home has no Parakeet v3 model installed, and a build
+            // without the engine says so instead.
             let error = cmd_set_setting("transcription".into(), "engine".into(), "sherpa".into())
                 .unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
             assert_eq!(Config::load().transcription.engine, "auto");
         });
     }
@@ -18607,8 +18608,16 @@ mod tests {
         with_temp_home(|_| {
             let error =
                 cmd_set_setting("dictation".into(), "backend".into(), "sherpa".into()).unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
         });
+    }
+
+    fn missing_parakeet_message() -> &'static str {
+        if cfg!(feature = "engine-sherpa") {
+            "Parakeet v3 is not installed"
+        } else {
+            "doesn't include Parakeet v3"
+        }
     }
 
     #[test]

@@ -81,8 +81,7 @@
 .dictation-save-status { position: sticky; top: 0; z-index: 2; background: var(--bg-elevated); padding: 8px 0; }
 
 /* Keep the frequent dictation tasks together; disclose configuration in place. */
-#settings-overlay .about-card:has(#panel-dictation.is-active) { width: min(720px, calc(100vw - 32px)); max-width: none; }
-.dictation-page :focus-visible { outline-color: var(--capture); }
+.dictation-page :focus-visible { outline-color: var(--accent); }
 .dictation-gestures { display: grid; gap: 4px; padding: 8px 0 12px; font-size: 12px; color: var(--text-secondary); }
 .dictation-gestures strong { color: var(--text); font-weight: 600; }
 .dictation-disclosure { padding: 8px 0; border-top: 1px solid var(--border-mid); }
@@ -145,6 +144,7 @@
 }
 .dictation-ready-controls { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .dictation-page .btn { color: var(--text); }
+.dictation-page .btn-primary { color: var(--on-accent); }
 @media (max-width: 620px) {
  .dictation-ready-heading { flex-wrap: wrap; }
  .dictation-ready-controls { justify-content: flex-start; }

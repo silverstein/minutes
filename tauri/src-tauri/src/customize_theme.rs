@@ -289,6 +289,67 @@ mod tests {
             .contains("--dictation-action-bg"));
     }
 
+    /// WCAG contrast between two `#RRGGBB` colors.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let luminance = |hex: &str| {
+            let channel = |i: usize| {
+                let c = f64::from(u8::from_str_radix(&hex[i..i + 2], 16).unwrap()) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5)
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn window_palettes_keep_secondary_text_and_button_labels_readable() {
+        // Each window defines its palette twice (dark, then light). Every
+        // `--text-secondary` and `--accent` is checked against the `--bg`
+        // declared before it in the same palette. WCAG AA asks 4.5:1. The
+        // dictation overlay is left out: it draws on its own surface colors.
+        for (name, html) in [
+            ("index.html", include_str!("../../src/index.html")),
+            ("note.html", include_str!("../../src/note.html")),
+            (
+                "meeting-prompt.html",
+                include_str!("../../src/meeting-prompt.html"),
+            ),
+            ("terminal.html", include_str!("../../src/terminal.html")),
+        ] {
+            let mut background: Option<&str> = None;
+            let mut checked = 0;
+            for line in html.lines() {
+                let Some((token, value)) = line.trim().split_once(':') else {
+                    continue;
+                };
+                let value = value.trim().trim_end_matches(';');
+                if !(value.len() == 7 && value.starts_with('#')) {
+                    continue;
+                }
+                match token {
+                    "--bg" => background = Some(value),
+                    "--text-secondary" | "--accent" => {
+                        let bg =
+                            background.unwrap_or_else(|| panic!("{name}: {token} before --bg"));
+                        let ratio = contrast(value, bg);
+                        assert!(
+                            ratio >= 4.5,
+                            "{name}: {token} {value} on {bg} is {ratio:.2}:1"
+                        );
+                        checked += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(checked >= 2, "{name}: found no palette to check");
+        }
+    }
+
     #[test]
     fn every_window_loads_the_theme_script() {
         for html in [

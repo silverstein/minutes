@@ -175,6 +175,16 @@
       }
       if ([...picker.options].some((option) => option.value === previous && !option.disabled)) picker.value = previous;
       if (!picker.options.length) { const option = document.createElement('option'); option.textContent = 'No physical microphone found'; option.value = ''; picker.append(option); }
+      // Outside preferred mode the picker is read-only, so show the input
+      // dictation will actually use rather than whichever device listed first.
+      const mode = preferences?.experience.microphone_mode;
+      if (mode && mode !== 'preferred') {
+        const first = (data.candidates || [])[0];
+        const name = first || 'System default';
+        const option = document.createElement('option'); option.value = '';
+        option.textContent = mode === 'shared' ? `${name} (recording microphone)` : name;
+        picker.replaceChildren(option);
+      }
       $('dictation-lid-warning').hidden = !data.lidClosed;
     } catch (error) { status(`Could not refresh microphones: ${error}`, true); }
   }
@@ -197,7 +207,7 @@
   $('dictation-clipboard-delay').addEventListener('change', (event) => { const value = Number(event.target.value); save((next) => next.experience.clipboard_restore_delay_ms = value); });
   $('dictation-context-enabled').addEventListener('change', (event) => { const value = event.target.checked; save((next) => next.experience.context_enabled = value); });
   $('settings-dictation-writing-style').addEventListener('change', (event) => { const value = event.target.value; save((next) => next.experience.writing_style = value); });
-  $('dictation-mic-mode').addEventListener('change', (event) => { const value = event.target.value; stopMic(); save((next) => next.experience.microphone_mode = value); });
+  $('dictation-mic-mode').addEventListener('change', async (event) => { const value = event.target.value; stopMic(); await save((next) => next.experience.microphone_mode = value); devices(); });
   $('dictation-virtual-mics').addEventListener('change', async (event) => { const value = event.target.checked; await save((next) => next.experience.include_virtual_microphones = value); devices(); });
   $('settings-dictation-microphone').addEventListener('focus', devices);
   $('dictation-mic-add').addEventListener('click', () => { const value = $('settings-dictation-microphone').value; if (value) save((next) => { if (!next.experience.microphones.includes(value)) next.experience.microphones.push(value); }); });

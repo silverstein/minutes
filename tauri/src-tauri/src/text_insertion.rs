@@ -315,8 +315,13 @@ fn target_prefers_clipboard_paste(target: Option<&ActiveTargetContext>) -> bool 
         bundle_id.as_str(),
         "com.useminutes.desktop" | "com.useminutes.desktop.dev"
     );
+    // Apps whose prompt accepts an accessibility write without the text ever
+    // arriving, like a terminal. Matched by exact bundle ID, so lookalikes
+    // such as CodexBar keep the native path.
+    let accepts_ax_without_delivery = matches!(bundle_id.as_str(), "com.openai.codex");
 
     is_minutes_webview
+        || accepts_ax_without_delivery
         || [
             "ghostty",
             "terminal",
@@ -1996,6 +2001,7 @@ mod tests {
             ("iTerm2", "com.googlecode.iterm2"),
             ("Warp", "dev.warp.Warp-Stable"),
             ("Herdr", "dev.herdr.app"),
+            ("ChatGPT", "com.openai.codex"),
             ("Minutes", "com.useminutes.desktop"),
             ("Minutes Dev", "com.useminutes.desktop.dev"),
         ] {
@@ -2015,6 +2021,14 @@ mod tests {
             process_id: Some(42),
         };
         assert!(!target_prefers_clipboard_paste(Some(&notes)));
+
+        let codex_bar = ActiveTargetContext {
+            platform: "macos".into(),
+            app_name: Some("CodexBar".into()),
+            bundle_id: Some("com.steipete.codexbar".into()),
+            process_id: Some(42),
+        };
+        assert!(!target_prefers_clipboard_paste(Some(&codex_bar)));
     }
 
     #[test]

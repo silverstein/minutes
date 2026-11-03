@@ -116,7 +116,60 @@ fn maybe_run_apple_speech_runtime_acceptance() -> Option<i32> {
     }
 }
 
+/// Window-state flags we write ourselves. VISIBLE is left out on purpose: the
+/// main window is often hidden to the tray when we save, and recording that
+/// would reopen the app with no window.
+fn persisted_window_state_flags() -> tauri_plugin_window_state::StateFlags {
+    tauri_plugin_window_state::StateFlags::all() - tauri_plugin_window_state::StateFlags::VISIBLE
+}
+
+/// Write window sizes and positions to `window-state.json` now.
+///
+/// tauri-plugin-window-state only writes on `RunEvent::Exit`, and Minutes
+/// never emits it: quit, restart and update all leave through
+/// `exit_process_without_destructors` (`_exit` on macOS, `process::exit`
+/// elsewhere) to avoid the C++ static-destructor crash. So the file was
+/// never refreshed after the first save, and every launch restored that old
+/// size. We save after resizes settle and once more before exiting.
+fn persist_window_state(app: &tauri::AppHandle) {
+    use tauri_plugin_window_state::AppHandleExt;
+    if let Err(error) = app.save_window_state(persisted_window_state_flags()) {
+        eprintln!("[window-state] save failed: {error}");
+    }
+}
+
+static WINDOW_STATE_LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
+static WINDOW_STATE_SAVE_PENDING: AtomicBool = AtomicBool::new(false);
+const WINDOW_STATE_SETTLE_MS: u64 = 800;
+
+fn window_state_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Save once the window has stopped moving or resizing for a moment. A drag
+/// fires dozens of events; one background waiter covers all of them.
+fn schedule_window_state_save(app: &tauri::AppHandle) {
+    WINDOW_STATE_LAST_CHANGE_MS.store(window_state_now_ms(), Ordering::Relaxed);
+    if WINDOW_STATE_SAVE_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(WINDOW_STATE_SETTLE_MS / 2));
+        let last = WINDOW_STATE_LAST_CHANGE_MS.load(Ordering::Relaxed);
+        if window_state_now_ms().saturating_sub(last) >= WINDOW_STATE_SETTLE_MS {
+            WINDOW_STATE_SAVE_PENDING.store(false, Ordering::Release);
+            persist_window_state(&app);
+            break;
+        }
+    });
+}
+
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
+    persist_window_state(app);
     if let Some(state) = app.try_state::<commands::AppState>() {
         if state.copilot_active.load(Ordering::Relaxed) {
             state.copilot_stop_flag.store(true, Ordering::Release);
@@ -2899,6 +2952,7 @@ fn main() {
                                     None,
                                     None,
                                     None,
+                                    None,
                                 ) {
                                     commands::show_user_notification(
                                         &app_handle,
@@ -3158,6 +3212,11 @@ fn main() {
         })
         .on_window_event(|window, event| {
             match event {
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+                    if window.label() == "main" =>
+                {
+                    schedule_window_state_save(window.app_handle());
+                }
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                     // Hide main window on close instead of quitting (app stays in tray)
                     // PTY session persists — user can reopen and resume where they left off

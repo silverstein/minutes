@@ -16411,8 +16411,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     window.addEventListener('resize', syncNarrowLayout);
 
     // ── Draggable split handle ──
+    // The list's real floor is its CSS min-width (260px, enough for the
+    // Meeting / Memo / Live switch). A fixed 66.7% cap on Recall kept the list
+    // at a third of the window instead, ~330px at 1000px wide and more on
+    // wider windows, so let Recall grow until the list reaches that floor.
+    const LIST_MIN_WIDTH_PX = 260;
     function clampRecallRatio(ratio) {
-      return Math.min(MAX_RECALL_RATIO, Math.max(MIN_RECALL_RATIO, ratio));
+      const bodyW = document.body?.clientWidth || 0;
+      const maxRatio = bodyW > 0
+        ? Math.max(MAX_RECALL_RATIO, 1 - LIST_MIN_WIDTH_PX / bodyW)
+        : MAX_RECALL_RATIO;
+      return Math.min(maxRatio, Math.max(MIN_RECALL_RATIO, ratio));
     }
 
     function getStoredRecallRatio() {

@@ -1683,6 +1683,40 @@ fn merge_config_tables(
     }
 }
 
+/// Dotted names of the keys whose values differ between two config tables,
+/// using the same comparison as [`merge_config_tables`].
+fn changed_config_keys(
+    prefix: &str,
+    previous: &dyn toml_edit::TableLike,
+    updated: &dyn toml_edit::TableLike,
+    changed: &mut Vec<String>,
+) {
+    let name = |key: &str| {
+        if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        }
+    };
+    for (key, _) in previous.iter() {
+        if !updated.contains_key(key) {
+            changed.push(name(key));
+        }
+    }
+    for (key, next) in updated.iter() {
+        match previous.get(key) {
+            Some(old) => {
+                if let (Some(old), Some(new)) = (old.as_table_like(), next.as_table_like()) {
+                    changed_config_keys(&name(key), old, new, changed);
+                } else if old.to_string() != next.to_string() {
+                    changed.push(name(key));
+                }
+            }
+            None => changed.push(name(key)),
+        }
+    }
+}
+
 #[cfg(test)]
 fn config_path_from(xdg_config_home: Option<OsString>, home: PathBuf) -> PathBuf {
     config_base_dir_from(xdg_config_home, home)
@@ -2165,13 +2199,21 @@ impl Config {
 
     /// Save config to the standard config file location.
     /// Creates the config directory and file if they don't exist.
+    #[track_caller]
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::config_path();
         Self::save_to(self, &path)
     }
 
     /// Save config to a specific path.
+    ///
+    /// Each save that changes the file logs the caller, the process and the
+    /// names of the changed keys (never their values, which can be secrets),
+    /// so an unexpected write can be traced to its writer.
+    #[track_caller]
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        let caller = std::panic::Location::caller();
+        let mut changed = Vec::new();
         let contents = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::other(format!("TOML serialize: {}", e)))?;
         let invalid = || {
@@ -2204,8 +2246,10 @@ impl Config {
                 previous.as_table(),
                 updated.as_table(),
             );
+            changed_config_keys("", previous.as_table(), updated.as_table(), &mut changed);
             document.to_string()
         } else {
+            changed.push("(new file)".to_string());
             contents
         };
         let parent = path
@@ -2230,7 +2274,28 @@ impl Config {
             ));
         }
         temporary.persist(path).map_err(|error| error.error)?;
-        tracing::info!(path = %path.display(), "config saved");
+        if changed.is_empty() {
+            tracing::debug!(path = %path.display(), caller = %caller, "config saved unchanged");
+        } else {
+            // The desktop app installs no tracing subscriber, so this goes to
+            // the JSON log as well. HOME and the override show which config a
+            // process believed it was using.
+            let env = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+            crate::logging::log_step(
+                "config_save",
+                &path.display().to_string(),
+                0,
+                serde_json::json!({
+                    "caller": caller.to_string(),
+                    "pid": std::process::id(),
+                    "exe": std::env::current_exe().map(|exe| exe.display().to_string()).ok(),
+                    "home": env("HOME"),
+                    "config_override": env("MINUTES_CONFIG_PATH"),
+                    "changed": changed,
+                }),
+            );
+            tracing::info!(path = %path.display(), caller = %caller, changed = %changed.join(", "), "config saved");
+        }
         Ok(())
     }
 
@@ -2515,6 +2580,32 @@ fn migrate_dictation_auto_engine(raw: &str) -> Option<(String, bool)> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn save_audit_names_only_the_keys_that_changed() {
+        let before = Config::default();
+        let mut after = before.clone();
+        after.transcription.model = "large-v3".into();
+        after.privacy.hide_from_screen_share = !before.privacy.hide_from_screen_share;
+        let table = |config: &Config| {
+            toml::to_string_pretty(config)
+                .unwrap()
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap()
+        };
+        let mut changed = Vec::new();
+        changed_config_keys(
+            "",
+            table(&before).as_table(),
+            table(&after).as_table(),
+            &mut changed,
+        );
+        changed.sort();
+        assert_eq!(
+            changed,
+            ["privacy.hide_from_screen_share", "transcription.model"]
+        );
+    }
 
     #[test]
     fn voice_privacy_defaults_are_biometric_safe() {

@@ -12,6 +12,13 @@ export const metadata: Metadata = {
 
 const posts = [
   {
+    slug: "building-local-dictation",
+    date: "2026-11-03",
+    title: "The model was the easy part",
+    summary:
+      "A build log of local dictation in Minutes. Swapping in Parakeet v3 took a week. Getting text into the right app, catching the bugs that hid behind other bugs, and testing two features that didn't ship took months.",
+  },
+  {
     slug: "whisper-cpp-vs-parakeet-cpp",
     date: "2026-10-27",
     title: "Whisper vs Parakeet v3 for local transcription",

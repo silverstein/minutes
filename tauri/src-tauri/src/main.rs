@@ -437,9 +437,9 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true)
             // Measured: y = 16 put the buttons' centre at ~14px, and the centre
-            // moves 1:1 with y. y = 25 lands it at ~23px, the middle of the
-            // 46px title row in index.html.
-            .traffic_light_position(tauri::LogicalPosition::new(16.0, 25.0));
+            // moves 1:1 with y. y = 28 lands it at ~26px, the middle of the
+            // 52px title row in index.html.
+            .traffic_light_position(tauri::LogicalPosition::new(16.0, 28.0));
     }
 
     if let Ok(win) = builder.build() {

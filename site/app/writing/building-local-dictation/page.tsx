@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { blogPostingSchema } from "@/lib/schema";
 
 export const metadata: Metadata = {
-  title: "Building local dictation: the model was the easy part | minutes",
+  title: "Building local dictation in Minutes | minutes",
   description:
-    "A build log of local dictation in Minutes: the Parakeet v3 swap, getting text into the right app, the bugs that hid behind other bugs, and two features we tested and did not ship.",
+    "How dictation in Minutes works: Parakeet v3 measured on real dictation clips, getting text into the right app, bugs found in daily use, and two features that failed their tests.",
   alternates: {
     canonical: "/writing/building-local-dictation",
   },
@@ -66,7 +66,7 @@ export default function Post() {
     <div className="mx-auto max-w-[680px] px-6 pb-16 sm:px-8">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingSchema({ metadata, headline: "The model was the easy part", path: "/writing/building-local-dictation", datePublished: "2026-11-03", dateModified: "2026-11-03" })) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingSchema({ metadata, headline: "Building local dictation in Minutes", path: "/writing/building-local-dictation", datePublished: "2026-11-03", dateModified: "2026-11-03" })) }}
       />
       <nav className="flex items-center justify-between border-b border-[color:var(--border)] py-4">
         <a href="/" className="font-mono text-[15px] font-medium text-[var(--text)]">
@@ -90,23 +90,18 @@ export default function Post() {
           2026-11-03 · Build log · Mat Silverstein
         </p>
         <h1 className="font-serif text-[36px] leading-[1.05] tracking-[-0.04em] text-[var(--text)] sm:text-[42px]">
-          The model was the easy part
+          Building local dictation in Minutes
         </h1>
-        <p className="mt-4 text-[18px] leading-[1.6] text-[var(--text-secondary)]">
-          A build log of local dictation in Minutes.
-        </p>
 
         <div className="mt-8 space-y-5 text-[16px] leading-[1.75] text-[var(--text-secondary)]">
           <p>
             Minutes has had dictation since March. You hold a key, talk, and the words land
-            wherever your cursor is. All of it runs on your Mac. Going in, I assumed the speech
-            model would be the hard part. It turned out to be the smallest part of the work. Most
-            of the time went into what surrounds the model: getting text into the right app, being
-            honest about whether it got there, and not shipping features that only worked in a
-            demo.
+            wherever your cursor is. All of it runs on your Mac. This post covers the engine change
+            in October and its numbers, how the text gets into the app you are using, the bugs I
+            hit along the way, and two features I tested and dropped.
           </p>
 
-          <h2 className={headingClass}>The model</h2>
+          <h2 className={headingClass}>Switching from Whisper to Parakeet v3</h2>
           <p>
             For most of this year, dictation used Whisper small. In October I moved the final pass
             to NVIDIA&apos;s Parakeet v3. I tested it on 39 of my own saved dictation clips. There
@@ -132,71 +127,66 @@ export default function Post() {
             </a>
             .
           </p>
-          <p>That swap took about a week. Everything below took months.</p>
 
-          <h2 className={headingClass}>Text has to land where you are</h2>
+          <h2 className={headingClass}>Getting text into the right app</h2>
           <p>
             Dictation is only useful if the words show up in the field you were typing in. On a Mac
             there are two ways to do that. Minutes can write into the focused control through
             Accessibility, or it can put the text on the clipboard and press Cmd-V for you.
           </p>
           <p>
-            Writing through Accessibility is cleaner, and it sometimes lies. In Ghostty, macOS
-            reported the write as a success while the prompt received nothing. The terminal built
+            Writing through Accessibility is cleaner, but macOS can report it as a success when
+            nothing arrived. That happened in Ghostty: the write succeeded and the prompt stayed
+            empty. The terminal built
             into Minutes did the same thing. So terminals always get the paste path now, and
             Minutes only says Typed when it can see that the text actually changed. Otherwise it
             says Pasted or Copied, and either way the words stay on your clipboard.
           </p>
           <p>
-            &quot;Where you are&quot; also means the exact window you started in. If you have two
-            windows of the same app open, the text goes to the one you were in.
+            The text also goes to the exact window you started in, even when two windows of the
+            same app are open.
           </p>
           <p>
-            Other platforms get less. Linux on X11 gets a paste that Minutes cannot verify. Windows
-            and Wayland get the clipboard, and Minutes tells you that instead of pretending.
+            Linux on X11 gets a paste that Minutes cannot verify. On Windows and Wayland, Minutes
+            copies the text and tells you to paste it.
           </p>
 
-          <h2 className={headingClass}>Bugs that hid behind other bugs</h2>
+          <h2 className={headingClass}>Bugs from daily use</h2>
           <p>
-            With the default settings, every dictation pasted twice. It stayed hidden because the
-            paste keystroke does nothing until you grant Accessibility permission. Granting the
-            permission is what revealed it.
+            With the default settings, every dictation pasted twice. That stayed hidden because the
+            paste keystroke does nothing until you grant Accessibility permission. Granting it is
+            what made the second paste show up.
           </p>
           <p>
-            The app also heard itself. The start sound played just after the microphone opened, so
-            one transcript began with &quot;[MUSIC PLAYING].&quot; Dictation starts silently now.
+            The start sound played just after the microphone opened, so the microphone picked it up
+            and one transcript began with &quot;[MUSIC PLAYING].&quot; Dictation starts silently
+            now.
           </p>
           <p>
-            Some errors pointed in the wrong direction. A missing model file showed &quot;mic
-            silent, check input device.&quot; The microphone, the permission, the signature and the
+            A missing model file showed &quot;mic silent, check input device.&quot; The microphone, the permission, the signature and the
             device were all fine. Minutes now checks for the model before it opens the microphone,
-            and offers a download button if it is missing. In another case, macOS never showed its
+            and offers a download button if it is missing. In a separate bug, macOS never showed its
             microphone prompt, and dictation sat waiting for 59 seconds while Escape did nothing.
             Now Minutes asks for access itself and gives up after 30 seconds.
           </p>
-          <p>
-            None of these show up in a benchmark. You find them by dictating all day and reading
-            the logs when something feels off.
-          </p>
 
-          <h2 className={headingClass}>What I didn&apos;t ship</h2>
-          <p>Two features looked finished in a demo and failed their tests.</p>
+          <h2 className={headingClass}>Two features that failed their tests</h2>
           <p>
             The first was showing words on screen while you speak. The bar was a first useful word
             in under 700&nbsp;ms for 95% of runs, at most 30% of words wrong, and never rewriting
             text already on screen. I tried five setups across four engines. Apple&apos;s
             DictationTranscriber came closest, at 751&nbsp;ms. Whisper tiny was quick and invented
             things, including &quot;Maddened Wesley of the World.&quot; Nothing passed, so the
-            dictation pill shows a waveform. A fast wrong guess on screen is more distracting than
-            no text at all.
+            dictation pill shows a waveform. I would rather show nothing than a fast guess that
+            changes as you watch.
           </p>
           <p>
             The second was self-correction: when you say &quot;actually&quot; and fix yourself
             mid-sentence, drop the part you corrected. I tested a rule that treats
             &quot;actually&quot; after a dash as a correction. It caught all 12 real corrections in
             the test set. It also rewrote 9 of the 20 sentences that were not corrections. The bar
-            was zero wrong rewrites, because a dictation tool that quietly changes what you said is
-            worse than one that leaves a word in. So &quot;actually&quot; stays literal, and you
+            was zero wrong rewrites, because changing what someone said without telling them is
+            worse than leaving an extra word in. So &quot;actually&quot; stays literal, and you
             say &quot;scratch that&quot; when you want to take something back.
           </p>
           <p>
@@ -205,7 +195,7 @@ export default function Post() {
             &quot;Alright, this is a dictation app test. Let&apos;s try that again.&quot;
           </p>
 
-          <h2 className={headingClass}>Where it stands</h2>
+          <h2 className={headingClass}>What works today</h2>
           <p>
             On an Apple Silicon Mac with Parakeet v3 installed, Parakeet writes the final text.
             Whisper covers everything else and steps in if Parakeet fails. Every dictation is saved
@@ -218,9 +208,7 @@ export default function Post() {
             comparison, so I won&apos;t claim we match it.
           </p>
           <p>
-            The accuracy of a model is a number you can look up. Whether the text lands, and
-            whether the app tells you the truth about it, you only learn by using it every day. The
-            code, the evaluations and the failed experiments are all{" "}
+            The code, the evaluation write-ups and the failed experiments are all{" "}
             <a href="https://github.com/silverstein/minutes" className={linkClass}>
               on GitHub
             </a>

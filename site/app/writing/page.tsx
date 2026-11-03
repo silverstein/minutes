@@ -14,9 +14,9 @@ const posts = [
   {
     slug: "building-local-dictation",
     date: "2026-11-03",
-    title: "The model was the easy part",
+    title: "Building local dictation in Minutes",
     summary:
-      "A build log of local dictation in Minutes. Swapping in Parakeet v3 took a week. Getting text into the right app, catching the bugs that hid behind other bugs, and testing two features that didn't ship took months.",
+      "How dictation in Minutes got to where it is: the Parakeet v3 numbers on real dictation clips, how text reaches the app you are using, bugs found in daily use, and two features that failed their tests and were dropped.",
   },
   {
     slug: "whisper-cpp-vs-parakeet-cpp",

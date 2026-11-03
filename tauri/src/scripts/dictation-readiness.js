@@ -125,16 +125,31 @@
   }
   $('dictation-ready-toggle').addEventListener('click', () => { if (!checking) setExpanded(!expanded); });
   $('dictation-ready-refresh').addEventListener('click', () => { snapshotError = ''; refresh(); });
-  $('dictation-ready-practice').addEventListener('click', () => {
+  // "Try dictation here" starts a real dictation into the practice box, the
+  // same as pressing the shortcut with the box focused, so the button does
+  // what it says instead of leaving an empty field that invites typing.
+  const practiceLabel = $('dictation-practice-label');
+  const practiceIdle = practiceLabel.textContent;
+  const resetPractice = () => { practiceLabel.textContent = practiceIdle; practiceLabel.classList.remove('error'); };
+  $('dictation-ready-practice').addEventListener('click', async () => {
     setExpanded(false);
     window.MinutesDictation?.show('writing'); $('dictation-practice').open = true;
     $('dictation-practice-text').focus(); $('dictation-practice').scrollIntoView({ block: 'center' });
+    practiceLabel.textContent = 'Listening. Say something, then tap your shortcut or choose Finish.';
+    try { await invoke('cmd_start_dictation'); }
+    catch (error) {
+      practiceLabel.textContent = `Dictation didn't start: ${error}. You can click the box and use your shortcut instead.`;
+      practiceLabel.classList.add('error');
+    }
   });
+  $('dictation-practice-text').addEventListener('input', resetPractice);
   window.addEventListener('focus', () => { if (visible()) refresh(); });
   window.addEventListener('minutes:shortcut-changed', event => { if (event.detail.slot === 'dictation' && visible()) refresh(); });
   window.MinutesDictationReadiness = { refresh };
   if (window.__TAURI__?.event) {
     window.__TAURI__.event.listen('dictation:preferences-changed', () => { if (visible()) refresh(); });
+    window.__TAURI__.event.listen('dictation:result', resetPractice);
+    window.__TAURI__.event.listen('dictation:state', event => { if (['cancelled', 'error', 'recoverable'].includes(event.payload)) resetPractice(); });
     window.__TAURI__.event.listen('dictation:mic-test', event => { if (event.payload.state !== 'level' && visible()) refresh(); });
     window.__TAURI__.event.listen('download-model', event => {
       const progress = event.payload;

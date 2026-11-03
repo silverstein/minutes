@@ -1161,8 +1161,181 @@
       margin-top: 32px;
     }
 
+    /* ── macOS title row ──
+       The window uses an overlay title bar, so the row beside the traffic
+       lights belongs to us. Brand, list toggle and settings share it instead
+       of stacking three rows under an empty strip. 46px tall so its centre
+       (23px) lines up with the traffic lights (traffic_light_position in main.rs). */
+    html[data-platform="macos"] .header {
+      height: 46px;
+      min-height: 46px;
+      margin: 0 12px 2px 78px;
+      gap: 8px;
+    }
+
+    html[data-platform="macos"].is-fullscreen .header {
+      margin-left: 14px;
+    }
+
+    html[data-platform="macos"] .brand {
+      gap: 7px;
+    }
+
+    html[data-platform="macos"] .brand-mark {
+      width: 18px;
+      height: 18px;
+    }
+
+    html[data-platform="macos"] .brand-mark img.brand-mark-dark {
+      border-radius: 4px;
+    }
+
+    .brand-name {
+      display: none;
+    }
+
+    html[data-platform="macos"] .brand-name {
+      display: block;
+      font-size: var(--text-body);
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    /* Status chips need the room more than the name does. */
+    html[data-platform="macos"] .header:has(.header-chip.active) .brand-name {
+      display: none;
+    }
+
+    /* Idle is the normal state; a permanent grey dot read as a glitch. The
+       dot only appears when there is something to say, with a tooltip. */
+    html[data-platform="macos"] .header .status-pill:not(.recording):not(.starting):not(.processing):not(.live):not(.sensitive) {
+      display: none;
+    }
+
+    .sidebar-glyph-panel {
+      display: none;
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn,
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-collapse-btn {
+      border-color: transparent;
+      background: transparent;
+      color: var(--text-secondary);
+      order: -1;
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn:hover {
+      background: var(--surface-fill-hover);
+      color: var(--text);
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      background: transparent;
+    }
+
+    html[data-platform="macos"] .header .sidebar-glyph-chevron {
+      display: none;
+    }
+
+    html[data-platform="macos"] .header .sidebar-glyph-panel {
+      display: block;
+    }
+
+    html[data-platform="macos"] .sidebar-collapse-btn.is-collapsed {
+      transform: none;
+    }
+
+    /* The toggle itself stays put when the list collapses (see
+       applySidebarCollapsed), so the separate expand rail would only stack a
+       second control on top of it. */
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-expand-rail {
+      display: none;
+    }
+
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 78px;
+      top: 9px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 14px;
+    }
+
+    /* The right-hand pane headers share the title row. */
+    html[data-platform="macos"] .recall-panel.expanded {
+      padding-top: 5px;
+    }
+
     html[data-platform="macos"] .recall-header {
-      margin-top: 1em;
+      padding-top: 5px;
+      padding-bottom: 5px;
+      position: relative;
+      z-index: 6;
+    }
+
+    /* With the list toggle gone from it, the row above search only held
+       Documents. Sit the pane buttons beside the search field instead; they
+       wrap below it when the list is too narrow for both. */
+    html[data-platform="macos"] .search-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding-top: 6px;
+    }
+
+    html[data-platform="macos"] .search-wrap .search-box {
+      order: 1;
+      flex: 1 1 150px;
+      width: auto;
+      min-width: 0;
+    }
+
+    html[data-platform="macos"] .search-wrap .list-header-actions {
+      order: 2;
+      margin: 0 0 0 auto;
+    }
+
+    html[data-platform="macos"] .search-wrap .search-error {
+      order: 3;
+      flex-basis: 100%;
+    }
+
+    html[data-platform="macos"] .list-header-group:empty {
+      display: none;
+    }
+
+    html[data-platform="macos"] .recall-toggle-btn {
+      margin: 0;
+    }
+
+    html[data-platform="macos"] .search-icon::before {
+      top: 16px;
+    }
+
+    html[data-platform="macos"] .md-viewer-header {
+      min-height: 46px;
+    }
+
+    /* With the list collapsed, whichever pane is leftmost starts after the
+       traffic lights and the toggle. */
+    html[data-platform="macos"] body.sidebar-collapsed .recall-header {
+      margin-left: 98px;
+    }
+
+    html[data-platform="macos"] body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
+      padding-left: 114px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-header {
+      margin-left: 34px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
+      padding-left: 50px;
     }
 
     .brand {
@@ -6090,6 +6263,7 @@
           <img class="brand-mark-dark" src="assets/app-icon.png" alt="" aria-hidden="true" data-tauri-drag-region>
         </span>
         <div class="brand-copy" data-tauri-drag-region>
+          <span class="brand-name" data-tauri-drag-region>Minutes</span>
           <div class="brand-sub" data-tauri-drag-region>Conversation memory for humans and agents</div>
         </div>
       </div>
@@ -6191,7 +6365,7 @@
     <div class="search-wrap search-icon">
       <div class="list-header-actions">
         <div class="list-header-group">
-          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane">‹</button>
+          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane"><span class="sidebar-glyph-chevron" aria-hidden="true">‹</span><svg class="sidebar-glyph-panel" aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.25"/><path d="M6 2.75v10.5"/></svg></button>
         </div>
         <!-- Recall opens a panel; it is navigation, not capture, so it lives
              with the other pane controls rather than beside Start Recording.
@@ -8015,6 +8189,23 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const documentsToggle = document.getElementById('btn-documents-toggle');
     const sidebarCollapseButton = document.getElementById('btn-sidebar-collapse');
     const sidebarExpandRail = document.getElementById('btn-sidebar-expand');
+    if (isMac) {
+      // macOS title row: the list toggle sits right after the traffic lights,
+      // where it stays whether the list is open or collapsed.
+      document.querySelector('.app-left > .header')?.prepend(sidebarCollapseButton);
+      const syncFullscreen = () => {
+        // Full screen hides the traffic lights, so the title row slides left.
+        const full = window.innerWidth === screen.width && window.innerHeight === screen.height;
+        document.documentElement.classList.toggle('is-fullscreen', full);
+      };
+      syncFullscreen();
+      window.addEventListener('resize', syncFullscreen);
+    }
+    // The status dot has no visible text; keep its state readable on hover.
+    new MutationObserver(() => {
+      const state = statusPill.textContent.trim();
+      statusPill.title = state && state !== 'idle' ? state : '';
+    }).observe(statusPill, { childList: true, characterData: true, subtree: true });
     const searchInput = document.getElementById('search-input');
     const detailOverlay = document.getElementById('detail-overlay');
     const detailTitle = document.getElementById('detail-title');

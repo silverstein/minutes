@@ -436,7 +436,10 @@ pub(crate) fn show_main_window(app: &tauri::AppHandle) {
             // visual chrome instead of stacking below a separate gray title bar.
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true)
-            .traffic_light_position(tauri::LogicalPosition::new(16.0, 16.0));
+            // Measured: y = 16 put the buttons' centre at ~14px, and the centre
+            // moves 1:1 with y. y = 25 lands it at ~23px, the middle of the
+            // 46px title row in index.html.
+            .traffic_light_position(tauri::LogicalPosition::new(16.0, 25.0));
     }
 
     if let Ok(win) = builder.build() {

@@ -18249,6 +18249,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       scheduleMeetingsRefresh(0);
     });
 
+    // A row picked from a palette result list (search, research, action items, decisions).
+    currentWindow.listen('palette:open-meeting', async (event) => {
+      const path = event.payload?.path;
+      if (!path) return;
+      try {
+        await openMeetingDetail(path);
+      } catch (e) {
+        showActionToast(`Could not open that meeting: ${e?.message || e}`, { tone: 'error' });
+      }
+    });
+
     // ── Listen for recall:expand events from Rust backend ──
     currentWindow.listen('recall:expand', (event) => {
       const { title, mode } = event.payload;

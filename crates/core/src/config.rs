@@ -1423,6 +1423,8 @@ pub struct HooksConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LiveTranscriptConfig {
+    /// Opt-in bounded, text-free coverage diagnostics; never skips final ASR.
+    pub coverage_shadow: bool,
     /// Standalone live transcript backend selection.
     ///
     /// - `"inherit"` (default): follow `transcription.engine`
@@ -1463,6 +1465,7 @@ pub struct LiveTranscriptConfig {
 impl Default for LiveTranscriptConfig {
     fn default() -> Self {
         Self {
+            coverage_shadow: false,
             backend: LIVE_TRANSCRIPT_BACKEND_INHERIT.into(),
             model: String::new(), // empty = use dictation model
             max_utterance_secs: 30,

@@ -285,8 +285,12 @@ pub fn spawn_live_transcription_from_stems(
     stop_flag: Arc<AtomicBool>,
     partial_publisher: Option<crate::live_partials::LivePartialPublisher>,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let (live_tx, sidecar_handle) =
-        crate::capture::start_live_sidecar(config, &stop_flag, partial_publisher);
+    let (live_tx, sidecar_handle) = crate::capture::start_live_sidecar_with_source(
+        config,
+        &stop_flag,
+        partial_publisher,
+        crate::live_audio_coverage::AudioSource::Mixed,
+    );
     let live_tx = live_tx?;
 
     let feeder = std::thread::Builder::new()
@@ -312,7 +316,7 @@ pub fn spawn_live_transcription_from_stems(
 fn feed_from_stems(
     voice_stem: PathBuf,
     system_stem: Option<PathBuf>,
-    live_tx: &std::sync::mpsc::SyncSender<Vec<f32>>,
+    live_tx: &crate::live_audio_coverage::LiveAudioSender,
     stop_flag: &Arc<AtomicBool>,
     progress: &InputProgress,
 ) {
@@ -734,16 +738,26 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let feeder_stop = Arc::clone(&stop);
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let tx = crate::live_audio_coverage::LiveAudioSender::new(
+            tx,
+            crate::live_audio_coverage::AudioSource::Mixed,
+        );
         let feeder = std::thread::spawn(move || {
             let progress = InputProgress::for_test();
             feed_from_stems(voice, Some(system), &tx, &feeder_stop, &progress);
             progress.snapshot()
         });
         let mixed = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(mixed, vec![0.75; 32_000]);
+        assert_eq!(mixed.samples, vec![0.75; 32_000]);
+        assert_eq!(mixed.span.as_ref().unwrap().start_sample, 0);
+        assert_eq!(
+            mixed.span.as_ref().unwrap().source,
+            crate::live_audio_coverage::AudioSource::Mixed
+        );
         stop.store(true, Ordering::Relaxed);
         let suffix = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(suffix, vec![0.5; 16_000]);
+        assert_eq!(suffix.samples, vec![0.5; 16_000]);
+        assert_eq!(suffix.span.as_ref().unwrap().start_sample, 32_000);
         let progress = feeder.join().unwrap();
         assert_eq!(progress["counters"]["voice_samples_read"], 32_000);
         assert_eq!(progress["counters"]["system_samples_read"], 48_000);

@@ -7885,13 +7885,11 @@ pub fn cmd_sensitive_stop(
         show_user_notification(&app, "Sensitive meeting saved", &error);
     } else if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
-            let input = if is_shell_command(&command) {
-                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
-            } else {
-                format!("{debrief_prompt}\n")
-            };
-            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            if let Some(input) =
+                agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
+            {
+                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            }
         }
     }
     Ok(serde_json::json!({
@@ -7929,13 +7927,11 @@ pub fn cmd_run_meeting_debrief(
     )?;
     if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
-            let input = if is_shell_command(&command) {
-                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
-            } else {
-                format!("{debrief_prompt}\n")
-            };
-            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            if let Some(input) =
+                agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
+            {
+                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            }
         }
     }
     Ok(())
@@ -8937,15 +8933,19 @@ fn validate_resummarize_meeting_path(path: &Path, meetings_root: &Path) -> Resul
     Ok(canonical)
 }
 
-fn write_notice_prompt(command: &str, plain_text: &str) -> String {
+/// Text for the assistant agent, typed as a turn. A plain shell gets nothing:
+/// nobody reads it there, and the old `cat <<'__MINUTES__'` wrapper only left
+/// clutter at the top of the user's terminal. The same state is on disk
+/// (CURRENT_MEETING.md, CURRENT_ARTIFACT.md) for anything that wants it.
+fn agent_notice(command: &str, plain_text: &str) -> Option<String> {
     if is_shell_command(command) {
-        format!("cat <<'__MINUTES__'\n{plain_text}\n__MINUTES__\n")
+        None
     } else {
-        format!("{plain_text}\n")
+        Some(format!("{plain_text}\n"))
     }
 }
 
-fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> String {
+fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> Option<String> {
     let plain_text = match artifact_name {
         Some(name) => format!(
             "Minutes opened artifact {name}. Read CURRENT_ARTIFACT.md and your assistant instructions (CLAUDE.md or AGENTS.md). The user has this file open in the document pane beside this chat and may want help editing it. If you update it on disk, the viewer will refresh live."
@@ -8953,7 +8953,7 @@ fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> String 
         None => "Minutes cleared the open artifact focus. Ignore CURRENT_ARTIFACT.md unless it reappears. If CURRENT_MEETING.md exists, prioritize it; otherwise continue in general assistant mode."
             .into(),
     };
-    write_notice_prompt(command, &plain_text)
+    agent_notice(command, &plain_text)
 }
 
 fn notify_assistant_artifact_focus(
@@ -8966,8 +8966,9 @@ fn notify_assistant_artifact_focus(
         .map_err(|_| "PTY manager lock failed")?;
     if manager.assistant_session_id().is_some() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let prompt = artifact_switch_prompt(&command, artifact_name);
-            manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+            if let Some(prompt) = artifact_switch_prompt(&command, artifact_name) {
+                manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+            }
         }
     }
     Ok(())
@@ -10592,7 +10593,7 @@ fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
+fn context_switch_prompt(command: &str, mode: &str, title: &str) -> Option<String> {
     let plain_text = match mode {
         "meeting" => format!(
             "Minutes changed focus to {title}. Read CURRENT_MEETING.md and your assistant instructions (CLAUDE.md or AGENTS.md), then help with that meeting."
@@ -10601,11 +10602,7 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
             .into(),
     };
 
-    if is_shell_command(command) {
-        format!("cat <<'__MINUTES__'\n{plain_text}\n__MINUTES__\n")
-    } else {
-        format!("{plain_text}\n")
-    }
+    agent_notice(command, &plain_text)
 }
 
 #[derive(Debug, Clone)]
@@ -10807,8 +10804,9 @@ pub fn spawn_terminal(
         // which would inject unwanted text into Claude Code's input).
         if mode == "meeting" {
             if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-                let prompt = context_switch_prompt(&command, mode, &title);
-                manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+                if let Some(prompt) = context_switch_prompt(&command, mode, &title) {
+                    manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+                }
             }
         }
     } else {
@@ -16686,17 +16684,41 @@ mod tests {
             terminal_title_for_mode("deferred", None).unwrap(),
             "Minutes Assistant"
         );
-        let meeting_prompt = context_switch_prompt("opencode", "meeting", "Discussing: Demo");
+        let meeting_prompt =
+            context_switch_prompt("opencode", "meeting", "Discussing: Demo").unwrap();
         assert!(meeting_prompt.contains("CURRENT_MEETING.md"));
         assert!(meeting_prompt.contains("CLAUDE.md or AGENTS.md"));
         assert!(!meeting_prompt.contains("Read CURRENT_MEETING.md and CLAUDE.md,"));
 
-        let general_prompt = context_switch_prompt("opencode", "assistant", "Minutes Assistant");
+        let general_prompt =
+            context_switch_prompt("opencode", "assistant", "Minutes Assistant").unwrap();
         assert!(general_prompt.contains("CLAUDE.md or AGENTS.md"));
 
-        let artifact_prompt = artifact_switch_prompt("opencode", Some("draft.md"));
+        let artifact_prompt = artifact_switch_prompt("opencode", Some("draft.md")).unwrap();
         assert!(artifact_prompt.contains("CURRENT_ARTIFACT.md"));
         assert!(artifact_prompt.contains("CLAUDE.md or AGENTS.md"));
+    }
+
+    #[test]
+    fn plain_shells_get_no_typed_notices() {
+        for shell in ["zsh", "/bin/zsh", "bash", "sh", "fish"] {
+            assert_eq!(
+                context_switch_prompt(shell, "meeting", "Demo"),
+                None,
+                "{shell}"
+            );
+            assert_eq!(
+                artifact_switch_prompt(shell, Some("draft.md")),
+                None,
+                "{shell}"
+            );
+            assert_eq!(artifact_switch_prompt(shell, None), None, "{shell}");
+            assert_eq!(agent_notice(shell, "Run /minutes-debrief"), None, "{shell}");
+        }
+        assert_eq!(
+            agent_notice("claude", "Run /minutes-debrief").as_deref(),
+            Some("Run /minutes-debrief\n")
+        );
     }
 
     #[test]

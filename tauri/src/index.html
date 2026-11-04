@@ -3491,34 +3491,6 @@
       flex-shrink: 0;
     }
 
-    .meeting-chat-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      border: none;
-      background: transparent;
-      color: var(--text-tertiary);
-      font-size: var(--text-sm);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s ease, color 0.15s ease;
-      -webkit-app-region: no-drag;
-      flex-shrink: 0;
-      opacity: 0;
-      transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-    }
-
-    .meeting-item:hover .meeting-chat-btn {
-      opacity: 1;
-    }
-
-    .meeting-chat-btn:hover {
-      background: var(--accent-tint);
-      color: var(--accent);
-    }
-
     .detail-context {
       margin-top: 16px;
       padding: 12px 14px;
@@ -12554,18 +12526,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       item.classList.add('has-kind-label');
 
-      const chatBtn = document.createElement('button');
-      chatBtn.className = 'meeting-chat-btn';
-      chatBtn.setAttribute('aria-label', 'Discuss with Agent');
-      chatBtn.setAttribute('title', 'Discuss with Agent');
-      chatBtn.textContent = '\u279C';
-      chatBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await discussMeetingWithAgent(m.path, m.title);
-      });
-
+      // No hover arrow: it reserved 32px of every row, cutting titles short
+      // even when hidden. "Discuss with Agent" is in the right-click menu
+      // and on the meeting's detail page.
       item.appendChild(info);
-      item.appendChild(chatBtn);
       return item;
     }
 

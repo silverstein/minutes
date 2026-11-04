@@ -2613,7 +2613,8 @@ pub(crate) fn start_live_sidecar_with_source(
         return (None, None);
     }
     let (tx, rx) = std::sync::mpsc::sync_channel(200);
-    let tx = crate::live_audio_coverage::LiveAudioSender::new(tx, source);
+    let tx = crate::live_audio_coverage::LiveAudioSender::new(tx, source)
+        .with_source_tracking(config.live_transcript.coverage_shadow);
     let sidecar_config = config.clone();
     let sidecar_stop = stop_flag.clone();
     match std::thread::Builder::new()

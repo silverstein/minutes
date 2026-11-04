@@ -48,10 +48,53 @@ pub(crate) fn append_span(spans: &mut Vec<AudioSpan>, span: AudioSpan) {
     spans.push(span);
 }
 
+/// Positions in one stem's decoded 16 kHz stream, before mixing. Roles name
+/// caller-supplied file slots, never a verified device or speaker identity.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum StemRole {
+    Voice,
+    System,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SourceRange {
+    pub epoch: u64,
+    pub role: StemRole,
+    pub source_start_sample: u64,
+    pub output_start_sample: u64,
+    pub sample_count: u64,
+}
+
+/// A hash of complete PCM frames already consumed by the tailer. It excludes
+/// the mutable WAV header. Validation against the preserved file is still
+/// required, including its final length; this is not a capture-end checkpoint.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SourcePrefix {
+    pub epoch: u64,
+    pub role: StemRole,
+    pub locator_sha256: Option<String>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub encoding: &'static str,
+    pub data_offset: u64,
+    pub pcm_bytes: u64,
+    pub pcm_sha256: String,
+    pub decoded_samples: u64,
+    pub invalidated: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Serialize, Default)]
+pub(crate) struct PacketSources {
+    pub ranges: Vec<SourceRange>,
+    pub prefixes: Vec<SourcePrefix>,
+}
+
 #[derive(Debug)]
 pub(crate) struct AudioPacket {
     pub samples: Vec<f32>,
     pub span: Option<AudioSpan>,
+    pub sources: Option<PacketSources>,
 }
 
 /// Allocation and sends run after recording writes, never on the audio callback.
@@ -62,6 +105,7 @@ pub(crate) struct LiveAudioSender {
     next_sample: Arc<AtomicU64>,
     stream: u64,
     source: AudioSource,
+    track_sources: bool,
 }
 
 impl LiveAudioSender {
@@ -72,10 +116,20 @@ impl LiveAudioSender {
             next_sample: Arc::new(AtomicU64::new(0)),
             stream: NEXT_STREAM.fetch_add(1, Ordering::Relaxed),
             source,
+            track_sources: false,
         }
     }
 
-    fn packet(&self, samples: Vec<f32>) -> AudioPacket {
+    pub fn with_source_tracking(mut self, enabled: bool) -> Self {
+        self.track_sources = enabled;
+        self
+    }
+
+    pub fn tracks_sources(&self) -> bool {
+        self.track_sources
+    }
+
+    fn packet(&self, samples: Vec<f32>, sources: Option<PacketSources>) -> AudioPacket {
         let count = samples.len() as u64;
         AudioPacket {
             span: Some(AudioSpan {
@@ -85,15 +139,20 @@ impl LiveAudioSender {
                 sample_count: count,
             }),
             samples,
+            sources,
         }
     }
 
     pub fn try_send(&self, samples: Vec<f32>) -> Result<(), mpsc::TrySendError<AudioPacket>> {
-        self.tx.try_send(self.packet(samples))
+        self.tx.try_send(self.packet(samples, None))
     }
 
-    pub fn send(&self, samples: Vec<f32>) -> Result<(), mpsc::SendError<AudioPacket>> {
-        self.tx.send(self.packet(samples))
+    pub fn send_with_sources(
+        &self,
+        samples: Vec<f32>,
+        sources: Option<PacketSources>,
+    ) -> Result<(), mpsc::SendError<AudioPacket>> {
+        self.tx.send(self.packet(samples, sources))
     }
 }
 
@@ -183,6 +242,19 @@ impl CoverageLedger {
                 ..span.clone()
             });
         self.record(serde_json::json!({"event":"received","span":span}));
+    }
+
+    pub fn observe_sources(&mut self, span: Option<&AudioSpan>, sources: Option<&PacketSources>) {
+        if let Some(sources) = sources {
+            self.record(serde_json::json!({
+                "event":"source_inputs", "version":1, "span":span, "sources":sources,
+                "epoch_scope":"this-manifest", "source_roles":"caller-file-slots",
+                "resampling":"channel-average-nearest-source-v1", "mixing":"sum-clamp-v1",
+                "locator_format":"canonical-path-utf8-sha256",
+                "binding":"observed-pcm-prefix", "final_file_validation":"not-performed",
+                "capture_end":"unknown", "reuse_authorized":false
+            }));
+        }
     }
 
     pub fn classified(&mut self, spans: &[AudioSpan], state: &str) {
@@ -320,6 +392,63 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn source_observations_join_forwarded_ranges_without_granting_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coverage.jsonl");
+        let mut ledger = CoverageLedger::open(&path, Some("fixture-session")).unwrap();
+        let span = AudioSpan {
+            stream: 1,
+            source: AudioSource::Mixed,
+            start_sample: 800,
+            sample_count: 1600,
+        };
+        let sources = PacketSources {
+            ranges: vec![SourceRange {
+                epoch: 7,
+                role: StemRole::System,
+                source_start_sample: 3200,
+                output_start_sample: 0,
+                sample_count: 1600,
+            }],
+            prefixes: vec![SourcePrefix {
+                epoch: 7,
+                role: StemRole::System,
+                locator_sha256: Some("fixture-locator-hash".into()),
+                sample_rate: 48000,
+                channels: 2,
+                encoding: "f32-le",
+                data_offset: 4096,
+                pcm_bytes: 115200,
+                pcm_sha256: "fixture-pcm-hash".into(),
+                decoded_samples: 4800,
+                invalidated: None,
+            }],
+        };
+        ledger.observe(Some(&span));
+        ledger.observe_sources(Some(&span), None);
+        ledger.observe_sources(Some(&span), Some(&sources));
+        ledger.finish();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let bindings: Vec<_> = rows
+            .iter()
+            .filter(|r| r["event"] == "source_inputs")
+            .collect();
+        assert_eq!(bindings.len(), 1);
+        let binding = bindings[0];
+        assert_eq!(binding["span"]["start_sample"], 800);
+        assert_eq!(binding["sources"]["ranges"][0]["source_start_sample"], 3200);
+        assert_eq!(binding["sources"]["prefixes"][0]["epoch"], 7);
+        assert_eq!(binding["final_file_validation"], "not-performed");
+        assert_eq!(binding["capture_end"], "unknown");
+        assert_eq!(binding["reuse_authorized"], false);
+        assert_eq!(rows.last().unwrap()["complete"], false);
     }
 
     #[cfg(unix)]

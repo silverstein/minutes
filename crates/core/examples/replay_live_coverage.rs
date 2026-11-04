@@ -87,6 +87,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|r| r["event"] == "finalized")
             .count()
             .into();
+        let inputs: Vec<_> = rows
+            .iter()
+            .filter(|r| r["event"] == "source_inputs")
+            .collect();
+        result["source_input_records"] = inputs.len().into();
+        result["mapped_source_ranges"] = inputs
+            .iter()
+            .filter_map(|r| r["sources"]["ranges"].as_array())
+            .map(Vec::len)
+            .sum::<usize>()
+            .into();
+        result["source_prefix_hashes"] = inputs
+            .iter()
+            .filter_map(|r| r["sources"]["prefixes"].as_array())
+            .flatten()
+            .filter_map(|p| p["pcm_sha256"].as_str())
+            .collect::<Vec<_>>()
+            .into();
         result["complete"] = rows.last().unwrap()["complete"].clone();
         result["raw_text_in_coverage"] = text.contains(&speech).into();
     }

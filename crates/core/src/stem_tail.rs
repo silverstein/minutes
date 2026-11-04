@@ -19,7 +19,9 @@
 //!   so leftover bytes carry into the next poll rather than being dropped.
 
 use crate::config::Config;
+use crate::live_audio_coverage::{PacketSources, SourcePrefix, SourceRange, StemRole};
 use crate::live_input_progress::{Counter, InputProgress, Stage};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -64,6 +66,42 @@ pub(crate) struct StemTail {
     /// Fractional read position for decimation, carried across polls so the
     /// resampled stream stays continuous instead of restarting each time.
     resample_pos: f64,
+    tracking: Option<StemTracking>,
+}
+
+#[derive(Debug)]
+struct StemTracking {
+    anchor: File,
+    epoch: u64,
+    locator_sha256: Option<String>,
+    data_offset: u64,
+    pcm_bytes: u64,
+    pcm_hash: Sha256,
+    decoded_samples: u64,
+    invalidated: Option<&'static str>,
+}
+
+impl StemTracking {
+    fn new(anchor: File, path: &Path, data_offset: u64) -> Self {
+        static NEXT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            anchor,
+            epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
+            locator_sha256: path.canonicalize().ok().and_then(|p| {
+                p.to_str()
+                    .map(|value| format!("{:x}", Sha256::digest(value.as_bytes())))
+            }),
+            data_offset,
+            pcm_bytes: 0,
+            pcm_hash: Sha256::new(),
+            decoded_samples: 0,
+            invalidated: None,
+        }
+    }
+
+    fn invalidate(&mut self, reason: &'static str) {
+        self.invalidated.get_or_insert(reason);
+    }
 }
 
 impl StemTail {
@@ -72,6 +110,10 @@ impl StemTail {
     /// Fails while the header is too short to describe the format, which is
     /// normal in the first moments of a capture; the caller retries.
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_tracking(path, false)
+    }
+
+    fn open_with_tracking(path: &Path, track: bool) -> Result<Self, String> {
         let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         let mut header = [0_u8; 4096];
         let read = file
@@ -84,6 +126,7 @@ impl StemTail {
             cursor: data_offset,
             carry: Vec::new(),
             resample_pos: 0.0,
+            tracking: track.then(|| StemTracking::new(file, path, data_offset)),
         })
     }
 
@@ -93,12 +136,27 @@ impl StemTail {
     /// transient by nature here (the file is being written concurrently), so the
     /// caller should treat them as "nothing this round" rather than fatal.
     pub(crate) fn poll(&mut self) -> Result<Vec<f32>, String> {
-        let mut file =
-            File::open(&self.path).map_err(|e| format!("reopen {}: {e}", self.path.display()))?;
+        let mut file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) => {
+                if let Some(tracking) = self.tracking.as_mut() {
+                    tracking.invalidate("source-unavailable");
+                }
+                return Err(format!("reopen {}: {error}", self.path.display()));
+            }
+        };
         let len = file
             .metadata()
             .map_err(|e| format!("stat {}: {e}", self.path.display()))?
             .len();
+        if let Some(tracking) = self.tracking.as_mut() {
+            if !crate::policy_fs::open_file_identity_matches(&tracking.anchor, &file) {
+                tracking.invalidate("file-replaced");
+            }
+            if len < self.cursor {
+                tracking.invalidate("file-truncated");
+            }
+        }
         if len <= self.cursor {
             return Ok(Vec::new());
         }
@@ -126,7 +184,44 @@ impl StemTail {
         let usable = fresh.len() - (fresh.len() % frame);
         self.carry = fresh[usable..].to_vec();
 
-        Ok(self.decode_to_mono_16k(&fresh[..usable]))
+        let decoded = self.decode_to_mono_16k(&fresh[..usable]);
+        if let Some(tracking) = self.tracking.as_mut() {
+            tracking.pcm_hash.update(&fresh[..usable]);
+            tracking.pcm_bytes += usable as u64;
+            tracking.decoded_samples += decoded.len() as u64;
+            // Recheck the path after reading. Appends and header finalization
+            // are allowed; replacement/truncation permanently invalidate this
+            // observer epoch. No reread of the existing PCM prefix is needed.
+            if !File::open(&self.path).is_ok_and(|current| {
+                crate::policy_fs::open_file_identity_matches(&tracking.anchor, &current)
+            }) {
+                tracking.invalidate("file-replaced-or-unavailable");
+            }
+            if file.metadata().is_ok_and(|m| m.len() < self.cursor) {
+                tracking.invalidate("file-truncated");
+            }
+        }
+        Ok(decoded)
+    }
+
+    fn source_prefix(&self, role: StemRole) -> Option<SourcePrefix> {
+        let t = self.tracking.as_ref()?;
+        Some(SourcePrefix {
+            epoch: t.epoch,
+            role,
+            locator_sha256: t.locator_sha256.clone(),
+            sample_rate: self.format.sample_rate,
+            channels: self.format.channels,
+            encoding: match self.format.encoding {
+                Encoding::F32 => "f32-le",
+                Encoding::I16 => "i16-le",
+            },
+            data_offset: t.data_offset,
+            pcm_bytes: t.pcm_bytes,
+            pcm_sha256: format!("{:x}", t.pcm_hash.clone().finalize()),
+            decoded_samples: t.decoded_samples,
+            invalidated: t.invalidated,
+        })
     }
 
     /// Decode whole frames, average channels to mono, and decimate to 16 kHz.
@@ -321,11 +416,12 @@ fn feed_from_stems(
     progress: &InputProgress,
 ) {
     let opened = progress.measure(Stage::HeaderWait, || {
-        wait_for_stems(
+        wait_for_stems_with_tracking(
             &voice_stem,
             system_stem.as_deref(),
             stop_flag,
             SIBLING_STEM_GRACE,
+            live_tx.tracks_sources(),
         )
     });
     let Some((mut voice, mut system)) = opened else {
@@ -439,6 +535,17 @@ fn feed_from_stems(
 
         progress.set(Counter::VoicePendingSamples, voice_pending.len());
         progress.set(Counter::SystemPendingSamples, system_pending.len());
+        let sources = live_tx.tracks_sources().then(|| {
+            source_inputs(
+                voice.as_ref(),
+                system.as_ref(),
+                voice_pending.len(),
+                system_pending.len(),
+                has_voice,
+                has_system,
+                false,
+            )
+        });
         let chunk = progress.measure(Stage::Mix, || {
             take_audio(
                 &mut voice_pending,
@@ -453,7 +560,7 @@ fn feed_from_stems(
         progress.set(Counter::ChunkRemainingSamples, samples);
         if samples > 0 {
             if progress
-                .measure(Stage::Send, || live_tx.send(chunk))
+                .measure(Stage::Send, || live_tx.send_with_sources(chunk, sources))
                 .is_err()
             {
                 // The sidecar is gone; nothing left to feed.
@@ -480,6 +587,17 @@ fn feed_from_stems(
             system_pending.extend_from_slice(&samples);
         }
     }
+    let sources = live_tx.tracks_sources().then(|| {
+        source_inputs(
+            voice.as_ref(),
+            system.as_ref(),
+            voice_pending.len(),
+            system_pending.len(),
+            has_voice,
+            has_system,
+            true,
+        )
+    });
     let mut tail = take_audio(
         &mut voice_pending,
         &mut system_pending,
@@ -495,11 +613,85 @@ fn feed_from_stems(
     progress.set(Counter::SystemPendingSamples, system_pending.len());
     let samples = tail.len();
     progress.set(Counter::ChunkRemainingSamples, samples);
-    if !tail.is_empty() && progress.measure(Stage::Send, || live_tx.send(tail)).is_ok() {
+    if !tail.is_empty()
+        && progress
+            .measure(Stage::Send, || live_tx.send_with_sources(tail, sources))
+            .is_ok()
+    {
         progress.add(Counter::SamplesSent, samples);
         progress.add(Counter::SendsCompleted, 1);
         progress.set(Counter::ChunkRemainingSamples, 0);
     }
+}
+
+/// Describe the same drains as `take_audio`, without changing the buffers.
+/// Output positions are relative to the next packet, not the recording clock.
+#[allow(clippy::too_many_arguments)]
+fn source_inputs(
+    voice: Option<&StemTail>,
+    system: Option<&StemTail>,
+    voice_pending: usize,
+    system_pending: usize,
+    has_voice: bool,
+    has_system: bool,
+    final_drain: bool,
+) -> PacketSources {
+    let both = has_voice && has_system;
+    let overlap = voice_pending.min(system_pending);
+    let v = if both {
+        overlap
+    } else if has_voice {
+        voice_pending
+    } else {
+        0
+    };
+    let s = if both {
+        overlap
+    } else if has_system {
+        system_pending
+    } else {
+        0
+    };
+    let output = v.max(s);
+    let mut sources = PacketSources::default();
+    for (tail, role, pending, consumed, suffix_offset) in [
+        (voice, StemRole::Voice, voice_pending, v, output),
+        (
+            system,
+            StemRole::System,
+            system_pending,
+            s,
+            output + if final_drain { voice_pending - v } else { 0 },
+        ),
+    ] {
+        let Some(prefix) = tail.and_then(|t| t.source_prefix(role)) else {
+            continue;
+        };
+        // Missing evidence is preferable to inventing a source position.
+        let Some(start) = prefix.decoded_samples.checked_sub(pending as u64) else {
+            continue;
+        };
+        if consumed > 0 {
+            sources.ranges.push(SourceRange {
+                epoch: prefix.epoch,
+                role,
+                source_start_sample: start,
+                output_start_sample: 0,
+                sample_count: consumed as u64,
+            });
+        }
+        if final_drain && pending > consumed {
+            sources.ranges.push(SourceRange {
+                epoch: prefix.epoch,
+                role,
+                source_start_sample: start + consumed as u64,
+                output_start_sample: suffix_offset as u64,
+                sample_count: (pending - consumed) as u64,
+            });
+        }
+        sources.prefixes.push(prefix);
+    }
+    sources
 }
 
 /// Return audio for the selected source plan.
@@ -590,12 +782,30 @@ fn poll_source(
 /// Voice and system are probed in parallel. Once either is ready, the sibling
 /// gets a short grace period to avoid dropping one side because of a startup
 /// race. A missing voice stem must not suppress healthy system audio.
+#[cfg(test)]
 fn wait_for_stems(
     voice_path: &Path,
     system_path: Option<&Path>,
     stop_flag: &Arc<AtomicBool>,
     sibling_grace: std::time::Duration,
 ) -> Option<(Option<StemTail>, Option<StemTail>)> {
+    wait_for_stems_with_tracking(voice_path, system_path, stop_flag, sibling_grace, false)
+}
+
+fn wait_for_stems_with_tracking(
+    voice_path: &Path,
+    system_path: Option<&Path>,
+    stop_flag: &Arc<AtomicBool>,
+    sibling_grace: std::time::Duration,
+    track: bool,
+) -> Option<(Option<StemTail>, Option<StemTail>)> {
+    let open = |path: &Path| {
+        if track {
+            StemTail::open_with_tracking(path, true)
+        } else {
+            StemTail::open(path)
+        }
+    };
     let deadline = std::time::Instant::now() + HEADER_WAIT;
     let mut voice = None;
     let mut system = None;
@@ -607,10 +817,10 @@ fn wait_for_stems(
         }
 
         if voice.is_none() {
-            voice = StemTail::open(voice_path).ok();
+            voice = open(voice_path).ok();
         }
         if system.is_none() {
-            system = system_path.and_then(|path| StemTail::open(path).ok());
+            system = system_path.and_then(|path| open(path).ok());
         }
 
         let any_ready = voice.is_some() || system.is_some();
@@ -677,6 +887,170 @@ mod tests {
     }
 
     #[test]
+    fn source_prefix_hashes_complete_frames_once_and_ignores_header_finalization() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private-source-name.wav");
+        write_growing_stem(&path, 2, 24_000, Encoding::F32);
+        let mut tracked = StemTail::open_with_tracking(&path, true).unwrap();
+        let mut plain = StemTail::open(&path).unwrap();
+        let bytes: Vec<u8> = [0.1_f32, 0.3, 0.2, 0.4, 0.5, 0.7]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let mut all = Vec::new();
+        for part in [&bytes[..3], &bytes[3..11], &bytes[11..]] {
+            File::options()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(part)
+                .unwrap();
+            let actual = tracked.poll().unwrap();
+            assert_eq!(actual, plain.poll().unwrap());
+            all.extend(actual);
+        }
+        let before = tracked.source_prefix(StemRole::Voice).unwrap();
+        assert_eq!(before.pcm_bytes, 24);
+        assert_eq!(before.pcm_sha256, format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(before.decoded_samples, all.len() as u64);
+        assert!(plain.source_prefix(StemRole::Voice).is_none());
+        assert!(before.locator_sha256.is_some());
+        let mut writer = File::options().write(true).open(&path).unwrap();
+        writer.seek(SeekFrom::Start(40)).unwrap();
+        writer.write_all(&24_u32.to_le_bytes()).unwrap();
+        assert!(tracked.poll().unwrap().is_empty());
+        let after = tracked.source_prefix(StemRole::Voice).unwrap();
+        assert_eq!(before.pcm_sha256, after.pcm_sha256);
+        assert_eq!(before.epoch, after.epoch);
+        assert!(after.invalidated.is_none());
+        assert!(!serde_json::to_string(&after)
+            .unwrap()
+            .contains("private-source-name"));
+    }
+
+    #[test]
+    fn truncation_invalidates_the_observer_epoch_even_if_audio_later_grows_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        write_growing_stem(&path, 1, 16_000, Encoding::F32);
+        append_f32(&path, &[0.25; 10]);
+        let mut tail = StemTail::open_with_tracking(&path, true).unwrap();
+        tail.poll().unwrap();
+        let old_epoch = tail.source_prefix(StemRole::Voice).unwrap().epoch;
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(44)
+            .unwrap();
+        assert!(tail.poll().unwrap().is_empty());
+        append_f32(&path, &[0.5; 20]);
+        tail.poll().unwrap();
+        let prefix = tail.source_prefix(StemRole::Voice).unwrap();
+        assert_eq!(prefix.epoch, old_epoch);
+        assert_eq!(prefix.invalidated, Some("file-truncated"));
+        let fresh = StemTail::open_with_tracking(&path, true).unwrap();
+        let fresh = fresh.source_prefix(StemRole::Voice).unwrap();
+        assert_ne!(fresh.epoch, old_epoch);
+        assert!(fresh.invalidated.is_none());
+    }
+
+    #[test]
+    fn a_different_open_file_invalidates_identity_before_an_empty_poll_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        let other = dir.path().join("other.wav");
+        write_growing_stem(&path, 1, 16_000, Encoding::F32);
+        write_growing_stem(&other, 1, 16_000, Encoding::F32);
+        let mut tail = StemTail::open_with_tracking(&path, true).unwrap();
+        tail.tracking.as_mut().unwrap().anchor = File::open(other).unwrap();
+        assert!(tail.poll().unwrap().is_empty());
+        assert_eq!(
+            tail.source_prefix(StemRole::Voice).unwrap().invalidated,
+            Some("file-replaced")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_path_with_an_equal_length_file_cannot_keep_its_source_epoch_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.wav");
+        write_growing_stem(&path, 1, 16_000, Encoding::F32);
+        append_f32(&path, &[0.25; 10]);
+        let mut tail = StemTail::open_with_tracking(&path, true).unwrap();
+        tail.poll().unwrap();
+        std::fs::rename(&path, dir.path().join("old.wav")).unwrap();
+        write_growing_stem(&path, 1, 16_000, Encoding::F32);
+        append_f32(&path, &[0.5; 10]);
+        assert!(tail.poll().unwrap().is_empty());
+        assert_eq!(
+            tail.source_prefix(StemRole::Voice).unwrap().invalidated,
+            Some("file-replaced")
+        );
+    }
+
+    #[test]
+    fn source_ranges_preserve_discarded_pending_gaps_and_inactive_stop_suffix_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("voice.wav");
+        let system = dir.path().join("system.wav");
+        write_growing_stem(&voice, 1, 16_000, Encoding::F32);
+        write_growing_stem(&system, 1, 16_000, Encoding::F32);
+        append_f32(&voice, &[0.1; 20]);
+        append_f32(&system, &[0.2; 30]);
+        let mut v = StemTail::open_with_tracking(&voice, true).unwrap();
+        let mut s = StemTail::open_with_tracking(&system, true).unwrap();
+        v.poll().unwrap();
+        s.poll().unwrap();
+        // Five voice samples and 23 system samples were already forwarded or
+        // discarded. At Stop, system is active and voice has a late suffix.
+        let mut vp = vec![0.1; 15];
+        let mut sp = vec![0.2; 7];
+        let evidence = source_inputs(Some(&v), Some(&s), vp.len(), sp.len(), false, true, true);
+        let mut actual = take_audio(&mut vp, &mut sp, false, true);
+        actual.extend(vp);
+        actual.extend(sp);
+        assert_eq!(actual, [vec![0.2; 7], vec![0.1; 15]].concat());
+        let voice = evidence
+            .ranges
+            .iter()
+            .find(|r| r.role == StemRole::Voice)
+            .unwrap();
+        let system = evidence
+            .ranges
+            .iter()
+            .find(|r| r.role == StemRole::System)
+            .unwrap();
+        assert_eq!(
+            (
+                voice.source_start_sample,
+                voice.output_start_sample,
+                voice.sample_count
+            ),
+            (5, 7, 15)
+        );
+        assert_eq!(
+            (
+                system.source_start_sample,
+                system.output_start_sample,
+                system.sample_count
+            ),
+            (23, 0, 7)
+        );
+        // With both sources active, only overlap is mixed; the longer source's
+        // suffix maps to a distinct output interval during the final drain.
+        let mixed = source_inputs(Some(&v), Some(&s), 20, 30, true, true, true);
+        let suffix = mixed
+            .ranges
+            .iter()
+            .find(|r| r.role == StemRole::System && r.output_start_sample == 20)
+            .unwrap();
+        assert_eq!((suffix.source_start_sample, suffix.sample_count), (20, 10));
+    }
+
+    #[test]
     fn reads_native_padded_headers_and_preserves_samples_across_rate_and_poll_boundaries() {
         // Synthetic native RIFF layout: audio begins at 4096, data size remains
         // a placeholder. No capture device or private recording is involved.
@@ -704,7 +1078,7 @@ mod tests {
             header.extend_from_slice(&0_u32.to_le_bytes());
             assert_eq!(header.len(), 4096);
             std::fs::write(&stem, &header).unwrap();
-            let mut tail = StemTail::open(&stem).unwrap();
+            let mut tail = StemTail::open_with_tracking(&stem, true).unwrap();
             assert!(tail.poll().unwrap().is_empty());
             let mut read = Vec::new();
             // Odd sizes exercise persistent fractional decimation/carry phase.
@@ -717,6 +1091,14 @@ mod tests {
                 assert!(tail.poll().unwrap().is_empty());
             }
             assert_eq!(read.len(), 32_000, "rate {rate}");
+            let prefix = tail.source_prefix(StemRole::Voice).unwrap();
+            assert_eq!(prefix.data_offset, 4096);
+            let pcm: Vec<u8> = input
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect();
+            assert_eq!(prefix.pcm_sha256, format!("{:x}", Sha256::digest(pcm)));
+            assert!(prefix.invalidated.is_none());
             let mut whole = StemTail::open(&stem).unwrap();
             assert_eq!(
                 read,
@@ -724,6 +1106,29 @@ mod tests {
                 "poll boundaries changed the resampling phase at rate {rate}"
             );
         }
+    }
+
+    #[test]
+    fn default_feeder_preserves_audio_without_source_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("voice.wav");
+        write_growing_stem(&voice, 1, 16_000, Encoding::F32);
+        append_f32(&voice, &[0.25; 160]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let feeder_stop = Arc::clone(&stop);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let tx = crate::live_audio_coverage::LiveAudioSender::new(
+            tx,
+            crate::live_audio_coverage::AudioSource::Mixed,
+        );
+        let feeder = std::thread::spawn(move || {
+            feed_from_stems(voice, None, &tx, &feeder_stop, &InputProgress::for_test());
+        });
+        let packet = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(packet.samples, vec![0.25; 160]);
+        assert!(packet.sources.is_none());
+        stop.store(true, Ordering::Relaxed);
+        feeder.join().unwrap();
     }
 
     #[test]
@@ -741,7 +1146,8 @@ mod tests {
         let tx = crate::live_audio_coverage::LiveAudioSender::new(
             tx,
             crate::live_audio_coverage::AudioSource::Mixed,
-        );
+        )
+        .with_source_tracking(true);
         let feeder = std::thread::spawn(move || {
             let progress = InputProgress::for_test();
             feed_from_stems(voice, Some(system), &tx, &feeder_stop, &progress);
@@ -750,6 +1156,18 @@ mod tests {
         let mixed = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(mixed.samples, vec![0.75; 32_000]);
         assert_eq!(mixed.span.as_ref().unwrap().start_sample, 0);
+        let evidence = mixed.sources.as_ref().unwrap();
+        assert_eq!(evidence.ranges.len(), 2);
+        assert_eq!(evidence.ranges[0].role, StemRole::Voice);
+        assert_eq!(evidence.ranges[1].role, StemRole::System);
+        assert!(evidence.ranges.iter().all(|r| r.source_start_sample == 0
+            && r.output_start_sample == 0
+            && r.sample_count == 32_000));
+        assert_eq!(evidence.prefixes[0].sample_rate, 24_000);
+        assert_eq!(evidence.prefixes[0].pcm_bytes, 48_000 * 4);
+        assert_eq!(evidence.prefixes[1].sample_rate, 48_000);
+        assert_eq!(evidence.prefixes[1].pcm_bytes, 144_000 * 4);
+        assert!(evidence.prefixes.iter().all(|p| p.invalidated.is_none()));
         assert_eq!(
             mixed.span.as_ref().unwrap().source,
             crate::live_audio_coverage::AudioSource::Mixed
@@ -758,6 +1176,14 @@ mod tests {
         let suffix = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(suffix.samples, vec![0.5; 16_000]);
         assert_eq!(suffix.span.as_ref().unwrap().start_sample, 32_000);
+        let sources = suffix.sources.as_ref().unwrap();
+        assert_eq!(sources.ranges.len(), 1);
+        let range = &sources.ranges[0];
+        assert_eq!(range.role, StemRole::System);
+        assert_eq!(range.source_start_sample, 32_000);
+        assert_eq!(range.output_start_sample, 0);
+        assert_eq!(range.sample_count, 16_000);
+        assert_eq!(range.epoch, evidence.prefixes[1].epoch);
         let progress = feeder.join().unwrap();
         assert_eq!(progress["counters"]["voice_samples_read"], 32_000);
         assert_eq!(progress["counters"]["system_samples_read"], 48_000);

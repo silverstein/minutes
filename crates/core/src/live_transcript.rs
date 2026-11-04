@@ -3444,6 +3444,7 @@ pub fn run_sidecar_mpsc(
                 .map(|samples| AudioPacket {
                     samples,
                     span: None,
+                    sources: None,
                 })
         },
         stop_flag,
@@ -3874,7 +3875,10 @@ fn run_sidecar_inner_mpsc(
         };
 
         if config.live_transcript.coverage_shadow {
-            sidecar_coverage(&writer, |l| l.observe(packet.span.as_ref()));
+            sidecar_coverage(&writer, |l| {
+                l.observe(packet.span.as_ref());
+                l.observe_sources(packet.span.as_ref(), packet.sources.as_ref());
+            });
         }
         let samples = packet.samples;
         progress.add(Counter::SamplesReceived, samples.len());

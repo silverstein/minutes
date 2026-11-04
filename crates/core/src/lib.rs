@@ -9,6 +9,9 @@ pub(crate) mod audio_budget;
 pub mod audio_decode_worker;
 pub mod autoresearch;
 pub(crate) mod bounded_child;
+mod live_audio_coverage;
+/// Offline, non-authorizing checks of live source observations.
+pub mod live_source_validation;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_graph_xpc;
 pub mod orukeet;

@@ -1197,22 +1197,8 @@
       border-radius: 4px;
     }
 
-    .brand-name {
-      display: none;
-    }
-
-    html[data-platform="macos"] .brand-name {
-      display: block;
-      font-size: var(--text-body);
-      font-weight: 600;
-      color: var(--text);
-      white-space: nowrap;
-    }
-
-    /* Status chips need the room more than the name does. */
-    html[data-platform="macos"] .header:has(.header-chip.active) .brand-name {
-      display: none;
-    }
+    /* The mark carries the identity; the menu bar already names the app
+       whenever this window is focused, so the wordmark was repetition. */
 
     /* Idle is the normal state; a permanent grey dot read as a glitch. The
        dot only appears when there is something to say, with a tooltip. */
@@ -6281,7 +6267,6 @@
           <img class="brand-mark-dark" src="assets/app-icon.png" alt="" aria-hidden="true" data-tauri-drag-region>
         </span>
         <div class="brand-copy" data-tauri-drag-region>
-          <span class="brand-name" data-tauri-drag-region>Minutes</span>
           <div class="brand-sub" data-tauri-drag-region>Conversation memory for humans and agents</div>
         </div>
       </div>

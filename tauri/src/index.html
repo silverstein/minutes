@@ -1295,8 +1295,28 @@
 
     html[data-platform="macos"] .search-wrap .search-field {
       order: 1;
-      flex: 1 1 150px;
-      min-width: 0;
+      /* Shrinks before anything wraps; only below 110px do the pane
+         buttons drop under it. */
+      flex: 1 1 0;
+      min-width: 110px;
+    }
+
+    html[data-platform="macos"] .search-wrap {
+      container: listsearch / inline-size;
+    }
+
+    .list-toggle-btn .label-short {
+      display: none;
+    }
+
+    @container listsearch (max-width: 280px) {
+      .list-toggle-btn .label-long {
+        display: none;
+      }
+
+      .list-toggle-btn .label-short {
+        display: inline;
+      }
     }
 
     html[data-platform="macos"] .search-wrap .list-header-actions {
@@ -6370,7 +6390,7 @@
              Same id and nudge element: every existing handler keeps working. -->
         <button class="list-toggle-btn recall-toggle-btn" id="btn-assistant" type="button" aria-expanded="false" title="Open Recall">Recall <span class="recall-nudge"
             id="recall-nudge" aria-label="Recall has new content"></span></button>
-        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
+        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false" aria-label="Show documents"><span class="label-long">Documents</span><span class="label-short" aria-hidden="true">Docs</span></button>
       </div>
       <div class="search-field">
         <svg class="search-field-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.75"/><path d="M10.5 10.5 14 14"/></svg>
@@ -12367,7 +12387,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       documentsToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
       // Label the button with its DESTINATION so returning to meetings is
       // self-evident: it reads "Meetings" while documents are showing.
-      documentsToggle.textContent = active ? 'Meetings' : 'Documents';
+      // Long and short forms; a narrow list shows the short one (see the
+      // listsearch container query) rather than wrapping the row.
+      const [longLabel, shortLabel] = active ? ['Meetings', 'Meetings'] : ['Documents', 'Docs'];
+      documentsToggle.replaceChildren(
+        Object.assign(document.createElement('span'), { className: 'label-long', textContent: longLabel }),
+        Object.assign(document.createElement('span'), { className: 'label-short', textContent: shortLabel }),
+      );
+      documentsToggle.lastChild.setAttribute('aria-hidden', 'true');
       documentsToggle.setAttribute(
         'aria-label',
         active ? 'Back to meetings' : 'Show documents',

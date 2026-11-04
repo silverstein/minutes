@@ -3139,6 +3139,36 @@
       padding-left: 14px;
     }
 
+    .meeting-item[hidden] {
+      display: none;
+    }
+
+    .meeting-item.in-dictation-group {
+      padding-left: 26px;
+    }
+
+    .dictation-group .meeting-title {
+      color: var(--text-secondary);
+    }
+
+    .dictation-group-chevron {
+      flex-shrink: 0;
+      color: var(--text-tertiary);
+      font-size: var(--text-base);
+      line-height: 1;
+      transition: transform 0.15s ease;
+    }
+
+    .dictation-group[aria-expanded="true"] .dictation-group-chevron {
+      transform: rotate(90deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .dictation-group-chevron {
+        transition: none;
+      }
+    }
+
     .meeting-item:hover {
       background: var(--bg-hover);
       box-shadow: 0 1px 4px var(--shadow-soft);
@@ -12384,11 +12414,75 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       meetingRowsState = {
         query: activeSearchQuery,
         rows: Object.entries(groupByDate(meetings)).flatMap(([label, items]) =>
-          items.map((m) => ({ label, m }))),
+          activeSearchQuery ? items.map((m) => ({ label, m })) : rowsWithDictationsGrouped(label, items)),
         rendered: 0,
         lastLabel: null,
       };
       appendMeetingRows(Math.max(MEETING_ROWS_CHUNK, sameList ? previousRendered : 0));
+    }
+
+    // A day of dictation can bury that day's meetings, so two or more
+    // dictations on one day fold into a single row that opens in place. The
+    // row sits where the newest of them would. Search never groups: a query
+    // should show every match.
+    const expandedDictationDays = new Set();
+    function rowsWithDictationsGrouped(label, items) {
+      const dictations = items.filter((m) => m.content_type === 'dictation');
+      if (dictations.length < 2) return items.map((m) => ({ label, m }));
+      const rows = [];
+      let placed = false;
+      for (const m of items) {
+        if (m.content_type !== 'dictation') {
+          rows.push({ label, m });
+          continue;
+        }
+        if (placed) continue;
+        placed = true;
+        rows.push({ label, group: { key: label, items: dictations } });
+        for (const d of dictations) rows.push({ label, m: d, groupKey: label });
+      }
+      return rows;
+    }
+
+    function buildDictationGroupRow(group) {
+      const expanded = expandedDictationDays.has(group.key);
+      const row = document.createElement('div');
+      row.className = 'meeting-item dictation-group has-kind-label';
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      row.setAttribute('aria-expanded', String(expanded));
+      const info = document.createElement('div');
+      info.className = 'meeting-info';
+      const title = document.createElement('div');
+      title.className = 'meeting-title';
+      title.textContent = `${group.items.length} dictations`;
+      const meta = document.createElement('div');
+      meta.className = 'meeting-meta';
+      const times = group.items.map((m) => new Date(m.date).getTime()).filter(Number.isFinite);
+      meta.textContent = times.length
+        ? `${formatTime(new Date(Math.min(...times)).toISOString())} to ${formatTime(new Date(Math.max(...times)).toISOString())}`
+        : '';
+      info.append(title, meta);
+      const chevron = document.createElement('span');
+      chevron.className = 'dictation-group-chevron';
+      chevron.setAttribute('aria-hidden', 'true');
+      chevron.textContent = '›';
+      row.append(info, chevron);
+      const toggle = () => {
+        const open = !expandedDictationDays.has(group.key);
+        if (open) expandedDictationDays.add(group.key); else expandedDictationDays.delete(group.key);
+        row.setAttribute('aria-expanded', String(open));
+        meetingsScroll.querySelectorAll('.meeting-item[data-dictation-group]').forEach((child) => {
+          if (child.dataset.dictationGroup === group.key) child.hidden = !open;
+        });
+      };
+      row.addEventListener('click', toggle);
+      row.addEventListener('keydown', (event) => {
+        if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        toggle();
+      });
+      return row;
     }
 
     function appendMeetingRows(count) {
@@ -12405,20 +12499,32 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           meetingsScroll.appendChild(header);
           state.lastLabel = label;
         }
-        meetingsScroll.appendChild(buildMeetingRow(m));
+        if (state.rows[index].group) {
+          meetingsScroll.appendChild(buildDictationGroupRow(state.rows[index].group));
+          continue;
+        }
+        const row = buildMeetingRow(m);
+        const groupKey = state.rows[index].groupKey;
+        if (groupKey) {
+          row.dataset.dictationGroup = groupKey;
+          row.classList.add('in-dictation-group');
+          row.hidden = !expandedDictationDays.has(groupKey);
+        }
+        meetingsScroll.appendChild(row);
       }
       state.rendered = end;
       previousRendered = end;
       if (end === state.rows.length && !state.query) {
+        const total = state.rows.filter((row) => row.m).length;
         const listEnd = document.createElement('div');
         listEnd.className = 'meeting-list-end';
-        listEnd.textContent = `${state.rows.length.toLocaleString('en-US')} ${state.rows.length === 1 ? 'meeting' : 'meetings'}`;
+        listEnd.textContent = `${total.toLocaleString('en-US')} ${total === 1 ? 'meeting' : 'meetings'}`;
         meetingsScroll.appendChild(listEnd);
       }
     }
 
     function focusMeetingRow(from, step) {
-      const rows = [...meetingsScroll.querySelectorAll('.meeting-item')];
+      const rows = [...meetingsScroll.querySelectorAll('.meeting-item:not([hidden])')];
       if (!rows.length) return false;
       const index = from ? rows.indexOf(from) : -1;
       const next = rows[index + step];

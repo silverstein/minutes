@@ -3127,6 +3127,12 @@
       transition: background 0.15s ease, box-shadow 0.15s ease;
     }
 
+    /* Meeting rows name their kind in the meta line, so they no longer
+       reserve a gutter for the type dot. */
+    .meeting-item.has-kind-label {
+      padding-left: 14px;
+    }
+
     .meeting-item:hover {
       background: var(--bg-hover);
       box-shadow: 0 1px 4px var(--shadow-soft);
@@ -3238,21 +3244,6 @@
       background: var(--surface-fill-strongest-hover);
     }
 
-    .meeting-badge.memo {
-      background: var(--purple-solid-soft);
-    }
-
-    .meeting-item:hover .meeting-badge.memo {
-      background: var(--purple-solid-strong);
-    }
-
-    .meeting-badge.dictation {
-      background: var(--green-solid-soft);
-    }
-
-    .meeting-item:hover .meeting-badge.dictation {
-      background: var(--green-solid-strong);
-    }
 
     /* ── Meeting detail view ── */
     .detail-overlay {
@@ -12530,7 +12521,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const meta = document.createElement('div');
       meta.className = 'meeting-meta';
       // Section headers replace date headers in search-by-meaning results.
-      meta.textContent = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
+      const when = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
+      // The kind is spelled out instead of shown as a coloured dot: a dot
+      // before a list row reads as "unread" everywhere else on the Mac.
+      // Meetings are the default and stay unlabelled.
+      const kindLabel = { memo: 'Memo', dictation: 'Dictation' }[m.content_type] || '';
+      meta.textContent = kindLabel ? `${when} · ${kindLabel}` : when;
 
       info.appendChild(title);
       info.appendChild(meta);
@@ -12556,10 +12552,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         info.appendChild(badgeRow);
       }
 
-      const badge = document.createElement('span');
-      const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
-      badge.className = 'meeting-badge' + typeClass;
-      badge.textContent = m.content_type || 'meeting';
+      item.classList.add('has-kind-label');
 
       const chatBtn = document.createElement('button');
       chatBtn.className = 'meeting-chat-btn';
@@ -12573,7 +12566,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       item.appendChild(info);
       item.appendChild(chatBtn);
-      item.appendChild(badge);
       return item;
     }
 

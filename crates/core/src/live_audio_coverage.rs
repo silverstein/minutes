@@ -1,6 +1,8 @@
 //! Diagnostic capture-to-final handoff. Never authorizes reuse of live text.
 //! Positions describe the forwarded 16 kHz stream, not hardware-clock continuity.
-#![cfg_attr(not(feature = "whisper"), allow(dead_code))]
+// Capture's optional sender type exists in every build, while its live consumer
+// requires both features. Keep unused helpers quiet only without that consumer.
+#![cfg_attr(not(all(feature = "streaming", feature = "whisper")), allow(dead_code))]
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};

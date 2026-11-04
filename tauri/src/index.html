@@ -628,10 +628,12 @@
       padding: 10px 0 6px 5px;
     }
 
+    /* Style the scrollbar with ::-webkit-scrollbar only, like the meeting
+       list and document pane. Current WebKit honours the standard
+       scrollbar-color / scrollbar-width over these, and with them set the
+       terminal drew a solid full-height white bar at its right edge. */
     .recall-terminal .xterm .xterm-viewport {
       background-color: transparent;
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 18%, transparent) transparent;
-      scrollbar-width: thin;
     }
 
     .recall-terminal .xterm .xterm-viewport::-webkit-scrollbar {
@@ -648,11 +650,6 @@
       border-radius: 999px;
       background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
       background-clip: content-box;
-    }
-
-    .recall-terminal:hover .xterm .xterm-viewport,
-    .recall-terminal:focus-within .xterm .xterm-viewport {
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 38%, transparent) transparent;
     }
 
     .recall-terminal:hover .xterm .xterm-viewport::-webkit-scrollbar-thumb,

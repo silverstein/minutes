@@ -249,14 +249,53 @@ fn restart_macos_on_main_thread(app: &tauri::AppHandle) -> ! {
     relaunch_and_exit(&env, binary)
 }
 
+/// The `.app` bundle that contains `binary`, if any.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn enclosing_app_bundle(binary: &std::path::Path) -> Option<std::path::PathBuf> {
+    binary
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))
+        .map(std::path::Path::to_path_buf)
+}
+
+/// Waits for `pid` to exit (up to ~10 s), then opens the bundle through
+/// LaunchServices. `$1` pid, `$2` bundle, the rest are app arguments.
+#[cfg(target_os = "macos")]
+const RELAUNCH_AFTER_EXIT_SCRIPT: &str = r#"pid=$1; bundle=$2; shift 2
+i=0
+while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+if [ "$#" -gt 0 ]; then exec /usr/bin/open "$bundle" --args "$@"; fi
+exec /usr/bin/open "$bundle""#;
+
 #[cfg(target_os = "macos")]
 fn relaunch_and_exit(env: &tauri::Env, binary: std::io::Result<std::path::PathBuf>) -> ! {
+    // Relaunch the way a person would: after this process is gone, through
+    // LaunchServices. Exec'ing the binary directly started the new copy while
+    // this one was still exiting and outside LaunchServices, and after an
+    // in-app update the menu bar icon came back at the far left instead of
+    // where the user had dragged it (the position is saved per app under
+    // "NSStatusItem Preferred Position Item-0"). Quit-and-reopen and
+    // reinstall-then-open both keep it.
     match binary {
         Ok(path) => {
-            if let Err(error) = std::process::Command::new(path)
-                .args(env.args_os.iter().skip(1))
-                .spawn()
-            {
+            let spawned = match enclosing_app_bundle(&path) {
+                Some(bundle) => std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(RELAUNCH_AFTER_EXIT_SCRIPT)
+                    .arg("minutes-relaunch")
+                    .arg(std::process::id().to_string())
+                    .arg(bundle)
+                    .args(env.args_os.iter().skip(1))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn(),
+                // A raw target binary has no bundle to open.
+                None => std::process::Command::new(path)
+                    .args(env.args_os.iter().skip(1))
+                    .spawn(),
+            };
+            if let Err(error) = spawned {
                 eprintln!("[restart] failed to relaunch app: {error}");
             }
         }
@@ -4432,6 +4471,26 @@ mod tray_activity_tests {
         assert_eq!(
             TrayAppearance::from_theme(tauri::Theme::Dark),
             TrayAppearance::Dark
+        );
+    }
+}
+
+#[cfg(test)]
+mod relaunch_tests {
+    use super::enclosing_app_bundle;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn finds_the_app_bundle_around_the_binary() {
+        assert_eq!(
+            enclosing_app_bundle(Path::new(
+                "/Applications/Minutes.app/Contents/MacOS/minutes-app"
+            )),
+            Some(PathBuf::from("/Applications/Minutes.app"))
+        );
+        assert_eq!(
+            enclosing_app_bundle(Path::new("/Users/x/target/release/minutes-app")),
+            None
         );
     }
 }

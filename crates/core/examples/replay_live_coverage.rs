@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writer.finalize()?;
     let stop = Arc::new(AtomicBool::new(false));
     let handle = minutes_core::stem_tail::spawn_live_transcription_from_stems(
-        input,
+        input.clone(),
         None,
         &config,
         Arc::clone(&stop),
@@ -107,6 +107,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into();
         result["complete"] = rows.last().unwrap()["complete"].clone();
         result["raw_text_in_coverage"] = text.contains(&speech).into();
+        // Explicit offline verification only. The product Stop path performs
+        // no new scan and never treats this report as accepted transcript input.
+        use minutes_core::live_source_validation::{
+            validate_source_prefixes, SourceCandidate, SourceSlot, ValidationBudget,
+        };
+        let locator = format!(
+            "{:x}",
+            Sha256::digest(
+                input
+                    .canonicalize()?
+                    .to_str()
+                    .ok_or("source path is not UTF-8")?
+                    .as_bytes()
+            )
+        );
+        let mut source = std::fs::File::open(&input)?;
+        let mut diagnostics = std::fs::File::open(data.join("live-transcript.coverage.jsonl"))?;
+        let validation = validate_source_prefixes(
+            &mut diagnostics,
+            &mut [SourceCandidate {
+                slot: SourceSlot::Voice,
+                file: &mut source,
+                canonical_path_sha256: &locator,
+            }],
+            None,
+            ValidationBudget::default(),
+        )?;
+        result["source_validation"] = serde_json::to_value(validation)?;
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())

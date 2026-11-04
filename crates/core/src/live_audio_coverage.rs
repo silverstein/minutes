@@ -114,7 +114,9 @@ pub(crate) struct CoverageLedger {
 impl CoverageLedger {
     pub fn open(path: &std::path::Path, session: Option<&str>) -> std::io::Result<Self> {
         // Replace the scratch slot atomically. A late writer from the previous
-        // session keeps its old inode and cannot interleave with the new file.
+        // session keeps its old file and cannot interleave with the new file.
+        // Windows may refuse replacement while that file is open. Return the
+        // error instead of truncating it; the caller disables diagnostics only.
         let parent = path
             .parent()
             .ok_or_else(|| std::io::Error::other("coverage path has no parent"))?;
@@ -336,7 +338,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("coverage.jsonl");
         let mut old = CoverageLedger::open(&path, Some("old-session")).unwrap();
-        let mut current = CoverageLedger::open(&path, Some("new-session")).unwrap();
+        old.writer.flush().unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let replacement = CoverageLedger::open(&path, Some("new-session"));
+        if let Err(error) = &replacement {
+            #[cfg(windows)]
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            #[cfg(not(windows))]
+            panic!("unexpected replacement failure: {error}");
+        }
+        if replacement.is_err() {
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
         old.finalized(
             &[],
             77,
@@ -348,6 +361,11 @@ mod tests {
             },
         );
         old.finish();
+        drop(old);
+        // Windows can safely retry after the old handle closes. On platforms
+        // that replaced it, the late old write must stay in the unlinked file.
+        let mut current = replacement
+            .unwrap_or_else(|_| CoverageLedger::open(&path, Some("new-session")).unwrap());
         current.finish();
         let text = std::fs::read_to_string(path).unwrap();
         assert!(text.contains("new-session"));

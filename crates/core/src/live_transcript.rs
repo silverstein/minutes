@@ -579,11 +579,16 @@ impl LiveTranscriptWriter {
         let coverage = if config.live_transcript.coverage_shadow
             && source == TranscriptSource::RecordingSidecar
         {
-            CoverageLedger::open(
+            match CoverageLedger::open(
                 &jsonl_path.with_extension("coverage.jsonl"),
                 session_id.as_deref(),
-            )
-            .ok()
+            ) {
+                Ok(coverage) => Some(coverage),
+                Err(error) => {
+                    tracing::warn!(%error, "live coverage diagnostics unavailable; transcription continues");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -4963,6 +4968,36 @@ mod tests {
             assert_eq!(diagnostic["writer_lock_wait"]["count"], 1);
             assert_eq!(diagnostic["writer_write"]["count"], 1);
             assert!(!diagnostic.to_string().contains(text));
+        });
+    }
+
+    #[test]
+    fn unavailable_coverage_diagnostics_do_not_prevent_final_transcript_writes() {
+        with_temp_home(|| {
+            let mut config = Config::default();
+            config.live_transcript.coverage_shadow = true;
+            let coverage_path = pid::live_transcript_jsonl_path().with_extension("coverage.jsonl");
+            // A directory cannot be replaced by the optional diagnostic file.
+            std::fs::create_dir_all(&coverage_path).unwrap();
+            let w = LiveTranscriptWriter::new(&config, None, TranscriptSource::RecordingSidecar)
+                .unwrap();
+            assert!(w.coverage.is_none());
+            let writer = Mutex::new(Some(w));
+            let text = "Final transcription survives unavailable diagnostics.";
+            write_timed_sidecar_utterance(
+                &writer,
+                text,
+                2.5,
+                &mut SidecarWorkerTimings::default(),
+                &[],
+                None,
+            );
+            let (lines, _, path) = lock_ignore_poison(&writer).take().unwrap().finalize();
+            assert_eq!(lines, 1);
+            let line: TranscriptLine =
+                serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
+            assert_eq!(line.text, text);
+            assert!(coverage_path.is_dir());
         });
     }
 

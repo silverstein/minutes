@@ -12,6 +12,14 @@ Every manifest/final/checkpoint explicitly denies reuse authority. Capture end a
 
 This is the recording-sidecar foundation. Standalone capture, per-source channels and epoch/reset binding, source-integrity checkpoints, retention integration and matched language/quality assessment remain prerequisites for accepted live-text handoff. Current recording-sidecar Whisper output is not automatically equivalent to final Parakeet output.
 
+## Native stem source observations
+
+With coverage enabled, the native file feeder adds `source_inputs` records. Each links a forwarded packet interval to the exact input intervals consumed from the voice and system file slots. Input positions count decoded 16 kHz samples before mixing. Mix overlap, buffered residue, discarded pending input and the separately appended Stop suffix retain their own input positions. Final transcript spans can be joined to these packet intervals. A missing observation is unknown coverage.
+
+Each observed file gets a manifest-scoped observer epoch, its sample format and data offset, a hash of its canonical UTF-8 path, and an incremental SHA-256 of complete PCM frames read so far. The hash excludes the mutable WAV header and incomplete frame carry. It uses bytes already read by the feeder, without an extra full-file pass at Stop. Raw paths, filenames and transcript text are not written into these records. The native reader pins an open file identity and invalidates the observer epoch when it detects replacement, truncation or a missing path. Reopening a reader creates a new epoch; this change does not automatically recover or rebind an invalidated epoch. Audio forwarding retains its existing behavior.
+
+These are observations of read prefixes, not trusted producer or final-file checkpoints. A prefix may include buffered input not forwarded to recognition. Observer epochs are not certified capture epochs, and file-slot roles do not verify physical devices, source independence or speaker identity. In-place changes to already read bytes still require comparison against the preserved file. The manifest keeps `source_file_binding` unverified; every source observation explicitly denies reuse and reports that final-file validation was not performed. Producer completion, full source validation, standalone/other capture paths and matched quality assessment remain open. Coverage off performs no additional hashing or identity checks.
+
 ## File-only smoke test
 
 Use a private isolated data directory and an explicit test config with local models. Do not set HOME or point the harness at the normal Minutes data directory. Use public input, at most one minute, in 16 kHz mono i16 WAV format. The harness copies the input, appends two seconds of silence, and drives the production native-stem feeder for fifteen seconds without opening an audio device.

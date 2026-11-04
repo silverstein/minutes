@@ -16507,6 +16507,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       applySidebarCollapsed(false, { explicit: true });
     });
     window.addEventListener('resize', syncNarrowLayout);
+    // The saved split is a preference; re-apply it as the window settles
+    // (including the size restore just after launch) so the clamp is
+    // measured against the real width.
+    window.addEventListener('resize', () => {
+      if (typeof recallExpanded !== 'undefined' && recallExpanded) applyRecallRatio(getStoredRecallRatio());
+    });
 
     // ── Draggable split handle ──
     // The list's real floor is its CSS min-width (260px, enough for the
@@ -20325,10 +20331,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
 
       if (typeof recallWorkspaceState.recallRatio === 'number') {
-        const restoredRatio = clampRecallRatio(Number(recallWorkspaceState.recallRatio));
-        localStorage.setItem('minutes.recallRatio', restoredRatio.toFixed(3));
-        if (Math.abs(restoredRatio - Number(recallWorkspaceState.recallRatio)) > 0.001) {
-          persistRecallWorkspaceState({ recallRatio: restoredRatio });
+        // Keep the user's split as they left it. Clamping here measured the
+        // window before window-state had restored its size (it opens at the
+        // 1120px default first), then saved the clamped value back, so a
+        // narrow list came back wider after every launch. The clamp belongs
+        // to applying the ratio, not to storing it.
+        const stored = Number(recallWorkspaceState.recallRatio);
+        if (stored > 0 && stored < 1) {
+          localStorage.setItem('minutes.recallRatio', stored.toFixed(3));
         }
       }
 

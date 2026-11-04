@@ -422,6 +422,12 @@
       opacity: 0.5;
     }
 
+    /* The chat/document divider shows only while chat and a docked document
+       are both open, including with the list collapsed. */
+    body:not(.doc-overlay):has(#recall-panel.expanded):has(#md-viewer.active) .doc-split-handle {
+      display: block;
+    }
+
     .split-handle.visible {
       display: block;
     }
@@ -6615,6 +6621,9 @@
        collapsed — so the one gesture that would give notes more room during
        a meeting destroyed the view instead. Ordered after the chat panel to
        match where every assistant surface puts its artifact panel. ── -->
+  <!-- Between chat and document; shown only while both are open. -->
+  <div class="split-handle doc-split-handle" id="doc-split-handle" role="separator"
+    aria-orientation="vertical" aria-label="Resize document pane"></div>
   <div class="md-viewer" id="md-viewer">
     <div class="md-viewer-header">
       <div class="md-viewer-header-main">
@@ -16388,10 +16397,99 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallPanel.style.setProperty('--recall-width', (clampRecallRatio(ratio) * 100) + '%');
     }
 
+    // ── Three-pane widths (list · chat · document) ──
+    // With a document open, chat takes the remainder, so the list and the
+    // document carry their own widths. Both are stored as fractions of the
+    // window so they scale with it, and both survive restarts.
+    const RECALL_MIN_WIDTH_PX = 320;
+    const DOC_MIN_WIDTH_PX = 280;
+    const DEFAULT_DOC_RATIO = 0.34;
+    const DEFAULT_LIST_RATIO_DOC_OPEN = 0.22;
+    function readStoredRatio(key, fallback) {
+      const v = parseFloat(localStorage.getItem(key));
+      return v > 0 && v < 1 ? v : fallback;
+    }
+    function listWidthPx() {
+      return document.body.classList.contains('sidebar-collapsed')
+        ? 0
+        : (document.querySelector('.app-left')?.offsetWidth || 0);
+    }
+    function docWidthPx() {
+      return mdViewerPane?.classList.contains('active') ? mdViewerPane.offsetWidth : 0;
+    }
+    function clampListRatioDocOpen(ratio) {
+      const bodyW = document.body.clientWidth || 1;
+      const max = (bodyW - docWidthPx() - RECALL_MIN_WIDTH_PX) / bodyW;
+      return Math.max(LIST_MIN_WIDTH_PX / bodyW, Math.min(max, ratio));
+    }
+    function clampDocRatio(ratio) {
+      const bodyW = document.body.clientWidth || 1;
+      const max = (bodyW - listWidthPx() - RECALL_MIN_WIDTH_PX) / bodyW;
+      return Math.max(DOC_MIN_WIDTH_PX / bodyW, Math.min(max, ratio));
+    }
+    function applyListRatioDocOpen(ratio) {
+      document.body.style.setProperty('--list-width', (ratio * 100).toFixed(2) + '%');
+    }
+    function applyDocRatio(ratio) {
+      document.body.style.setProperty('--doc-width', (ratio * 100).toFixed(2) + '%');
+    }
+    const mdViewerPane = document.getElementById('md-viewer');
+    const docSplitHandle = document.getElementById('doc-split-handle');
+    applyListRatioDocOpen(readStoredRatio('minutes.listRatioDocOpen', DEFAULT_LIST_RATIO_DOC_OPEN));
+    applyDocRatio(readStoredRatio('minutes.docRatio', DEFAULT_DOC_RATIO));
+
+    function startPaneDrag(handle, onMove, onDone) {
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      const move = (ev) => {
+        onMove(ev);
+        if (recallFitAddon) recallFitAddon.fit();
+      };
+      const up = () => {
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        onDone();
+        if (recallFitAddon) recallFitAddon.fit();
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    }
+
+    docSplitHandle?.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startPaneDrag(docSplitHandle, (ev) => {
+        const bodyW = document.body.clientWidth || 1;
+        applyDocRatio(clampDocRatio((bodyW - ev.clientX) / bodyW));
+      }, () => {
+        const ratio = clampDocRatio(docWidthPx() / (document.body.clientWidth || 1));
+        localStorage.setItem('minutes.docRatio', ratio.toFixed(3));
+      });
+    });
+    docSplitHandle?.addEventListener('dblclick', () => {
+      localStorage.removeItem('minutes.docRatio');
+      applyDocRatio(DEFAULT_DOC_RATIO);
+      if (recallFitAddon) recallFitAddon.fit();
+    });
+
     splitHandle.addEventListener('mousedown', (e) => {
       if (document.body.classList.contains('sidebar-collapsed')) return;
       if (!recallExpanded) return;
       e.preventDefault();
+      if (document.body.classList.contains('doc-open')) {
+        // Chat is the remainder here; dragging this divider sizes the list.
+        startPaneDrag(splitHandle, (ev) => {
+          const bodyW = document.body.clientWidth || 1;
+          applyListRatioDocOpen(clampListRatioDocOpen(ev.clientX / bodyW));
+        }, () => {
+          const ratio = clampListRatioDocOpen(listWidthPx() / (document.body.clientWidth || 1));
+          localStorage.setItem('minutes.listRatioDocOpen', ratio.toFixed(3));
+        });
+        return;
+      }
       splitHandle.classList.add('dragging');
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
@@ -16421,6 +16519,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     splitHandle.addEventListener('dblclick', () => {
+      if (document.body.classList.contains('doc-open')) {
+        localStorage.removeItem('minutes.listRatioDocOpen');
+        applyListRatioDocOpen(DEFAULT_LIST_RATIO_DOC_OPEN);
+        if (recallFitAddon) recallFitAddon.fit();
+        return;
+      }
       const ratio = clampRecallRatio(DEFAULT_RECALL_RATIO);
       localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
       applyRecallRatio(ratio);

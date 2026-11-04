@@ -1017,7 +1017,7 @@ impl CaptureWriterPump {
         mut writer: hound::WavWriter<W>,
         sample_count: Arc<std::sync::atomic::AtomicU64>,
         storage_failed: Arc<AtomicBool>,
-        live_tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+        live_tx: Option<crate::live_audio_coverage::LiveAudioSender>,
     ) -> Self {
         let queue = Arc::new(CaptureWriteQueue::new(CAPTURE_WRITE_QUEUE_SAMPLES));
         let worker_queue = Arc::clone(&queue);
@@ -1369,7 +1369,7 @@ impl DualCaptureWriters {
         &mut self,
         voice_samples: &[f32],
         system_samples: &[f32],
-        live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+        live_tx: &Option<crate::live_audio_coverage::LiveAudioSender>,
     ) -> Result<(), CaptureError> {
         write_samples_to_wav(&mut self.voice, voice_samples, &mut self.voice_content)?;
         write_samples_to_wav(&mut self.system, system_samples, &mut self.system_content)?;
@@ -1624,7 +1624,7 @@ fn flush_dual_source_slots(
     pending_voice: &mut std::collections::BTreeMap<u64, Vec<f32>>,
     pending_system: &mut std::collections::BTreeMap<u64, Vec<f32>>,
     writers: &mut DualCaptureWriters,
-    live_tx: &Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    live_tx: &Option<crate::live_audio_coverage::LiveAudioSender>,
     slot_stats: &mut DualSlotStats,
 ) -> Result<(), CaptureError> {
     let (Some(current_slot), Some(max_slot)) = (*next_slot, max_slot) else {
@@ -1669,7 +1669,12 @@ fn record_to_wav_dual_source(
     let mut writers = DualCaptureWriters::new(output_path)?;
     AUDIO_LEVEL.store(0, Ordering::Relaxed);
 
-    let (live_tx, sidecar_handle) = start_live_sidecar(config, &stop_flag, partial_publisher);
+    let (live_tx, sidecar_handle) = start_live_sidecar_with_source(
+        config,
+        &stop_flag,
+        partial_publisher,
+        crate::live_audio_coverage::AudioSource::Mixed,
+    );
 
     // Screen context is an independent evidence lane. Start it before opening
     // either audio stream so a slow or blocked microphone/system-audio setup
@@ -2565,13 +2570,30 @@ fn report_screen_permission_failure(output_path: &Path) {
 /// Spawn a live transcript sidecar thread that receives audio samples and
 /// produces a JSONL transcript in real-time. Returns (sender, join_handle).
 /// When the whisper+streaming features are not available, returns (None, None).
-#[cfg(all(feature = "whisper", feature = "streaming"))]
 pub(crate) fn start_live_sidecar(
     config: &Config,
     stop_flag: &Arc<AtomicBool>,
     partial_publisher: Option<crate::live_partials::LivePartialPublisher>,
 ) -> (
-    Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    Option<crate::live_audio_coverage::LiveAudioSender>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    start_live_sidecar_with_source(
+        config,
+        stop_flag,
+        partial_publisher,
+        crate::live_audio_coverage::AudioSource::Unknown,
+    )
+}
+
+#[cfg(all(feature = "whisper", feature = "streaming"))]
+pub(crate) fn start_live_sidecar_with_source(
+    config: &Config,
+    stop_flag: &Arc<AtomicBool>,
+    partial_publisher: Option<crate::live_partials::LivePartialPublisher>,
+    source: crate::live_audio_coverage::AudioSource,
+) -> (
+    Option<crate::live_audio_coverage::LiveAudioSender>,
     Option<std::thread::JoinHandle<()>>,
 ) {
     if !config.live_transcript.recording_sidecar {
@@ -2590,13 +2612,14 @@ pub(crate) fn start_live_sidecar(
         crate::live_transcript::mark_recording_sidecar_disabled();
         return (None, None);
     }
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(200);
+    let (tx, rx) = std::sync::mpsc::sync_channel(200);
+    let tx = crate::live_audio_coverage::LiveAudioSender::new(tx, source);
     let sidecar_config = config.clone();
     let sidecar_stop = stop_flag.clone();
     match std::thread::Builder::new()
         .name("live-sidecar".into())
         .spawn(move || {
-            crate::live_transcript::run_sidecar_mpsc(
+            crate::live_transcript::run_tracked_sidecar_mpsc(
                 rx,
                 sidecar_stop,
                 &sidecar_config,
@@ -2612,12 +2635,13 @@ pub(crate) fn start_live_sidecar(
 }
 
 #[cfg(not(all(feature = "whisper", feature = "streaming")))]
-pub(crate) fn start_live_sidecar(
+pub(crate) fn start_live_sidecar_with_source(
     _config: &Config,
     _stop_flag: &Arc<AtomicBool>,
     _partial_publisher: Option<crate::live_partials::LivePartialPublisher>,
+    _source: crate::live_audio_coverage::AudioSource,
 ) -> (
-    Option<std::sync::mpsc::SyncSender<Vec<f32>>>,
+    Option<crate::live_audio_coverage::LiveAudioSender>,
     Option<std::thread::JoinHandle<()>>,
 ) {
     (None, None)
@@ -3523,7 +3547,7 @@ mod tests {
             .map(|i| ((i as f32) * 0.01).sin() * 0.5)
             .collect();
 
-        let record = |name: &str, live_tx: Option<std::sync::mpsc::SyncSender<Vec<f32>>>| {
+        let record = |name: &str, live_tx: Option<crate::live_audio_coverage::LiveAudioSender>| {
             let path = dir.path().join(name);
             let count = Arc::new(AtomicU64::new(0));
             let failed = Arc::new(AtomicBool::new(false));
@@ -3547,8 +3571,14 @@ mod tests {
         // The pump drops chunks when a sidecar falls behind, by design. Room for
         // every possible chunk keeps a slow runner's drain thread from turning
         // that into a failure of this test, which is about WAV integrity.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(samples.len());
-        let drain = std::thread::spawn(move || rx.iter().map(|chunk| chunk.len()).sum::<usize>());
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<crate::live_audio_coverage::AudioPacket>(samples.len());
+        let tx = crate::live_audio_coverage::LiveAudioSender::new(
+            tx,
+            crate::live_audio_coverage::AudioSource::Unknown,
+        );
+        let drain =
+            std::thread::spawn(move || rx.iter().map(|chunk| chunk.samples.len()).sum::<usize>());
         let with_sidecar = record("with-sidecar.wav", Some(tx));
         let forwarded = drain.join().unwrap();
         let without_sidecar = record("without-sidecar.wav", None);

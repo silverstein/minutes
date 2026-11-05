@@ -2819,7 +2819,7 @@ fn rebuild_in_memory_projection_with_hook(
     after_source_snapshot: impl FnMut(&Path),
     include_alias_analysis: bool,
 ) -> Result<(Connection, GraphStats), GraphError> {
-    let conn = open_memory_db()?;
+    let mut conn = open_memory_db()?;
     let progress_budget = budget.clone();
     conn.progress_handler(
         1_000,
@@ -2943,7 +2943,7 @@ pub(crate) fn populate_policy_projection_from_stream(
     correction_revision: String,
     include_alias_analysis: bool,
 ) -> Result<(Connection, GraphStats), GraphError> {
-    let conn = open_memory_db()?;
+    let mut conn = open_memory_db()?;
     let budget = ActiveCorpusReadBudget::new();
     let progress_budget = budget.clone();
     conn.progress_handler(

@@ -340,6 +340,9 @@ try {
   assert.ok(modeStart > 0 && modeEnd > modeStart, 'Production mode handoff markers exist');
   const handoff = await page.evaluate(async code => {
     const recallDevMode = false;
+    // applyRecallMode refreshes the context chips first; this fixture only
+    // checks the chat handoff, so the refresh is a no-op here.
+    const refreshRecallContextChips = () => {};
     const recallTerminalContainer = document.getElementById('recall-terminal-container');
     const recallChatPanel = document.getElementById('recall-chat-panel');
     const recallLoading = document.getElementById('recall-loading');

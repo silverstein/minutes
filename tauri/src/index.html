@@ -2487,6 +2487,11 @@
       padding-left: 12px;
       padding-right: 12px;
     }
+    /* The hover rounding curved the ends of the quote bar and left faint
+       arcs at its right corners. */
+    .md-viewer-content blockquote.md-block {
+      border-radius: 0;
+    }
 
     .md-viewer.is-editable .md-viewer-content .md-block:hover {
       background: var(--bg-hover);
@@ -3008,7 +3013,7 @@
     }
 
     .md-viewer-content blockquote {
-      border-left: 3px solid var(--accent);
+      border-left: 2px solid var(--accent);
       padding: 4px 12px;
       margin: 0.6em 0;
       color: var(--text-secondary);

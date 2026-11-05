@@ -6960,7 +6960,7 @@ dependencies = [
  "tokio",
  "url",
  "windows-sys 0.61.2",
- "zip 9.0.0",
+ "zip 9.0.5",
 ]
 
 [[package]]

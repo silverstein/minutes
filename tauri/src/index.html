@@ -2964,9 +2964,16 @@
     .md-frontmatter dt:not(:first-child) { margin-top: 8px; }
     .md-frontmatter dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 
+    /* Same spacing as h1-h3: a bold line used as a heading sits with the
+       content it introduces. Size and weight stay as written. */
+    .md-viewer-content p.md-lead-in {
+      margin: 1.2em 0 0.4em;
+    }
+
     .md-viewer-content h1:first-child,
     .md-viewer-content h2:first-child,
-    .md-viewer-content h3:first-child {
+    .md-viewer-content h3:first-child,
+    .md-viewer-content p.md-lead-in:first-child {
       margin-top: 0;
     }
 
@@ -19433,6 +19440,21 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return true;
     }
 
+    // A short paragraph that is entirely bold and doesn't end like a sentence
+    // is being used as a heading (common in drafted email). It keeps its
+    // markup and size; it only gets a heading's spacing, closer to what it
+    // introduces than to what came before. A bold sentence stays a paragraph.
+    function isLeadInParagraph(node) {
+      if (node.tagName !== 'P' || node.children.length !== 1) return false;
+      const strong = node.children[0];
+      if (strong.tagName !== 'STRONG') return false;
+      const text = (node.textContent || '').trim();
+      return text.length > 0
+        && text.length <= 90
+        && text === (strong.textContent || '').trim()
+        && !/[.!?]$/.test(text);
+    }
+
     function renderMarkdownToElement(el, markdownText, { annotateSource = false } = {}) {
       const source = markdownText || '';
       const { meta, body, bodyStart } = splitFrontmatter(source);
@@ -19441,6 +19463,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const tokens = marked.lexer(escapeHtmlForMarkdown(body));
       const doc = new DOMParser().parseFromString(marked.parser(tokens), 'text/html');
       sanitizeDom(doc.body);
+      for (const node of doc.body.children) {
+        if (isLeadInParagraph(node)) node.classList.add('md-lead-in');
+      }
       if (annotateSource && source.length <= MAX_ANNOTATED_SOURCE_CHARS) {
         annotateBlocksWithSource(doc.body, tokens, body, bodyStart);
       }

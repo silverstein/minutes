@@ -18,7 +18,7 @@ function extract(name) {
 function context(extra = {}) {
   const ctx = vm.createContext({ ...extra });
   vm.runInContext(readFileSync(new URL('../tauri/src/vendor/marked.min.js', import.meta.url), 'utf8'), ctx);
-  for (const name of ['splitFrontmatter', 'artifactDisplayTitle', 'buildFrontmatterElement', 'buildSourceOffsetMap', 'escapeHtmlForMarkdown', 'annotateBlocksWithSource']) {
+  for (const name of ['splitFrontmatter', 'artifactDisplayTitle', 'buildFrontmatterElement', 'buildSourceOffsetMap', 'escapeHtmlForMarkdown', 'annotateBlocksWithSource', 'isLeadInParagraph']) {
     vm.runInContext(extract(name), ctx);
   }
   vm.runInContext("const INVISIBLE_MARKDOWN_TOKENS = new Set(['space', 'def']);", ctx);
@@ -76,6 +76,35 @@ for (const newline of ['\n', '\r\n']) {
     assert.equal(ctx.openArtifactDirty, true);
   });
 }
+
+test('quotes render as quotes, raw HTML stays text, and offsets stay exact', () => {
+  const body = ['Intro & <b>bold</b> a > b.', '', '> Quoted line', '> 1. still quoted', '', 'After.', ''].join('\n');
+  const ctx = context();
+  const tokens = ctx.marked.lexer(ctx.escapeHtmlForMarkdown(body));
+  const html = ctx.marked.parser(tokens);
+  assert.match(html, /<blockquote>[\s\S]*Quoted line[\s\S]*<\/blockquote>/);
+  assert.doesNotMatch(html, /<b>/, 'raw HTML must not come through');
+  assert.match(html, /&lt;b&gt;bold/);
+  const blocks = tokens.filter(t => !['space', 'def'].includes(t.type)).map(() => new Element('p'));
+  assert.equal(ctx.annotateBlocksWithSource({ children: blocks }, tokens, body, 0), true);
+  const slice = (b) => body.slice(Number(b.dataset.srcStart), Number(b.dataset.srcEnd));
+  assert.match(slice(blocks[0]), /^Intro & <b>bold<\/b> a > b\./);
+  assert.match(slice(blocks[1]), /^> Quoted line\n> 1\. still quoted/);
+  assert.match(slice(blocks[2]), /^After\./);
+});
+
+test('a short all-bold line gets heading spacing; a bold sentence does not', () => {
+  const ctx = context();
+  const el = (tagName, text, children = []) => ({ tagName, textContent: text, children });
+  const lead = (text, extra = '') => el('P', text + extra, [el('STRONG', text)]);
+  assert.equal(ctx.isLeadInParagraph(lead("Questions for Carrie's call on Friday")), true);
+  assert.equal(ctx.isLeadInParagraph(lead('Next steps:')), true);
+  assert.equal(ctx.isLeadInParagraph(lead('Do not share client names.')), false, 'a sentence stays a paragraph');
+  assert.equal(ctx.isLeadInParagraph(lead('To:', ' Carolyn')), false, 'bold label plus text is not a heading');
+  assert.equal(ctx.isLeadInParagraph(lead('x'.repeat(91))), false);
+  assert.equal(ctx.isLeadInParagraph(el('P', 'Plain', [])), false);
+  assert.equal(ctx.isLeadInParagraph(el('LI', 'Item', [el('STRONG', 'Item')])), false);
+});
 
 test('creating a draft opens an editable preview and cancellation creates no file', async () => {
   const calls = [], opened = [];

@@ -2529,6 +2529,28 @@
       padding-right: 6px;
     }
 
+    /* Lists, quotes and code blocks have their own left edge. The rule above
+       replaced it with 6px, which hung list numbers outside the text column
+       and pushed quote borders and code boxes past it. Lists keep their 20px
+       indent plus the 6px pulled back out; boxed blocks keep their padding
+       and stay inside the column. */
+    .md-viewer-content ol.md-block,
+    .md-viewer-content ul.md-block {
+      padding-left: 26px;
+    }
+    .md-viewer-content blockquote.md-block,
+    .md-viewer-content pre.md-block {
+      margin-left: 0;
+      margin-right: 0;
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    /* The hover rounding curved the ends of the quote bar and left faint
+       arcs at its right corners. */
+    .md-viewer-content blockquote.md-block {
+      border-radius: 0;
+    }
+
     .md-viewer.is-editable .md-viewer-content .md-block:hover {
       background: var(--bg-hover);
       cursor: text;
@@ -3000,9 +3022,19 @@
     .md-frontmatter dt:not(:first-child) { margin-top: 8px; }
     .md-frontmatter dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 
+    /* Same spacing as h1-h3: a bold line used as a heading sits with the
+       content it introduces. Size and weight stay as written. */
+    .md-viewer-content p.md-lead-in {
+      /* Top and bottom only: the shorthand would also reset the clickable
+         block's -6px side margins and shift the line right. */
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
+    }
+
     .md-viewer-content h1:first-child,
     .md-viewer-content h2:first-child,
-    .md-viewer-content h3:first-child {
+    .md-viewer-content h3:first-child,
+    .md-viewer-content p.md-lead-in:first-child {
       margin-top: 0;
     }
 
@@ -3049,7 +3081,7 @@
     }
 
     .md-viewer-content blockquote {
-      border-left: 3px solid var(--accent);
+      border-left: 2px solid var(--accent);
       padding: 4px 12px;
       margin: 0.6em 0;
       color: var(--text-secondary);
@@ -19351,11 +19383,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     marked.setOptions({ breaks: true });
 
+    // `<` is what opens raw HTML, so escaping it (and `&`) keeps marked from
+    // emitting any. `>` stays as written: escaping it turned every blockquote
+    // into literal "> " text, and on its own it cannot start a tag.
     function escapeHtmlForMarkdown(text) {
       return text
         .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/</g, '&lt;');
     }
 
     // Inline image data only. Remote schemes are deliberately absent: a note
@@ -19432,7 +19466,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // index in the original source, so a rendered block can be traced to the
     // exact bytes that produced it. Two transforms sit between them:
     //
-    //   1. escapeHtmlForMarkdown expands & < > (to 5, 4, 4 chars).
+    //   1. escapeHtmlForMarkdown expands & and < (to 5 and 4 chars).
     //   2. marked normalizes CRLF to LF before lexing, so token.raw is
     //      measured against a string with every \r removed.
     //
@@ -19453,7 +19487,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           i++;
           continue;
         }
-        const width = code === 38 ? 5 : (code === 60 || code === 62) ? 4 : 1;
+        // Mirrors escapeHtmlForMarkdown: & becomes &amp; and < becomes &lt;.
+        const width = code === 38 ? 5 : code === 60 ? 4 : 1;
         for (let k = 0; k < width; k++) map.push(i);
       }
       map.push(text.length);
@@ -19546,6 +19581,21 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return true;
     }
 
+    // A short paragraph that is entirely bold and doesn't end like a sentence
+    // is being used as a heading (common in drafted email). It keeps its
+    // markup and size; it only gets a heading's spacing, closer to what it
+    // introduces than to what came before. A bold sentence stays a paragraph.
+    function isLeadInParagraph(node) {
+      if (node.tagName !== 'P' || node.children.length !== 1) return false;
+      const strong = node.children[0];
+      if (strong.tagName !== 'STRONG') return false;
+      const text = (node.textContent || '').trim();
+      return text.length > 0
+        && text.length <= 90
+        && text === (strong.textContent || '').trim()
+        && !/[.!?]$/.test(text);
+    }
+
     function renderMarkdownToElement(el, markdownText, { annotateSource = false } = {}) {
       const source = markdownText || '';
       const { meta, body, bodyStart } = splitFrontmatter(source);
@@ -19554,6 +19604,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const tokens = marked.lexer(escapeHtmlForMarkdown(body));
       const doc = new DOMParser().parseFromString(marked.parser(tokens), 'text/html');
       sanitizeDom(doc.body);
+      for (const node of doc.body.children) {
+        if (isLeadInParagraph(node)) node.classList.add('md-lead-in');
+      }
       if (annotateSource && source.length <= MAX_ANNOTATED_SOURCE_CHARS) {
         annotateBlocksWithSource(doc.body, tokens, body, bodyStart);
       }

@@ -229,10 +229,74 @@ try {
     let sidebarAutoCollapsed = false;
     let userExpandedSidebarThisSession = false;
     const sidebarCollapseButton = document.getElementById('btn-sidebar-collapse');
-    const policy = eval('(function(){' + code + ';return {syncNarrowLayout,applySidebarCollapsed};})()');
+    const policy = eval('(function(){' + code + ';return {syncNarrowLayout,applySidebarCollapsed,toggleSidebarCollapsed};})()');
     window.fixture.syncLayout = policy.syncNarrowLayout;
     window.fixture.collapseSidebar = policy.applySidebarCollapsed;
+    window.fixture.toggleSidebar = policy.toggleSidebarCollapsed;
   }, source.slice(policyStart, policyEnd));
+  const overlayStart = source.indexOf('    function isOverlayActive() {');
+  const overlayEnd = source.indexOf('    mdViewerContent.addEventListener(', overlayStart);
+  const shortcutsStart = source.indexOf("    document.addEventListener('keydown', (e) => {", source.indexOf('// Cmd+O shortcut'));
+  const shortcutsEnd = source.indexOf('    // ── Init ──', shortcutsStart);
+  assert.ok(overlayStart > 0 && overlayEnd > overlayStart && shortcutsStart > 0 && shortcutsEnd > shortcutsStart,
+    'Production overlay and keyboard shortcut markers exist');
+  await page.evaluate(code => {
+    const original = new DOMParser().parseFromString(source, 'text/html');
+    const addOverlay = id => {
+      const node = document.importNode(original.getElementById(id), true);
+      document.body.append(node);
+      return node;
+    };
+    const whatsNewScrim = addOverlay('whats-new-scrim'), aboutOverlay = addOverlay('about-overlay');
+    const settingsOverlay = addOverlay('settings-overlay'), coachOnboardingOverlay = addOverlay('coach-onboarding-overlay');
+    const readinessOverlay = addOverlay('readiness-overlay'), recoveryOverlay = addOverlay('recovery-overlay');
+    const jobsOverlay = addOverlay('jobs-overlay'), detailOverlay = addOverlay('detail-overlay');
+    const recordingConsentOverlay = addOverlay('recording-consent-overlay'), cliSetupScrim = addOverlay('cli-setup-scrim');
+    const artifactTemplateOverlay = addOverlay('artifact-template-overlay');
+    const mdViewer = document.getElementById('md-viewer');
+    const toggleSidebarCollapsed = window.fixture.toggleSidebar;
+    eval(code);
+  }, source.slice(overlayStart, overlayEnd) + source.slice(shortcutsStart, shortcutsEnd));
+  const sidebarCollapsed = () => page.evaluate(() => document.body.classList.contains('sidebar-collapsed'));
+  await page.setViewportSize({ width: 1100, height: 780 });
+  for (const docOpen of [false, true]) {
+    await page.evaluate(open => {
+      document.getElementById('md-viewer').classList.toggle('active', open);
+      document.body.classList.toggle('doc-open', open);
+      window.fixture.collapseSidebar(false, { explicit: true });
+      window.fixture.syncLayout();
+    }, docOpen);
+    for (const modifier of ['Meta', 'Control']) {
+      await page.locator('#recall-chat-input').focus();
+      await page.keyboard.press(`${modifier}+b`);
+      assert.equal(await sidebarCollapsed(), true, `${modifier}+B hides the list with document open=${docOpen}`);
+      await page.keyboard.press(`${modifier}+b`);
+      assert.equal(await sidebarCollapsed(), false, `${modifier}+B reveals the list with document open=${docOpen}`);
+    }
+  }
+  await page.evaluate(() => {
+    const terminal = document.getElementById('recall-terminal-container');
+    terminal.classList.remove('hidden');
+    terminal.append(document.createElement('textarea'));
+  });
+  await page.locator('#recall-terminal-container textarea').focus();
+  await page.keyboard.press('Meta+b');
+  assert.equal(await sidebarCollapsed(), true, 'Cmd+B works with terminal focus and a document open');
+  for (const id of ['settings-overlay', 'detail-overlay']) {
+    await page.locator(`#${id}`).evaluate(node => node.classList.add('active'));
+    await page.keyboard.press('Meta+b');
+    assert.equal(await sidebarCollapsed(), true, `${id} blocks Cmd+B`);
+    await page.locator(`#${id}`).evaluate(node => node.classList.remove('active'));
+  }
+  await page.setViewportSize({ width: 640, height: 780 });
+  await page.keyboard.press('Meta+b');
+  await page.evaluate(() => window.fixture.syncLayout());
+  assert.equal(await sidebarCollapsed(), false, 'explicit Cmd+B expansion survives narrow document layout synchronization');
+  assert.equal(await page.evaluate(() => localStorage.getItem('minutes.sidebarCollapsed')), 'false');
+  await page.evaluate(() => {
+    document.getElementById('recall-terminal-container').classList.add('hidden');
+    localStorage.removeItem('minutes.sidebarCollapsed');
+  });
   for (const width of [960, 1100, 640]) {
     await page.setViewportSize({ width, height: 780 });
     await page.evaluate(() => window.fixture.syncLayout());

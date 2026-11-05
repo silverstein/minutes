@@ -77,6 +77,22 @@ for (const newline of ['\n', '\r\n']) {
   });
 }
 
+test('quotes render as quotes, raw HTML stays text, and offsets stay exact', () => {
+  const body = ['Intro & <b>bold</b> a > b.', '', '> Quoted line', '> 1. still quoted', '', 'After.', ''].join('\n');
+  const ctx = context();
+  const tokens = ctx.marked.lexer(ctx.escapeHtmlForMarkdown(body));
+  const html = ctx.marked.parser(tokens);
+  assert.match(html, /<blockquote>[\s\S]*Quoted line[\s\S]*<\/blockquote>/);
+  assert.doesNotMatch(html, /<b>/, 'raw HTML must not come through');
+  assert.match(html, /&lt;b&gt;bold/);
+  const blocks = tokens.filter(t => !['space', 'def'].includes(t.type)).map(() => new Element('p'));
+  assert.equal(ctx.annotateBlocksWithSource({ children: blocks }, tokens, body, 0), true);
+  const slice = (b) => body.slice(Number(b.dataset.srcStart), Number(b.dataset.srcEnd));
+  assert.match(slice(blocks[0]), /^Intro & <b>bold<\/b> a > b\./);
+  assert.match(slice(blocks[1]), /^> Quoted line\n> 1\. still quoted/);
+  assert.match(slice(blocks[2]), /^After\./);
+});
+
 test('creating a draft opens an editable preview and cancellation creates no file', async () => {
   const calls = [], opened = [];
   let kind = 'follow-up-email';

@@ -2471,6 +2471,23 @@
       padding-right: 6px;
     }
 
+    /* Lists, quotes and code blocks have their own left edge. The rule above
+       replaced it with 6px, which hung list numbers outside the text column
+       and pushed quote borders and code boxes past it. Lists keep their 20px
+       indent plus the 6px pulled back out; boxed blocks keep their padding
+       and stay inside the column. */
+    .md-viewer-content ol.md-block,
+    .md-viewer-content ul.md-block {
+      padding-left: 26px;
+    }
+    .md-viewer-content blockquote.md-block,
+    .md-viewer-content pre.md-block {
+      margin-left: 0;
+      margin-right: 0;
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
     .md-viewer.is-editable .md-viewer-content .md-block:hover {
       background: var(--bg-hover);
       cursor: text;
@@ -19213,11 +19230,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     marked.setOptions({ breaks: true });
 
+    // `<` is what opens raw HTML, so escaping it (and `&`) keeps marked from
+    // emitting any. `>` stays as written: escaping it turned every blockquote
+    // into literal "> " text, and on its own it cannot start a tag.
     function escapeHtmlForMarkdown(text) {
       return text
         .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/</g, '&lt;');
     }
 
     // Inline image data only. Remote schemes are deliberately absent: a note
@@ -19294,7 +19313,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // index in the original source, so a rendered block can be traced to the
     // exact bytes that produced it. Two transforms sit between them:
     //
-    //   1. escapeHtmlForMarkdown expands & < > (to 5, 4, 4 chars).
+    //   1. escapeHtmlForMarkdown expands & and < (to 5 and 4 chars).
     //   2. marked normalizes CRLF to LF before lexing, so token.raw is
     //      measured against a string with every \r removed.
     //
@@ -19315,7 +19334,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           i++;
           continue;
         }
-        const width = code === 38 ? 5 : (code === 60 || code === 62) ? 4 : 1;
+        // Mirrors escapeHtmlForMarkdown: & becomes &amp; and < becomes &lt;.
+        const width = code === 38 ? 5 : code === 60 ? 4 : 1;
         for (let k = 0; k < width; k++) map.push(i);
       }
       map.push(text.length);

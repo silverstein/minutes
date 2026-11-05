@@ -47,6 +47,11 @@ window.__MINUTES_I18N['zh-CN'] = {
     "Save": "保存",
     "Collapse list pane": "折叠列表面板",
     "Documents": "文档",
+    "Docs": "文档",
+    "Show documents": "显示文档",
+    "Meetings": "会议",
+    "Memo": "快速想法",
+    "Expand list pane": "展开列表面板",
     "Search recordings...": "搜索录音…",
     "Search": "搜索",
     "No documents yet.": "还没有文档。",
@@ -559,6 +564,10 @@ window.__MINUTES_I18N['zh-CN'] = {
     { re: "^Desktop app v(.+)$", to: "桌面应用 v$1" },
     { re: "^Downloading (.+) model\\.\\.\\.$", to: "正在下载 $1 模型…" },
     { re: "^Queued (\\d+)$", to: "已排队 $1" },
-    { re: "^(.+) call detected$", to: "检测到 $1 通话" }
+    { re: "^(.+) call detected$", to: "检测到 $1 通话" },
+    { re: "^(\\d+) dictations$", to: "$1 条听写" },
+    { re: "^(\\d{1,2}:\\d{2}\\s[AP]M) to (\\d{1,2}:\\d{2}\\s[AP]M)$", to: "$1 至 $2" },
+    { re: "^(.+) · Dictation$", to: "$1 · 听写" },
+    { re: "^(.+) · Memo$", to: "$1 · 快速想法" }
   ]
 };

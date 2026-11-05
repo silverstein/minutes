@@ -47,6 +47,8 @@ window.__MINUTES_I18N['pt-BR'] = {
     "Save": "Salvar",
     "Collapse list pane": "Recolher painel da lista",
     "Documents": "Documentos",
+    "Docs": "Docs",
+    "Meetings": "Reuniões",
     "Search recordings...": "Buscar gravações...",
     "Search": "Buscar",
     "No documents yet.": "Nenhum documento ainda.",
@@ -1140,6 +1142,10 @@ window.__MINUTES_I18N['pt-BR'] = {
     { re: "^Ollama not reachable at (.+)$", to: "Ollama inacessível em $1" },
     { re: "^Phase: (.+)$", to: "Fase: $1" },
     { re: "^Using: (.+) \u2014 no API key needed, uses your existing subscription$", to: "Usando: $1, sem precisar de chave de API, usa sua assinatura atual" },
-    { re: "^Meetings: (.+) \\((\\d+) files\\) • Memos: (.+) \\((\\d+)\\) • Models: (.+) • Screenshots: (.+) • Total: (.+)$", to: "Reuniões: $1 ($2 arquivos) • Ideias rápidas: $3 ($4) • Modelos: $5 • Capturas de tela: $6 • Total: $7" }
+    { re: "^Meetings: (.+) \\((\\d+) files\\) • Memos: (.+) \\((\\d+)\\) • Models: (.+) • Screenshots: (.+) • Total: (.+)$", to: "Reuniões: $1 ($2 arquivos) • Ideias rápidas: $3 ($4) • Modelos: $5 • Capturas de tela: $6 • Total: $7" },
+    { re: "^(\\d+) dictations$", to: "$1 ditados" },
+    { re: "^(\\d{1,2}:\\d{2}\\s[AP]M) to (\\d{1,2}:\\d{2}\\s[AP]M)$", to: "das $1 às $2" },
+    { re: "^(.+) · Dictation$", to: "$1 · Ditado" },
+    { re: "^(.+) · Memo$", to: "$1 · Ideia rápida" }
   ]
 };

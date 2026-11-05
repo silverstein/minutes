@@ -985,6 +985,14 @@ jobs:
       - name: Verify meeting draft editing and source preservation
         run: node --test scripts/test_meeting_drafts.mjs
 
+      # These ran only by hand, and the loading-state check went stale
+      # without anyone noticing.
+      - name: Verify meeting list loading state and Parakeet setup flows
+        run: |
+          node scripts/check_meeting_list_loading_state.mjs
+          node --test scripts/test_onboarding_parakeet.mjs
+          node --test scripts/test_parakeet_install.mjs
+
       - name: Test design-token checker
         run: node --test scripts/check_design_tokens.test.mjs
 

@@ -32,10 +32,24 @@ requireContract(
 
 const loadStart = panel.indexOf("async function loadMeetings(options = {})");
 const loadingStart = panel.indexOf("beginMeetingInventoryLoading();", loadStart);
-const inventoryStart = panel.indexOf("invoke('cmd_list_meetings'", loadStart);
+// loadMeetings reaches cmd_list_meetings through requestMeetingInventory (or
+// its patient wrapper), so check the call order there and that the helper
+// still issues the request.
+const inventoryStart = Math.min(
+  ...["requestMeetingInventory(", "invokeInventoryPatiently("]
+    .map((call) => panel.indexOf(call, loadStart))
+    .filter((index) => index !== -1),
+);
+const helperStart = panel.indexOf("function requestMeetingInventory(");
 requireContract(
   loadStart !== -1 && loadingStart > loadStart && inventoryStart > loadingStart,
   "loadMeetings must enter loading before starting the inventory request",
+);
+requireContract(
+  helperStart !== -1 &&
+    panel.indexOf("invoke('cmd_list_meetings'", helperStart) > helperStart &&
+    panel.indexOf("invoke('cmd_list_meetings'", helperStart) < panel.indexOf("\n    }\n", helperStart),
+  "requestMeetingInventory must issue the cmd_list_meetings request",
 );
 requireContract(
   panel.includes("if (meetingInventoryFingerprint !== null || documentsViewActive) return;"),

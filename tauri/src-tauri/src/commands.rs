@@ -7873,8 +7873,15 @@ pub fn cmd_sensitive_stop(
     let config = Config::load();
     let result = minutes_core::sensitive::stop(None, &config).map_err(|error| error.to_string())?;
     let path = result.path.to_string_lossy().to_string();
-    if let Err(error) = spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None, None)
-    {
+    if let Err(error) = spawn_terminal(
+        &app,
+        &state.pty_manager,
+        "meeting",
+        Some(&path),
+        None,
+        None,
+        None,
+    ) {
         show_user_notification(&app, "Sensitive meeting saved", &error);
     } else if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
@@ -7909,7 +7916,15 @@ pub fn cmd_run_meeting_debrief(
     let config = Config::load();
     let meeting_path = std::path::PathBuf::from(&path);
     minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
-    spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None, None)?;
+    spawn_terminal(
+        &app,
+        &state.pty_manager,
+        "meeting",
+        Some(&path),
+        None,
+        None,
+        None,
+    )?;
     if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
             if let Some(input) =
@@ -10752,7 +10767,19 @@ fn user_config_path_for_display() -> String {
     Config::config_path().display().to_string()
 }
 
+/// PTY grid for a new assistant session: the frontend's fitted size, or
+/// 120x30 when it is missing, zero, or implausibly large.
+fn spawn_grid(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((cols, rows)) if (2..=1000).contains(&cols) && (2..=500).contains(&rows) => {
+            (cols, rows)
+        }
+        _ => (120, 30),
+    }
+}
+
 /// Shared spawn logic used by both cmd_spawn_terminal and the tray menu handler.
+/// `size` is the frontend's fitted (cols, rows); `None` uses 120x30.
 /// Returns (session_id, window_title) on success.
 pub fn spawn_terminal(
     app: &tauri::AppHandle,
@@ -10761,6 +10788,7 @@ pub fn spawn_terminal(
     meeting_path: Option<&str>,
     agent_override: Option<&str>,
     theme_dark: Option<bool>,
+    size: Option<(u16, u16)>,
 ) -> Result<(String, String), String> {
     let config = Config::load();
     let title = terminal_title_for_mode(mode, meeting_path)?;
@@ -10791,6 +10819,10 @@ pub fn spawn_terminal(
             &workspace,
         );
 
+        // Spawn at the grid the panel will show. The shell draws its first
+        // prompt for this size, and zsh's PROMPT_SP padding drawn for a wider
+        // grid wraps into a stray % that a later resize cannot remove.
+        let (cols, rows) = spawn_grid(size);
         manager.spawn(
             crate::pty::SpawnConfig {
                 session_id: crate::pty::ASSISTANT_SESSION_ID.into(),
@@ -10803,8 +10835,8 @@ pub fn spawn_terminal(
                 target_window: "main".into(),
                 theme_dark,
             },
-            120,
-            30,
+            cols,
+            rows,
         )?;
     }
 
@@ -13192,6 +13224,7 @@ pub async fn cmd_prepare_recall_terminal_meeting(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_spawn_terminal(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -13199,6 +13232,8 @@ pub fn cmd_spawn_terminal(
     meeting_path: Option<String>,
     agent: Option<String>,
     theme_dark: Option<bool>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<String, String> {
     let (session_id, _) = spawn_terminal(
         &app,
@@ -13207,6 +13242,7 @@ pub fn cmd_spawn_terminal(
         meeting_path.as_deref(),
         agent.as_deref(),
         theme_dark,
+        cols.zip(rows),
     )?;
     Ok(session_id)
 }
@@ -14639,6 +14675,15 @@ mod tests {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn spawn_grid_uses_fitted_size_and_falls_back_to_120x30() {
+        assert_eq!(spawn_grid(Some((84, 22))), (84, 22));
+        assert_eq!(spawn_grid(None), (120, 30));
+        assert_eq!(spawn_grid(Some((0, 0))), (120, 30));
+        assert_eq!(spawn_grid(Some((1, 22))), (120, 30));
+        assert_eq!(spawn_grid(Some((u16::MAX, 22))), (120, 30));
+    }
 
     #[test]
     fn worker_stderr_tail_keeps_only_the_last_bytes() {

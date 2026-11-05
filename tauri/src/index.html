@@ -634,10 +634,12 @@
       padding: 10px 0 6px 5px;
     }
 
+    /* Style the scrollbar with ::-webkit-scrollbar only, like the meeting
+       list and document pane. Current WebKit honours the standard
+       scrollbar-color / scrollbar-width over these, and with them set the
+       terminal drew a solid full-height white bar at its right edge. */
     .recall-terminal .xterm .xterm-viewport {
       background-color: transparent;
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 18%, transparent) transparent;
-      scrollbar-width: thin;
     }
 
     .recall-terminal .xterm .xterm-viewport::-webkit-scrollbar {
@@ -654,11 +656,6 @@
       border-radius: 999px;
       background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
       background-clip: content-box;
-    }
-
-    .recall-terminal:hover .xterm .xterm-viewport,
-    .recall-terminal:focus-within .xterm .xterm-viewport {
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 38%, transparent) transparent;
     }
 
     .recall-terminal:hover .xterm .xterm-viewport::-webkit-scrollbar-thumb,
@@ -5413,7 +5410,9 @@
       align-items: center;
       justify-content: center;
       padding: 20px;
-      z-index: 200;
+      /* Opened from What's New (z-index 9000) as well as Settings, so it has
+         to stack above both or the setup step renders behind the notes. */
+      z-index: 9100;
     }
 
     .cli-setup-scrim.active { display: flex; }
@@ -5564,6 +5563,16 @@
       color: var(--text-secondary);
       margin-top: 4px;
     }
+    /* Release notes and CLI details carry commands and paths people copy.
+       The app shell disables selection on body, so opt these back in. */
+    .whats-new-body,
+    .whats-new-cli-body,
+    .about-cli-detail {
+      -webkit-user-select: text;
+      user-select: text;
+      cursor: auto;
+    }
+
     .whats-new-body {
       padding: 16px 20px;
       overflow-y: auto;
@@ -16715,6 +16724,20 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── xterm.js initialization ──
+    // The PTY's first size is what the shell draws its first prompt for. A
+    // fixed 120x30 made zsh pad its PROMPT_SP marker for 120 columns; in a
+    // narrower panel that wrapped and left a stray inverted % on its own line
+    // that the later resize could not remove. Fit first and spawn at the real
+    // grid; the backend falls back to 120x30 when this is empty.
+    function recallSpawnSize() {
+      try {
+        if (recallFitAddon) recallFitAddon.fit();
+      } catch (_) { /* hidden or zero-size container: use the fallback */ }
+      const cols = recallTerminal?.cols;
+      const rows = recallTerminal?.rows;
+      return cols > 1 && rows > 1 ? { cols, rows } : {};
+    }
+
     function initRecallTerminal() {
       if (recallInitialized) return;
       recallInitialized = true;
@@ -17087,7 +17110,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           // Always re-apply deferred mode, even to an existing PTY. This
           // clears any stale CURRENT_MEETING.md before a new question while
           // the backend keeps the already-running terminal session intact.
-          await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme() });
+          await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() });
           recallTerminalContextPending = true;
           markRecallPtyAlive();
           recallEndBtn.classList.add('active');
@@ -17294,7 +17317,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       await registerPtyListeners();
 
       try {
-        const opts = { mode, themeDark: isEffectiveDarkTheme() };
+        const opts = { mode, themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() };
         if (meetingPath) opts.meetingPath = meetingPath;
         await invoke('cmd_spawn_terminal', opts);
         markRecallPtyAlive();
@@ -18353,6 +18376,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             'The ', code('minutes'), ' on your PATH is not managed by this app. Reinstall or update it however you originally installed.',
           ]));
         }
+      } else if (method === 'conflict' && inSync) {
+        // The copy that wins is already this version. The others are never
+        // run, so this is information, not a problem to fix.
+        statusText = `CLI v${cliV} · in sync`;
+        statusClass = 'ok';
+        const cands = state.path_candidates || [];
+        const list = el('p');
+        cands.slice(1).forEach((p, i) => {
+          if (i > 0) list.appendChild(el('br'));
+          list.appendChild(code(p));
+        });
+        detailNodes.push(el('p', {}, ['Using ', code(cands[0] || 'minutes'), '. Older copies further down your PATH are ignored:']));
+        detailNodes.push(list);
       } else if (method === 'conflict') {
         statusText = `${state.path_candidates?.length || '?'} binaries on PATH`;
         statusClass = 'warn';
@@ -18406,7 +18442,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function renderWhatsNewCliSection(state) {
       if (!whatsNewCliSection || !whatsNewCliBody || !whatsNewCliActions) return;
       const method = state.install_method;
-      const shouldShow = !state.in_sync || method === 'none' || method === 'conflict';
+      // Only interrupt release notes when the CLI you actually run is missing
+      // or out of date. Shadowed extra copies are listed in Settings instead.
+      const shouldShow = !state.in_sync || method === 'none';
       if (!shouldShow || state.snoozed) {
         whatsNewCliSection.hidden = true;
         return;
@@ -18483,12 +18521,27 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       const known = state.known_bundles || [];
-      if (known.length > 1) {
-        showBundlePicker(state, known, pickDefaultBundle(known));
+      // Spotlight finds every Minutes.app on disk, including build outputs
+      // and copies in Downloads. Nobody can choose between seven paths, so
+      // only real installs count, and the released app wins when present.
+      const installed = known.filter((b) => isInstalledBundlePath(b.path));
+      const released = installed.filter((b) => b.bundle_id === 'com.useminutes.desktop');
+      const fallback = { path: state.bundle_root, bundle_id: state.bundle_id, version: state.app_version };
+      if (released.length === 1) {
+        showSetupConfirmation(state, released[0]);
+      } else if (installed.length === 1) {
+        showSetupConfirmation(state, installed[0]);
+      } else if (installed.length > 1) {
+        showBundlePicker(state, installed, pickDefaultBundle(installed));
       } else {
-        const single = known[0] || { path: state.bundle_root, bundle_id: state.bundle_id, version: state.app_version };
-        showSetupConfirmation(state, single);
+        showSetupConfirmation(state, known.find((b) => b.path === state.bundle_root) || fallback);
       }
+    }
+
+    /// An app in /Applications or ~/Applications, as opposed to a build
+    /// output, a mounted DMG or a stray copy somewhere else on disk.
+    function isInstalledBundlePath(path) {
+      return /^(\/Applications|\/Users\/[^/]+\/Applications)\/[^/]+\.app\/?$/.test(path || '');
     }
 
     function showBundlePicker(state, known, selected) {

@@ -234,6 +234,14 @@ impl PtyManager {
         // palette inside the dark app. The trailing COLORFGBG field is the
         // background: 0 = dark, 15 = light.
         cmd.env("TERM_PROGRAM", "Minutes");
+        // zsh marks output that ended without a newline with an inverted %
+        // padded to the terminal width (PROMPT_SP). Spawning at the fitted
+        // grid fixes the first prompt, but the Recall pane narrows later
+        // (a document opening beside it, a window resize) and xterm's reflow
+        // wraps that padding, stranding the % on a line of its own. An empty
+        // mark keeps the behaviour and drops the stray glyph; a user's own
+        // .zshrc can still set one.
+        cmd.env("PROMPT_EOL_MARK", "");
         // The app version from tauri.conf, not the crate's -- this package
         // is versioned 0.1.0 and the app is not.
         cmd.env(

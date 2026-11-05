@@ -116,7 +116,60 @@ fn maybe_run_apple_speech_runtime_acceptance() -> Option<i32> {
     }
 }
 
+/// Window-state flags we write ourselves. VISIBLE is left out on purpose: the
+/// main window is often hidden to the tray when we save, and recording that
+/// would reopen the app with no window.
+fn persisted_window_state_flags() -> tauri_plugin_window_state::StateFlags {
+    tauri_plugin_window_state::StateFlags::all() - tauri_plugin_window_state::StateFlags::VISIBLE
+}
+
+/// Write window sizes and positions to `window-state.json` now.
+///
+/// tauri-plugin-window-state only writes on `RunEvent::Exit`, and Minutes
+/// never emits it: quit, restart and update all leave through
+/// `exit_process_without_destructors` (`_exit` on macOS, `process::exit`
+/// elsewhere) to avoid the C++ static-destructor crash. So the file was
+/// never refreshed after the first save, and every launch restored that old
+/// size. We save after resizes settle and once more before exiting.
+fn persist_window_state(app: &tauri::AppHandle) {
+    use tauri_plugin_window_state::AppHandleExt;
+    if let Err(error) = app.save_window_state(persisted_window_state_flags()) {
+        eprintln!("[window-state] save failed: {error}");
+    }
+}
+
+static WINDOW_STATE_LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
+static WINDOW_STATE_SAVE_PENDING: AtomicBool = AtomicBool::new(false);
+const WINDOW_STATE_SETTLE_MS: u64 = 800;
+
+fn window_state_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Save once the window has stopped moving or resizing for a moment. A drag
+/// fires dozens of events; one background waiter covers all of them.
+fn schedule_window_state_save(app: &tauri::AppHandle) {
+    WINDOW_STATE_LAST_CHANGE_MS.store(window_state_now_ms(), Ordering::Relaxed);
+    if WINDOW_STATE_SAVE_PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(WINDOW_STATE_SETTLE_MS / 2));
+        let last = WINDOW_STATE_LAST_CHANGE_MS.load(Ordering::Relaxed);
+        if window_state_now_ms().saturating_sub(last) >= WINDOW_STATE_SETTLE_MS {
+            WINDOW_STATE_SAVE_PENDING.store(false, Ordering::Release);
+            persist_window_state(&app);
+            break;
+        }
+    });
+}
+
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
+    persist_window_state(app);
     if let Some(state) = app.try_state::<commands::AppState>() {
         if state.copilot_active.load(Ordering::Relaxed) {
             state.copilot_stop_flag.store(true, Ordering::Release);
@@ -196,14 +249,53 @@ fn restart_macos_on_main_thread(app: &tauri::AppHandle) -> ! {
     relaunch_and_exit(&env, binary)
 }
 
+/// The `.app` bundle that contains `binary`, if any.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn enclosing_app_bundle(binary: &std::path::Path) -> Option<std::path::PathBuf> {
+    binary
+        .ancestors()
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))
+        .map(std::path::Path::to_path_buf)
+}
+
+/// Waits for `pid` to exit (up to ~10 s), then opens the bundle through
+/// LaunchServices. `$1` pid, `$2` bundle, the rest are app arguments.
+#[cfg(target_os = "macos")]
+const RELAUNCH_AFTER_EXIT_SCRIPT: &str = r#"pid=$1; bundle=$2; shift 2
+i=0
+while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+if [ "$#" -gt 0 ]; then exec /usr/bin/open "$bundle" --args "$@"; fi
+exec /usr/bin/open "$bundle""#;
+
 #[cfg(target_os = "macos")]
 fn relaunch_and_exit(env: &tauri::Env, binary: std::io::Result<std::path::PathBuf>) -> ! {
+    // Relaunch the way a person would: after this process is gone, through
+    // LaunchServices. Exec'ing the binary directly started the new copy while
+    // this one was still exiting and outside LaunchServices, and after an
+    // in-app update the menu bar icon came back at the far left instead of
+    // where the user had dragged it (the position is saved per app under
+    // "NSStatusItem Preferred Position Item-0"). Quit-and-reopen and
+    // reinstall-then-open both keep it.
     match binary {
         Ok(path) => {
-            if let Err(error) = std::process::Command::new(path)
-                .args(env.args_os.iter().skip(1))
-                .spawn()
-            {
+            let spawned = match enclosing_app_bundle(&path) {
+                Some(bundle) => std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(RELAUNCH_AFTER_EXIT_SCRIPT)
+                    .arg("minutes-relaunch")
+                    .arg(std::process::id().to_string())
+                    .arg(bundle)
+                    .args(env.args_os.iter().skip(1))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn(),
+                // A raw target binary has no bundle to open.
+                None => std::process::Command::new(path)
+                    .args(env.args_os.iter().skip(1))
+                    .spawn(),
+            };
+            if let Err(error) = spawned {
                 eprintln!("[restart] failed to relaunch app: {error}");
             }
         }
@@ -2902,6 +2994,7 @@ fn main() {
                                     None,
                                     None,
                                     None,
+                                    None,
                                 ) {
                                     commands::show_user_notification(
                                         &app_handle,
@@ -3161,6 +3254,11 @@ fn main() {
         })
         .on_window_event(|window, event| {
             match event {
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+                    if window.label() == "main" =>
+                {
+                    schedule_window_state_save(window.app_handle());
+                }
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                     // Hide main window on close instead of quitting (app stays in tray)
                     // PTY session persists — user can reopen and resume where they left off
@@ -4376,6 +4474,26 @@ mod tray_activity_tests {
         assert_eq!(
             TrayAppearance::from_theme(tauri::Theme::Dark),
             TrayAppearance::Dark
+        );
+    }
+}
+
+#[cfg(test)]
+mod relaunch_tests {
+    use super::enclosing_app_bundle;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn finds_the_app_bundle_around_the_binary() {
+        assert_eq!(
+            enclosing_app_bundle(Path::new(
+                "/Applications/Minutes.app/Contents/MacOS/minutes-app"
+            )),
+            Some(PathBuf::from("/Applications/Minutes.app"))
+        );
+        assert_eq!(
+            enclosing_app_bundle(Path::new("/Users/x/target/release/minutes-app")),
+            None
         );
     }
 }

@@ -1081,7 +1081,7 @@ pub(crate) fn stable_speaker_overlay_snapshot_at_until(
             std::io::Error::other("speaker correction store exceeded its byte budget").into(),
         );
     }
-    let conn = Connection::open_with_flags(
+    let mut conn = Connection::open_with_flags(
         &canonical_db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NOFOLLOW

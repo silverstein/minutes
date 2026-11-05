@@ -18,6 +18,7 @@ mod board_state;
 pub(crate) mod continuity;
 pub use continuity::LocalWork;
 pub mod decimate;
+mod delegation_context;
 pub mod desktop;
 mod evaluation;
 mod github;

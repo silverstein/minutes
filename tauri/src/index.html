@@ -533,6 +533,64 @@
       text-overflow: ellipsis;
     }
 
+    /* What the agent is working from: the selected meeting (or all meetings)
+       and the open document. Named the way the user knows them; the agent and
+       its context files stay out of view. */
+    .recall-context-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 14px 0;
+      flex-shrink: 0;
+    }
+    .recall-context-chips[hidden] {
+      display: none;
+    }
+    .recall-context-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      min-width: 0;
+      max-width: 100%;
+      padding: 2px 3px 2px 10px;
+      border: 1px solid var(--border-mid);
+      border-radius: 999px;
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      font-size: var(--text-xs);
+      line-height: 1.4;
+    }
+    .recall-context-chip-label {
+      min-width: 0;
+      max-width: 32ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .recall-context-chip-remove {
+      display: inline-grid;
+      place-items: center;
+      flex: none;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--text-tertiary);
+      font-size: var(--text-sm);
+      line-height: 1;
+      cursor: pointer;
+    }
+    .recall-context-chip-remove:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    .recall-context-chip-remove:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+
     .recall-header-actions {
       display: flex;
       gap: 8px;
@@ -6628,6 +6686,7 @@
         <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
       </div>
     </div>
+    <div class="recall-context-chips" id="recall-context-chips" role="list" aria-label="In this conversation" hidden></div>
     <div class="recall-note" id="recall-note">
       <div class="recall-note-row">
         <input type="text" id="recall-note-input" placeholder="Quick note..." />
@@ -16125,6 +16184,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     function markRecallPtyAlive() {
       recallPtyAlive = true;
+      refreshRecallContextChips();
       invoke('cmd_terminal_info', { sessionId: SESSION_ID })
         .then((info) => { recallTerminalSessionDark = info?.theme_dark ?? null; })
         .catch(() => { recallTerminalSessionDark = null; })
@@ -16135,6 +16195,79 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallPtyAlive = false;
       recallTerminalSessionDark = null;
       applyRecallTerminalTheme();
+      renderRecallContextChips(null);
+    }
+
+    // ── What the agent is working from ──
+    // The backend reads it back from the workspace files, so the chips show
+    // what the agent can actually read, not what the UI last asked for.
+    const recallContextChips = document.getElementById('recall-context-chips');
+    let recallContextRefreshSeq = 0;
+
+    function renderRecallContextChips(items) {
+      const entries = [];
+      if (items?.meeting) entries.push({ item: 'meeting', label: items.meeting, userText: true });
+      if (items?.all_meetings) entries.push({ item: 'all_meetings', label: 'All meetings', userText: false });
+      if (items?.document) entries.push({ item: 'document', label: items.document, userText: true });
+      const focusedItem = recallContextChips.contains(document.activeElement)
+        ? document.activeElement.closest('[data-context-item]')?.dataset.contextItem
+        : null;
+      recallContextChips.replaceChildren(...entries.map(({ item, label, userText }) => {
+        const chip = document.createElement('span');
+        chip.className = 'recall-context-chip';
+        chip.setAttribute('role', 'listitem');
+        chip.dataset.contextItem = item;
+        const text = document.createElement('span');
+        text.className = 'recall-context-chip-label';
+        text.textContent = label;
+        text.title = label;
+        // Meeting titles and file names are the user's words, not UI copy.
+        if (userText) text.setAttribute('data-i18n-skip', '');
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'recall-context-chip-remove';
+        remove.setAttribute('aria-label', item === 'all_meetings'
+          ? 'Remove all meetings from this conversation'
+          : `Remove ${label} from this conversation`);
+        if (userText) remove.setAttribute('data-i18n-skip', '');
+        remove.textContent = '\u00d7';
+        remove.addEventListener('click', () => dropRecallContextItem(item));
+        chip.append(text, remove);
+        return chip;
+      }));
+      recallContextChips.hidden = entries.length === 0;
+      if (focusedItem) {
+        const next = recallContextChips.querySelector(`[data-context-item="${focusedItem}"] button`)
+          || recallContextChips.querySelector('button');
+        if (next) next.focus();
+        else recallTerminal?.focus?.();
+      }
+    }
+
+    async function refreshRecallContextChips() {
+      const seq = ++recallContextRefreshSeq;
+      // Private Chat mode does not use these files, and a plain shell or an
+      // ended session reads nothing.
+      if (!recallDevMode || !recallPtyAlive) {
+        renderRecallContextChips(null);
+        return;
+      }
+      try {
+        const items = await invoke('cmd_recall_context_items');
+        if (seq === recallContextRefreshSeq) renderRecallContextChips(items);
+      } catch (error) {
+        console.error('Recall context:', error);
+      }
+    }
+
+    async function dropRecallContextItem(item) {
+      try {
+        await invoke('cmd_recall_drop_context', { item });
+      } catch (error) {
+        console.error('Remove from conversation:', error);
+        showActionToast(`Could not remove it: ${error?.message || error}`, { tone: 'error' });
+      }
+      await refreshRecallContextChips();
     }
     let recallPhase = 'recall';
     let userExplicitlyCollapsed = false;
@@ -17096,6 +17229,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     /// Previously the dev branch only hid the chat panel and never spun up a
     /// PTY, so toggling to terminal mode mid-session showed a black pane.
     async function applyRecallMode() {
+      refreshRecallContextChips();
       if (recallDevMode) {
         // Terminal (developer) mode — mirror openRecall()'s dev path.
         // cmd_spawn_terminal is idempotent: if the assistant session already
@@ -18856,6 +18990,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     // ── Listen for recall:expand events from Rust backend ──
+    currentWindow.listen('recall:context-changed', () => {
+      refreshRecallContextChips();
+    });
+
     currentWindow.listen('recall:expand', (event) => {
       const { title, mode } = event.payload;
       const context = (title || '').replace('Minutes Assistant', '').replace('Discussing: ', '').trim();

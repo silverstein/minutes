@@ -9111,8 +9111,87 @@ pub fn cmd_set_recall_workspace_state(
     Ok(())
 }
 
+/// Tell the Recall header to re-read what the agent has loaded.
+fn emit_recall_context_changed(app: &tauri::AppHandle) {
+    let _ = app.emit_to("main", "recall:context-changed", ());
+}
+
+/// What the agent in Recall can read right now. Empty when no agent session
+/// is running or the assistant is a plain shell, since nothing reads the
+/// context files there.
 #[tauri::command]
-pub fn cmd_set_open_artifact(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+pub fn cmd_recall_context_items(
+    state: tauri::State<AppState>,
+) -> Result<crate::context::LoadedContext, String> {
+    let workspace = {
+        let manager = state
+            .pty_manager
+            .lock()
+            .map_err(|_| "PTY manager lock failed")?;
+        match manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+            Some(command) if !is_shell_command(&command) => manager
+                .session_context_dir(crate::pty::ASSISTANT_SESSION_ID)
+                .unwrap_or_else(crate::context::workspace_dir),
+            _ => return Ok(crate::context::LoadedContext::default()),
+        }
+    };
+    Ok(crate::context::loaded_context(&workspace))
+}
+
+/// Remove one item from the agent's context. Every agent's instructions say
+/// to check these files before each question, so deleting the file is the
+/// removal; an agent with the prompt hook is also told with its next prompt.
+/// The document stays open in the viewer.
+#[tauri::command]
+pub fn cmd_recall_drop_context(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    item: String,
+) -> Result<(), String> {
+    use crate::context::assistant_skills::FocusNotice;
+    let workspace = crate::context::workspace_dir();
+    let (kind, notice) = match item.as_str() {
+        "meeting" => {
+            crate::context::clear_active_meeting_context(&workspace)?;
+            (
+                FocusNotice::Meeting,
+                "The user removed the meeting from this conversation. CURRENT_MEETING.md is gone; don't rely on that meeting's content unless they bring it back.",
+            )
+        }
+        "all_meetings" => {
+            crate::context::clear_general_assistant_context(&workspace)?;
+            (
+                FocusNotice::Meeting,
+                "The user removed their meeting history from this conversation. ASSISTANT_CONTEXT.md is gone; don't rely on it unless they bring it back.",
+            )
+        }
+        "document" => {
+            crate::context::clear_active_artifact_context(&workspace)?;
+            (
+                FocusNotice::Artifact,
+                "The user removed the open document from this conversation. CURRENT_ARTIFACT.md is gone; leave that file alone unless they bring it back.",
+            )
+        }
+        other => return Err(format!("Unknown context item: {other}")),
+    };
+    let hooked = state
+        .pty_manager
+        .lock()
+        .map_err(|_| "PTY manager lock failed")?
+        .session_focus_hook(crate::pty::ASSISTANT_SESSION_ID);
+    if hooked {
+        crate::context::assistant_skills::queue_focus_notice(&workspace, kind, notice)?;
+    }
+    emit_recall_context_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cmd_set_open_artifact(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<(), String> {
     let canonical = validate_text_file_path(Path::new(&path))?;
     record_recent_artifact_path(&canonical);
     let config = Config::load();
@@ -9120,16 +9199,23 @@ pub fn cmd_set_open_artifact(state: tauri::State<AppState>, path: String) -> Res
     crate::context::write_assistant_context(&workspace, &config)?;
     crate::context::write_active_artifact_context(&workspace, &canonical)?;
     let artifact_name = canonical.file_name().and_then(|name| name.to_str());
-    notify_assistant_artifact_focus(&state, artifact_name)
+    let result = notify_assistant_artifact_focus(&state, artifact_name);
+    emit_recall_context_changed(&app);
+    result
 }
 
 #[tauri::command]
-pub fn cmd_clear_open_artifact(state: tauri::State<AppState>) -> Result<(), String> {
+pub fn cmd_clear_open_artifact(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
     let workspace = crate::context::workspace_dir();
     if workspace.exists() {
         crate::context::clear_active_artifact_context(&workspace)?;
     }
-    notify_assistant_artifact_focus(&state, None)
+    let result = notify_assistant_artifact_focus(&state, None);
+    emit_recall_context_changed(&app);
+    result
 }
 
 #[tauri::command]
@@ -10882,6 +10968,7 @@ pub fn spawn_terminal(
         .ok();
     }
 
+    emit_recall_context_changed(app);
     Ok((crate::pty::ASSISTANT_SESSION_ID.into(), title))
 }
 
@@ -13239,15 +13326,18 @@ fn materialize_recall_terminal_context(
 
 #[tauri::command]
 pub async fn cmd_prepare_recall_terminal_meeting(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     meeting_path: Option<String>,
 ) -> Result<(), String> {
     let pty_manager = state.pty_manager.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         prepare_recall_terminal_meeting(&pty_manager, meeting_path)
     })
     .await
-    .map_err(|_| "Recall provider verification stopped unexpectedly.".to_string())?
+    .map_err(|_| "Recall provider verification stopped unexpectedly.".to_string())?;
+    emit_recall_context_changed(&app);
+    result
 }
 
 #[tauri::command]

@@ -3379,6 +3379,8 @@ fn main() {
             commands::cmd_create_artifact_from_meeting,
             commands::cmd_set_open_artifact,
             commands::cmd_clear_open_artifact,
+            commands::cmd_recall_context_items,
+            commands::cmd_recall_drop_context,
             commands::cmd_clear_latest_output,
             commands::cmd_set_completion_notifications,
             commands::cmd_global_hotkey_settings,

@@ -123,6 +123,9 @@ pub struct PtySession {
     /// The `COLORFGBG` theme the child started with; terminal apps choose
     /// their colours once, at startup.
     pub theme_dark: Option<bool>,
+    /// The agent was started with Minutes' prompt hook, so focus changes are
+    /// queued for its next prompt instead of being typed into the terminal.
+    pub focus_hook: bool,
 }
 
 pub struct SpawnConfig {
@@ -140,6 +143,8 @@ pub struct SpawnConfig {
     /// child as `COLORFGBG` so TUIs can pick a matching palette without a
     /// terminal round trip. `None` leaves it unset.
     pub theme_dark: Option<bool>,
+    /// See [`PtySession::focus_hook`].
+    pub focus_hook: bool,
 }
 
 #[derive(Default)]
@@ -170,6 +175,14 @@ impl PtyManager {
         self.sessions
             .get(session_id)
             .map(|session| session.command.clone())
+    }
+
+    /// Whether the session's agent reads focus changes through Minutes'
+    /// prompt hook rather than typed notices.
+    pub fn session_focus_hook(&self, session_id: &str) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|session| session.focus_hook)
     }
 
     pub fn session_context_dir(&self, session_id: &str) -> Option<PathBuf> {
@@ -324,6 +337,7 @@ impl PtyManager {
                 title: cfg.title,
                 command: cfg.command,
                 theme_dark: cfg.theme_dark,
+                focus_hook: cfg.focus_hook,
             },
         );
 

@@ -114,6 +114,9 @@ window.__MINUTES_I18N['pt-BR'] = {
 
     // ── Markdown viewer ─────────────────────────────────────────────
     "Back to meetings": "Voltar para reuniões",
+    "All meetings": "Todas as reuniões",
+    "In this conversation": "Nesta conversa",
+    "Remove all meetings from this conversation": "Remover todas as reuniões desta conversa",
     "Preview": "Visualizar",
     "Source": "Código-fonte",
     "Make Editable Copy": "Criar cópia editável",

@@ -99,6 +99,9 @@ window.__MINUTES_I18N['zh-CN'] = {
 
     // ── Markdown viewer ─────────────────────────────────────────────
     "Back to meetings": "返回会议列表",
+    "All meetings": "全部会议",
+    "In this conversation": "本次对话内容",
+    "Remove all meetings from this conversation": "从本次对话中移除全部会议",
     "Preview": "预览",
     "Source": "源码",
     "Make Editable Copy": "创建可编辑副本",

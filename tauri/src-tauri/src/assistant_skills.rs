@@ -91,11 +91,136 @@ pub(crate) fn terminal_args(agent: &str, mut args: Vec<String>, workspace: &Path
     {
         let root = claude_skill_directory(workspace);
         if root.join(".claude/skills").is_dir() {
+            // A user's own --settings wins; that session keeps typed notices.
+            let user_settings = args
+                .iter()
+                .any(|arg| arg == "--settings" || arg.starts_with("--settings="));
             args.push("--add-dir".into());
             args.push(root.to_string_lossy().into_owned());
+            if cfg!(unix) && !user_settings {
+                if let Ok(path) = write_focus_settings(workspace) {
+                    args.push("--settings".into());
+                    args.push(path.to_string_lossy().into_owned());
+                }
+            }
         }
     }
     args
+}
+
+/// Settings file passed to Claude with `--settings`, holding only the focus
+/// hook. It lives in the managed pack so the user's `.claude` stays untouched.
+const FOCUS_SETTINGS_FILE: &str = "claude-focus-settings.json";
+const FOCUS_DIR: &str = "focus";
+
+/// A change of focus waiting for the agent's next prompt. Each kind has its
+/// own file, so switching meeting and then document before the next prompt
+/// delivers both; a later change of the same kind replaces the earlier one.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FocusNotice {
+    Meeting,
+    Artifact,
+}
+
+impl FocusNotice {
+    const ALL: [Self; 2] = [Self::Meeting, Self::Artifact];
+
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Meeting => "meeting.md",
+            Self::Artifact => "artifact.md",
+        }
+    }
+}
+
+fn focus_dir(workspace: &Path) -> PathBuf {
+    claude_skill_directory(workspace).join(FOCUS_DIR)
+}
+
+fn focus_settings_path(workspace: &Path) -> PathBuf {
+    claude_skill_directory(workspace).join(FOCUS_SETTINGS_FILE)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Claude Code adds a successful `UserPromptSubmit` hook's stdout to that
+/// prompt's context. Each queued notice is renamed before it is printed, so
+/// exactly one prompt receives it, and an empty queue prints nothing.
+fn focus_hook_command(workspace: &Path) -> String {
+    let dir = shell_quote(&focus_dir(workspace).to_string_lossy());
+    let files = FocusNotice::ALL.map(FocusNotice::file_name).join(" ");
+    format!(
+        "cd {dir} 2>/dev/null || exit 0; for f in {files}; do \
+         if mv \"$f\" \".$f.$$\" 2>/dev/null; then cat \".$f.$$\"; printf '\\n'; rm -f \".$f.$$\"; fi; \
+         done; exit 0"
+    )
+}
+
+fn write_focus_settings(workspace: &Path) -> Result<PathBuf, String> {
+    let root = claude_skill_directory(workspace);
+    reject_symlink(&root)?;
+    if fs::read_to_string(root.join(OWNER_FILE)).ok().as_deref() != Some(OWNER) {
+        return Err(format!("{} is not Minutes-managed", root.display()));
+    }
+    let path = focus_settings_path(workspace);
+    reject_symlink(&path)?;
+    let settings = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [
+                { "hooks": [ { "type": "command", "command": focus_hook_command(workspace) } ] }
+            ]
+        }
+    });
+    let body = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    if fs::read_to_string(&path).ok().as_deref() != Some(body.as_str()) {
+        fs::write(&path, body).map_err(|e| e.to_string())?;
+    }
+    Ok(path)
+}
+
+/// Whether these spawn arguments wire Minutes' focus hook into Claude.
+pub(crate) fn has_focus_hook(args: &[String], workspace: &Path) -> bool {
+    let path = focus_settings_path(workspace)
+        .to_string_lossy()
+        .into_owned();
+    args.windows(2)
+        .any(|pair| pair[0] == "--settings" && pair[1] == path)
+}
+
+/// Queue a focus notice for the agent's next prompt, replacing any earlier
+/// notice of the same kind. Written to a temporary name and renamed so the
+/// hook never reads half a file.
+pub(crate) fn queue_focus_notice(
+    workspace: &Path,
+    kind: FocusNotice,
+    text: &str,
+) -> Result<(), String> {
+    let dir = focus_dir(workspace);
+    reject_symlink(&claude_skill_directory(workspace))?;
+    reject_symlink(&dir)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let target = dir.join(kind.file_name());
+    reject_symlink(&target)?;
+    let staging = dir.join(format!(".{}.queue", kind.file_name()));
+    fs::write(&staging, text).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    fs::rename(&staging, &target).map_err(|e| e.to_string())
+}
+
+/// Drop queued notices, so a new session never receives a previous
+/// session's focus changes with its first prompt.
+pub(crate) fn clear_focus_notices(workspace: &Path) {
+    let dir = focus_dir(workspace);
+    for kind in FocusNotice::ALL {
+        let _ = fs::remove_file(dir.join(kind.file_name()));
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +311,86 @@ mod tests {
                 user_args
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_gets_the_focus_hook_unless_the_user_passes_settings() {
+        let (_temp, workspace, source) = fixture();
+        sync_claude_skills(&workspace, &source).unwrap();
+        let args = terminal_args("claude", vec![], &workspace);
+        assert!(has_focus_hook(&args, &workspace), "{args:?}");
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(focus_settings_path(&workspace)).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            focus_hook_command(&workspace)
+        );
+        assert!(
+            !fs::read_dir(workspace.join(".claude"))
+                .unwrap()
+                .any(|entry| entry.unwrap().file_name() == FOCUS_SETTINGS_FILE),
+            "the user's .claude stays untouched"
+        );
+
+        for user_args in [
+            vec!["--settings".to_string(), "/mine.json".to_string()],
+            vec!["--settings=/mine.json".to_string()],
+        ] {
+            let args = terminal_args("claude", user_args, &workspace);
+            assert!(!has_focus_hook(&args, &workspace), "{args:?}");
+        }
+        for agent in ["codex", "opencode", "zsh"] {
+            assert!(!has_focus_hook(
+                &terminal_args(agent, vec![], &workspace),
+                &workspace
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_prints_each_queued_notice_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("Mat's assistant with spaces");
+        let source = temp.path().join("generated");
+        fs::create_dir_all(source.join("minutes-prep")).unwrap();
+        fs::write(source.join("minutes-prep/SKILL.md"), "prep").unwrap();
+        sync_claude_skills(&workspace, &source).unwrap();
+        let run = || {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(focus_hook_command(&workspace))
+                .current_dir(temp.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap()
+        };
+
+        assert_eq!(run(), "", "nothing queued, nothing printed");
+
+        queue_focus_notice(&workspace, FocusNotice::Artifact, "opened a.md").unwrap();
+        queue_focus_notice(&workspace, FocusNotice::Meeting, "meeting X").unwrap();
+        queue_focus_notice(&workspace, FocusNotice::Artifact, "opened b.md").unwrap();
+        let first = run();
+        assert!(first.contains("meeting X"), "{first}");
+        assert!(first.contains("opened b.md"), "{first}");
+        assert!(
+            !first.contains("opened a.md"),
+            "a later change replaces an earlier one"
+        );
+        assert_eq!(run(), "", "a notice reaches one prompt only");
+
+        queue_focus_notice(&workspace, FocusNotice::Meeting, "stale").unwrap();
+        clear_focus_notices(&workspace);
+        assert_eq!(run(), "");
+        let leftovers: Vec<_> = fs::read_dir(focus_dir(&workspace))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[cfg(unix)]

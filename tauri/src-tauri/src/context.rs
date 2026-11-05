@@ -647,7 +647,9 @@ bounded read through the supported CLI or MCP reader named in that section even 
 speaker identities are unavailable; it does not mean the live transcript is unavailable.\n\n\
 Slash commands such as `/login` are account controls, not meeting questions. Never claim a meeting \
 was loaded merely because an account command succeeded.\n\n\
-Do not attribute a statement to a named person unless the meeting context verifies that identity.\n"
+Do not attribute a statement to a named person unless the meeting context verifies that identity.\n\n\
+## Open document\n\n\
+{ARTIFACT_INSTRUCTION}\n"
     );
     let existing = std::fs::read_to_string(workspace.join("CLAUDE.md")).unwrap_or_default();
     let content = merge_live_transcript_section(&deferred, &existing, live_transcript_active());
@@ -721,6 +723,41 @@ pub fn clear_active_meeting_context(workspace: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to clear meeting context: {}", e))?;
     }
     Ok(())
+}
+
+/// What the assistant workspace currently gives the agent, as the user would
+/// name it: the selected meeting's title, the open document's file name, and
+/// whether the all-meetings brief is loaded. Read back from the files
+/// themselves, so the Recall header shows what the agent can actually read.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LoadedContext {
+    pub meeting: Option<String>,
+    pub document: Option<String>,
+    pub all_meetings: bool,
+}
+
+pub fn loaded_context(workspace: &Path) -> LoadedContext {
+    let read = |name: &str| std::fs::read_to_string(workspace.join(name)).ok();
+    // generate_meeting_context writes the title as the first `## ` heading.
+    let meeting = read(ACTIVE_MEETING_FILE).map(|md| {
+        md.lines()
+            .find_map(|line| line.strip_prefix("## "))
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Meeting".to_string())
+    });
+    let document = read(ACTIVE_ARTIFACT_FILE).map(|md| {
+        md.lines()
+            .find_map(|line| line.strip_prefix("- **Filename**: "))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Document".to_string())
+    });
+    LoadedContext {
+        meeting,
+        document,
+        all_meetings: workspace.join(ASSISTANT_CONTEXT_FILE).is_file(),
+    }
 }
 
 pub fn clear_active_artifact_context(workspace: &Path) -> Result<(), String> {
@@ -884,6 +921,10 @@ mod tests {
             assert!(content.contains("gates stored meeting context, not an active live transcript"));
             assert!(content.contains("it does not mean the live transcript is unavailable"));
             assert!(content.contains("/login"));
+            assert!(
+                content.contains(ARTIFACT_INSTRUCTION),
+                "Recall's terminal always starts deferred; without this the agent never learns about the open document"
+            );
             assert!(!content.contains("exact transcript path"));
             assert!(!content.contains("## Recent Meetings"));
             assert!(!content.contains("## Open Action Items"));
@@ -905,6 +946,43 @@ mod tests {
         assert!(!path.exists());
         // Clearing an absent file is not an error.
         clear_general_assistant_context(workspace.path()).unwrap();
+    }
+
+    #[test]
+    fn loaded_context_names_what_the_agent_can_read() {
+        let (corpus, config) = test_config();
+        let workspace = tempfile::tempdir().unwrap();
+        assert_eq!(loaded_context(workspace.path()), LoadedContext::default());
+
+        let meeting = corpus.path().join("2026-10-24-pricing.md");
+        std::fs::write(
+            &meeting,
+            "---\ntitle: Q3 pricing sync\ntype: meeting\ndate: 2026-10-24T16:29:00-04:00\nduration: 20m\n---\n## Transcript\n## Not the title\n[0:00] hi\n",
+        )
+        .unwrap();
+        write_active_meeting_context(workspace.path(), &meeting, &config).unwrap();
+        let artifact = workspace.path().join("draft plan.md");
+        std::fs::write(&artifact, "# Draft\n").unwrap();
+        write_active_artifact_context(workspace.path(), &artifact).unwrap();
+        assert_eq!(
+            loaded_context(workspace.path()),
+            LoadedContext {
+                meeting: Some("Q3 pricing sync".into()),
+                document: Some("draft plan.md".into()),
+                all_meetings: false,
+            }
+        );
+
+        clear_active_meeting_context(workspace.path()).unwrap();
+        clear_active_artifact_context(workspace.path()).unwrap();
+        write_general_assistant_context(workspace.path(), &config).unwrap();
+        assert_eq!(
+            loaded_context(workspace.path()),
+            LoadedContext {
+                all_meetings: true,
+                ..LoadedContext::default()
+            }
+        );
     }
 
     #[test]

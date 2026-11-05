@@ -8945,15 +8945,18 @@ fn agent_notice(command: &str, plain_text: &str) -> Option<String> {
     }
 }
 
-fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> Option<String> {
-    let plain_text = match artifact_name {
+fn artifact_switch_text(artifact_name: Option<&str>) -> String {
+    match artifact_name {
         Some(name) => format!(
             "Minutes opened artifact {name}. Read CURRENT_ARTIFACT.md and your assistant instructions (CLAUDE.md or AGENTS.md). The user has this file open in the document pane beside this chat and may want help editing it. If you update it on disk, the viewer will refresh live."
         ),
         None => "Minutes cleared the open artifact focus. Ignore CURRENT_ARTIFACT.md unless it reappears. If CURRENT_MEETING.md exists, prioritize it; otherwise continue in general assistant mode."
             .into(),
-    };
-    agent_notice(command, &plain_text)
+    }
+}
+
+fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> Option<String> {
+    agent_notice(command, &artifact_switch_text(artifact_name))
 }
 
 fn notify_assistant_artifact_focus(
@@ -8965,7 +8968,17 @@ fn notify_assistant_artifact_focus(
         .lock()
         .map_err(|_| "PTY manager lock failed")?;
     if manager.assistant_session_id().is_some() {
-        if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+        // An agent with the prompt hook gets the change with its next prompt;
+        // typing it would submit a turn on the user's behalf.
+        if manager.session_focus_hook(crate::pty::ASSISTANT_SESSION_ID) {
+            if let Some(workspace) = manager.session_context_dir(crate::pty::ASSISTANT_SESSION_ID) {
+                crate::context::assistant_skills::queue_focus_notice(
+                    &workspace,
+                    crate::context::assistant_skills::FocusNotice::Artifact,
+                    &artifact_switch_text(artifact_name),
+                )?;
+            }
+        } else if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
             if let Some(prompt) = artifact_switch_prompt(&command, artifact_name) {
                 manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
             }
@@ -10593,16 +10606,18 @@ fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn context_switch_prompt(command: &str, mode: &str, title: &str) -> Option<String> {
-    let plain_text = match mode {
+fn context_switch_text(mode: &str, title: &str) -> String {
+    match mode {
         "meeting" => format!(
             "Minutes changed focus to {title}. Read CURRENT_MEETING.md and your assistant instructions (CLAUDE.md or AGENTS.md), then help with that meeting."
         ),
         _ => "Minutes cleared the active meeting focus. Resume general assistant mode and reread your assistant instructions (CLAUDE.md or AGENTS.md) if needed."
             .into(),
-    };
+    }
+}
 
-    agent_notice(command, &plain_text)
+fn context_switch_prompt(command: &str, mode: &str, title: &str) -> Option<String> {
+    agent_notice(command, &context_switch_text(mode, title))
 }
 
 #[derive(Debug, Clone)]
@@ -10803,7 +10818,14 @@ pub fn spawn_terminal(
         // meeting (not when merely re-opening the panel in assistant mode,
         // which would inject unwanted text into Claude Code's input).
         if mode == "meeting" {
-            if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+            if manager.session_focus_hook(crate::pty::ASSISTANT_SESSION_ID) {
+                crate::context::assistant_skills::queue_focus_notice(
+                    &workspace,
+                    crate::context::assistant_skills::FocusNotice::Meeting,
+                    &context_switch_text(mode, &title),
+                )?;
+            } else if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID)
+            {
                 if let Some(prompt) = context_switch_prompt(&command, mode, &title) {
                     manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
                 }
@@ -10818,6 +10840,10 @@ pub fn spawn_terminal(
             filtered_agent_args(agent_name, &config.assistant.agent_args),
             &workspace,
         );
+        let focus_hook = crate::context::assistant_skills::has_focus_hook(&agent_args, &workspace);
+        // A new session starts from CURRENT_MEETING.md and CURRENT_ARTIFACT.md;
+        // notices queued for a previous one are stale.
+        crate::context::assistant_skills::clear_focus_notices(&workspace);
 
         // Spawn at the grid the panel will show. The shell draws its first
         // prompt for this size, and zsh's PROMPT_SP padding drawn for a wider
@@ -10834,6 +10860,7 @@ pub fn spawn_terminal(
                 title: title.clone(),
                 target_window: "main".into(),
                 theme_dark,
+                focus_hook,
             },
             cols,
             rows,

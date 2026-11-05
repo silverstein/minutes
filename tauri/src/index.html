@@ -2967,7 +2967,10 @@
     /* Same spacing as h1-h3: a bold line used as a heading sits with the
        content it introduces. Size and weight stay as written. */
     .md-viewer-content p.md-lead-in {
-      margin: 1.2em 0 0.4em;
+      /* Top and bottom only: the shorthand would also reset the clickable
+         block's -6px side margins and shift the line right. */
+      margin-top: 1.2em;
+      margin-bottom: 0.4em;
     }
 
     .md-viewer-content h1:first-child,

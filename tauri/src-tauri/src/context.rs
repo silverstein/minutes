@@ -647,7 +647,9 @@ bounded read through the supported CLI or MCP reader named in that section even 
 speaker identities are unavailable; it does not mean the live transcript is unavailable.\n\n\
 Slash commands such as `/login` are account controls, not meeting questions. Never claim a meeting \
 was loaded merely because an account command succeeded.\n\n\
-Do not attribute a statement to a named person unless the meeting context verifies that identity.\n"
+Do not attribute a statement to a named person unless the meeting context verifies that identity.\n\n\
+## Open document\n\n\
+{ARTIFACT_INSTRUCTION}\n"
     );
     let existing = std::fs::read_to_string(workspace.join("CLAUDE.md")).unwrap_or_default();
     let content = merge_live_transcript_section(&deferred, &existing, live_transcript_active());
@@ -919,6 +921,10 @@ mod tests {
             assert!(content.contains("gates stored meeting context, not an active live transcript"));
             assert!(content.contains("it does not mean the live transcript is unavailable"));
             assert!(content.contains("/login"));
+            assert!(
+                content.contains(ARTIFACT_INSTRUCTION),
+                "Recall's terminal always starts deferred; without this the agent never learns about the open document"
+            );
             assert!(!content.contains("exact transcript path"));
             assert!(!content.contains("## Recent Meetings"));
             assert!(!content.contains("## Open Action Items"));

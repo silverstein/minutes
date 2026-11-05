@@ -114,6 +114,48 @@ struct WavLayout {
     large_container: bool,
 }
 
+/// Read-only geometry for a structurally finalized native RIFF stem. This does
+/// not prove that its producer has stopped or that its bytes are immutable.
+pub(crate) struct FinalWavLayout {
+    pub data_offset: u64,
+    pub data_bytes: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub encoding: &'static str,
+    pub frame_bytes: u64,
+}
+
+pub(crate) fn final_wav_layout(file: &mut File) -> Result<FinalWavLayout, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "could not seek source header")?;
+    let ParsedStem::Wav(layout) = parse_wav_file(file, Path::new("source"))? else {
+        return Err("source is not a supported finalized WAV".into());
+    };
+    if layout.large_container
+        || u64::from(layout.declared_riff_size) + 8 != layout.file_len
+        || u64::from(layout.declared_data_size) != layout.actual_data_size
+    {
+        return Err("source WAV header is not finalized".into());
+    }
+    let encoding = match layout.format.encoding() {
+        Some(SampleEncoding::Signed16) => "i16-le",
+        Some(SampleEncoding::Float32) => "f32-le",
+        _ => return Err("source encoding is not supported by the live reader".into()),
+    };
+    let frame_bytes = u64::from(layout.format.block_align);
+    if frame_bytes == 0 || layout.actual_data_size % frame_bytes != 0 {
+        return Err("source contains an incomplete PCM frame".into());
+    }
+    Ok(FinalWavLayout {
+        data_offset: layout.data_offset,
+        data_bytes: layout.actual_data_size,
+        sample_rate: layout.format.sample_rate,
+        channels: layout.format.channels,
+        encoding,
+        frame_bytes,
+    })
+}
+
 #[derive(Debug, Clone, Copy)]
 enum FormatContainer {
     Classic,

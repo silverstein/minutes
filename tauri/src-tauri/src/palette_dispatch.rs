@@ -397,7 +397,9 @@ pub fn palette_execute(
     let action_for_recents = action.clone();
 
     let result = dispatch_action(app, state, ui, action);
-    if result.is_ok() {
+    // Opening a result row is a follow-up, not a command the user ran,
+    // so it stays out of recents.
+    if result.is_ok() && !matches!(action_for_recents, ActionId::OpenMeeting { .. }) {
         record_recent(&action_for_recents);
     }
     result
@@ -767,6 +769,21 @@ fn dispatch_action(
                 old_path: path.to_string_lossy().to_string(),
                 new_path: new_path.to_string_lossy().to_string(),
             })
+        }
+        ActionId::OpenMeeting { path } => {
+            let path = path.ok_or_else(|| "meeting path is required".to_string())?;
+            if !path.is_file() {
+                return Err(format!("meeting not found: {}", path.display()));
+            }
+            // The main window loads it through cmd_get_meeting_detail,
+            // which enforces the meetings-root read check.
+            crate::show_main_window(&app);
+            app.emit(
+                "palette:open-meeting",
+                serde_json::json!({ "path": path.to_string_lossy() }),
+            )
+            .map_err(|e| format!("could not open meeting: {}", e))?;
+            Ok(ActionResponse::Ok)
         }
     }
 }

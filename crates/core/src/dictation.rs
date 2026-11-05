@@ -389,6 +389,8 @@ where
     F: FnMut(DictationEvent),
     G: FnMut(DictationResult),
 {
+    warn_ignored_destination_settings_once(config);
+
     if let Err(event) = preflight_model(config) {
         on_event(event);
         return Ok(());
@@ -1709,7 +1711,7 @@ fn handle_utterance<G>(
     if config.dictation.accumulate {
         accumulated_results.push(result.clone());
         // Stream the per-utterance result only for stdout. Single-shot
-        // destinations (insert/clipboard/file/command) receive exactly one
+        // destinations (insert/clipboard/file) receive exactly one
         // combined result from `flush_accumulated_results` at session end;
         // emitting the per-utterance result here as well delivered twice, which
         // for `destination = "insert"` pasted the dictation into the focused
@@ -1722,7 +1724,9 @@ fn handle_utterance<G>(
     }
 
     if let Some(result) = write_result_outputs(result, config) {
+        let hook = post_dictation_hook_request(&result, config);
         on_result(result);
+        enqueue_hook(hook);
     }
 }
 
@@ -1746,9 +1750,11 @@ fn flush_accumulated_results<F, G>(
 
     if let Some(result) = finish_session(accumulated_results.as_slice(), config) {
         on_event(DictationEvent::Success);
+        let hook = post_dictation_hook_request(&result, config);
         if config.dictation.destination != "stdout" {
             on_result(result);
         }
+        enqueue_hook(hook);
     }
     accumulated_results.clear();
 }
@@ -2221,12 +2227,94 @@ fn write_dictation_file(text: &str, duration_secs: f64, config: &Config) -> Opti
     match crate::markdown::write(&frontmatter, text, None, None, config) {
         Ok(result) => {
             tracing::info!(path = %result.path.display(), "dictation file written");
+            crate::events::append_event(dictation_completed_event(&result.path));
             Some(result.path)
         }
         Err(e) => {
             tracing::error!("failed to write dictation file: {}", e);
             None
         }
+    }
+}
+
+/// Build the post_dictation hook run for a result, when one is configured.
+///
+/// The text goes on stdin only, never in argv or the environment, where other
+/// local processes could read it.
+fn post_dictation_hook_request(
+    result: &DictationResult,
+    config: &Config,
+) -> Option<crate::hooks::HookRequest> {
+    let command = config
+        .hooks
+        .post_dictation
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty())?;
+    let path = result.file_path.as_deref();
+    let payload = serde_json::json!({
+        "id": path.and_then(|path| path.file_stem()).map(|stem| stem.to_string_lossy()),
+        "path": path.map(|path| path.display().to_string()),
+        "text": result.text,
+        "raw_text": result.raw_text,
+        "text_mode": result.text_mode.as_str(),
+        "engine_id": result.engine_id,
+        "duration_secs": result.duration_secs,
+    });
+    Some(crate::hooks::HookRequest {
+        name: "post_dictation",
+        command: command.to_string(),
+        argument: path
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        stdin: Some(payload.to_string().into_bytes()),
+    })
+}
+
+/// Hand a hook to the background queue once delivery has returned.
+fn enqueue_hook(request: Option<crate::hooks::HookRequest>) {
+    if let Some(request) = request {
+        crate::hooks::enqueue(request);
+    }
+}
+
+fn dictation_completed_event(path: &std::path::Path) -> crate::events::MinutesEvent {
+    crate::events::MinutesEvent::DictationCompleted {
+        id: path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: path.display().to_string(),
+    }
+}
+
+/// Settings that older configs may still set but dictation no longer reads.
+fn ignored_destination_settings(config: &Config) -> Vec<&'static str> {
+    let dictation = &config.dictation;
+    let mut ignored = Vec::new();
+    if dictation.destination == "command" {
+        ignored.push("destination = \"command\"");
+    }
+    if !dictation.destination_file.is_empty() {
+        ignored.push("destination_file");
+    }
+    if !dictation.destination_command.is_empty() {
+        ignored.push("destination_command");
+    }
+    ignored
+}
+
+fn warn_ignored_destination_settings_once(config: &Config) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    let ignored = ignored_destination_settings(config);
+    if !ignored.is_empty() {
+        WARNED.call_once(|| {
+            tracing::warn!(
+                ignored = %ignored.join(", "),
+                "ignoring [dictation] settings that are no longer read; \
+                 see docs/architecture/config.md"
+            );
+        });
     }
 }
 
@@ -2315,6 +2403,26 @@ fn num_cpus() -> i32 {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Point HOME at a temp dir so emitted events stay out of the real log.
+    fn with_temp_home<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = crate::test_support::home_env_lock();
+        let dir = TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        let original_userprofile = std::env::var_os("USERPROFILE");
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("USERPROFILE", dir.path());
+        let result = f();
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match original_userprofile {
+            Some(profile) => std::env::set_var("USERPROFILE", profile),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        result
+    }
 
     fn test_config(root: &std::path::Path) -> Config {
         Config {
@@ -2454,38 +2562,204 @@ mod tests {
     }
 
     #[test]
-    fn uncancelled_decode_still_writes_and_delivers_once() {
-        for accumulate in [false, true] {
+    fn written_dictation_emits_one_completed_event_without_text() {
+        with_temp_home(|| {
             let dir = TempDir::new().unwrap();
             let mut config = test_config(dir.path());
             config.dictation.destination = "file".into();
-            config.dictation.accumulate = accumulate;
-            config.dictation.daily_note_log = true;
-            let options = DictationRunOptions::default();
-            let mut accumulated = Vec::new();
-            let mut delivered = Vec::new();
-            assert!(decode_and_handle_utterance(
+            let path = write_dictation_file("secret words here", 2.0, &config).unwrap();
+
+            let events = crate::events::read_events(None, None);
+            assert_eq!(events.len(), 1);
+            let value = serde_json::to_value(&events[0]).unwrap();
+            assert_eq!(value["event_type"], "dictation.completed");
+            assert_eq!(value["path"], path.display().to_string());
+            assert_eq!(value["id"], path.file_stem().unwrap().to_str().unwrap());
+            for field in ["text", "raw_text", "title"] {
+                assert!(value.get(field).is_none(), "event must not carry {field}");
+            }
+        });
+    }
+
+    #[test]
+    fn daily_note_destination_writes_no_file_and_emits_no_completed_event() {
+        with_temp_home(|| {
+            let dir = TempDir::new().unwrap();
+            let config = test_config(dir.path());
+            let result = prepare_result(
+                "just a note",
+                1.0,
+                DictationFinalBackend::Whisper,
                 &config,
-                &options,
-                &mut accumulated,
-                &mut |result| delivered.push(result),
-                || Some(finalized_for_cancellation_test()),
-            ));
-            flush_accumulated_results(
-                &config,
-                &options,
-                &mut accumulated,
-                &mut |_| {},
-                &mut |result| delivered.push(result),
-            );
-            assert_eq!(delivered.len(), 1);
-            let path = delivered[0].file_path.as_ref().unwrap();
-            let written = std::fs::read_to_string(path).unwrap();
-            assert!(written.contains(&delivered[0].text));
-            assert!(delivered[0].daily_note_appended);
-            assert!(config.daily_notes.path.exists());
-            assert!(accumulated.is_empty());
-        }
+                DictationTextMode::Unknown,
+            )
+            .unwrap();
+            let output = write_result_outputs(result, &config).unwrap();
+            assert!(output.file_path.is_none());
+            assert!(crate::events::read_events(None, None).is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn post_dictation_hook_runs_after_delivery_with_json_on_stdin() {
+        with_temp_home(|| {
+            for accumulate in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let captured = dir.path().join("stdin.json");
+                let argument = dir.path().join("argument");
+                let mut config = test_config(dir.path());
+                config.dictation.destination = "file".into();
+                config.dictation.accumulate = accumulate;
+                let script = dir.path().join("hook.sh");
+                std::fs::write(
+                    &script,
+                    format!(
+                        "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\ncat > '{}'\n",
+                        argument.display(),
+                        captured.display()
+                    ),
+                )
+                .unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                config.hooks.post_dictation = Some(script.display().to_string());
+
+                let options = DictationRunOptions::default();
+                let mut accumulated = Vec::new();
+                let mut delivered = 0;
+                let mut on_result = |result: DictationResult| {
+                    assert!(result.file_path.is_some());
+                    assert!(
+                        !captured.exists(),
+                        "the hook must not start before delivery returns"
+                    );
+                    delivered += 1;
+                };
+                assert!(decode_and_handle_utterance(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut on_result,
+                    || Some(finalized_for_cancellation_test()),
+                ));
+                flush_accumulated_results(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |_| {},
+                    &mut on_result,
+                );
+                assert_eq!(delivered, 1);
+                assert!(crate::hooks::drain(std::time::Duration::from_secs(30)));
+
+                let path = std::fs::read_to_string(&argument).unwrap();
+                assert!(path.contains("dictations"), "unexpected path {path}");
+                let payload: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&captured).unwrap()).unwrap();
+                assert_eq!(payload["path"], path.as_str());
+                assert_eq!(
+                    payload["id"],
+                    std::path::Path::new(&path)
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                );
+                assert!(payload["text"]
+                    .as_str()
+                    .is_some_and(|text| !text.is_empty()));
+                assert!(payload["raw_text"].is_string());
+                assert_eq!(payload["text_mode"], "unknown");
+                assert!(payload["engine_id"].is_string());
+                assert!(payload["duration_secs"].is_number());
+            }
+        });
+    }
+
+    #[test]
+    fn post_dictation_hook_is_off_unless_set_and_handles_a_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        let result = prepare_result(
+            "just a note",
+            1.0,
+            DictationFinalBackend::Whisper,
+            &config,
+            DictationTextMode::TerminalCode,
+        )
+        .unwrap();
+        assert!(post_dictation_hook_request(&result, &config).is_none());
+
+        config.hooks.post_dictation = Some("   ".into());
+        assert!(post_dictation_hook_request(&result, &config).is_none());
+
+        config.hooks.post_dictation = Some("/bin/true".into());
+        let request = post_dictation_hook_request(&result, &config).unwrap();
+        assert_eq!(request.argument, "");
+        let payload: serde_json::Value = serde_json::from_slice(&request.stdin.unwrap()).unwrap();
+        assert!(payload["path"].is_null());
+        assert!(payload["id"].is_null());
+        assert_eq!(payload["text_mode"], "terminal_code");
+    }
+
+    #[test]
+    fn retired_destination_settings_are_reported_as_ignored() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        assert!(ignored_destination_settings(&config).is_empty());
+
+        config.dictation.destination = "file".into();
+        assert!(ignored_destination_settings(&config).is_empty());
+
+        config.dictation.destination = "command".into();
+        config.dictation.destination_file = "/tmp/out.md".into();
+        config.dictation.destination_command = "cat".into();
+        assert_eq!(
+            ignored_destination_settings(&config),
+            vec![
+                "destination = \"command\"",
+                "destination_file",
+                "destination_command"
+            ]
+        );
+    }
+
+    #[test]
+    fn uncancelled_decode_still_writes_and_delivers_once() {
+        with_temp_home(|| {
+            for accumulate in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let mut config = test_config(dir.path());
+                config.dictation.destination = "file".into();
+                config.dictation.accumulate = accumulate;
+                config.dictation.daily_note_log = true;
+                let options = DictationRunOptions::default();
+                let mut accumulated = Vec::new();
+                let mut delivered = Vec::new();
+                assert!(decode_and_handle_utterance(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |result| delivered.push(result),
+                    || Some(finalized_for_cancellation_test()),
+                ));
+                flush_accumulated_results(
+                    &config,
+                    &options,
+                    &mut accumulated,
+                    &mut |_| {},
+                    &mut |result| delivered.push(result),
+                );
+                assert_eq!(delivered.len(), 1);
+                let path = delivered[0].file_path.as_ref().unwrap();
+                let written = std::fs::read_to_string(path).unwrap();
+                assert!(written.contains(&delivered[0].text));
+                assert!(delivered[0].daily_note_appended);
+                assert!(config.daily_notes.path.exists());
+                assert!(accumulated.is_empty());
+            }
+        });
     }
 
     #[test]

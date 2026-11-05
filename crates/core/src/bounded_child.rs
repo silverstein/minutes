@@ -614,6 +614,16 @@ impl BoundedCommand {
         self
     }
 
+    /// Pass an argument to the child without Windows argv quoting. For
+    /// `cmd.exe`, whose own command-line parsing argv quoting would break.
+    #[cfg(windows)]
+    pub(crate) fn raw_arg<S: AsRef<OsStr>>(&mut self, argument: S) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        self.command.raw_arg(argument.as_ref());
+        self.arguments.push(argument.as_ref().to_os_string());
+        self
+    }
+
     pub(crate) fn args<I, S>(&mut self, arguments: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
@@ -630,7 +640,6 @@ impl BoundedCommand {
         self.arguments.iter().map(OsString::as_os_str)
     }
 
-    #[cfg_attr(not(feature = "parakeet"), allow(dead_code))]
     pub(crate) fn env<K, V>(&mut self, key: K, value: V) -> &mut Self
     where
         K: AsRef<OsStr>,

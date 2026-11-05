@@ -224,6 +224,7 @@ try {
     documentPane.classList.add('active');
     document.body.append(documentPane);
     document.documentElement.dataset.platform = 'macos';
+    const isMac = true;
     document.body.className = 'doc-open';
     let sidebarAutoCollapsed = false;
     let userExpandedSidebarThisSession = false;

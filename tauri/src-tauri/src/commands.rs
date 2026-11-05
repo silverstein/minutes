@@ -7873,18 +7873,23 @@ pub fn cmd_sensitive_stop(
     let config = Config::load();
     let result = minutes_core::sensitive::stop(None, &config).map_err(|error| error.to_string())?;
     let path = result.path.to_string_lossy().to_string();
-    if let Err(error) = spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None, None)
-    {
+    if let Err(error) = spawn_terminal(
+        &app,
+        &state.pty_manager,
+        "meeting",
+        Some(&path),
+        None,
+        None,
+        None,
+    ) {
         show_user_notification(&app, "Sensitive meeting saved", &error);
     } else if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
-            let input = if is_shell_command(&command) {
-                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
-            } else {
-                format!("{debrief_prompt}\n")
-            };
-            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            if let Some(input) =
+                agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
+            {
+                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            }
         }
     }
     Ok(serde_json::json!({
@@ -7911,16 +7916,22 @@ pub fn cmd_run_meeting_debrief(
     let config = Config::load();
     let meeting_path = std::path::PathBuf::from(&path);
     minutes_core::notes::validate_meeting_path(&meeting_path, &config.output_dir)?;
-    spawn_terminal(&app, &state.pty_manager, "meeting", Some(&path), None, None)?;
+    spawn_terminal(
+        &app,
+        &state.pty_manager,
+        "meeting",
+        Some(&path),
+        None,
+        None,
+        None,
+    )?;
     if let Ok(mut manager) = state.pty_manager.lock() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let debrief_prompt = "Run /minutes-debrief for CURRENT_MEETING.md.";
-            let input = if is_shell_command(&command) {
-                format!("cat <<'__MINUTES__'\n{debrief_prompt}\n__MINUTES__\n")
-            } else {
-                format!("{debrief_prompt}\n")
-            };
-            let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            if let Some(input) =
+                agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
+            {
+                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+            }
         }
     }
     Ok(())
@@ -8922,15 +8933,19 @@ fn validate_resummarize_meeting_path(path: &Path, meetings_root: &Path) -> Resul
     Ok(canonical)
 }
 
-fn write_notice_prompt(command: &str, plain_text: &str) -> String {
+/// Text for the assistant agent, typed as a turn. A plain shell gets nothing:
+/// nobody reads it there, and the old `cat <<'__MINUTES__'` wrapper only left
+/// clutter at the top of the user's terminal. The same state is on disk
+/// (CURRENT_MEETING.md, CURRENT_ARTIFACT.md) for anything that wants it.
+fn agent_notice(command: &str, plain_text: &str) -> Option<String> {
     if is_shell_command(command) {
-        format!("cat <<'__MINUTES__'\n{plain_text}\n__MINUTES__\n")
+        None
     } else {
-        format!("{plain_text}\n")
+        Some(format!("{plain_text}\n"))
     }
 }
 
-fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> String {
+fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> Option<String> {
     let plain_text = match artifact_name {
         Some(name) => format!(
             "Minutes opened artifact {name}. Read CURRENT_ARTIFACT.md and your assistant instructions (CLAUDE.md or AGENTS.md). The user has this file open in the document pane beside this chat and may want help editing it. If you update it on disk, the viewer will refresh live."
@@ -8938,7 +8953,7 @@ fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> String 
         None => "Minutes cleared the open artifact focus. Ignore CURRENT_ARTIFACT.md unless it reappears. If CURRENT_MEETING.md exists, prioritize it; otherwise continue in general assistant mode."
             .into(),
     };
-    write_notice_prompt(command, &plain_text)
+    agent_notice(command, &plain_text)
 }
 
 fn notify_assistant_artifact_focus(
@@ -8951,8 +8966,9 @@ fn notify_assistant_artifact_focus(
         .map_err(|_| "PTY manager lock failed")?;
     if manager.assistant_session_id().is_some() {
         if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            let prompt = artifact_switch_prompt(&command, artifact_name);
-            manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+            if let Some(prompt) = artifact_switch_prompt(&command, artifact_name) {
+                manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+            }
         }
     }
     Ok(())
@@ -10577,7 +10593,7 @@ fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
+fn context_switch_prompt(command: &str, mode: &str, title: &str) -> Option<String> {
     let plain_text = match mode {
         "meeting" => format!(
             "Minutes changed focus to {title}. Read CURRENT_MEETING.md and your assistant instructions (CLAUDE.md or AGENTS.md), then help with that meeting."
@@ -10586,11 +10602,7 @@ fn context_switch_prompt(command: &str, mode: &str, title: &str) -> String {
             .into(),
     };
 
-    if is_shell_command(command) {
-        format!("cat <<'__MINUTES__'\n{plain_text}\n__MINUTES__\n")
-    } else {
-        format!("{plain_text}\n")
-    }
+    agent_notice(command, &plain_text)
 }
 
 #[derive(Debug, Clone)]
@@ -10755,7 +10767,19 @@ fn user_config_path_for_display() -> String {
     Config::config_path().display().to_string()
 }
 
+/// PTY grid for a new assistant session: the frontend's fitted size, or
+/// 120x30 when it is missing, zero, or implausibly large.
+fn spawn_grid(size: Option<(u16, u16)>) -> (u16, u16) {
+    match size {
+        Some((cols, rows)) if (2..=1000).contains(&cols) && (2..=500).contains(&rows) => {
+            (cols, rows)
+        }
+        _ => (120, 30),
+    }
+}
+
 /// Shared spawn logic used by both cmd_spawn_terminal and the tray menu handler.
+/// `size` is the frontend's fitted (cols, rows); `None` uses 120x30.
 /// Returns (session_id, window_title) on success.
 pub fn spawn_terminal(
     app: &tauri::AppHandle,
@@ -10764,6 +10788,7 @@ pub fn spawn_terminal(
     meeting_path: Option<&str>,
     agent_override: Option<&str>,
     theme_dark: Option<bool>,
+    size: Option<(u16, u16)>,
 ) -> Result<(String, String), String> {
     let config = Config::load();
     let title = terminal_title_for_mode(mode, meeting_path)?;
@@ -10779,8 +10804,9 @@ pub fn spawn_terminal(
         // which would inject unwanted text into Claude Code's input).
         if mode == "meeting" {
             if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-                let prompt = context_switch_prompt(&command, mode, &title);
-                manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+                if let Some(prompt) = context_switch_prompt(&command, mode, &title) {
+                    manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+                }
             }
         }
     } else {
@@ -10793,6 +10819,10 @@ pub fn spawn_terminal(
             &workspace,
         );
 
+        // Spawn at the grid the panel will show. The shell draws its first
+        // prompt for this size, and zsh's PROMPT_SP padding drawn for a wider
+        // grid wraps into a stray % that a later resize cannot remove.
+        let (cols, rows) = spawn_grid(size);
         manager.spawn(
             crate::pty::SpawnConfig {
                 session_id: crate::pty::ASSISTANT_SESSION_ID.into(),
@@ -10805,8 +10835,8 @@ pub fn spawn_terminal(
                 target_window: "main".into(),
                 theme_dark,
             },
-            120,
-            30,
+            cols,
+            rows,
         )?;
     }
 
@@ -13194,6 +13224,7 @@ pub async fn cmd_prepare_recall_terminal_meeting(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_spawn_terminal(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
@@ -13201,6 +13232,8 @@ pub fn cmd_spawn_terminal(
     meeting_path: Option<String>,
     agent: Option<String>,
     theme_dark: Option<bool>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<String, String> {
     let (session_id, _) = spawn_terminal(
         &app,
@@ -13209,6 +13242,7 @@ pub fn cmd_spawn_terminal(
         meeting_path.as_deref(),
         agent.as_deref(),
         theme_dark,
+        cols.zip(rows),
     )?;
     Ok(session_id)
 }
@@ -13822,6 +13856,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
             "resolved_engine": batch_readiness.resolved_backend,
             "auto_engine_reason": auto_engine.reason,
             "sherpa_selectable": sherpa_selectable,
+            "sherpa_in_build": cfg!(feature = "engine-sherpa"),
             "model": config.transcription.model,
             "downloaded_models": downloaded_models,
             "language": config.transcription.language,
@@ -13890,6 +13925,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "hooks": {
             "post_record": config.hooks.post_record,
+            "post_dictation": config.hooks.post_dictation,
         },
         "calendar": {
             "enabled": config.calendar.enabled,
@@ -13912,6 +13948,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "dictation": {
             "backend": config.dictation.backend,
             "sherpa_available": minutes_core::dictation::sherpa_dictation_available(&config),
+            "sherpa_in_build": cfg!(feature = "engine-sherpa"),
             "auto_uses_parakeet": minutes_core::dictation::auto_dictation_uses_parakeet(&config),
             "model": config.dictation.model,
             "destination": config.dictation.destination,
@@ -14195,10 +14232,12 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             }
             reject_unselectable_parakeet(&value, "transcription engine")?;
             if value == "sherpa" && !minutes_core::transcribe::sherpa_selectable(&config) {
-                return Err(
+                return Err(if cfg!(feature = "engine-sherpa") {
                     "Parakeet v3 is not installed on this Mac. Install it from Settings first."
-                        .into(),
-                );
+                } else {
+                    "This build of Minutes doesn't include Parakeet v3."
+                }
+                .into());
             }
             config.transcription.engine = value.clone();
         }
@@ -14401,9 +14440,12 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             reject_unselectable_apple_speech(&value, "dictation backend")?;
             reject_unselectable_parakeet(&value, "dictation backend")?;
             if value == "sherpa" && !minutes_core::dictation::sherpa_dictation_available(&config) {
-                return Err(
-                    "Parakeet v3 is not installed, so it cannot write dictation text yet. Run `minutes setup --sherpa`, or keep Whisper.".into(),
-                );
+                return Err(if cfg!(feature = "engine-sherpa") {
+                    "Parakeet v3 is not installed, so it cannot write dictation text yet. Run `minutes setup --sherpa`, or keep Whisper."
+                } else {
+                    "This build of Minutes doesn't include Parakeet v3."
+                }
+                .into());
             }
             config.dictation.backend = value.clone();
             // A choice made here is deliberate; the one-time move from the old
@@ -14487,6 +14529,9 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         // Hooks
         ("hooks", "post_record") => {
             config.hooks.post_record = parse_optional_string_setting(&value);
+        }
+        ("hooks", "post_dictation") => {
+            config.hooks.post_dictation = parse_optional_string_setting(&value);
         }
 
         // Palette — persistence arms for the in-memory AppState writes
@@ -14630,6 +14675,15 @@ mod tests {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
+
+    #[test]
+    fn spawn_grid_uses_fitted_size_and_falls_back_to_120x30() {
+        assert_eq!(spawn_grid(Some((84, 22))), (84, 22));
+        assert_eq!(spawn_grid(None), (120, 30));
+        assert_eq!(spawn_grid(Some((0, 0))), (120, 30));
+        assert_eq!(spawn_grid(Some((1, 22))), (120, 30));
+        assert_eq!(spawn_grid(Some((u16::MAX, 22))), (120, 30));
+    }
 
     #[test]
     fn worker_stderr_tail_keeps_only_the_last_bytes() {
@@ -16630,17 +16684,41 @@ mod tests {
             terminal_title_for_mode("deferred", None).unwrap(),
             "Minutes Assistant"
         );
-        let meeting_prompt = context_switch_prompt("opencode", "meeting", "Discussing: Demo");
+        let meeting_prompt =
+            context_switch_prompt("opencode", "meeting", "Discussing: Demo").unwrap();
         assert!(meeting_prompt.contains("CURRENT_MEETING.md"));
         assert!(meeting_prompt.contains("CLAUDE.md or AGENTS.md"));
         assert!(!meeting_prompt.contains("Read CURRENT_MEETING.md and CLAUDE.md,"));
 
-        let general_prompt = context_switch_prompt("opencode", "assistant", "Minutes Assistant");
+        let general_prompt =
+            context_switch_prompt("opencode", "assistant", "Minutes Assistant").unwrap();
         assert!(general_prompt.contains("CLAUDE.md or AGENTS.md"));
 
-        let artifact_prompt = artifact_switch_prompt("opencode", Some("draft.md"));
+        let artifact_prompt = artifact_switch_prompt("opencode", Some("draft.md")).unwrap();
         assert!(artifact_prompt.contains("CURRENT_ARTIFACT.md"));
         assert!(artifact_prompt.contains("CLAUDE.md or AGENTS.md"));
+    }
+
+    #[test]
+    fn plain_shells_get_no_typed_notices() {
+        for shell in ["zsh", "/bin/zsh", "bash", "sh", "fish"] {
+            assert_eq!(
+                context_switch_prompt(shell, "meeting", "Demo"),
+                None,
+                "{shell}"
+            );
+            assert_eq!(
+                artifact_switch_prompt(shell, Some("draft.md")),
+                None,
+                "{shell}"
+            );
+            assert_eq!(artifact_switch_prompt(shell, None), None, "{shell}");
+            assert_eq!(agent_notice(shell, "Run /minutes-debrief"), None, "{shell}");
+        }
+        assert_eq!(
+            agent_notice("claude", "Run /minutes-debrief").as_deref(),
+            Some("Run /minutes-debrief\n")
+        );
     }
 
     #[test]
@@ -18582,10 +18660,11 @@ mod tests {
             cmd_set_setting("transcription".into(), "engine".into(), "auto".into()).unwrap();
             assert_eq!(Config::load().transcription.engine, "auto");
 
-            // The temp home has no Parakeet v3 model installed.
+            // The temp home has no Parakeet v3 model installed, and a build
+            // without the engine says so instead.
             let error = cmd_set_setting("transcription".into(), "engine".into(), "sherpa".into())
                 .unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
             assert_eq!(Config::load().transcription.engine, "auto");
         });
     }
@@ -18596,8 +18675,16 @@ mod tests {
         with_temp_home(|_| {
             let error =
                 cmd_set_setting("dictation".into(), "backend".into(), "sherpa".into()).unwrap_err();
-            assert!(error.contains("Parakeet v3 is not installed"));
+            assert!(error.contains(missing_parakeet_message()), "{error}");
         });
+    }
+
+    fn missing_parakeet_message() -> &'static str {
+        if cfg!(feature = "engine-sherpa") {
+            "Parakeet v3 is not installed"
+        } else {
+            "doesn't include Parakeet v3"
+        }
     }
 
     #[test]

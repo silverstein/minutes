@@ -50,6 +50,7 @@ const routes = [
   "/resources/turn-off-built-in-ai-notetakers",
   "/security",
   "/writing",
+  "/writing/building-local-dictation",
   "/writing/governance-built-in-not-retrofitted",
   "/writing/whisper-cpp-vs-parakeet-cpp",
 ] as const;

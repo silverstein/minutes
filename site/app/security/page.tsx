@@ -158,9 +158,9 @@ export default function SecurityPage() {
           </p>
           <p>
             Files copied into a synced folder follow that service&apos;s settings.
-            Your browser also uses website analytics on this site, separately from
-            the desktop recording pipeline. Website download and setup events contain
-            an action category and page path, not meeting content or clipboard text.
+            This website counts visits with Cloudflare Web Analytics, which sets no
+            cookies and does not identify you. It is separate from the desktop app,
+            which sends nothing to us.
           </p>
         </div>
       </section>

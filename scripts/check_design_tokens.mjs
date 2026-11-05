@@ -26,7 +26,12 @@ const TOKEN_DEFINITION_FILES = new Set([
   "site/app/globals.css",
   "tauri/src/index.html",
   "tauri/src/dictation-overlay.html",
-  "tauri/src/styles/theme-tokens.css",
+  "tauri/src/palette/index.html",
+  // Each window below loads on its own and keeps its own copy of the palette.
+  "tauri/src/note.html",
+  "tauri/src/meeting-prompt.html",
+  "tauri/src/terminal.html",
+  "tauri/src/copilot-hud.html",
 ]);
 const SOURCE_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
 const CSS_NAMED_COLORS = new Set([

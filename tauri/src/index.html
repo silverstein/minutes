@@ -10,6 +10,7 @@
       document.documentElement.dataset.platform = 'macos';
     }
   </script>
+  <script src="scripts/customize-theme.js"></script>
   <script src="scripts/ui-zoom.js"></script>
   <script src="locales/zh-CN.js"></script>
   <script src="locales/pt-BR.js"></script>
@@ -73,17 +74,16 @@
     }
 
     :root {
-      --dictation-action-bg: #2F6F8F;
-      --dictation-action-text: #F8F4ED;
       color-scheme: light dark;
       --bg: #0D0D0B;
+      --on-accent: var(--bg);
       --bg-elevated: #141412;
       --bg-hover: #1C1C1A;
       --border: rgba(255, 255, 255, 0.06);
       --border-mid: #2A2924;
       --text: #E8E4DA;
-      --text-secondary: #6B6760;
-      --text-tertiary: #3D3B38;
+      --text-secondary: #AAA49A;
+      --text-tertiary: #716C64;
       --accent: #30D158;
       --accent-hover: #4ADE70;
       --accent-soft: rgba(48, 209, 88, 0.10);
@@ -160,11 +160,11 @@
         --border: rgba(0, 0, 0, 0.07);
         --border-mid: rgba(0, 0, 0, 0.13);
         --text: #1A1916;
-        --text-secondary: #8C8880;
-        --text-tertiary: #BDB9B0;
-        --accent: #C96B4E;
-        --accent-hover: #B85A3E;
-        --accent-soft: rgba(201, 107, 78, 0.10);
+        --text-secondary: #6F6A62;
+        --text-tertiary: #958F85;
+        --accent: #AE5337;
+        --accent-hover: #9E4428;
+        --accent-soft: rgba(174, 83, 55, 0.10);
         --capture: #2F6F8F;
         --capture-tint: rgba(47, 111, 143, 0.10);
         --capture-tint-soft: rgba(47, 111, 143, 0.05);
@@ -177,10 +177,10 @@
         --orange: #B8731E;
         --purple-solid-soft: rgba(139, 92, 246, 0.58);
         --purple-solid-strong: rgba(139, 92, 246, 0.72);
-        --accent-tint: rgba(201, 107, 78, 0.10);
-        --accent-tint-soft: rgba(201, 107, 78, 0.05);
-        --accent-border: rgba(201, 107, 78, 0.15);
-        --accent-border-strong: rgba(201, 107, 78, 0.28);
+        --accent-tint: rgba(174, 83, 55, 0.10);
+        --accent-tint-soft: rgba(174, 83, 55, 0.05);
+        --accent-border: rgba(174, 83, 55, 0.15);
+        --accent-border-strong: rgba(174, 83, 55, 0.28);
         --green-tint: rgba(46, 125, 70, 0.10);
         --green-tint-soft: rgba(46, 125, 70, 0.06);
         --green-border: rgba(46, 125, 70, 0.14);
@@ -217,9 +217,9 @@
         --neutral-border: rgba(0, 0, 0, 0.10);
         --overlay-scrim: rgba(248, 244, 237, 0.78);
         --modal-scrim: rgba(248, 244, 237, 0.82);
-        --focus-ring: rgba(201, 107, 78, 0.16);
-        --focus-ring-soft: rgba(201, 107, 78, 0.10);
-        --focus-ring-subtle: rgba(201, 107, 78, 0.07);
+        --focus-ring: rgba(174, 83, 55, 0.16);
+        --focus-ring-soft: rgba(174, 83, 55, 0.10);
+        --focus-ring-subtle: rgba(174, 83, 55, 0.07);
         --info-ring: rgba(98, 188, 233, 0.24);
         --muted-badge: rgba(140, 136, 128, 0.16);
         --success-contrast: #F8F4ED;
@@ -420,6 +420,12 @@
     .split-handle.dragging::after {
       background: var(--text-tertiary);
       opacity: 0.5;
+    }
+
+    /* The chat/document divider shows only while chat and a docked document
+       are both open, including with the list collapsed. */
+    body:not(.doc-overlay):has(#recall-panel.expanded):has(#md-viewer.active) .doc-split-handle {
+      display: block;
     }
 
     .split-handle.visible {
@@ -628,10 +634,12 @@
       padding: 10px 0 6px 5px;
     }
 
+    /* Style the scrollbar with ::-webkit-scrollbar only, like the meeting
+       list and document pane. Current WebKit honours the standard
+       scrollbar-color / scrollbar-width over these, and with them set the
+       terminal drew a solid full-height white bar at its right edge. */
     .recall-terminal .xterm .xterm-viewport {
       background-color: transparent;
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 18%, transparent) transparent;
-      scrollbar-width: thin;
     }
 
     .recall-terminal .xterm .xterm-viewport::-webkit-scrollbar {
@@ -648,11 +656,6 @@
       border-radius: 999px;
       background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
       background-clip: content-box;
-    }
-
-    .recall-terminal:hover .xterm .xterm-viewport,
-    .recall-terminal:focus-within .xterm .xterm-viewport {
-      scrollbar-color: color-mix(in srgb, var(--text-tertiary) 38%, transparent) transparent;
     }
 
     .recall-terminal:hover .xterm .xterm-viewport::-webkit-scrollbar-thumb,
@@ -707,7 +710,7 @@
       border: none;
       border-radius: 999px;
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       cursor: pointer;
       box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
       opacity: 0.95;
@@ -1161,8 +1164,183 @@
       margin-top: 32px;
     }
 
+    /* ── macOS title row ──
+       The window uses an overlay title bar, so the row beside the traffic
+       lights belongs to us. Brand, list toggle and settings share it instead
+       of stacking three rows under an empty strip. 52px tall so its centre
+       (26px) lines up with the traffic lights (traffic_light_position in
+       main.rs), with room for the Recall header to sit off the top edge. */
+    html[data-platform="macos"] .header {
+      height: 52px;
+      min-height: 52px;
+      margin: 0 12px 0 86px;
+      gap: 8px;
+    }
+
+    html[data-platform="macos"].is-fullscreen .header {
+      margin-left: 14px;
+    }
+
+    html[data-platform="macos"] .brand {
+      gap: 7px;
+    }
+
+    html[data-platform="macos"] .brand-mark {
+      width: 18px;
+      height: 18px;
+    }
+
+    html[data-platform="macos"] .brand-mark img.brand-mark-dark {
+      border-radius: 4px;
+    }
+
+    /* The mark carries the identity; the menu bar already names the app
+       whenever this window is focused, so the wordmark was repetition. */
+
+    /* Idle is the normal state; a permanent grey dot read as a glitch. The
+       dot only appears when there is something to say, with a tooltip. */
+    html[data-platform="macos"] .header .status-pill:not(.recording):not(.starting):not(.processing):not(.live):not(.sensitive) {
+      display: none;
+    }
+
+    .sidebar-glyph-panel {
+      display: none;
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn,
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-collapse-btn {
+      border-color: transparent;
+      background: transparent;
+      color: var(--text-secondary);
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn:hover {
+      background: var(--surface-fill-hover);
+      color: var(--text);
+    }
+
+    html[data-platform="macos"] .header .sidebar-collapse-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      background: transparent;
+    }
+
+    html[data-platform="macos"] .header .sidebar-glyph-chevron {
+      display: none;
+    }
+
+    html[data-platform="macos"] .header .sidebar-glyph-panel {
+      display: block;
+    }
+
+    html[data-platform="macos"] .sidebar-collapse-btn.is-collapsed {
+      transform: none;
+    }
+
+    /* The toggle itself moves beside the traffic lights when the list
+       collapses (see applySidebarCollapsed), so the separate expand rail
+       would only stack a second control on top of it. */
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-expand-rail {
+      display: none;
+    }
+
+    html[data-platform="macos"] body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 84px;
+      top: 12px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .sidebar-collapse-btn {
+      left: 14px;
+    }
+
+    /* The right-hand pane headers share the title row. */
+    html[data-platform="macos"] .recall-panel.expanded {
+      padding-top: 8px;
+    }
+
     html[data-platform="macos"] .recall-header {
-      margin-top: 1em;
+      padding-top: 5px;
+      padding-bottom: 5px;
+      position: relative;
+      z-index: 6;
+    }
+
+    /* With the list toggle gone from it, the row above search only held
+       Documents. Sit the pane buttons beside the search field instead; they
+       wrap below it when the list is too narrow for both. */
+    html[data-platform="macos"] .search-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding-top: 6px;
+    }
+
+    html[data-platform="macos"] .search-wrap .search-field {
+      order: 1;
+      /* Shrinks before anything wraps; only below 110px do the pane
+         buttons drop under it. */
+      flex: 1 1 0;
+      min-width: 110px;
+    }
+
+    html[data-platform="macos"] .search-wrap {
+      container: listsearch / inline-size;
+    }
+
+    .list-toggle-btn .label-short {
+      display: none;
+    }
+
+    @container listsearch (max-width: 280px) {
+      .list-toggle-btn .label-long {
+        display: none;
+      }
+
+      .list-toggle-btn .label-short {
+        display: inline;
+      }
+    }
+
+    html[data-platform="macos"] .search-wrap .list-header-actions {
+      order: 2;
+      margin: 0 0 0 auto;
+    }
+
+    html[data-platform="macos"] .search-wrap .search-error {
+      order: 3;
+      flex-basis: 100%;
+    }
+
+    html[data-platform="macos"] .list-header-group:empty {
+      display: none;
+    }
+
+    html[data-platform="macos"] .recall-toggle-btn {
+      margin: 0;
+    }
+
+
+    html[data-platform="macos"] .md-viewer-header {
+      min-height: 52px;
+    }
+
+    /* With the list collapsed, whichever pane is leftmost starts after the
+       traffic lights and the toggle. */
+    html[data-platform="macos"] body.sidebar-collapsed .recall-header {
+      margin-left: 104px;
+    }
+
+    html[data-platform="macos"] body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
+      padding-left: 120px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-header {
+      margin-left: 34px;
+    }
+
+    html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
+      padding-left: 50px;
     }
 
     .brand {
@@ -1266,6 +1444,11 @@
 
     .header-chip.readiness {
       display: none;
+    }
+
+    /* Still hidden by default, but the dictation permission nudge needs it visible. */
+    .header-chip.readiness.active {
+      display: inline-flex;
     }
 
     .status-pill {
@@ -2018,16 +2201,19 @@
       line-height: 1.4;
     }
 
-    .search-icon {
+    /* The icon is centred on the field itself, so it stays level with the
+       placeholder whatever sits above the field or how far the UI is zoomed.
+       (The old ⌕ glyph was placed at a fixed offset from the row and sat
+       below the text.) */
+    .search-field {
       position: relative;
     }
 
-    .search-icon::before {
-      content: "⌕";
+    .search-field-icon {
       position: absolute;
-      left: 28px;
-      top: 53px;
-      font-size: var(--text-base);
+      left: 13px;
+      top: 50%;
+      transform: translateY(-50%);
       color: var(--text-secondary);
       pointer-events: none;
       z-index: 1;
@@ -2655,8 +2841,10 @@
     }
 
     .input-modal-title {
-      font-family: var(--font-display);
-      font-size: var(--text-xl);
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
     }
 
@@ -2948,6 +3136,42 @@
       transition: background 0.15s ease, box-shadow 0.15s ease;
     }
 
+    /* Meeting rows name their kind in the meta line, so they no longer
+       reserve a gutter for the type dot. */
+    .meeting-item.has-kind-label {
+      padding-left: 14px;
+    }
+
+    .meeting-item[hidden] {
+      display: none;
+    }
+
+    .meeting-item.in-dictation-group {
+      padding-left: 26px;
+    }
+
+    .dictation-group .meeting-title {
+      color: var(--text-secondary);
+    }
+
+    .dictation-group-chevron {
+      flex-shrink: 0;
+      color: var(--text-tertiary);
+      font-size: var(--text-base);
+      line-height: 1;
+      transition: transform 0.15s ease;
+    }
+
+    .dictation-group[aria-expanded="true"] .dictation-group-chevron {
+      transform: rotate(90deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .dictation-group-chevron {
+        transition: none;
+      }
+    }
+
     .meeting-item:hover {
       background: var(--bg-hover);
       box-shadow: 0 1px 4px var(--shadow-soft);
@@ -3059,21 +3283,6 @@
       background: var(--surface-fill-strongest-hover);
     }
 
-    .meeting-badge.memo {
-      background: var(--purple-solid-soft);
-    }
-
-    .meeting-item:hover .meeting-badge.memo {
-      background: var(--purple-solid-strong);
-    }
-
-    .meeting-badge.dictation {
-      background: var(--green-solid-soft);
-    }
-
-    .meeting-item:hover .meeting-badge.dictation {
-      background: var(--green-solid-strong);
-    }
 
     /* ── Meeting detail view ── */
     .detail-overlay {
@@ -3321,34 +3530,6 @@
       flex-shrink: 0;
     }
 
-    .meeting-chat-btn {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      border: none;
-      background: transparent;
-      color: var(--text-tertiary);
-      font-size: var(--text-sm);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s ease, color 0.15s ease;
-      -webkit-app-region: no-drag;
-      flex-shrink: 0;
-      opacity: 0;
-      transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-    }
-
-    .meeting-item:hover .meeting-chat-btn {
-      opacity: 1;
-    }
-
-    .meeting-chat-btn:hover {
-      background: var(--accent-tint);
-      color: var(--accent);
-    }
-
     .detail-context {
       margin-top: 16px;
       padding: 12px 14px;
@@ -3497,7 +3678,7 @@
 
     .speaker-confirm-btn:hover {
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       border-color: var(--accent);
     }
 
@@ -3780,7 +3961,11 @@
       padding-top: 6vh;
     }
 
+    /* One width for every tab, so switching tabs never resizes the dialog.
+       The Dictation tab sets the floor: its recovery comparison needs two
+       columns. */
     #settings-overlay .about-card {
+      width: min(720px, calc(100vw - 32px));
       max-height: calc(100vh - 6vh - 40px);
     }
 
@@ -3809,11 +3994,11 @@
     }
 
     .about-copy h2 {
-      font-size: var(--text-2xl);
-      font-family: var(--font-display);
-      font-weight: 400;
-      line-height: 1;
-      letter-spacing: -0.4px;
+      font-size: var(--text-xl);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      line-height: 1.1;
+      letter-spacing: -0.01em;
       margin-bottom: 6px;
     }
 
@@ -3829,7 +4014,7 @@
       gap: 8px;
       margin-top: 10px;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.5;
     }
 
@@ -3856,7 +4041,7 @@
       font-weight: 700;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       margin-bottom: 6px;
     }
 
@@ -3870,7 +4055,7 @@
       padding-top: 14px;
       border-top: 1px solid var(--border);
       font-size: var(--text-xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -3925,7 +4110,7 @@
     .about-controls-meta {
       margin-top: 8px;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -3963,7 +4148,7 @@
     .dictation-recent-meta {
       margin-top: 3px;
       font-size: var(--text-2xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.35;
     }
 
@@ -4049,9 +4234,9 @@
 
     .readiness-title {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.2px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin-bottom: 6px;
     }
@@ -4128,7 +4313,7 @@
 
     .readiness-optional {
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       margin-top: 8px;
       letter-spacing: 0.15px;
     }
@@ -4147,7 +4332,7 @@
     .readiness-action-status {
       width: 100%;
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -4217,9 +4402,9 @@
 
     .recovery-title {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.2px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin-bottom: 6px;
     }
@@ -4512,7 +4697,7 @@
 
     .btn-primary {
       background: var(--accent);
-      color: var(--bg);
+      color: var(--on-accent);
       box-shadow: inset 0 -1px 0 var(--border);
     }
 
@@ -4834,11 +5019,14 @@
       font-size: 12px;
       line-height: 1.5;
     }
+    .config-warning.is-repaired { background: var(--green-tint); border-bottom-color: var(--green-glow); }
     .config-warning[hidden], .config-warning [hidden] { display: none !important; }
     .config-warning strong { display: block; margin-bottom: 4px; }
     .config-warning p { margin: 4px 0; }
     .config-warning code { overflow-wrap: anywhere; font-size: 11px; }
     .config-warning-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .config-warning .config-warning-status { margin: 8px 0 0; font-weight: 600; }
+    .config-warning .config-warning-status.error { border-left: 2px solid var(--red); padding-left: 8px; }
 
     /* ── Update available banner ── */
     .update-banner {
@@ -5139,7 +5327,7 @@
       font-weight: 700;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
     }
 
     .about-cli-status {
@@ -5154,7 +5342,7 @@
 
     .about-cli-detail {
       font-size: var(--text-xs);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.5;
       margin-bottom: 8px;
     }
@@ -5222,7 +5410,9 @@
       align-items: center;
       justify-content: center;
       padding: 20px;
-      z-index: 200;
+      /* Opened from What's New (z-index 9000) as well as Settings, so it has
+         to stack above both or the setup step renders behind the notes. */
+      z-index: 9100;
     }
 
     .cli-setup-scrim.active { display: flex; }
@@ -5249,9 +5439,9 @@
 
     .cli-setup-header h2 {
       font-size: var(--text-lg);
-      font-family: var(--font-display);
-      font-weight: 400;
-      letter-spacing: -0.3px;
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }
 
     .cli-setup-body {
@@ -5317,8 +5507,8 @@
     .cli-setup-warning {
       padding: 10px 12px;
       border-radius: 10px;
-      background: rgba(201, 107, 78, 0.1);
-      border: 1px solid rgba(201, 107, 78, 0.3);
+      background: rgba(174, 83, 55, 0.1);
+      border: 1px solid rgba(174, 83, 55, 0.3);
       color: #c96b4e;
       font-size: var(--text-xs);
       line-height: 1.5;
@@ -5360,9 +5550,10 @@
       flex-shrink: 0;
     }
     .whats-new-header h2 {
-      font-family: var(--font-display);
-      font-size: var(--text-xl);
-      font-weight: 400;
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      font-weight: 600;
+      letter-spacing: -0.01em;
       color: var(--text);
       margin: 0;
     }
@@ -5372,6 +5563,16 @@
       color: var(--text-secondary);
       margin-top: 4px;
     }
+    /* Release notes and CLI details carry commands and paths people copy.
+       The app shell disables selection on body, so opt these back in. */
+    .whats-new-body,
+    .whats-new-cli-body,
+    .about-cli-detail {
+      -webkit-user-select: text;
+      user-select: text;
+      cursor: auto;
+    }
+
     .whats-new-body {
       padding: 16px 20px;
       overflow-y: auto;
@@ -5549,9 +5750,13 @@
       max-height: calc(100vh - 40px);
     }
 
+    /* Dialog titles are interface chrome, so they use the sans. The serif
+       stays for editorial content such as meeting titles. */
     .settings-title {
-      font-size: var(--text-xl);
-      font-family: var(--font-display);
+      font-size: var(--text-lg);
+      font-family: var(--font-sans);
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }
 
     .settings-section {
@@ -5577,8 +5782,35 @@
 
     .settings-hint-link {
       font-size: var(--text-meta);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       cursor: pointer;
+    }
+
+    .settings-color-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .settings-color-row .settings-field {
+      margin-top: 0;
+    }
+
+    .settings-color-swatch {
+      flex: none;
+      width: 44px;
+      height: 34px;
+      padding: 2px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-mid);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .settings-color-swatch:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     .settings-field {
@@ -5591,6 +5823,12 @@
       color: var(--text);
       font-size: var(--text-body);
       box-sizing: border-box;
+    }
+
+    /* Placeholders are examples, not saved values: keep them visibly fainter. */
+    .settings-field::placeholder {
+      color: var(--text-tertiary);
+      opacity: 1;
     }
 
     .settings-secret-row {
@@ -5639,7 +5877,7 @@
     .settings-footer {
       padding-top: 14px;
       border-top: 1px solid var(--border);
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       line-height: 1.45;
     }
 
@@ -5689,7 +5927,7 @@
       font-family: var(--font-mono);
       font-size: var(--text-meta);
       font-weight: 500;
-      color: var(--text-tertiary);
+      color: var(--text-secondary);
       white-space: nowrap;
       letter-spacing: 0.01em;
       transition: color 0.15s ease;
@@ -6136,19 +6374,22 @@
     </div>
 
     <!-- Search -->
-    <div class="search-wrap search-icon">
+    <div class="search-wrap">
       <div class="list-header-actions">
         <div class="list-header-group">
-          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane">‹</button>
+          <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" type="button" aria-label="Collapse list pane" title="Collapse list pane"><span class="sidebar-glyph-chevron" aria-hidden="true">‹</span><svg class="sidebar-glyph-panel" aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2.25"/><path d="M6 2.75v10.5"/></svg></button>
         </div>
         <!-- Recall opens a panel; it is navigation, not capture, so it lives
              with the other pane controls rather than beside Start Recording.
              Same id and nudge element: every existing handler keeps working. -->
         <button class="list-toggle-btn recall-toggle-btn" id="btn-assistant" type="button" aria-expanded="false" title="Open Recall">Recall <span class="recall-nudge"
             id="recall-nudge" aria-label="Recall has new content"></span></button>
-        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false">Documents</button>
+        <button class="list-toggle-btn" id="btn-documents-toggle" type="button" aria-pressed="false" aria-label="Show documents"><span class="label-long">Documents</span><span class="label-short" aria-hidden="true">Docs</span></button>
       </div>
-      <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      <div class="search-field">
+        <svg class="search-field-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.75"/><path d="M10.5 10.5 14 14"/></svg>
+        <input class="search-box" type="text" placeholder="Search recordings..." id="search-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      </div>
       <div class="search-error" id="search-error" hidden></div>
     </div>
 
@@ -6157,13 +6398,13 @@
       <p id="config-warning-message"></p>
       <p><code id="config-warning-path"></code></p>
       <p id="config-warning-defaults"></p>
-      <p id="config-warning-action-error" hidden></p>
       <div class="config-warning-actions">
+        <button class="btn btn-primary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-open">Open settings file</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-check">Check again</button>
-        <button class="btn btn-secondary btn-sm" id="config-warning-restart" hidden>Restart Minutes</button>
         <button class="btn btn-secondary btn-sm" id="config-warning-help">Get help</button>
       </div>
+      <p class="config-warning-status" id="config-warning-action-error" hidden></p>
     </section>
 
     <!-- Upcoming meeting suggestion -->
@@ -6424,6 +6665,9 @@
        collapsed — so the one gesture that would give notes more room during
        a meeting destroyed the view instead. Ordered after the chat panel to
        match where every assistant surface puts its artifact panel. ── -->
+  <!-- Between chat and document; shown only while both are open. -->
+  <div class="split-handle doc-split-handle" id="doc-split-handle" role="separator"
+    aria-orientation="vertical" aria-label="Resize document pane"></div>
   <div class="md-viewer" id="md-viewer">
     <div class="md-viewer-header">
       <div class="md-viewer-header-main">
@@ -6698,6 +6942,43 @@
       </nav>
 
       <div class="settings-tab-panel is-active" role="tabpanel" id="panel-general" data-panel="general" aria-labelledby="tab-general">
+      <!-- Appearance -->
+      <div class="settings-section">
+        <div class="about-item-title">APPEARANCE</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-mode">Theme</label>
+            <select id="settings-theme-mode" class="settings-field">
+              <option value="auto">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-accent-light">Accent color in light mode</label>
+            <div class="about-controls-meta">Pick a color, or enter a hex or oklch() value. Leave blank for the default.</div>
+            <div class="settings-color-row">
+              <input type="color" id="settings-theme-accent-light-picker" class="settings-color-swatch" value="#AE5337" aria-label="Pick the accent color for light mode">
+              <input type="text" id="settings-theme-accent-light" class="settings-field" placeholder="#AE5337" spellcheck="false" autocomplete="off">
+            </div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-theme-accent-dark">Accent color in dark mode</label>
+            <div class="about-controls-meta">Pick a color, or enter a hex or oklch() value. Leave blank for the default.</div>
+            <div class="settings-color-row">
+              <input type="color" id="settings-theme-accent-dark-picker" class="settings-color-swatch" value="#30D158" aria-label="Pick the accent color for dark mode">
+              <input type="text" id="settings-theme-accent-dark" class="settings-field" placeholder="#30D158" spellcheck="false" autocomplete="off">
+            </div>
+            <div class="about-controls-meta" id="settings-theme-status" role="status"></div>
+            <div class="about-controls-meta">Saved in <span id="settings-theme-path"></span>. You or an agent can edit that file directly. Recording and error colors stay fixed.</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Identity -->
       <div class="settings-section">
         <div class="about-item-title">IDENTITY</div>
@@ -6838,7 +7119,7 @@
               <option value="parakeet" disabled>Parakeet — unavailable</option>
               <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
             </select>
-            <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.</div>
+            <div class="about-controls-meta" id="settings-transcription-engine-detail">The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting under Capture.</div>
             <div class="about-controls-meta" id="settings-parakeet-install" hidden>
               <button class="btn btn-secondary btn-sm" id="btn-settings-parakeet-install">Install Parakeet v3</button>
               <span id="settings-parakeet-install-status"></span>
@@ -6847,7 +7128,7 @@
         </div>
         <div class="about-controls" id="settings-whisper-section">
           <div class="about-controls-group">
-            <div class="about-controls-copy">Whisper model</div>
+            <div class="about-controls-copy" id="settings-whisper-model-label">Whisper model</div>
             <select id="settings-whisper-model" class="settings-field">
               <option value="base">base — 142 MB, lower resource use</option>
               <option value="small">small — 466 MB, good quality (recommended)</option>
@@ -7021,7 +7302,7 @@
           <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
         </div>
         <div class="dictation-gestures" aria-label="How to dictate"><p><strong>Hold</strong> to speak. Release to finish.</p><p><strong>Tap</strong> to keep listening. Tap again or choose Finish.</p><p><strong>Escape</strong> cancels without inserting.</p></div>
-        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Try: Let’s meet on Thursday at ten." spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
+        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" id="dictation-practice-label" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Dictated text appears here. Try saying: “Let’s meet on Thursday at ten.”" spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Where dictated text goes</div>
@@ -7115,6 +7396,11 @@
           <div class="dictation-form-actions"><button type="submit" class="btn btn-secondary btn-sm">Add preference</button><button type="button" class="btn btn-secondary btn-sm" data-dictation-cancel="rule" hidden>Cancel</button></div><p id="dictation-rule-error" class="dictation-form-error" role="alert"></p></form><div id="dictation-rules" class="dictation-list"></div>
         </section>
 </details>
+<section class="dictation-block"><h3>After each dictation</h3><p class="dictation-note">Shell command run after each dictation. The file path is appended as the final argument, and the text arrives as JSON on stdin. This command can send your words off this computer, including anything you dictate into a terminal. Leave blank to disable.</p>
+          <label class="about-controls-copy" for="settings-hooks-post-dictation">Post-dictation command</label>
+          <input type="text" id="settings-hooks-post-dictation" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
+          <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
+        </section>
 <details class="dictation-disclosure" id="dictation-recovery-settings"><summary>Delivery and recovery shortcuts</summary>        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Anything you copy after a paste takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
           <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
           <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
@@ -7383,12 +7669,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             <div class="about-controls-meta">Shell command run after each recording is processed. The transcript file path is appended as the final argument. Leave blank to disable.</div>
             <input type="text" id="settings-hooks-post-record" class="settings-field" placeholder="/path/to/script.sh" spellcheck="false">
             <div class="about-controls-meta" id="settings-hooks-post-record-status"></div>
+            <div class="about-controls-meta">Commands that run after a dictation are in Settings, Dictation.</div>
           </div>
         </div>
       </div>
 
       <!-- Calendar -->
-      <div class="settings-section">
+      <div class="settings-section" id="settings-calendar-section">
         <div class="about-item-title">CALENDAR</div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -7920,6 +8207,23 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const documentsToggle = document.getElementById('btn-documents-toggle');
     const sidebarCollapseButton = document.getElementById('btn-sidebar-collapse');
     const sidebarExpandRail = document.getElementById('btn-sidebar-expand');
+    if (isMac) {
+      // macOS title row: the list toggle ends the row, at the list's right
+      // edge. When the list collapses it slides over beside the traffic lights.
+      document.querySelector('.app-left > .header .header-actions')?.append(sidebarCollapseButton);
+      const syncFullscreen = () => {
+        // Full screen hides the traffic lights, so the title row slides left.
+        const full = window.innerWidth === screen.width && window.innerHeight === screen.height;
+        document.documentElement.classList.toggle('is-fullscreen', full);
+      };
+      syncFullscreen();
+      window.addEventListener('resize', syncFullscreen);
+    }
+    // The status dot has no visible text; keep its state readable on hover.
+    new MutationObserver(() => {
+      const state = statusPill.textContent.trim();
+      statusPill.title = state && state !== 'idle' ? state : '';
+    }).observe(statusPill, { childList: true, characterData: true, subtree: true });
     const searchInput = document.getElementById('search-input');
     const detailOverlay = document.getElementById('detail-overlay');
     const detailTitle = document.getElementById('detail-title');
@@ -8794,6 +9098,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (fingerprint === configWarningFingerprint) return;
       configWarningFingerprint = fingerprint;
       const banner = document.getElementById('config-warning');
+      document.getElementById('config-warning-action-error').hidden = true;
       if (warning) lastConfigWarning = warning;
       if (!lastConfigWarning) { banner.hidden = true; return; }
       banner.hidden = false;
@@ -8807,12 +9112,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         ? `Fallback transcription: ${warning.engine} · ${warning.model}. Recordings folder: ${warning.outputDir}`
         : '';
       document.getElementById('config-warning-restart').hidden = !!warning;
+      document.getElementById('config-warning-check').hidden = !warning;
+      document.getElementById('config-warning-help').hidden = !warning;
+      banner.classList.toggle('is-repaired', !warning);
+      banner.setAttribute('role', warning ? 'alert' : 'status');
     }
     async function configWarningAction(action) {
       const errorEl = document.getElementById('config-warning-action-error');
       errorEl.hidden = true;
+      errorEl.classList.remove('error');
       try { await action(); }
-      catch (error) { errorEl.textContent = String(error); errorEl.hidden = false; }
+      catch (error) { errorEl.textContent = String(error); errorEl.classList.add('error'); errorEl.hidden = false; }
     }
     document.getElementById('config-warning-open').addEventListener('click', () =>
       configWarningAction(() => invoke('cmd_open_file', { path: lastConfigWarning.path })));
@@ -8820,6 +9130,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       configWarningAction(async () => {
         const status = await invoke('cmd_capture_status');
         renderConfigWarning(status.configWarning);
+        if (status.configWarning) {
+          const errorEl = document.getElementById('config-warning-action-error');
+          errorEl.textContent = 'Still can\'t read the file.';
+          errorEl.classList.add('error');
+          errorEl.hidden = false;
+        }
       }));
     document.getElementById('config-warning-restart').addEventListener('click', (event) =>
       configWarningAction(() => {
@@ -12065,7 +12381,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       documentsToggle.setAttribute('aria-pressed', active ? 'true' : 'false');
       // Label the button with its DESTINATION so returning to meetings is
       // self-evident: it reads "Meetings" while documents are showing.
-      documentsToggle.textContent = active ? 'Meetings' : 'Documents';
+      // Long and short forms; a narrow list shows the short one (see the
+      // listsearch container query) rather than wrapping the row.
+      const [longLabel, shortLabel] = active ? ['Meetings', 'Meetings'] : ['Documents', 'Docs'];
+      documentsToggle.replaceChildren(
+        Object.assign(document.createElement('span'), { className: 'label-long', textContent: longLabel }),
+        Object.assign(document.createElement('span'), { className: 'label-short', textContent: shortLabel }),
+      );
+      documentsToggle.lastChild.setAttribute('aria-hidden', 'true');
       documentsToggle.setAttribute(
         'aria-label',
         active ? 'Back to meetings' : 'Show documents',
@@ -12112,11 +12435,75 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       meetingRowsState = {
         query: activeSearchQuery,
         rows: Object.entries(groupByDate(meetings)).flatMap(([label, items]) =>
-          items.map((m) => ({ label, m }))),
+          activeSearchQuery ? items.map((m) => ({ label, m })) : rowsWithDictationsGrouped(label, items)),
         rendered: 0,
         lastLabel: null,
       };
       appendMeetingRows(Math.max(MEETING_ROWS_CHUNK, sameList ? previousRendered : 0));
+    }
+
+    // A day of dictation can bury that day's meetings, so two or more
+    // dictations on one day fold into a single row that opens in place. The
+    // row sits where the newest of them would. Search never groups: a query
+    // should show every match.
+    const expandedDictationDays = new Set();
+    function rowsWithDictationsGrouped(label, items) {
+      const dictations = items.filter((m) => m.content_type === 'dictation');
+      if (dictations.length < 2) return items.map((m) => ({ label, m }));
+      const rows = [];
+      let placed = false;
+      for (const m of items) {
+        if (m.content_type !== 'dictation') {
+          rows.push({ label, m });
+          continue;
+        }
+        if (placed) continue;
+        placed = true;
+        rows.push({ label, group: { key: label, items: dictations } });
+        for (const d of dictations) rows.push({ label, m: d, groupKey: label });
+      }
+      return rows;
+    }
+
+    function buildDictationGroupRow(group) {
+      const expanded = expandedDictationDays.has(group.key);
+      const row = document.createElement('div');
+      row.className = 'meeting-item dictation-group has-kind-label';
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      row.setAttribute('aria-expanded', String(expanded));
+      const info = document.createElement('div');
+      info.className = 'meeting-info';
+      const title = document.createElement('div');
+      title.className = 'meeting-title';
+      title.textContent = `${group.items.length} dictations`;
+      const meta = document.createElement('div');
+      meta.className = 'meeting-meta';
+      const times = group.items.map((m) => new Date(m.date).getTime()).filter(Number.isFinite);
+      meta.textContent = times.length
+        ? `${formatTime(new Date(Math.min(...times)).toISOString())} to ${formatTime(new Date(Math.max(...times)).toISOString())}`
+        : '';
+      info.append(title, meta);
+      const chevron = document.createElement('span');
+      chevron.className = 'dictation-group-chevron';
+      chevron.setAttribute('aria-hidden', 'true');
+      chevron.textContent = '›';
+      row.append(info, chevron);
+      const toggle = () => {
+        const open = !expandedDictationDays.has(group.key);
+        if (open) expandedDictationDays.add(group.key); else expandedDictationDays.delete(group.key);
+        row.setAttribute('aria-expanded', String(open));
+        meetingsScroll.querySelectorAll('.meeting-item[data-dictation-group]').forEach((child) => {
+          if (child.dataset.dictationGroup === group.key) child.hidden = !open;
+        });
+      };
+      row.addEventListener('click', toggle);
+      row.addEventListener('keydown', (event) => {
+        if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
+        event.preventDefault();
+        toggle();
+      });
+      return row;
     }
 
     function appendMeetingRows(count) {
@@ -12133,20 +12520,32 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           meetingsScroll.appendChild(header);
           state.lastLabel = label;
         }
-        meetingsScroll.appendChild(buildMeetingRow(m));
+        if (state.rows[index].group) {
+          meetingsScroll.appendChild(buildDictationGroupRow(state.rows[index].group));
+          continue;
+        }
+        const row = buildMeetingRow(m);
+        const groupKey = state.rows[index].groupKey;
+        if (groupKey) {
+          row.dataset.dictationGroup = groupKey;
+          row.classList.add('in-dictation-group');
+          row.hidden = !expandedDictationDays.has(groupKey);
+        }
+        meetingsScroll.appendChild(row);
       }
       state.rendered = end;
       previousRendered = end;
       if (end === state.rows.length && !state.query) {
+        const total = state.rows.filter((row) => row.m).length;
         const listEnd = document.createElement('div');
         listEnd.className = 'meeting-list-end';
-        listEnd.textContent = `${state.rows.length.toLocaleString('en-US')} ${state.rows.length === 1 ? 'meeting' : 'meetings'}`;
+        listEnd.textContent = `${total.toLocaleString('en-US')} ${total === 1 ? 'meeting' : 'meetings'}`;
         meetingsScroll.appendChild(listEnd);
       }
     }
 
     function focusMeetingRow(from, step) {
-      const rows = [...meetingsScroll.querySelectorAll('.meeting-item')];
+      const rows = [...meetingsScroll.querySelectorAll('.meeting-item:not([hidden])')];
       if (!rows.length) return false;
       const index = from ? rows.indexOf(from) : -1;
       const next = rows[index + step];
@@ -12230,7 +12629,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const meta = document.createElement('div');
       meta.className = 'meeting-meta';
       // Section headers replace date headers in search-by-meaning results.
-      meta.textContent = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
+      const when = meetingRowsState?.sections ? formatSearchRowDate(m.date) : formatTime(m.date);
+      // The kind is spelled out instead of shown as a coloured dot: a dot
+      // before a list row reads as "unread" everywhere else on the Mac.
+      // Meetings are the default and stay unlabelled.
+      const kindLabel = { memo: 'Memo', dictation: 'Dictation' }[m.content_type] || '';
+      meta.textContent = kindLabel ? `${when} · ${kindLabel}` : when;
 
       info.appendChild(title);
       info.appendChild(meta);
@@ -12256,24 +12660,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         info.appendChild(badgeRow);
       }
 
-      const badge = document.createElement('span');
-      const typeClass = m.content_type === 'memo' ? ' memo' : m.content_type === 'dictation' ? ' dictation' : '';
-      badge.className = 'meeting-badge' + typeClass;
-      badge.textContent = m.content_type || 'meeting';
+      item.classList.add('has-kind-label');
 
-      const chatBtn = document.createElement('button');
-      chatBtn.className = 'meeting-chat-btn';
-      chatBtn.setAttribute('aria-label', 'Discuss with Agent');
-      chatBtn.setAttribute('title', 'Discuss with Agent');
-      chatBtn.textContent = '\u279C';
-      chatBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await discussMeetingWithAgent(m.path, m.title);
-      });
-
+      // No hover arrow: it reserved 32px of every row, cutting titles short
+      // even when hidden. "Discuss with Agent" is in the right-click menu
+      // and on the meeting's detail page.
       item.appendChild(info);
-      item.appendChild(chatBtn);
-      item.appendChild(badge);
       return item;
     }
 
@@ -13182,7 +13574,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             .catch((e) => showActionToast(`Could not hide it: ${e?.message || e}`, { tone: 'error' })),
         });
       }
-      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'capture' }) });
+      items.push({ item: 'Separator' }, { text: 'Calendar settings…', action: () => openSettings({ tab: 'ai', section: 'settings-calendar-section' }) });
       const button = document.getElementById('btn-dismiss-upcoming');
       const rect = button.getBoundingClientRect();
       const menu = await Menu.new({ items });
@@ -13248,6 +13640,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // Open on the requested tab, else General.
       const tab = options?.tab && document.querySelector(`.settings-tab[data-tab="${options.tab}"]`);
       (tab || settingsTabs[0]).click();
+      if (options?.section) {
+        requestAnimationFrame(() => document.getElementById(options.section)?.scrollIntoView({ block: 'start' }));
+      }
       loadSettings();
     }
     function closeSettings() { settingsOverlay.classList.remove('active'); window.MinutesDictation?.stopMic(); }
@@ -13611,8 +14006,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
               : (resolvedBatchEngine === 'sherpa'
                 ? 'Parakeet v3 runs on this Mac for batch, recording, and recording-sidecar transcription. Whisper takes over if Parakeet fails on a recording.'
                 : (eng === 'sherpa'
-                  ? 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.'
-                  : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting above.')));
+                  ? (s.transcription?.sherpa_in_build === false
+                    ? "This build of Minutes doesn't include Parakeet v3; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription."
+                    : 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.')
+                  : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting under Capture.')));
         }
         refreshParakeetInstall();
         if (engineAppleOpt) {
@@ -13650,8 +14047,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             Boolean(appleSpeechStatus && appleSpeechStatus.selectable),
           );
         }
+        // Whisper stays visible under Parakeet: it still takes over when
+        // Parakeet fails, so its model has to be chosen and downloaded.
         const batchUsesWhisper = resolvedBatchEngine === 'whisper';
-        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', !batchUsesWhisper);
+        document.getElementById('settings-whisper-model-label').textContent = batchUsesWhisper
+          ? 'Whisper model'
+          : 'Whisper model (used if Parakeet fails)';
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
         renderParakeetSettingsStatus(parakeetStatus, parakeetSelectable, parakeetUnavailableReason);
@@ -13690,6 +14091,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         document.getElementById('settings-hooks-post-record').value = postRecord;
         document.getElementById('settings-hooks-post-record-status').textContent =
           postRecord ? 'Active. Transcript path is appended on every recording.' : '';
+        const postDictation = (s.hooks && s.hooks.post_dictation) || '';
+        document.getElementById('settings-hooks-post-dictation').value = postDictation;
+        document.getElementById('settings-hooks-post-dictation-status').textContent =
+          postDictation ? 'Active. Runs after every dictation.' : '';
         try {
           const agentCmdSel = document.getElementById('settings-agent-command');
           const sumAgents = await invoke('cmd_list_agents');
@@ -14576,6 +14981,46 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       updateSumStatus(s);
       renderOpenAiCompatibleSettings(s);
     });
+    function renderThemeSettings(theme) {
+      document.getElementById('settings-theme-mode').value = theme.mode;
+      document.getElementById('settings-theme-accent-light').value = theme.accent_light || '';
+      document.getElementById('settings-theme-accent-dark').value = theme.accent_dark || '';
+      document.getElementById('settings-theme-accent-light-picker').value = theme.accent_light_hex || '#AE5337';
+      document.getElementById('settings-theme-accent-dark-picker').value = theme.accent_dark_hex || '#30D158';
+      document.getElementById('settings-theme-path').textContent = theme.path;
+      const status = document.getElementById('settings-theme-status');
+      status.textContent = theme.problems.join(' ');
+      status.style.color = theme.problems.length ? 'var(--red)' : '';
+    }
+    async function saveThemeSettings() {
+      const status = document.getElementById('settings-theme-status');
+      try {
+        renderThemeSettings(await invoke('cmd_set_theme', {
+          mode: document.getElementById('settings-theme-mode').value,
+          accentLight: document.getElementById('settings-theme-accent-light').value,
+          accentDark: document.getElementById('settings-theme-accent-dark').value,
+        }));
+      } catch (err) {
+        status.textContent = String(err);
+        status.style.color = 'var(--red)';
+      }
+    }
+    ['settings-theme-mode', 'settings-theme-accent-light', 'settings-theme-accent-dark'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', saveThemeSettings);
+    });
+    ['light', 'dark'].forEach((appearance) => {
+      const text = document.getElementById(`settings-theme-accent-${appearance}`);
+      document.getElementById(`settings-theme-accent-${appearance}-picker`).addEventListener('change', (e) => {
+        text.value = e.target.value.toUpperCase();
+        saveThemeSettings();
+      });
+    });
+    document.addEventListener('minutes-theme-changed', () => {
+      if (window.__MINUTES_THEME__) renderThemeSettings(window.__MINUTES_THEME__);
+    });
+    invoke('cmd_get_customization').then(renderThemeSettings).catch((err) => {
+      console.error('Load appearance settings:', err);
+    });
     // Post-record hook — empty string clears the hook (Rust side maps "" → None).
     document.getElementById('settings-hooks-post-record').addEventListener('change', async (e) => {
       const value = e.target.value;
@@ -14588,6 +15033,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } catch (err) {
         document.getElementById('settings-hooks-post-record-status').textContent = String(err);
         document.getElementById('settings-hooks-post-record-status').style.color = 'var(--red)';
+      }
+    });
+    document.getElementById('settings-hooks-post-dictation').addEventListener('change', async (e) => {
+      const value = e.target.value;
+      const status = document.getElementById('settings-hooks-post-dictation-status');
+      try {
+        await invoke('cmd_set_setting', { section: 'hooks', key: 'post_dictation', value });
+        status.textContent = value.trim() ? 'Active. Runs after every dictation.' : 'Disabled.';
+        status.style.color = '';
+      } catch (err) {
+        status.textContent = String(err);
+        status.style.color = 'var(--red)';
       }
     });
     document.getElementById('settings-screen-context').addEventListener('click', async () => {
@@ -14736,7 +15193,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (!container) continue;
         const values = calendarSettings[key] || [];
         if (!values.length) {
-          container.textContent = emptyText;
+          const empty = document.createElement('span');
+          empty.className = 'about-controls-meta';
+          empty.textContent = emptyText;
+          container.replaceChildren(empty);
           continue;
         }
         container.replaceChildren(...values.map((value) => {
@@ -14907,9 +15367,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const backend = ['auto', 'whisper', 'sherpa'].includes(dictation.backend) ? dictation.backend : 'whisper';
       autoOption.textContent = autoParakeet ? 'Auto (Parakeet v3)' : 'Auto (Whisper)';
       sherpaOption.disabled = !available && backend !== 'sherpa';
+      const parakeetInBuild = dictation.sherpa_in_build !== false;
       sherpaOption.textContent = available
         ? 'Parakeet v3 — most accurate final text'
-        : 'Parakeet v3 — not installed';
+        : (parakeetInBuild ? 'Parakeet v3 — not installed' : 'Parakeet v3 — not in this build');
       select.value = backend;
       if (backend === 'auto') {
         detail.textContent = autoParakeet
@@ -14918,7 +15379,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } else if (backend === 'sherpa' && available) {
         detail.textContent = 'Whisper still shows words as you speak; Parakeet v3 writes the final text. If Parakeet cannot, Whisper does.';
       } else if (backend === 'sherpa') {
-        detail.textContent = 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.';
+        detail.textContent = parakeetInBuild
+          ? 'Parakeet v3 is not installed, so Whisper writes the final text. Install it in Settings, Transcription.'
+          : "This build of Minutes doesn't include Parakeet v3, so Whisper writes the final text.";
       } else {
         detail.textContent = 'Whisper shows words as you speak and writes the final text, in every language Whisper supports.';
       }
@@ -15929,7 +16392,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       // clear the inline coords so it returns to flow. (The CSS left/top on the
       // collapsed rule is only a fallback for a collapsed-on-launch start.)
       const alreadyCollapsed = document.body.classList.contains('sidebar-collapsed');
-      if (collapsed && !alreadyCollapsed) {
+      // On macOS the toggle moves between the right end of the title row and
+      // the spot beside the traffic lights; CSS places it, and a FLIP slide
+      // below carries it across instead of letting it jump.
+      const slideFrom = isMac && collapsed !== alreadyCollapsed
+        ? sidebarCollapseButton.getBoundingClientRect()
+        : null;
+      if (isMac) {
+        // CSS owns the collapsed position.
+      } else if (collapsed && !alreadyCollapsed) {
         const rect = sidebarCollapseButton.getBoundingClientRect();
         if (rect.width && rect.height) {
           sidebarCollapseButton.style.top = `${Math.round(rect.top)}px`;
@@ -15941,6 +16412,18 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
       document.body.classList.toggle('sidebar-collapsed', collapsed);
       sidebarCollapseButton.classList.toggle('is-collapsed', collapsed);
+      if (slideFrom && slideFrom.width) {
+        const to = sidebarCollapseButton.getBoundingClientRect();
+        const dx = slideFrom.left - to.left;
+        const dy = slideFrom.top - to.top;
+        const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if ((dx || dy) && !reduce && sidebarCollapseButton.animate) {
+          sidebarCollapseButton.animate(
+            [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
+            { duration: 200, easing: 'cubic-bezier(0.2, 0, 0, 1)' },
+          );
+        }
+      }
       sidebarCollapseButton.setAttribute('aria-label', collapsed ? 'Expand list pane' : 'Collapse list pane');
       sidebarCollapseButton.setAttribute('title', collapsed ? 'Expand list pane' : 'Collapse list pane');
       if (explicit) {
@@ -16018,10 +16501,25 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       applySidebarCollapsed(false, { explicit: true });
     });
     window.addEventListener('resize', syncNarrowLayout);
+    // The saved split is a preference; re-apply it as the window settles
+    // (including the size restore just after launch) so the clamp is
+    // measured against the real width.
+    window.addEventListener('resize', () => {
+      if (typeof recallExpanded !== 'undefined' && recallExpanded) applyRecallRatio(getStoredRecallRatio());
+    });
 
     // ── Draggable split handle ──
+    // The list's real floor is its CSS min-width (260px, enough for the
+    // Meeting / Memo / Live switch). A fixed 66.7% cap on Recall kept the list
+    // at a third of the window instead, ~330px at 1000px wide and more on
+    // wider windows, so let Recall grow until the list reaches that floor.
+    const LIST_MIN_WIDTH_PX = 260;
     function clampRecallRatio(ratio) {
-      return Math.min(MAX_RECALL_RATIO, Math.max(MIN_RECALL_RATIO, ratio));
+      const bodyW = document.body?.clientWidth || 0;
+      const maxRatio = bodyW > 0
+        ? Math.max(MAX_RECALL_RATIO, 1 - LIST_MIN_WIDTH_PX / bodyW)
+        : MAX_RECALL_RATIO;
+      return Math.min(maxRatio, Math.max(MIN_RECALL_RATIO, ratio));
     }
 
     function getStoredRecallRatio() {
@@ -16032,10 +16530,99 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallPanel.style.setProperty('--recall-width', (clampRecallRatio(ratio) * 100) + '%');
     }
 
+    // ── Three-pane widths (list · chat · document) ──
+    // With a document open, chat takes the remainder, so the list and the
+    // document carry their own widths. Both are stored as fractions of the
+    // window so they scale with it, and both survive restarts.
+    const RECALL_MIN_WIDTH_PX = 320;
+    const DOC_MIN_WIDTH_PX = 280;
+    const DEFAULT_DOC_RATIO = 0.34;
+    const DEFAULT_LIST_RATIO_DOC_OPEN = 0.22;
+    function readStoredRatio(key, fallback) {
+      const v = parseFloat(localStorage.getItem(key));
+      return v > 0 && v < 1 ? v : fallback;
+    }
+    function listWidthPx() {
+      return document.body.classList.contains('sidebar-collapsed')
+        ? 0
+        : (document.querySelector('.app-left')?.offsetWidth || 0);
+    }
+    function docWidthPx() {
+      return mdViewerPane?.classList.contains('active') ? mdViewerPane.offsetWidth : 0;
+    }
+    function clampListRatioDocOpen(ratio) {
+      const bodyW = document.body.clientWidth || 1;
+      const max = (bodyW - docWidthPx() - RECALL_MIN_WIDTH_PX) / bodyW;
+      return Math.max(LIST_MIN_WIDTH_PX / bodyW, Math.min(max, ratio));
+    }
+    function clampDocRatio(ratio) {
+      const bodyW = document.body.clientWidth || 1;
+      const max = (bodyW - listWidthPx() - RECALL_MIN_WIDTH_PX) / bodyW;
+      return Math.max(DOC_MIN_WIDTH_PX / bodyW, Math.min(max, ratio));
+    }
+    function applyListRatioDocOpen(ratio) {
+      document.body.style.setProperty('--list-width', (ratio * 100).toFixed(2) + '%');
+    }
+    function applyDocRatio(ratio) {
+      document.body.style.setProperty('--doc-width', (ratio * 100).toFixed(2) + '%');
+    }
+    const mdViewerPane = document.getElementById('md-viewer');
+    const docSplitHandle = document.getElementById('doc-split-handle');
+    applyListRatioDocOpen(readStoredRatio('minutes.listRatioDocOpen', DEFAULT_LIST_RATIO_DOC_OPEN));
+    applyDocRatio(readStoredRatio('minutes.docRatio', DEFAULT_DOC_RATIO));
+
+    function startPaneDrag(handle, onMove, onDone) {
+      handle.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      const move = (ev) => {
+        onMove(ev);
+        if (recallFitAddon) recallFitAddon.fit();
+      };
+      const up = () => {
+        handle.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        onDone();
+        if (recallFitAddon) recallFitAddon.fit();
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    }
+
+    docSplitHandle?.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startPaneDrag(docSplitHandle, (ev) => {
+        const bodyW = document.body.clientWidth || 1;
+        applyDocRatio(clampDocRatio((bodyW - ev.clientX) / bodyW));
+      }, () => {
+        const ratio = clampDocRatio(docWidthPx() / (document.body.clientWidth || 1));
+        localStorage.setItem('minutes.docRatio', ratio.toFixed(3));
+      });
+    });
+    docSplitHandle?.addEventListener('dblclick', () => {
+      localStorage.removeItem('minutes.docRatio');
+      applyDocRatio(DEFAULT_DOC_RATIO);
+      if (recallFitAddon) recallFitAddon.fit();
+    });
+
     splitHandle.addEventListener('mousedown', (e) => {
       if (document.body.classList.contains('sidebar-collapsed')) return;
       if (!recallExpanded) return;
       e.preventDefault();
+      if (document.body.classList.contains('doc-open')) {
+        // Chat is the remainder here; dragging this divider sizes the list.
+        startPaneDrag(splitHandle, (ev) => {
+          const bodyW = document.body.clientWidth || 1;
+          applyListRatioDocOpen(clampListRatioDocOpen(ev.clientX / bodyW));
+        }, () => {
+          const ratio = clampListRatioDocOpen(listWidthPx() / (document.body.clientWidth || 1));
+          localStorage.setItem('minutes.listRatioDocOpen', ratio.toFixed(3));
+        });
+        return;
+      }
       splitHandle.classList.add('dragging');
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
@@ -16065,6 +16652,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     splitHandle.addEventListener('dblclick', () => {
+      if (document.body.classList.contains('doc-open')) {
+        localStorage.removeItem('minutes.listRatioDocOpen');
+        applyListRatioDocOpen(DEFAULT_LIST_RATIO_DOC_OPEN);
+        if (recallFitAddon) recallFitAddon.fit();
+        return;
+      }
       const ratio = clampRecallRatio(DEFAULT_RECALL_RATIO);
       localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
       applyRecallRatio(ratio);
@@ -16131,6 +16724,20 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── xterm.js initialization ──
+    // The PTY's first size is what the shell draws its first prompt for. A
+    // fixed 120x30 made zsh pad its PROMPT_SP marker for 120 columns; in a
+    // narrower panel that wrapped and left a stray inverted % on its own line
+    // that the later resize could not remove. Fit first and spawn at the real
+    // grid; the backend falls back to 120x30 when this is empty.
+    function recallSpawnSize() {
+      try {
+        if (recallFitAddon) recallFitAddon.fit();
+      } catch (_) { /* hidden or zero-size container: use the fallback */ }
+      const cols = recallTerminal?.cols;
+      const rows = recallTerminal?.rows;
+      return cols > 1 && rows > 1 ? { cols, rows } : {};
+    }
+
     function initRecallTerminal() {
       if (recallInitialized) return;
       recallInitialized = true;
@@ -16158,6 +16765,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colors until you end this session, so its text stays readable.`);
         }
       };
+      document.addEventListener('minutes-theme-changed', () => {
+        if (recallThemeHandler) recallThemeHandler();
+      });
       // Re-theme when the app's own override flips, not only when the OS does.
       recallThemeObserver = new MutationObserver(recallThemeHandler);
       recallThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -16500,7 +17110,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           // Always re-apply deferred mode, even to an existing PTY. This
           // clears any stale CURRENT_MEETING.md before a new question while
           // the backend keeps the already-running terminal session intact.
-          await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme() });
+          await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() });
           recallTerminalContextPending = true;
           markRecallPtyAlive();
           recallEndBtn.classList.add('active');
@@ -16707,7 +17317,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       await registerPtyListeners();
 
       try {
-        const opts = { mode, themeDark: isEffectiveDarkTheme() };
+        const opts = { mode, themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() };
         if (meetingPath) opts.meetingPath = meetingPath;
         await invoke('cmd_spawn_terminal', opts);
         markRecallPtyAlive();
@@ -17766,6 +18376,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             'The ', code('minutes'), ' on your PATH is not managed by this app. Reinstall or update it however you originally installed.',
           ]));
         }
+      } else if (method === 'conflict' && inSync) {
+        // The copy that wins is already this version. The others are never
+        // run, so this is information, not a problem to fix.
+        statusText = `CLI v${cliV} · in sync`;
+        statusClass = 'ok';
+        const cands = state.path_candidates || [];
+        const list = el('p');
+        cands.slice(1).forEach((p, i) => {
+          if (i > 0) list.appendChild(el('br'));
+          list.appendChild(code(p));
+        });
+        detailNodes.push(el('p', {}, ['Using ', code(cands[0] || 'minutes'), '. Older copies further down your PATH are ignored:']));
+        detailNodes.push(list);
       } else if (method === 'conflict') {
         statusText = `${state.path_candidates?.length || '?'} binaries on PATH`;
         statusClass = 'warn';
@@ -17819,7 +18442,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function renderWhatsNewCliSection(state) {
       if (!whatsNewCliSection || !whatsNewCliBody || !whatsNewCliActions) return;
       const method = state.install_method;
-      const shouldShow = !state.in_sync || method === 'none' || method === 'conflict';
+      // Only interrupt release notes when the CLI you actually run is missing
+      // or out of date. Shadowed extra copies are listed in Settings instead.
+      const shouldShow = !state.in_sync || method === 'none';
       if (!shouldShow || state.snoozed) {
         whatsNewCliSection.hidden = true;
         return;
@@ -17896,12 +18521,27 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       const known = state.known_bundles || [];
-      if (known.length > 1) {
-        showBundlePicker(state, known, pickDefaultBundle(known));
+      // Spotlight finds every Minutes.app on disk, including build outputs
+      // and copies in Downloads. Nobody can choose between seven paths, so
+      // only real installs count, and the released app wins when present.
+      const installed = known.filter((b) => isInstalledBundlePath(b.path));
+      const released = installed.filter((b) => b.bundle_id === 'com.useminutes.desktop');
+      const fallback = { path: state.bundle_root, bundle_id: state.bundle_id, version: state.app_version };
+      if (released.length === 1) {
+        showSetupConfirmation(state, released[0]);
+      } else if (installed.length === 1) {
+        showSetupConfirmation(state, installed[0]);
+      } else if (installed.length > 1) {
+        showBundlePicker(state, installed, pickDefaultBundle(installed));
       } else {
-        const single = known[0] || { path: state.bundle_root, bundle_id: state.bundle_id, version: state.app_version };
-        showSetupConfirmation(state, single);
+        showSetupConfirmation(state, known.find((b) => b.path === state.bundle_root) || fallback);
       }
+    }
+
+    /// An app in /Applications or ~/Applications, as opposed to a build
+    /// output, a mounted DMG or a stray copy somewhere else on disk.
+    function isInstalledBundlePath(path) {
+      return /^(\/Applications|\/Users\/[^/]+\/Applications)\/[^/]+\.app\/?$/.test(path || '');
     }
 
     function showBundlePicker(state, known, selected) {
@@ -18202,6 +18842,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         showDetailFeedback(`Created ${String(draft.templateKind || 'debrief-memo').replaceAll('-', ' ')} draft`, 'success');
       }
       scheduleMeetingsRefresh(0);
+    });
+
+    // A row picked from a palette result list (search, research, action items, decisions).
+    currentWindow.listen('palette:open-meeting', async (event) => {
+      const path = event.payload?.path;
+      if (!path) return;
+      try {
+        await openMeetingDetail(path);
+      } catch (e) {
+        showActionToast(`Could not open that meeting: ${e?.message || e}`, { tone: 'error' });
+      }
     });
 
     // ── Listen for recall:expand events from Rust backend ──
@@ -19718,10 +20369,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
 
       if (typeof recallWorkspaceState.recallRatio === 'number') {
-        const restoredRatio = clampRecallRatio(Number(recallWorkspaceState.recallRatio));
-        localStorage.setItem('minutes.recallRatio', restoredRatio.toFixed(3));
-        if (Math.abs(restoredRatio - Number(recallWorkspaceState.recallRatio)) > 0.001) {
-          persistRecallWorkspaceState({ recallRatio: restoredRatio });
+        // Keep the user's split as they left it. Clamping here measured the
+        // window before window-state had restored its size (it opens at the
+        // 1120px default first), then saved the clamped value back, so a
+        // narrow list came back wider after every launch. The clamp belongs
+        // to applying the ratio, not to storing it.
+        const stored = Number(recallWorkspaceState.recallRatio);
+        if (stored > 0 && stored < 1) {
+          localStorage.setItem('minutes.recallRatio', stored.toFixed(3));
         }
       }
 

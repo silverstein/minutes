@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Minutes Palette</title>
+  <script src="../scripts/customize-theme.js"></script>
   <script src="../scripts/ui-zoom.js"></script>
   <script src="../locales/zh-CN.js"></script>
   <script src="../locales/pt-BR.js"></script>
@@ -23,10 +24,33 @@
       --row-hover: rgba(255, 255, 255, 0.04);
       --row-focus: rgba(77, 168, 217, 0.16);
       --section-label: #6e6e73;
+      --fill: rgba(255, 255, 255, 0.06);
+      --fill-strong: rgba(255, 255, 255, 0.08);
       --shadow:
         0 24px 48px rgba(0, 0, 0, 0.32),
         0 6px 14px rgba(0, 0, 0, 0.24),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --panel: rgba(248, 244, 237, 0.98);
+        --panel-edge: rgba(26, 25, 22, 0.12);
+        --text: #1a1916;
+        --text-secondary: #5f5b54;
+        --text-tertiary: #6f6b63;
+        --accent: #2f6f8f;
+        --accent-soft: rgba(47, 111, 143, 0.14);
+        --row-hover: rgba(26, 25, 22, 0.05);
+        --row-focus: rgba(47, 111, 143, 0.14);
+        --section-label: #6b6760;
+        --fill: rgba(26, 25, 22, 0.06);
+        --fill-strong: rgba(26, 25, 22, 0.08);
+        --shadow:
+          0 24px 48px rgba(26, 25, 22, 0.16),
+          0 6px 14px rgba(26, 25, 22, 0.10),
+          inset 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
     }
 
     html, body {
@@ -63,7 +87,7 @@
 
     .input-row {
       padding: 14px 18px 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      border-bottom: 1px solid var(--panel-edge);
       display: flex;
       align-items: center;
       gap: 10px;
@@ -108,7 +132,7 @@
       width: 6px;
     }
     .list::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--fill-strong);
       border-radius: 3px;
     }
 
@@ -133,7 +157,7 @@
       width: 22px;
       height: 22px;
       border-radius: 5px;
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--fill);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -173,7 +197,7 @@
       flex-shrink: 0;
       padding: 2px 6px;
       border-radius: 4px;
-      background: rgba(255, 255, 255, 0.04);
+      background: var(--row-hover);
     }
 
     .empty {
@@ -184,7 +208,7 @@
     }
 
     .footer {
-      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      border-top: 1px solid var(--panel-edge);
       padding: 8px 18px;
       display: flex;
       gap: 16px;
@@ -193,7 +217,7 @@
     }
 
     .footer kbd {
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--fill);
       border-radius: 3px;
       padding: 1px 5px;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -276,6 +300,10 @@
      * Reducer state. Either:
      *   { kind: "browsing" }
      *   { kind: "locked",  command: CommandDto, payload: string }
+     *   { kind: "results", title: string, emptyText: string, items: ResultItem[] }
+     *
+     * ResultItem: { title, description, badge, path | null }. Rows with a
+     * path open that meeting in the main window.
      */
     let mode = { kind: "browsing" };
     let focusedIndex = 0;
@@ -452,6 +480,10 @@
         renderLockedView();
         return;
       }
+      if (mode.kind === "results") {
+        renderResultsView();
+        return;
+      }
 
       const rows = rowsForCurrentQuery();
       if (rows.length === 0) {
@@ -546,7 +578,79 @@
       countEl.textContent = "input required";
     }
 
+    function renderResultsView() {
+      const items = mode.items;
+      if (items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = mode.emptyText;
+        listEl.appendChild(empty);
+        countEl.textContent = "";
+        hintEl.textContent = "";
+        return;
+      }
+      countEl.textContent = `${items.length} result${items.length === 1 ? "" : "s"}`;
+      if (focusedIndex >= items.length) focusedIndex = 0;
+
+      items.forEach((item, index) => {
+        const row = document.createElement("div");
+        row.className = "row" + (index === focusedIndex ? " focused" : "");
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", index === focusedIndex ? "true" : "false");
+        row.dataset.index = String(index);
+
+        const text = document.createElement("div");
+        text.className = "text";
+        const title = document.createElement("div");
+        title.className = "title";
+        title.textContent = item.title;
+        title.title = item.title;
+        text.appendChild(title);
+        if (item.description) {
+          const description = document.createElement("div");
+          description.className = "description";
+          description.textContent = item.description;
+          text.appendChild(description);
+        }
+        row.appendChild(text);
+
+        if (item.badge) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = item.badge;
+          row.appendChild(badge);
+        }
+
+        row.addEventListener("mouseenter", () => {
+          focusedIndex = index;
+          updateFocusClasses();
+        });
+        row.addEventListener("mousedown", async (event) => {
+          event.preventDefault();
+          focusedIndex = index;
+          await openFocusedResult();
+        });
+        listEl.appendChild(row);
+      });
+      hintEl.textContent = resultHint();
+    }
+
+    function resultHint() {
+      if (mode.kind !== "results") return "";
+      const item = mode.items[focusedIndex];
+      return item && item.path ? "Enter opens meeting" : "";
+    }
+
     function updateFocusClasses() {
+      if (mode.kind === "results") {
+        listEl.querySelectorAll(".row").forEach((row, index) => {
+          row.classList.toggle("focused", index === focusedIndex);
+          row.setAttribute("aria-selected", index === focusedIndex ? "true" : "false");
+        });
+        listEl.children[focusedIndex]?.scrollIntoView?.({ block: "nearest" });
+        hintEl.textContent = resultHint();
+        return;
+      }
       if (mode.kind !== "browsing") return;
       const rows = listEl.querySelectorAll(".row");
       rows.forEach((row, index) => {
@@ -587,7 +691,7 @@
           allCommands = [];
           recents = [];
         }
-        if (focusedIndex >= allCommands.length) {
+        if (mode.kind === "browsing" && focusedIndex >= allCommands.length) {
           focusedIndex = 0;
         }
         render();
@@ -665,7 +769,14 @@
           return;
         }
 
-        await invoke("palette_execute", { ui, action: actionJson });
+        const response = await invoke("palette_execute", { ui, action: actionJson });
+        // Commands that return data show it here instead of closing.
+        const command = visible.find((c) => c.id === commandId);
+        const results = resultsFromResponse(response, command?.title ?? commandId, actionJson);
+        if (results) {
+          enterResultsMode(results);
+          return;
+        }
         // Successful execution: close the palette. The Tauri-side
         // record_recent already persisted the recent.
         await closePalette();
@@ -749,6 +860,155 @@
       }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Results. Data-returning commands (search, research, action items,
+    // decisions, upcoming meetings, live transcript) show a list here.
+    // ─────────────────────────────────────────────────────────────
+
+    const INTENT_LABELS = {
+      "action-item": "Action item",
+      decision: "Decision",
+      "open-question": "Open question",
+      commitment: "Commitment",
+    };
+
+    function shortDate(value) {
+      if (!value) return "";
+      const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+      if (!match) return String(value);
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    }
+
+    function timeLabel(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime())
+        ? ""
+        : date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    }
+
+    function offsetLabel(ms) {
+      const total = Math.floor((Number(ms) || 0) / 1000);
+      return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+    }
+
+    function list(value) {
+      return Array.isArray(value) ? value : [];
+    }
+
+    /** Map an ActionResponse to a result list, or null when there is nothing to show. */
+    function resultsFromResponse(response, commandTitle, actionJson) {
+      const kind = response?.kind;
+      const title = commandTitle.replace(/(…|\.\.\.)$/, "");
+      switch (kind) {
+        case "search-results":
+          return {
+            title: actionJson?.query ? `${title}: ${actionJson.query}` : title,
+            emptyText: "No meetings match.",
+            items: list(response.results).map((r) => ({
+              title: r.title || "Untitled meeting",
+              description: r.snippet || "",
+              badge: shortDate(r.date),
+              path: r.path || null,
+            })),
+          };
+        case "research": {
+          const report = response.report || {};
+          const items = [
+            ...list(report.related_decisions).map((d) => ({
+              title: d.what, description: `${d.title} · ${shortDate(d.date)}`, badge: "Decision", path: d.path || null,
+            })),
+            ...list(report.related_open_intents).map((i) => ({
+              title: i.what,
+              description: [i.who, i.title].filter(Boolean).join(" · "),
+              badge: INTENT_LABELS[i.kind] || "Open",
+              path: i.path || null,
+            })),
+            ...list(report.recent_meetings).map((m) => ({
+              title: m.title || "Untitled meeting", description: "", badge: shortDate(m.date), path: m.path || null,
+            })),
+          ];
+          return {
+            title: report.query ? `${title}: ${report.query}` : title,
+            emptyText: "Nothing found for that topic.",
+            items,
+          };
+        }
+        case "actions":
+          return {
+            title,
+            emptyText: "No open action items.",
+            items: list(response.actions).map((a) => ({
+              title: a.task,
+              description: [a.assignee, a.meeting_title].filter(Boolean).join(" · "),
+              badge: a.due ? `Due ${shortDate(a.due)}` : shortDate(a.meeting_date),
+              path: a.meeting_path || null,
+            })),
+          };
+        case "decisions":
+          return {
+            title,
+            emptyText: "No decisions recorded yet.",
+            items: list(response.decisions).map((d) => ({
+              title: d.what, description: d.title || "", badge: shortDate(d.date), path: d.path || null,
+            })),
+          };
+        case "upcoming":
+          return {
+            title,
+            emptyText: "No meetings in the next two hours.",
+            items: list(response.events).map((e) => ({
+              title: e.title || "Untitled event",
+              description: [timeLabel(e.start), list(e.attendees).length ? `${list(e.attendees).length} people` : ""]
+                .filter(Boolean).join(" · "),
+              badge: e.minutes_until > 0 ? `In ${e.minutes_until} min` : "Now",
+              path: null,
+            })),
+          };
+        case "live-lines":
+          return {
+            title,
+            emptyText: "Nothing transcribed yet.",
+            startAtEnd: true,
+            items: list(response.lines).map((l) => ({
+              title: l.text, description: l.speaker || "", badge: offsetLabel(l.offset_ms), path: null,
+            })),
+          };
+        default:
+          return null;
+      }
+    }
+
+    function enterResultsMode(results) {
+      mode = { kind: "results", ...results };
+      queryEl.value = "";
+      queryEl.readOnly = true;
+      queryEl.placeholder = results.title;
+      // Live transcript reads newest-last; start at the latest line.
+      focusedIndex = results.startAtEnd && results.items.length > 0 ? results.items.length - 1 : 0;
+      render();
+      listEl.children[focusedIndex]?.scrollIntoView?.({ block: "nearest" });
+    }
+
+    function exitResultsMode() {
+      queryEl.readOnly = false;
+      exitLockedMode();
+    }
+
+    async function openFocusedResult() {
+      if (mode.kind !== "results") return;
+      const item = mode.items[focusedIndex];
+      if (!item || !item.path) return;
+      try {
+        await invoke("palette_execute", { ui: {}, action: { id: "open-meeting", path: item.path } });
+        await closePalette();
+      } catch (e) {
+        console.error("[palette] open meeting failed:", e);
+        const message = (typeof e === "string" ? e : (e?.message ?? "could not open meeting"));
+        hintEl.textContent = message.slice(0, 80);
+      }
+    }
+
     function exitLockedMode() {
       mode = { kind: "browsing" };
       queryEl.value = "";
@@ -760,6 +1020,7 @@
     }
 
     queryEl.addEventListener("input", () => {
+      if (mode.kind === "results") return;
       if (mode.kind === "locked") {
         mode.payload = queryEl.value;
         return;
@@ -776,28 +1037,36 @@
             exitLockedMode();
             return;
           }
+          if (mode.kind === "results") {
+            exitResultsMode();
+            return;
+          }
           await closePalette();
           return;
         case "ArrowDown": {
-          if (mode.kind !== "browsing") return;
+          if (mode.kind === "locked") return;
           event.preventDefault();
-          const rows = rowsForCurrentQuery();
-          if (rows.length === 0) return;
-          focusedIndex = (focusedIndex + 1) % rows.length;
+          const count = mode.kind === "results" ? mode.items.length : rowsForCurrentQuery().length;
+          if (count === 0) return;
+          focusedIndex = (focusedIndex + 1) % count;
           updateFocusClasses();
           return;
         }
         case "ArrowUp": {
-          if (mode.kind !== "browsing") return;
+          if (mode.kind === "locked") return;
           event.preventDefault();
-          const rows = rowsForCurrentQuery();
-          if (rows.length === 0) return;
-          focusedIndex = (focusedIndex - 1 + rows.length) % rows.length;
+          const count = mode.kind === "results" ? mode.items.length : rowsForCurrentQuery().length;
+          if (count === 0) return;
+          focusedIndex = (focusedIndex - 1 + count) % count;
           updateFocusClasses();
           return;
         }
         case "Enter": {
           event.preventDefault();
+          if (mode.kind === "results") {
+            await openFocusedResult();
+            return;
+          }
           if (mode.kind === "locked") {
             const payload = (mode.payload ?? "").trim();
             if (payload.length === 0) {

@@ -56,6 +56,7 @@ pub fn infer_target_text_mode(
             "kitty",
             "wezterm",
             "hyper",
+            "herdr",
         ],
     ) {
         return DictationTextMode::TerminalCode;
@@ -115,6 +116,14 @@ fn contains_any(identity: &str, needles: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn herdr_is_terminal_code() {
+        assert_eq!(
+            infer_target_text_mode(Some("Herdr"), Some("dev.herdr.app"), None),
+            DictationTextMode::TerminalCode
+        );
+    }
 
     #[test]
     fn ghostty_is_terminal_code() {

@@ -3344,6 +3344,7 @@ fn queue_native_call_capture_for_processing(
     extra_warning: Option<String>,
     remote_audio: Option<minutes_core::markdown::RemoteAudioStatus>,
     call_audio_source: Option<&'static str>,
+    checkpoint: Option<minutes_core::transcript_checkpoint::TranscriptCheckpoint>,
 ) -> Result<minutes_core::jobs::ProcessingJob, String> {
     let input = native_call_processing_input(output_path).map_err(|error| {
         format!("failed to prepare native call capture for processing: {error}")
@@ -3381,7 +3382,7 @@ fn queue_native_call_capture_for_processing(
         (None, None)
     };
 
-    minutes_core::jobs::queue_live_capture_with_recording_health(
+    minutes_core::jobs::queue_live_capture_with_transcript_checkpoint(
         mode,
         requested_title,
         &input.path,
@@ -3395,6 +3396,7 @@ fn queue_native_call_capture_for_processing(
         consent,
         consent_notice,
         recording_health,
+        checkpoint.as_ref(),
     )
     .map_err(|error| error.to_string())
 }
@@ -3892,6 +3894,16 @@ fn start_native_call_recording(
         }
     };
     let output_path = session.output_path().to_path_buf();
+    let checkpoint = (mode == CaptureMode::Meeting)
+        .then(|| {
+            minutes_core::capture_checkpoint::CaptureCheckpoint::start(
+                &output_path,
+                config,
+                requested_title.as_deref(),
+                minutes_core::notes::read_context().as_deref(),
+            )
+        })
+        .flatten();
     let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
@@ -4211,6 +4223,7 @@ fn start_native_call_recording(
                     ),
                     remote_silence.outcome(),
                     session.source_health().call_audio_source_summary(),
+                    checkpoint.map(|worker| worker.finish()),
                 ) {
                     Ok(job) => {
                         processing.store(true, Ordering::Relaxed);
@@ -4297,6 +4310,8 @@ fn start_native_call_recording(
         }
     }
 
+    let checkpoint = checkpoint.map(|worker| worker.finish());
+
     if let Err(error) = session.stop() {
         let recording_finished_at = chrono::Local::now();
         let user_notes = minutes_core::notes::read_notes();
@@ -4322,6 +4337,7 @@ fn start_native_call_recording(
             ),
             remote_silence.outcome(),
             session.source_health().call_audio_source_summary(),
+            checkpoint,
         );
 
         match queue_result {
@@ -4461,6 +4477,7 @@ fn start_native_call_recording(
         combine_native_call_warnings(session.capture_warning(), safety_stop_warning.clone()),
         remote_silence.outcome(),
         session.source_health().call_audio_source_summary(),
+        checkpoint,
     ) {
         Ok(job) => {
             processing.store(true, Ordering::Relaxed);
@@ -13966,6 +13983,7 @@ pub fn cmd_get_settings() -> serde_json::Value {
         "config_path": path.display().to_string(),
         "recording": {
             "device": config.recording.device,
+            "transcript_checkpoints": config.recording.transcript_checkpoints,
             "desktop_audio_source": crate::recording_audio::saved_choice(&config).ok().flatten().map(|source| source.as_str()),
         },
         "transcription": {
@@ -14388,6 +14406,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
         }
 
         // Recording
+        ("recording", "transcript_checkpoints") => {
+            config.recording.transcript_checkpoints = value
+                .parse::<bool>()
+                .map_err(|_| "transcript_checkpoints must be true or false".to_string())?;
+        }
         ("recording", "device") => {
             config.recording.device =
                 minutes_core::capture::canonicalize_input_device_setting(&value);
@@ -18258,6 +18281,7 @@ mod tests {
                 Some(warning.clone()),
                 None,
                 Some(minutes_core::health::CALL_AUDIO_SOURCE_TAP),
+                None,
             )
             .expect("native call capture should queue");
 
@@ -18304,6 +18328,7 @@ mod tests {
                     None,
                     None,
                     remote_audio,
+                    None,
                     None,
                 )
                 .expect("native call capture should queue")
@@ -18695,6 +18720,41 @@ mod tests {
 
         config.desktop_context.enabled = false;
         assert_eq!(desktop_context_state(&config, false, true), "off");
+    }
+
+    #[test]
+    fn desktop_checkpoint_setting_round_trips_and_rejects_invalid_values() {
+        with_temp_home(|_| {
+            assert_eq!(
+                cmd_get_settings()["recording"]["transcript_checkpoints"],
+                true
+            );
+            cmd_set_setting(
+                "recording".into(),
+                "transcript_checkpoints".into(),
+                "false".into(),
+            )
+            .unwrap();
+            assert!(!Config::load().recording.transcript_checkpoints);
+            assert_eq!(
+                cmd_get_settings()["recording"]["transcript_checkpoints"],
+                false
+            );
+            assert!(cmd_set_setting(
+                "recording".into(),
+                "transcript_checkpoints".into(),
+                "maybe".into()
+            )
+            .is_err());
+            assert!(!Config::load().recording.transcript_checkpoints);
+            cmd_set_setting(
+                "recording".into(),
+                "transcript_checkpoints".into(),
+                "true".into(),
+            )
+            .unwrap();
+            assert!(Config::load().recording.transcript_checkpoints);
+        });
     }
 
     #[test]

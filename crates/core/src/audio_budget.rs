@@ -18,7 +18,7 @@ pub(crate) const MAX_AUDIO_CHANNELS: usize = 32;
 pub(crate) const MAX_AUDIO_SAMPLE_RATE: u32 = 384_000;
 pub(crate) const AUDIO_DECODE_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct AudioWorkBudget {
     deadline: Instant,
 }
@@ -94,6 +94,7 @@ pub(crate) fn resource_error(message: &'static str) -> Error {
 /// common 44.1/48 kHz meeting WAVs: retaining the entire high-rate source before
 /// resampling either imposed a rate-dependent duration cap or required several
 /// gigabytes for a multi-hour recording.
+#[derive(Debug)]
 pub(crate) struct StreamingMonoResampler {
     from_rate: u32,
     to_rate: u32,
@@ -172,6 +173,13 @@ impl StreamingMonoResampler {
             self.zeroize_buffers();
         }
         result
+    }
+
+    /// Drain only output with complete lookahead. A live reader spends time
+    /// waiting on capture, so each bounded poll gets a fresh decode deadline.
+    pub(crate) fn take_live_output(&mut self) -> Vec<f32> {
+        self.budget = AudioWorkBudget::new();
+        std::mem::take(&mut self.output)
     }
 
     pub(crate) fn finish(mut self) -> std::io::Result<Vec<f32>> {

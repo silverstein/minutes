@@ -24,6 +24,21 @@ a host supplies a checkpoint. Without one, processing is unchanged.
 
 Cut spans in a pause, so no word is split between two spans.
 
+## Reusing a decoder during capture
+
+A host can keep a `SpanTranscriber::new(config, hints)` on its optional worker
+and call its `transcribe_span(samples, start_sample, source)` method for each
+completed range. It freezes config and hints for that meeting and lazily loads
+one Whisper model context shared by both source stems. The standalone
+`transcribe_span` function retains its existing signature and behavior.
+
+`decode_hints_for_queued_meeting_at(title, pre_context, recorded_at, config)`
+uses the final pipeline's calendar selection and hint builder for the recording
+start time. Call it on the worker because calendar access can wait. A changed
+title, context, calendar match, or vocabulary can still invalidate spans at
+final processing. The final pass logs that mismatch and decodes again. Never
+re-key the old span text to bypass that validation.
+
 ## What the final pass accepts
 
 For each ambient meeting source, the final pass loads the final file and accepts

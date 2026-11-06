@@ -129,6 +129,8 @@ mod exit_teardown_tests {
 pub(crate) mod bounded_inference;
 pub mod calendar;
 pub mod capture;
+/// Failure-isolated desktop native-call checkpoint producer.
+pub mod capture_checkpoint;
 pub mod config;
 pub mod context_store;
 pub mod copilot;

@@ -7202,6 +7202,13 @@
         <div class="about-item-title">TRANSCRIPTION</div>
         <div class="about-controls">
           <div class="about-controls-group">
+            <div class="about-controls-copy">Transcribe during calls</div>
+            <div class="about-controls-meta">Prepare completed audio while a Mac call records to shorten the wait after Stop. Turns itself off for the call if the model cannot keep up. Changes apply to the next recording.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-transcript-checkpoints" aria-label="Transcribe during calls">On</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
             <div class="about-controls-copy">Engine</div>
             <select id="settings-transcription-engine" class="settings-field">
               <option value="auto">Auto (Whisper)</option>
@@ -14198,6 +14205,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           agentCmdSel.value = currentCmd;
           document.getElementById('settings-agent-command-status').textContent = sumAgents.find(a => a.name === currentCmd) ? 'Installed' : 'Custom command';
         } catch (e) { console.error('agent command picker:', e); }
+        setSettingsToggle('settings-transcript-checkpoints', s.recording?.transcript_checkpoints !== false);
         setSettingsToggle('settings-screen-share', Boolean(s.privacy?.hide_from_screen_share));
         const consentMode = s.consent?.mode || 'remind';
         const consentModeSelect = document.getElementById('settings-consent-mode');
@@ -14853,6 +14861,20 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // Settings change handlers
+    document.getElementById('settings-transcript-checkpoints').addEventListener('click', async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      try {
+        const settings = await invoke('cmd_get_settings');
+        const next = settings.recording.transcript_checkpoints === false;
+        await invoke('cmd_set_setting', { section: 'recording', key: 'transcript_checkpoints', value: String(next) });
+        setSettingsToggle('settings-transcript-checkpoints', next);
+      } catch (error) {
+        showActionToast('Could not save call transcription setting: ' + error, { tone: 'error' });
+      } finally {
+        button.disabled = false;
+      }
+    });
     document.getElementById('settings-transcription-engine').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: e.target.value });
       await checkSetup();

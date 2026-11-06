@@ -2463,25 +2463,61 @@ fn transcribe_prepared_input_with_hints(
     content_type: ContentType,
     config: &Config,
     decode_hints: crate::transcribe::DecodeHints,
+    checkpoint: Option<&crate::transcript_checkpoint::TranscriptCheckpoint>,
 ) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
+    use crate::transcript_checkpoint::{self as checkpoints, CheckpointSource};
+    // Host checkpoints apply to ambient meeting sources only; an authorized
+    // capability is always transcribed in full.
+    let spans_for = |source| {
+        checkpoint
+            .filter(|_| input_authority.is_none() && content_type == ContentType::Meeting)
+            .map(|checkpoint| checkpoint.spans_for(source))
+            .unwrap_or_default()
+    };
     if input_authority.is_none() {
         if let PreparedTranscriptionInput::IndependentStems(stems) = prepared {
             // Sequential calls bound model memory; this is final processing,
             // never the live capture/optional-consumer path. A short response
             // on one track must not fail the whole meeting's word threshold.
-            let mut source_config = config.clone();
-            source_config.transcription.min_words = 0;
             return transcribe_independent_stems(stems, |path| {
+                let source = if path == stems.voice {
+                    CheckpointSource::Voice
+                } else {
+                    CheckpointSource::System
+                };
+                let (source_config, source_hints) =
+                    checkpoints::source_inputs(source, config, &decode_hints);
+                let spans = spans_for(source);
+                if !spans.is_empty() {
+                    return checkpoints::transcribe_meeting_with_spans(
+                        path,
+                        &source_config,
+                        &source_hints,
+                        &spans,
+                    );
+                }
                 crate::transcription_coordinator::transcribe_path_for_content_with_hints(
                     path,
                     content_type,
                     &source_config,
-                    decode_hints
-                        .clone()
-                        .with_audio_format_extension("wav")
-                        .with_source_timeline(),
+                    source_hints,
                 )
             });
+        }
+        if let PreparedTranscriptionInput::Original = prepared {
+            let spans = spans_for(CheckpointSource::Recording);
+            if !spans.is_empty() {
+                let transcription = checkpoints::transcribe_meeting_with_spans(
+                    original,
+                    config,
+                    &decode_hints,
+                    &spans,
+                )?;
+                return Ok(PreparedTranscriptionResult {
+                    transcription,
+                    sources: None,
+                });
+            }
         }
     }
     let transcription =
@@ -3513,6 +3549,11 @@ pub struct BackgroundPipelineContext {
     /// Optional template applied to summarization. Recorded in frontmatter
     /// so Phase 2 reprocessing knows which template produced this file.
     pub template: Option<crate::template::Template>,
+    /// Transcript spans the host produced while recording. Final
+    /// transcription reuses the spans that match the final audio and
+    /// settings, and transcribes the rest. See [`crate::transcript_checkpoint`].
+    pub transcript_checkpoint:
+        Option<std::sync::Arc<crate::transcript_checkpoint::TranscriptCheckpoint>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -5015,6 +5056,7 @@ fn transcribe_to_artifact_with_authority(
         content_type,
         config,
         decode_hints,
+        context.transcript_checkpoint.as_deref(),
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
@@ -6144,6 +6186,7 @@ where
         content_type,
         config,
         decode_hints,
+        None,
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
@@ -7683,6 +7726,24 @@ fn apply_vocabulary_spellings(
         segment.text = crate::vocabulary::correct_spellings(&segment.text, &pairs).0;
     }
     (result, applied)
+}
+
+/// The decode hints [`transcribe_to_artifact`] builds for a queued meeting
+/// with no calendar event.
+pub(crate) fn queued_meeting_decode_hints(
+    title: Option<&str>,
+    pre_context: Option<&str>,
+    config: &Config,
+) -> crate::transcribe::DecodeHints {
+    let vocabulary = load_vocabulary_for_decode_hints();
+    build_decode_hints(
+        title,
+        None,
+        pre_context,
+        &[],
+        Some(&config.identity),
+        vocabulary.as_ref(),
+    )
 }
 
 fn load_vocabulary_for_decode_hints() -> Option<crate::vocabulary::VocabularyStore> {

@@ -201,12 +201,62 @@ pub fn queue_live_capture_with_recording_health(
     consent_notice: Option<String>,
     recording_health: Option<crate::markdown::RecordingHealth>,
 ) -> std::io::Result<ProcessingJob> {
+    queue_live_capture_with_transcript_checkpoint(
+        mode,
+        title,
+        current_wav,
+        user_notes,
+        pre_context,
+        recording_started_at,
+        recording_finished_at,
+        context_session_id,
+        calendar_event,
+        template_slug,
+        consent,
+        consent_notice,
+        recording_health,
+        None,
+    )
+}
+
+/// Queue a capture together with transcript spans the host produced while
+/// recording (see [`crate::transcript_checkpoint`]). The worker reuses the
+/// spans that match the final audio and transcribes only the rest. A
+/// checkpoint that cannot be saved is dropped with a warning; the job is still
+/// queued and transcribed in full.
+#[allow(clippy::too_many_arguments)]
+pub fn queue_live_capture_with_transcript_checkpoint(
+    mode: CaptureMode,
+    title: Option<String>,
+    current_wav: &Path,
+    user_notes: Option<String>,
+    pre_context: Option<String>,
+    recording_started_at: Option<DateTime<Local>>,
+    recording_finished_at: Option<DateTime<Local>>,
+    context_session_id: Option<String>,
+    calendar_event: Option<CalendarEvent>,
+    template_slug: Option<String>,
+    consent: Option<crate::markdown::ConsentBasis>,
+    consent_notice: Option<String>,
+    recording_health: Option<crate::markdown::RecordingHealth>,
+    transcript_checkpoint: Option<&crate::transcript_checkpoint::TranscriptCheckpoint>,
+) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
     let old_screen_anchor = native_stem_group_for_survivor(current_wav)
         .map(|group| group.anchor)
         .unwrap_or_else(|| current_wav.to_path_buf());
     let old_screen_dir = crate::screen::screens_dir_for(&old_screen_anchor);
     let audio_path = move_capture_into_job(&job_id, current_wav)?;
+    if let Some(checkpoint) = transcript_checkpoint.filter(|c| !c.is_empty()) {
+        if let Err(error) = write_transcript_checkpoint(&job_id, checkpoint) {
+            tracing::warn!(
+                job_id = %job_id,
+                error = %error,
+                "could not save the transcript checkpoint; the job transcribes in full"
+            );
+            fs::remove_file(job_checkpoint_path(&job_id)).ok();
+        }
+    }
     let new_screen_anchor = native_stem_group_for_survivor(&audio_path)
         .map(|group| group.anchor)
         .unwrap_or_else(|| audio_path.clone());
@@ -241,6 +291,7 @@ pub fn queue_live_capture_with_recording_health(
         crashed_while_transcribing: false,
     };
     if let Err(error) = write_job(&job) {
+        fs::remove_file(job_checkpoint_path(&job.id)).ok();
         if audio_path.exists() {
             move_capture_artifacts(&audio_path, current_wav).ok();
         }
@@ -300,6 +351,50 @@ pub fn job_path(job_id: &str) -> PathBuf {
 /// Path of a job's archived JSON (after terminal state transition).
 pub fn job_archive_path(job_id: &str) -> PathBuf {
     archive_dir().join(format!("{}.json", job_id))
+}
+
+/// Transcript spans saved with a queued job, if the host supplied any.
+pub fn job_checkpoint_path(job_id: &str) -> PathBuf {
+    jobs_dir().join(format!("{}.checkpoint.json", job_id))
+}
+
+fn write_transcript_checkpoint(
+    job_id: &str,
+    checkpoint: &crate::transcript_checkpoint::TranscriptCheckpoint,
+) -> std::io::Result<()> {
+    let path = job_checkpoint_path(job_id);
+    let json = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    }
+    fs::rename(&tmp, &path)
+}
+
+fn load_transcript_checkpoint(
+    job_id: &str,
+) -> Option<std::sync::Arc<crate::transcript_checkpoint::TranscriptCheckpoint>> {
+    let path = job_checkpoint_path(job_id);
+    let bytes = fs::read(&path).ok()?;
+    match serde_json::from_slice(&bytes) {
+        Ok(checkpoint) => Some(std::sync::Arc::new(checkpoint)),
+        Err(error) => {
+            tracing::warn!(
+                job_id,
+                error = %error,
+                "ignoring an unreadable transcript checkpoint; the job transcribes in full"
+            );
+            None
+        }
+    }
+}
+
+/// Spans hold transcript text, so they go once the transcript is saved.
+fn remove_transcript_checkpoint(job_id: &str) {
+    fs::remove_file(job_checkpoint_path(job_id)).ok();
 }
 
 pub fn job_capture_path(job_id: &str) -> PathBuf {
@@ -1279,6 +1374,7 @@ where
 }
 
 pub fn remove_capture_artifacts(job: &ProcessingJob) {
+    remove_transcript_checkpoint(&job.id);
     let audio_path = PathBuf::from(&job.audio_path);
     let screen_anchor = native_stem_group_for_survivor(&audio_path)
         .map(|group| group.anchor)
@@ -1501,6 +1597,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         recording_health: job.recording_health.clone(),
         context_session_id: job.context_session_id.clone(),
         template,
+        transcript_checkpoint: load_transcript_checkpoint(&job.id),
     }
 }
 
@@ -1698,6 +1795,7 @@ fn process_pending_jobs_with_transcriber(
                 &artifact.write_result,
                 &recording_duration(&review_job),
             ));
+            remove_transcript_checkpoint(&review_job.id);
             maybe_mark_context_session_complete(&review_job, artifact.write_result.content_type);
             // Graph answers are disposable, policy-fresh projections of the
             // current Markdown corpus; there is no durable index to refresh.
@@ -1789,6 +1887,7 @@ fn process_pending_jobs_with_transcriber(
                 refresh_qmd_collection(config);
                 // Run post_record hook (async, non-blocking)
                 pipeline::run_post_record_hook(config, &result.path);
+                remove_transcript_checkpoint(&completed_job.id);
                 if completed_job.state == JobState::Complete {
                     preserve_audio_alongside_output(&completed_job, config);
                 }
@@ -2128,6 +2227,116 @@ mod tests {
             assert!(!job_audio.exists());
             assert_eq!(fs::read(&archived_wav).unwrap(), b"recoverable-live-audio");
             assert!(archived_jsonl.exists());
+        });
+    }
+
+    #[test]
+    fn queued_transcript_checkpoint_reaches_the_transcriber_and_is_removed_after() {
+        use crate::transcript_checkpoint::{
+            CheckpointSource, CheckpointSpan, TranscriptCheckpoint,
+        };
+        with_temp_home(|dir| {
+            let mut config = Config {
+                output_dir: dir.path().join("output"),
+                ..Config::default()
+            };
+            config.summarization.engine = "none".into();
+            config.diarization.engine = "none".into();
+            let checkpoint = TranscriptCheckpoint {
+                spans: vec![CheckpointSpan {
+                    source: CheckpointSource::Recording,
+                    start_sample: 0,
+                    end_sample: 1_600,
+                    settings: "fixture".into(),
+                    pcm_sha256: "fixture".into(),
+                    lines: vec!["[0:00] said while recording".into()],
+                }],
+                ..Default::default()
+            };
+
+            for (outcome, keeps_checkpoint) in [
+                (FakeProcessingOutcome::FailedTranscription, true),
+                (FakeProcessingOutcome::NoSpeech, false),
+            ] {
+                let current_wav = dir.path().join(format!("current-{outcome:?}.wav"));
+                create_sample_bearing_wav(&current_wav);
+                let queued = queue_live_capture_with_transcript_checkpoint(
+                    CaptureMode::Meeting,
+                    None,
+                    &current_wav,
+                    None,
+                    None,
+                    None,
+                    Some(Local::now()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&checkpoint),
+                )
+                .unwrap();
+                let saved = job_checkpoint_path(&queued.id);
+                assert!(saved.exists());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = fs::metadata(&saved).unwrap().permissions().mode();
+                    assert_eq!(mode & 0o777, 0o600);
+                }
+
+                let mut seen = None;
+                let mut transcribe = |audio_path: &Path,
+                                      _: ContentType,
+                                      _: Option<&str>,
+                                      _: &Config,
+                                      context: &BackgroundPipelineContext,
+                                      _: Option<&Path>| {
+                    seen = context.transcript_checkpoint.as_deref().cloned();
+                    match outcome {
+                        FakeProcessingOutcome::NoSpeech => Ok(fake_no_speech_artifact(audio_path)),
+                        _ => {
+                            Err(TranscribeError::TranscriptionFailed("fake failure".into()).into())
+                        }
+                    }
+                };
+                let mut on_job_update = |_: &ProcessingJob| {};
+                process_pending_jobs_with_transcriber(&config, &mut on_job_update, &mut transcribe)
+                    .unwrap();
+
+                assert_eq!(seen.as_ref(), Some(&checkpoint), "outcome {outcome:?}");
+                // A failed job keeps its spans for a retry; a finished one drops them.
+                assert_eq!(saved.exists(), keeps_checkpoint, "outcome {outcome:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn queue_without_checkpoint_writes_no_checkpoint_file() {
+        with_temp_home(|dir| {
+            let current_wav = dir.path().join("current.wav");
+            create_sample_bearing_wav(&current_wav);
+            let empty = crate::transcript_checkpoint::TranscriptCheckpoint::default();
+            let job = queue_live_capture_with_transcript_checkpoint(
+                CaptureMode::Meeting,
+                None,
+                &current_wav,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&empty),
+            )
+            .unwrap();
+            assert!(!job_checkpoint_path(&job.id).exists());
+            assert!(job_context(&job).transcript_checkpoint.is_none());
         });
     }
 

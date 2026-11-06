@@ -301,8 +301,16 @@ impl DecodeHints {
         self
     }
 
-    fn audio_format_extension(&self) -> Option<&str> {
+    pub(crate) fn audio_format_extension(&self) -> Option<&str> {
         self.audio_format_extension.as_deref()
+    }
+
+    /// The hints that change decoding. The format extension only selects a
+    /// decoder, so a checkpoint fingerprint leaves it out.
+    pub(crate) fn without_audio_format_extension(&self) -> Self {
+        let mut hints = self.clone();
+        hints.audio_format_extension = None;
+        hints
     }
 
     pub(crate) fn debug_priority_phrases(&self) -> Vec<String> {
@@ -444,7 +452,7 @@ pub fn transcribe_with_hints(
     transcribe_dispatch(audio_path, config, hints)
 }
 
-fn ensure_ambient_audio_path(audio_path: &Path) -> Result<(), TranscribeError> {
+pub(crate) fn ensure_ambient_audio_path(audio_path: &Path) -> Result<(), TranscribeError> {
     if crate::pipeline::is_reserved_private_audio_path(audio_path) {
         return Err(TranscribeError::UnsupportedFormat(
             "private audio tokens require the typed authorized entry point".into(),
@@ -786,22 +794,46 @@ fn transcribe_chunk_ranges(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<Option<TranscribeResult>, TranscribeError> {
+    let mut chunks = transcribe_chunk_lines(samples, chunk_ranges, 0, config, hints)?;
+    chunks.stats.audio_duration_secs = audio_duration_secs;
+    Ok(finish_chunk_lines(chunks))
+}
+
+/// Timestamped lines from VAD chunks, before the transcript cleanup pipeline.
+/// Line times are on the source clock: `clock_offset` is the source sample at
+/// which `samples` starts. Cleanup looks across chunk boundaries, so it
+/// runs once over the whole recording in [`finish_chunk_lines`].
+pub(crate) struct ChunkLines {
+    pub(crate) lines: Vec<String>,
+    pub(crate) stats: FilterStats,
+}
+
+impl ChunkLines {
+    pub(crate) fn add_stats(&mut self, other: &FilterStats) {
+        self.stats.samples_after_silence_strip += other.samples_after_silence_strip;
+        self.stats.raw_segments += other.raw_segments;
+        self.stats.skipped_no_speech += other.skipped_no_speech;
+        self.stats.after_no_speech_filter += other.after_no_speech_filter;
+        self.stats.rescued_no_speech += other.rescued_no_speech;
+    }
+}
+
+pub(crate) fn transcribe_chunk_lines(
+    samples: &[f32],
+    chunk_ranges: &[(usize, usize)],
+    clock_offset: usize,
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<ChunkLines, TranscribeError> {
     #[cfg(feature = "whisper")]
     if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext {
-        return transcribe_whisper_chunk_ranges(
-            samples,
-            chunk_ranges,
-            audio_duration_secs,
-            config,
-            hints,
-        );
+        return transcribe_whisper_chunk_lines(samples, chunk_ranges, clock_offset, config, hints);
     }
 
     let mut session = BatchTranscriptionSession::new(config);
-    let mut all_lines = Vec::new();
-    let mut aggregate = FilterStats {
-        audio_duration_secs,
-        ..Default::default()
+    let mut out = ChunkLines {
+        lines: Vec::new(),
+        stats: FilterStats::default(),
     };
 
     for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
@@ -831,19 +863,25 @@ fn transcribe_chunk_ranges(
             }
             Err(error) => return Err(error),
         };
-        let chunk_offset_secs = *start_sample as f64 / 16000.0;
+        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
         let offset_lines =
             offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-        aggregate.samples_after_silence_strip += chunk_result.stats.samples_after_silence_strip;
-        aggregate.raw_segments += chunk_result.stats.raw_segments;
-        aggregate.skipped_no_speech += chunk_result.stats.skipped_no_speech;
-        aggregate.after_no_speech_filter += chunk_result.stats.after_no_speech_filter;
-        aggregate.rescued_no_speech += chunk_result.stats.rescued_no_speech;
-        all_lines.extend(offset_lines);
+        out.add_stats(&chunk_result.stats);
+        out.lines.extend(offset_lines);
     }
 
+    Ok(out)
+}
+
+/// Run the transcript cleanup pipeline over all chunk lines. `None` when no
+/// chunk produced text, so the caller can fall back to the whole file.
+pub(crate) fn finish_chunk_lines(chunks: ChunkLines) -> Option<TranscribeResult> {
+    let ChunkLines {
+        lines: all_lines,
+        stats: mut aggregate,
+    } = chunks;
     if all_lines.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let cleanup = run_transcript_cleanup_pipeline(all_lines);
@@ -860,12 +898,12 @@ fn transcribe_chunk_ranges(
     };
     aggregate.final_words = text.split_whitespace().count();
 
-    Ok(Some(TranscribeResult {
+    Some(TranscribeResult {
         text,
         stats: aggregate,
         segments: vec![],
         detected_language: None,
-    }))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -884,24 +922,26 @@ fn chunk_transcription_strategy(config: &Config) -> ChunkTranscriptionStrategy {
     }
 }
 
-fn should_bypass_meeting_chunk_rotation(config: &Config, private_audio_available: bool) -> bool {
+pub(crate) fn should_bypass_meeting_chunk_rotation(
+    config: &Config,
+    private_audio_available: bool,
+) -> bool {
     !private_audio_available
         && chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::DispatchPerChunk
 }
 
 #[cfg(feature = "whisper")]
-fn transcribe_whisper_chunk_ranges(
+fn transcribe_whisper_chunk_lines(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
-    audio_duration_secs: f64,
+    clock_offset: usize,
     config: &Config,
     hints: &DecodeHints,
-) -> Result<Option<TranscribeResult>, TranscribeError> {
+) -> Result<ChunkLines, TranscribeError> {
     let ctx = load_whisper_context(config)?;
-    let mut all_lines = Vec::new();
-    let mut aggregate = FilterStats {
-        audio_duration_secs,
-        ..Default::default()
+    let mut out = ChunkLines {
+        lines: Vec::new(),
+        stats: FilterStats::default(),
     };
 
     for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
@@ -929,42 +969,14 @@ fn transcribe_whisper_chunk_ranges(
             }
             Err(error) => return Err(error),
         };
-        let chunk_offset_secs = *start_sample as f64 / 16000.0;
+        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
         let offset_lines =
             offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-
-        aggregate.samples_after_silence_strip += chunk_result.stats.samples_after_silence_strip;
-        aggregate.raw_segments += chunk_result.stats.raw_segments;
-        aggregate.skipped_no_speech += chunk_result.stats.skipped_no_speech;
-        aggregate.after_no_speech_filter += chunk_result.stats.after_no_speech_filter;
-        aggregate.rescued_no_speech += chunk_result.stats.rescued_no_speech;
-        all_lines.extend(offset_lines);
+        out.add_stats(&chunk_result.stats);
+        out.lines.extend(offset_lines);
     }
 
-    if all_lines.is_empty() {
-        return Ok(None);
-    }
-
-    let cleanup = run_transcript_cleanup_pipeline(all_lines);
-    aggregate.after_dedup = cleanup.after(TranscriptCleanupStage::DedupSegments);
-    aggregate.after_interleaved = cleanup.after(TranscriptCleanupStage::DedupInterleaved);
-    aggregate.after_script_filter = cleanup.after(TranscriptCleanupStage::StripForeignScript);
-    aggregate.after_noise_markers = cleanup.after(TranscriptCleanupStage::CollapseNoiseMarkers);
-    aggregate.after_trailing_trim = cleanup.after(TranscriptCleanupStage::TrimTrailingNoise);
-
-    let text = if cleanup.lines.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", cleanup.lines.join("\n"))
-    };
-    aggregate.final_words = text.split_whitespace().count();
-
-    Ok(Some(TranscribeResult {
-        text,
-        stats: aggregate,
-        segments: vec![],
-        detected_language: None,
-    }))
+    Ok(out)
 }
 
 /// Meeting-specialized transcription path that can split long recordings at
@@ -990,12 +1002,23 @@ fn transcribe_meeting_with_hints_inner(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
-    const MIN_MEETING_CHUNKS: usize = 2;
-
     let samples =
         load_audio_samples_with_format(audio_path, hints.audio_format_extension(), config)?;
+    transcribe_meeting_samples(audio_path, &samples, config, hints)
+}
+
+/// The meeting path after decode. `samples` are `audio_path`'s canonical
+/// 16 kHz mono samples; the whole-file fallbacks still read `audio_path`.
+pub(crate) fn transcribe_meeting_samples(
+    audio_path: &Path,
+    samples: &[f32],
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<TranscribeResult, TranscribeError> {
+    const MIN_MEETING_CHUNKS: usize = 2;
+
     let audio_duration_secs = samples.len() as f64 / 16000.0;
-    let vad_chunks = detect_meeting_vad_chunks(&samples);
+    let vad_chunks = detect_meeting_vad_chunks(samples);
 
     if vad_chunks.len() < MIN_MEETING_CHUNKS {
         return transcribe_dispatch(audio_path, config, hints);
@@ -1023,7 +1046,7 @@ fn transcribe_meeting_with_hints_inner(
     );
 
     if let Some(result) =
-        transcribe_chunk_ranges(&samples, &vad_chunks, audio_duration_secs, config, hints)?
+        transcribe_chunk_ranges(samples, &vad_chunks, audio_duration_secs, config, hints)?
     {
         return Ok(result);
     }
@@ -1869,7 +1892,7 @@ fn transcribe_with_whisper(
 /// demuxers allocate attacker-controlled container table counts while probing,
 /// before a decoder budget can run, so there is deliberately no in-process
 /// compressed-container fallback.
-fn load_audio_samples_with_format(
+pub(crate) fn load_audio_samples_with_format(
     path: &Path,
     format_extension: Option<&str>,
     config: &Config,
@@ -2361,7 +2384,7 @@ fn decode_with_ffmpeg_binary(
 // resample() and normalize_audio() are provided by whisper_guard::audio
 // and re-exported at the top of this file.
 
-fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
+pub(crate) fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
     const SAMPLE_RATE: usize = 16_000;
     const WINDOW_SAMPLES: usize = 1_600; // 100ms
     const ROTATE_SILENCE_MS: u64 = 800;

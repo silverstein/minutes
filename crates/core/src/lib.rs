@@ -234,6 +234,8 @@ pub mod template;
 pub mod test_support;
 pub mod tls_roots;
 pub mod transcribe;
+/// Reuse of transcript spans a host produced while recording.
+pub mod transcript_checkpoint;
 pub mod transcription_coordinator;
 pub mod vault;
 pub mod vocabulary;

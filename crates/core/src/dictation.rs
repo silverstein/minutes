@@ -12,7 +12,7 @@ use crate::error::{DictationError, MinutesError, TranscribeError};
 use crate::markdown::{ContentType, Frontmatter, OutputStatus};
 use crate::pid;
 use crate::streaming::AudioStream;
-use crate::streaming_whisper::{StreamingResult, StreamingWhisper};
+use crate::streaming_whisper::{StreamingResult, StreamingWhisper, StreamingWhisperSession};
 use crate::vad::Vad;
 use chrono::Local;
 use std::io::Write;
@@ -629,19 +629,25 @@ where
         };
 
         let mut vad = Vad::new();
-        let mut streaming = StreamingWhisper::with_partial_max_secs(
-            config.transcription.language.clone(),
-            config.transcription.partial_max_secs,
-        )
-        .with_recognition_hint(
-            if config.dictation.cleanup_engine == "none"
-                || options.text_mode == DictationTextMode::TerminalCode
-            {
-                String::new()
-            } else {
-                config.dictation.experience.recognition_hint()
-            },
-        );
+        // Experimental, exact-audio reuse only. No new model or extra decode work.
+        let reuse_final =
+            std::env::var("MINUTES_DICTATION_FINAL_REUSE").is_ok_and(|value| value == "1");
+        let mut streaming = whisper_ctx.as_ref().map(|context| {
+            let transcriber = StreamingWhisper::with_partial_max_secs(
+                config.transcription.language.clone(),
+                config.transcription.partial_max_secs,
+            )
+            .with_recognition_hint(
+                if config.dictation.cleanup_engine == "none"
+                    || options.text_mode == DictationTextMode::TerminalCode
+                {
+                    String::new()
+                } else {
+                    config.dictation.experience.recognition_hint()
+                },
+            );
+            StreamingWhisperSession::new(transcriber, context).with_final_reuse(reuse_final)
+        });
         let mut final_utterance_samples: Vec<f32> = Vec::new();
         let mut accumulated_results: Vec<DictationResult> = Vec::new();
         let mut was_speaking = false;
@@ -692,7 +698,6 @@ where
                                 &apple_session,
                                 &final_utterance_samples,
                                 &mut streaming,
-                                whisper_ctx.as_ref(),
                             )
                         },
                     ) {
@@ -736,7 +741,6 @@ where
                                 &apple_session,
                                 &final_utterance_samples,
                                 &mut streaming,
-                                whisper_ctx.as_ref(),
                             )
                         },
                     ) {
@@ -834,8 +838,8 @@ where
                 }
 
                 // Feed to streaming whisper — may emit a partial result
-                if let Some(context) = whisper_ctx.as_ref() {
-                    if let Some(sr) = streaming.feed(&chunk.samples, context) {
+                if let Some(session) = streaming.as_mut() {
+                    if let Some(sr) = session.feed(&chunk.samples) {
                         on_event(DictationEvent::PartialText(sr.text));
                     }
                 }
@@ -856,7 +860,6 @@ where
                                 &apple_session,
                                 &final_utterance_samples,
                                 &mut streaming,
-                                whisper_ctx.as_ref(),
                             )
                         },
                     ) {
@@ -867,7 +870,9 @@ where
                         continue;
                     }
                     final_utterance_samples.clear();
-                    streaming.reset();
+                    if let Some(session) = streaming.as_mut() {
+                        session.reset();
+                    }
                     utterance_samples = 0;
                     was_speaking = false;
                     on_event(DictationEvent::Listening);
@@ -889,7 +894,6 @@ where
                                 &apple_session,
                                 &final_utterance_samples,
                                 &mut streaming,
-                                whisper_ctx.as_ref(),
                             )
                         },
                     ) {
@@ -900,7 +904,9 @@ where
                         continue;
                     }
                     final_utterance_samples.clear();
-                    streaming.reset();
+                    if let Some(session) = streaming.as_mut() {
+                        session.reset();
+                    }
                     utterance_samples = 0;
                     was_speaking = false;
                     total_silence_ms = 0;
@@ -1181,8 +1187,7 @@ fn finalize_dictation_transcription(
     _final_backend: DictationFinalBackend,
     apple_session: &AppleSpeechSession,
     _final_utterance_samples: &[f32],
-    streaming: &mut StreamingWhisper,
-    whisper_ctx: Option<&whisper_rs::WhisperContext>,
+    streaming: &mut Option<StreamingWhisperSession<'_>>,
 ) -> Option<FinalizedDictation> {
     #[cfg(not(target_os = "macos"))]
     let _ = apple_session;
@@ -1254,8 +1259,27 @@ fn finalize_dictation_transcription(
         }
     }
 
-    whisper_ctx
-        .and_then(|context| streaming.finalize(context))
+    streaming
+        .as_mut()
+        .and_then(|session| {
+            let started = Instant::now();
+            let result = session.finalize();
+            if session.final_reuse_enabled() {
+                crate::logging::append_log(&serde_json::json!({
+                    "ts": chrono::Local::now().to_rfc3339(),
+                    "level": "info",
+                    "step": "dictation_final_reuse",
+                    "file": "dictation",
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "extra": {
+                        "reused": session.final_reused(),
+                        "produced_text": result.is_some(),
+                    },
+                }))
+                .ok();
+            }
+            result
+        })
         .map(|transcript| FinalizedDictation {
             transcript,
             backend: DictationFinalBackend::Whisper,

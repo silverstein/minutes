@@ -1,0 +1,406 @@
+{
+  "all_text_identical": true,
+  "measurement": "unpaced 100ms-chunk engine replay; excludes capture, release delivery and insertion",
+  "pairs": [
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1477446,
+        "final_us": 960366,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 1453618,
+        "final_us": 1,
+        "reused": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "aligned_4s",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1491520,
+        "final_us": 990730,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 1451285,
+        "final_us": 0,
+        "reused": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "aligned_4s",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1506122,
+        "final_us": 969226,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 1510759,
+        "final_us": 0,
+        "reused": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "aligned_4s",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 65600,
+      "baseline": {
+        "feed_us": 1531969,
+        "final_us": 1014454,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "candidate": {
+        "feed_us": 1492472,
+        "final_us": 986351,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "case": "new_audio_100ms",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 65600,
+      "baseline": {
+        "feed_us": 1468387,
+        "final_us": 997463,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "candidate": {
+        "feed_us": 1483733,
+        "final_us": 978404,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "case": "new_audio_100ms",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 65600,
+      "baseline": {
+        "feed_us": 1470838,
+        "final_us": 983534,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "candidate": {
+        "feed_us": 1509113,
+        "final_us": 994179,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+      },
+      "case": "new_audio_100ms",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 72000,
+      "baseline": {
+        "feed_us": 1506178,
+        "final_us": 1003007,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "candidate": {
+        "feed_us": 1447598,
+        "final_us": 974392,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "case": "new_audio_500ms",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 72000,
+      "baseline": {
+        "feed_us": 1464395,
+        "final_us": 968684,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "candidate": {
+        "feed_us": 1462070,
+        "final_us": 973487,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "case": "new_audio_500ms",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 72000,
+      "baseline": {
+        "feed_us": 1462563,
+        "final_us": 968283,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "candidate": {
+        "feed_us": 1488965,
+        "final_us": 969509,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+      },
+      "case": "new_audio_500ms",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 170013,
+      "baseline": {
+        "feed_us": 3722282,
+        "final_us": 597696,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "candidate": {
+        "feed_us": 3667283,
+        "final_us": 608299,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "case": "whole_fixture",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 170013,
+      "baseline": {
+        "feed_us": 3702890,
+        "final_us": 591500,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "candidate": {
+        "feed_us": 3803180,
+        "final_us": 608839,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "case": "whole_fixture",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 170013,
+      "baseline": {
+        "feed_us": 3616616,
+        "final_us": 619358,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "candidate": {
+        "feed_us": 3704473,
+        "final_us": 565775,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "case": "whole_fixture",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 996916,
+        "final_us": 959926,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 1006344,
+        "final_us": 950318,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "bounded_suffix",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 1
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1044542,
+        "final_us": 990162,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 1008005,
+        "final_us": 982837,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "bounded_suffix",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 1
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1030927,
+        "final_us": 954821,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "candidate": {
+        "feed_us": 991961,
+        "final_us": 975433,
+        "reused": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+      },
+      "case": "bounded_suffix",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 1
+    },
+    {
+      "audio_samples": 8000,
+      "baseline": {
+        "feed_us": 5,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "candidate": {
+        "feed_us": 1,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "case": "too_short",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 8000,
+      "baseline": {
+        "feed_us": 1,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "candidate": {
+        "feed_us": 1,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "case": "too_short",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 8000,
+      "baseline": {
+        "feed_us": 1,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "candidate": {
+        "feed_us": 1,
+        "final_us": 0,
+        "reused": false,
+        "text": null
+      },
+      "case": "too_short",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1028266,
+        "final_us": 521510,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "candidate": {
+        "feed_us": 1033091,
+        "final_us": 506074,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "case": "silence",
+      "exact_text_match": true,
+      "iteration": 0,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1048282,
+        "final_us": 509319,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "candidate": {
+        "feed_us": 1017043,
+        "final_us": 512048,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "case": "silence",
+      "exact_text_match": true,
+      "iteration": 1,
+      "partial_max_secs": 30
+    },
+    {
+      "audio_samples": 64000,
+      "baseline": {
+        "feed_us": 1031061,
+        "final_us": 516004,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "candidate": {
+        "feed_us": 1040226,
+        "final_us": 518534,
+        "reused": false,
+        "text": "[BLANK_AUDIO]"
+      },
+      "case": "silence",
+      "exact_text_match": true,
+      "iteration": 2,
+      "partial_max_secs": 30
+    }
+  ],
+  "schema_version": 1
+}

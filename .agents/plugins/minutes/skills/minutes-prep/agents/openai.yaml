@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Prep"
+  short_description: "Interactive meeting prep from your conversation history."
+  default_prompt: "Use Minutes Prep to help me prepare for an upcoming meeting using relationship history, open commitments, and prior decisions."

@@ -8,6 +8,7 @@ import { renderSkillForHost } from "./render.js";
 import { resolveSkillAssetSourcePath, validateSkillAssets } from "./validate.js";
 import { renderClaudePluginManifest } from "./plugin.js";
 import { renderSiteSkillCatalog } from "./site.js";
+import { renderOpenAIPlugin } from "./openai-plugin.js";
 
 interface CompileOptions {
   dryRun: boolean;
@@ -149,6 +150,13 @@ async function main(): Promise<void> {
     );
     if (manifestStatus === "changed") {
       changes.push({ host: "claude", path: ".claude/plugins/minutes/plugin.json", kind: "manifest" });
+    }
+  }
+
+  if (options.hosts.includes("codex")) {
+    for (const [targetPath, content] of await renderOpenAIPlugin(rootDir, skills)) {
+      const status = await compareOrWrite(rootDir, targetPath, content, options.dryRun);
+      if (status === "changed") changes.push({ host: "openai-plugin", path: targetPath, kind: "plugin" });
     }
   }
 

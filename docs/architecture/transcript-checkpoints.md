@@ -44,6 +44,18 @@ Checkpoints are not used for authorized private-audio inputs, for a single
 surviving stem, for non-meeting content, or where meeting chunk rotation is
 bypassed. Those inputs are transcribed in full.
 
+## Trust
+
+The SHA-256 covers the audio, not the span text. A matching hash proves that a
+span was cut from the same samples. It does not prove that its lines are what
+Whisper produced for them. The checkpoint file is therefore trusted the way the
+job folder is: anyone who can write `<job>.checkpoint.json` can supply any text
+for audio that hashes correctly. This stays inside the existing same-user model,
+because the file is owner-only and sits beside the job's audio and JSON, and
+whoever can write those can already change the meeting. Do not treat the hash as
+an integrity check on the text, and do not accept checkpoints from a less
+trusted writer than the job itself.
+
 ## Equivalence
 
 Chunks are decoded independently, so a span's lines are what the final pass would

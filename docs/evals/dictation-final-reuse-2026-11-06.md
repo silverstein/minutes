@@ -63,6 +63,31 @@ Reproduction identity: tiny model, 77691713 bytes, SHA-256 `be07e048e1e599ad4634
 
 Reproduction identity: public WAV, 340104 bytes, SHA-256 `d32616b3f1a5a669c35885d815f9e82b1447d50d07a1892c4e08e710f7a85c8b`.
 
+## Apple Silicon follow-up
+
+The exact runtime candidate `6534df23b044884e1c211da41f32b154037e5df3` was replayed on an Apple M4 Max with 128 GB RAM running macOS 26.6, using the existing Tiny and Small models and `whisper,streaming,metal`. This repeats the same unpaced development-build benchmark and public fixture; it is not an installed-app or natural speaking test. All 42 baseline/candidate pairs produced identical text. The deliberately aligned case reused on all six runs across the two models; every other case missed conservatively.
+
+| Model / case | Reused / runs | Baseline final p50 (ms) | Candidate final p50 (ms) |
+| --- | ---: | ---: | ---: |
+| Tiny / `aligned_4s` | 3 / 3 | 52.121 | <0.001 |
+| Tiny / `new_audio_100ms` | 0 / 3 | 50.157 | 50.292 |
+| Tiny / `whole_fixture` | 0 / 3 | 61.089 | 62.474 |
+| Tiny / `bounded_suffix` | 0 / 3 | 50.368 | 50.462 |
+| Small / `aligned_4s` | 3 / 3 | 113.725 | <0.001 |
+| Small / `new_audio_100ms` | 0 / 3 | 114.270 | 112.724 |
+| Small / `whole_fixture` | 0 / 3 | 180.605 | 183.063 |
+| Small / `bounded_suffix` | 0 / 3 | 115.892 | 114.814 |
+
+The Mac result bounds the opportunity more usefully than the shared Linux host: the selected hit avoids about 52 ms with Tiny or 114 ms with Small. It does not establish a meaningful benefit for typical dictation. The explicit installed-Tiny regression also passed on this Mac (1 passed, 0 failed), including invalidation and cancellation controls.
+
+The canonical installer produced a signed target-only Minutes Dev bundle with a strict seal on the same Mac. Signing from SSH first failed with `errSecInternalComponent`; one minimal probe reproduced the failure. That same probe and the canonical build succeeded from a fresh Apple Terminal instance. This is signing-context evidence, not a permission grant or installed-app acceptance. The intended identity is `com.useminutes.desktop.dev`, with signing authority `Apple Development: Mathieu Silverstein (97C8UF8QVF)` and observed TeamIdentifier `63TMLKT8HN`.
+
+A subsequent installed-app qualification attempt was interrupted by loss of SSH and Tailnet connectivity before the installation command returned a receipt. Whether that attempt started or changed the installed Dev bundle remains unconfirmed. The prior idle installed Dev process was PID 80937; no new running PID or installed executable time was verified. Do not treat the signed target bundle as the installed app. The production Minutes app was not an installation target.
+
+The prepared acceptance harness uses a separate config/data root, an exact pinned virtual input (`MMAudio Device`), a dedicated TextEdit document, and a unique shortcut. A private playback helper verified per-process routing of the public fixture to that virtual output while leaving the system default output unchanged. No app capture or insertion test completed, so this routing result does not prove virtual loopback, recognition, delivery, or release latency. No private microphone or meeting audio was used for the completed replay checks.
+
+Raw Mac replay and signing evidence remains in the owned Mac artifact directory `~/.codex/artifacts/minutes-dictation-reuse-mac-20261106/` (`tiny-metal.json`, `small-metal.json`, `model-regression.log`, and `aqua-signed-target-build.log`). Retrieval and the state of the attempted install must be checked when the Mac is reachable. `minutes-n843` remains open for installed-app acceptance and useful natural hit-rate evidence. The default remains off.
+
 ## Final local checks
 
 | Check | Result |
@@ -76,4 +101,4 @@ Reproduction identity: public WAV, 340104 bytes, SHA-256 `d32616b3f1a5a669c35885
 | Coverage auditor tests and feature mapping audit | 16 tests passed; mapping audit passed (PyYAML supplied through an isolated uv environment) |
 | Rust formatting, diff checks, versions, generated agent docs | Passed; generated site test-count drift is explicitly non-failing in the existing checker |
 
-The model-dependent regression remains ignored in ordinary CI because it requires an explicit installed model. It was executed separately here. No signed Mac app build, microphone capture, physical key-release timing, destination insertion, real-speaker accuracy, natural reuse hit rate, or battery measurement was performed. No default promotion or release follows from these checks.
+The model-dependent regression remains ignored in ordinary CI because it requires an explicit installed model. It was executed separately here. A signed Mac target-only build and Metal replay were completed as described above. Installed-app acceptance, app microphone capture, physical key-release timing, destination insertion, real-speaker accuracy, natural reuse hit rate, and battery measurement remain unverified. No default promotion or release follows from these checks.

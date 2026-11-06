@@ -63,7 +63,7 @@ const MIN_TRANSCRIBE_SAMPLES: usize = 16000; // 1 second
 
 /// Default cap for partial transcription cost. See `StreamingWhisper::new` for
 /// the full reasoning — past this many seconds of accumulated audio, partial
-/// passes are skipped (the utterance still finalizes correctly).
+/// passes use the newest bounded window; finalization still uses all audio.
 pub const DEFAULT_PARTIAL_MAX_SECS: u32 = 30;
 
 /// Result from a streaming transcription pass.
@@ -101,6 +101,96 @@ pub struct StreamingWhisper {
     /// in-flight Whisper pass so optional live evidence cannot hold capture
     /// shutdown open after the WAV has been sealed.
     abort_signal: Option<Arc<AtomicBool>>,
+}
+
+/// A streaming utterance bound to one recognizer for its entire lifetime.
+///
+/// The experimental final-reuse path can promote an already-completed decode
+/// only when it covered the entire, unchanged audio buffer. Binding the context
+/// prevents a result from one model being reused with another model. Ordinary
+/// streaming and recording consumers retain their existing behavior.
+pub struct StreamingWhisperSession<'ctx> {
+    transcriber: StreamingWhisper,
+    context: &'ctx WhisperContext,
+    reuse_final: bool,
+    complete_partial: Option<StreamingResult>,
+    final_reused: bool,
+}
+
+impl<'ctx> StreamingWhisperSession<'ctx> {
+    /// Bind an utterance to its recognizer; final-result reuse starts disabled.
+    pub fn new(transcriber: StreamingWhisper, context: &'ctx WhisperContext) -> Self {
+        Self {
+            transcriber,
+            context,
+            reuse_final: false,
+            complete_partial: None,
+            final_reused: false,
+        }
+    }
+
+    /// Opt into exact-audio final reuse, without scheduling extra decode passes.
+    pub fn with_final_reuse(mut self, enabled: bool) -> Self {
+        self.reuse_final = enabled;
+        self.complete_partial = None;
+        self.final_reused = false;
+        self
+    }
+
+    /// Feed speech using the bound recognizer and retain eligible full decodes.
+    pub fn feed(&mut self, samples: &[f32]) -> Option<StreamingResult> {
+        if !samples.is_empty() {
+            // Even one additional sample invalidates reuse. No VAD decision or
+            // text similarity can prove that the old decode heard new audio.
+            self.complete_partial = None;
+        }
+        let result = self.transcriber.feed(samples, self.context);
+        if self.reuse_final && self.transcriber.transcription_window_start(false) == 0 {
+            if let Some(result) = &result {
+                self.complete_partial = Some(result.clone());
+            }
+        }
+        result
+    }
+
+    /// Finalize, optionally reusing a successful full-buffer decode of this audio.
+    ///
+    /// Partials and finals use identical Whisper parameters. A bounded suffix,
+    /// failed/empty decode, changed audio, reset, or abort cannot be promoted.
+    pub fn finalize(&mut self) -> Option<StreamingResult> {
+        self.final_reused = false;
+        let aborted = self
+            .transcriber
+            .abort_signal
+            .as_ref()
+            .is_some_and(|signal| signal.load(Ordering::Relaxed));
+        if self.reuse_final && !aborted {
+            if let Some(mut result) = self.complete_partial.take() {
+                result.is_final = true;
+                self.final_reused = true;
+                return Some(result);
+            }
+        }
+        self.complete_partial = None;
+        self.transcriber.finalize(self.context)
+    }
+
+    /// Start a new utterance without carrying cached text across its boundary.
+    pub fn reset(&mut self) {
+        self.complete_partial = None;
+        self.final_reused = false;
+        self.transcriber.reset();
+    }
+
+    /// Whether the most recent finalization reused a decode instead of running one.
+    pub fn final_reused(&self) -> bool {
+        self.final_reused
+    }
+
+    /// Whether exact-audio final reuse was explicitly enabled for this session.
+    pub fn final_reuse_enabled(&self) -> bool {
+        self.reuse_final
+    }
 }
 
 #[cfg(test)]
@@ -448,5 +538,100 @@ mod tests {
         assert!(!configured.load(Ordering::Relaxed));
         stop.store(true, Ordering::Relaxed);
         assert!(configured.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    #[ignore = "requires MINUTES_TEST_WHISPER_MODEL; uses public repository audio only"]
+    fn final_reuse_preserves_text_and_rejects_incomplete_or_invalidated_decodes() {
+        let model = std::env::var_os("MINUTES_TEST_WHISPER_MODEL")
+            .expect("set MINUTES_TEST_WHISPER_MODEL to an installed Whisper model");
+        let context =
+            WhisperContext::new_with_params(model, crate::transcribe::whisper_context_params())
+                .unwrap();
+        let mut wav = hound::WavReader::open(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/demo.wav"),
+        )
+        .unwrap();
+        assert_eq!(wav.spec().sample_rate, 16000);
+        assert_eq!(wav.spec().channels, 1);
+        let samples: Vec<f32> = wav
+            .samples::<i16>()
+            .take(4 * 16000)
+            .map(|sample| sample.unwrap() as f32 / 32768.0)
+            .collect();
+        assert_eq!(samples.len(), 4 * 16000);
+        let new_session = |cap, reuse| {
+            StreamingWhisperSession::new(
+                StreamingWhisper::with_partial_max_secs(Some("en".into()), cap),
+                &context,
+            )
+            .with_final_reuse(reuse)
+        };
+
+        let mut baseline = new_session(30, false);
+        for chunk in samples.chunks(1600) {
+            baseline.feed(chunk);
+        }
+        let before = recognition_passes_for_test();
+        let expected = baseline.finalize().expect("spoken fixture produces text");
+        assert_eq!(recognition_passes_for_test() - before, 1);
+        assert!(!baseline.final_reused());
+
+        let mut candidate = new_session(30, true);
+        for chunk in samples.chunks(1600) {
+            candidate.feed(chunk);
+        }
+        let before = recognition_passes_for_test();
+        let actual = candidate.finalize().unwrap();
+        assert_eq!(actual.text, expected.text);
+        assert_eq!(actual.duration_secs, expected.duration_secs);
+        assert!(actual.is_final);
+        assert!(candidate.final_reused());
+        assert_eq!(recognition_passes_for_test() - before, 0);
+
+        // A rolled suffix must never replace the full utterance, even when its
+        // text looks plausible. It must execute the ordinary full final pass.
+        let mut bounded = new_session(1, true);
+        for chunk in samples.chunks(1600) {
+            bounded.feed(chunk);
+        }
+        let before = recognition_passes_for_test();
+        assert_eq!(bounded.finalize().unwrap().text, expected.text);
+        assert!(!bounded.final_reused());
+        assert_eq!(recognition_passes_for_test() - before, 1);
+
+        // One additional sample invalidates the exact-audio proof.
+        let mut changed = new_session(30, true);
+        changed.feed(&samples);
+        changed.feed(&[0.01]);
+        let before = recognition_passes_for_test();
+        assert!(changed.finalize().is_some());
+        assert!(!changed.final_reused());
+        assert_eq!(recognition_passes_for_test() - before, 1);
+
+        let mut reset = new_session(30, true);
+        reset.feed(&samples);
+        reset.reset();
+        assert!(reset.finalize().is_none());
+        assert!(!reset.final_reused());
+
+        let mut disabled = new_session(30, true);
+        disabled.feed(&samples);
+        let mut disabled = disabled.with_final_reuse(false);
+        let before = recognition_passes_for_test();
+        assert_eq!(disabled.finalize().unwrap().text, expected.text);
+        assert!(!disabled.final_reused());
+        assert_eq!(recognition_passes_for_test() - before, 1);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut aborted = StreamingWhisperSession::new(
+            StreamingWhisper::new(Some("en".into())).with_abort_signal(Arc::clone(&stop)),
+            &context,
+        )
+        .with_final_reuse(true);
+        aborted.feed(&samples);
+        stop.store(true, Ordering::Relaxed);
+        aborted.finalize();
+        assert!(!aborted.final_reused(), "abort cannot promote cached text");
     }
 }

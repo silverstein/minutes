@@ -42,32 +42,39 @@ impl CaptureCheckpoint {
         title: Option<&str>,
         context: Option<&str>,
     ) -> Option<Self> {
+        Self::start_at(anchor, config, title, context, chrono::Local::now())
+    }
+
+    pub fn start_at(
+        anchor: &Path,
+        config: &Config,
+        title: Option<&str>,
+        context: Option<&str>,
+        recorded_at: chrono::DateTime<chrono::Local>,
+    ) -> Option<Self> {
         if !config.recording.transcript_checkpoints || crate::sensitive::is_active() {
             return None;
         }
         let title = title.map(str::to_owned);
         let context = context.map(str::to_owned);
         let config = config.clone();
-        let mut hints = None;
+        let mut decoder = None;
         Self::spawn(
             anchor,
             SPAN,
             move |work| {
-                let hints = hints.get_or_insert_with(|| {
-                    transcript_checkpoint::decode_hints_for_queued_meeting(
+                let decoder = decoder.get_or_insert_with(|| {
+                    let hints = transcript_checkpoint::decode_hints_for_queued_meeting_at(
                         title.as_deref(),
                         context.as_deref(),
+                        recorded_at,
                         &config,
-                    )
+                    );
+                    transcript_checkpoint::SpanTranscriber::new(&config, &hints)
                 });
-                transcript_checkpoint::transcribe_span(
-                    &work.samples,
-                    work.start,
-                    work.source,
-                    &config,
-                    hints,
-                )
-                .map_err(|e| e.to_string())
+                decoder
+                    .transcribe_span(&work.samples, work.start, work.source)
+                    .map_err(|e| e.to_string())
             },
             true,
         )
@@ -283,6 +290,11 @@ fn feed(
                     Ok(()) => (),
                     Err(mpsc::TrySendError::Full(_)) => {
                         counts.rejected.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "checkpoint worker fell behind; stopped cutting spans for this call"
+                        );
+                        stop.store(true, Ordering::Release);
+                        return;
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => return,
                 }
@@ -413,6 +425,10 @@ mod tests {
             .unwrap();
             entry.recv_timeout(Duration::from_secs(5)).unwrap();
             wait_until(|| worker.counts.rejected.load(Ordering::Relaxed) > 0);
+            assert!(
+                worker.stop.load(Ordering::Acquire),
+                "a full queue must stop span cutting"
+            );
             // Stand in for capture continuing to append while decode is wedged.
             use std::io::Write;
             let voice = anchor.with_extension("voice.wav");

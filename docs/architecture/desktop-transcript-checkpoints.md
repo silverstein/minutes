@@ -17,7 +17,7 @@ decoder thread. Both use background QoS on macOS. They only read the stem files;
 the capture writer never feeds them or waits for them. The reader reuses
 `stem_tail::StemTail` with bounded 256 KiB reads and a canonical resampling mode.
 It retains one open span per source, sends at most two queued audio spans with
-`try_send`, and keeps at most 256 completed results. A full queue drops work.
+`try_send`, and keeps at most 256 completed results. A full queue drops that span and stops cutting new spans for the call.
 
 The cut is the midpoint of the quietest 100 ms window in the last 15 seconds of
 a 120-second span. The next span begins at that cut, on the same source clock.
@@ -27,9 +27,15 @@ The final decoder can normalize quiet files by their whole-file peak. Until the
 reader sees a peak of at least 0.1 on a source, it skips its spans because the
 final gain is not yet known. Subsequent digest validation remains authoritative.
 
-Hints are built on the decoder thread with the queued meeting's title and
-pre-context. The final pass rejects spans if settings, title, context,
-vocabulary, calendar matching, or audio differ. Recording remains recoverable
+Hints are built on the decoder thread using the recording start time, title,
+pre-context, and the same calendar selection and hint builder as final
+processing. That calendar lookup never runs on capture or Stop. A calendar
+match already present during capture can reuse spans. If a match appears or
+changes later, or the title, context, vocabulary, settings, or audio change,
+the final pass deliberately rejects the old spans and transcribes again.
+Rejection logs name the failed condition, including settings or decode hints.
+The host never changes a fingerprint to make text produced with old hints look
+current. Recording remains recoverable
 through the ordinary full transcription path.
 
 On normal Stop, the host stops the optional worker before finalizing capture.
@@ -46,9 +52,11 @@ At Stop, logs report `accepted` (completed spans offered to the job), `rejected`
 failures). These are producer counts. The final pass separately logs its
 actual accepted count and every rejection reason.
 
-The contributor API does not accept a loaded model context. Each span therefore
-still loads a context. Reusing one context across spans needs a follow-up to
-that API. Stop does not cancel an in-progress native decode; its result is
+The additive `transcript_checkpoint::SpanTranscriber` session freezes config
+and decode hints and lazily loads one Whisper context for all microphone and
+system spans in the meeting. The existing `transcribe_span` function remains
+available for standalone callers. Non-Whisper engines retain their existing
+batch dispatch. Stop does not cancel an in-progress native decode; its result is
 discarded, and it can retain resources until it returns.
 
 ## Reproducible file replay

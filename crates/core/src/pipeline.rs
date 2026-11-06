@@ -5014,20 +5014,16 @@ fn transcribe_to_artifact_with_authority(
     } else {
         None
     };
-    let calendar_event_title = matched_event
-        .as_ref()
-        .and_then(|event| meaningful_calendar_title(&event.title));
     let attendees = matched_event
         .as_ref()
         .map(|event| event.attendees.clone())
         .unwrap_or_default();
     let vocabulary = load_vocabulary_for_decode_hints();
-    let mut decode_hints = build_decode_hints(
+    let mut decode_hints = queued_meeting_decode_hints_for_event(
         title,
-        calendar_event_title.as_deref(),
         context.pre_context.as_deref(),
-        &attendees,
-        Some(&config.identity),
+        matched_event.as_ref(),
+        config,
         vocabulary.as_ref(),
     );
     if let Some(format) = authorized_format {
@@ -7736,13 +7732,44 @@ pub(crate) fn queued_meeting_decode_hints(
     config: &Config,
 ) -> crate::transcribe::DecodeHints {
     let vocabulary = load_vocabulary_for_decode_hints();
+    queued_meeting_decode_hints_for_event(title, pre_context, None, config, vocabulary.as_ref())
+}
+
+pub(crate) fn queued_meeting_decode_hints_at(
+    title: Option<&str>,
+    pre_context: Option<&str>,
+    recorded_at: DateTime<Local>,
+    config: &Config,
+) -> crate::transcribe::DecodeHints {
+    let event = select_calendar_event(&crate::calendar::events_overlapping(recorded_at), title);
+    let vocabulary = load_vocabulary_for_decode_hints();
+    queued_meeting_decode_hints_for_event(
+        title,
+        pre_context,
+        event.as_ref(),
+        config,
+        vocabulary.as_ref(),
+    )
+}
+
+pub(crate) fn queued_meeting_decode_hints_for_event(
+    title: Option<&str>,
+    pre_context: Option<&str>,
+    event: Option<&crate::calendar::CalendarEvent>,
+    config: &Config,
+    vocabulary: Option<&crate::vocabulary::VocabularyStore>,
+) -> crate::transcribe::DecodeHints {
+    let calendar_title = event.and_then(|event| meaningful_calendar_title(&event.title));
+    let attendees = event
+        .map(|event| event.attendees.as_slice())
+        .unwrap_or_default();
     build_decode_hints(
         title,
-        None,
+        calendar_title.as_deref(),
         pre_context,
-        &[],
+        attendees,
         Some(&config.identity),
-        vocabulary.as_ref(),
+        vocabulary,
     )
 }
 

@@ -3894,17 +3894,18 @@ fn start_native_call_recording(
         }
     };
     let output_path = session.output_path().to_path_buf();
+    let recording_started_at = chrono::Local::now();
     let checkpoint = (mode == CaptureMode::Meeting)
         .then(|| {
-            minutes_core::capture_checkpoint::CaptureCheckpoint::start(
+            minutes_core::capture_checkpoint::CaptureCheckpoint::start_at(
                 &output_path,
                 config,
                 requested_title.as_deref(),
                 minutes_core::notes::read_context().as_deref(),
+                recording_started_at,
             )
         })
         .flatten();
-    let recording_started_at = chrono::Local::now();
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
         config.screen_context.enabled,

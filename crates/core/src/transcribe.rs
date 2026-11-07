@@ -1020,6 +1020,12 @@ impl CheckpointChunkDecoder {
             if self.whisper.is_none() {
                 self.whisper = Some(load_whisper_context(config)?);
                 tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
+                crate::logging::log_step(
+                    "capture_checkpoint_model_load",
+                    "",
+                    0,
+                    serde_json::json!({"engine":"whisper"}),
+                );
             }
             return transcribe_whisper_chunk_lines_with_context(
                 self.whisper.as_ref().expect("context loaded above"),

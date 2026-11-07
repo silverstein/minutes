@@ -50,7 +50,11 @@ and process crashes are outside the Rust panic boundary.
 At Stop, logs report `accepted` (completed spans offered to the job), `rejected`
 (offered spans not completed), and `skipped` (queue, quiet-audio, or decoder
 failures). These are producer counts. The final pass separately logs its
-actual accepted count and every rejection reason.
+actual accepted count and every rejection reason. The desktop also saves these
+receipts in `~/.minutes/logs/minutes.log`: `capture_checkpoint_model_load`,
+`capture_checkpoint_stop`, `transcript_checkpoint_reuse`, and
+`transcript_checkpoint_rejected`. The Stop summary uses a bounded queue to a
+single background logger; a stalled log sink cannot block Stop.
 
 The additive `transcript_checkpoint::SpanTranscriber` session freezes config
 and decode hints and lazily loads one Whisper context for all microphone and

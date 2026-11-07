@@ -245,6 +245,18 @@ pub(crate) fn transcribe_meeting_with_spans(
         audio_secs = samples.len() as f64 / SAMPLE_RATE as f64,
         "meeting transcription with checkpoint spans"
     );
+    crate::logging::log_step(
+        "transcript_checkpoint_reuse",
+        "",
+        0,
+        serde_json::json!({
+            "source": spans.first().map(|span| span.source),
+            "offered": spans.len(), "accepted": accepted.len(),
+            "rejected": spans.len().saturating_sub(accepted.len()),
+            "covered_secs": accepted.iter().map(|s| (s.end_sample - s.start_sample) as f64 / SAMPLE_RATE as f64).sum::<f64>(),
+            "audio_secs": samples.len() as f64 / SAMPLE_RATE as f64,
+        }),
+    );
     if accepted.is_empty() {
         return transcribe::transcribe_meeting_samples(audio_path, &samples, config, hints);
     }
@@ -309,13 +321,18 @@ fn accepted_spans<'a>(
             None
         };
         match reason {
-            Some(reason) => tracing::warn!(
-                source = ?span.source,
-                start_sample = span.start_sample,
-                end_sample = span.end_sample,
-                reason,
-                "ignoring checkpoint span; that range is transcribed again"
-            ),
+            Some(reason) => {
+                tracing::warn!(source = ?span.source, start_sample = span.start_sample,
+                    end_sample = span.end_sample, reason,
+                    "ignoring checkpoint span; that range is transcribed again");
+                crate::logging::log_step(
+                    "transcript_checkpoint_rejected",
+                    "",
+                    0,
+                    serde_json::json!({"source":span.source,"start_sample":span.start_sample,
+                        "end_sample":span.end_sample,"reason":reason}),
+                );
+            }
             None => {
                 covered_until = span.end_sample;
                 accepted.push(span);

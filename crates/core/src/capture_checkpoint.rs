@@ -5,7 +5,7 @@ use crate::stem_tail::StemTail;
 use crate::transcript_checkpoint::{self, CheckpointSource, CheckpointSpan, TranscriptCheckpoint};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 const RATE: usize = 16_000;
@@ -31,6 +31,7 @@ pub struct CaptureCheckpoint {
     stop: Arc<AtomicBool>,
     completed: mpsc::Receiver<CheckpointSpan>,
     counts: Arc<Counts>,
+    stop_log: Option<mpsc::SyncSender<serde_json::Value>>,
 }
 
 impl CaptureCheckpoint {
@@ -92,6 +93,7 @@ impl CaptureCheckpoint {
             tracing::warn!("checkpoint decoder still busy; recording continues without spans");
             return None;
         }
+        let stop_log = stop_log_sender();
         let stop = Arc::new(AtomicBool::new(false));
         let counts = Arc::new(Counts::default());
         let (send, receive) = mpsc::sync_channel(2);
@@ -142,6 +144,7 @@ impl CaptureCheckpoint {
             stop,
             completed,
             counts,
+            stop_log,
         })
     }
 
@@ -157,11 +160,41 @@ impl CaptureCheckpoint {
             skipped = self.counts.rejected.load(Ordering::Relaxed),
             "native call transcript checkpoints at Stop"
         );
+        if let Some(log) = &self.stop_log {
+            let _ = log.try_send(serde_json::json!({
+                "accepted": spans.len(),
+                "rejected": offered.saturating_sub(spans.len()),
+                "skipped": self.counts.rejected.load(Ordering::Relaxed),
+                "covered_secs": spans.iter().map(|s| (s.end_sample - s.start_sample) as f64 / RATE as f64).sum::<f64>(),
+            }));
+        }
         TranscriptCheckpoint {
             spans,
             ..Default::default()
         }
     }
+}
+
+// The desktop has no tracing subscriber. Keep its Stop receipt durable without
+// adding filesystem work to Stop. One process-wide logger and a bounded queue
+// also bound resource use if the log filesystem stalls.
+fn stop_log_sender() -> Option<mpsc::SyncSender<serde_json::Value>> {
+    static SENDER: OnceLock<Option<mpsc::SyncSender<serde_json::Value>>> = OnceLock::new();
+    SENDER
+        .get_or_init(|| {
+            let (send, receive) = mpsc::sync_channel(8);
+            std::thread::Builder::new()
+                .name("call-checkpoint-log".into())
+                .spawn(move || {
+                    low_priority();
+                    for summary in receive {
+                        crate::logging::log_step("capture_checkpoint_stop", "", 0, summary);
+                    }
+                })
+                .ok()
+                .map(|_| send)
+        })
+        .clone()
 }
 
 impl Drop for CaptureCheckpoint {

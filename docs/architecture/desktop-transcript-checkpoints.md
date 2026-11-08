@@ -19,8 +19,14 @@ the capture writer never feeds them or waits for them. The reader reuses
 It retains one open span per source, sends at most two queued audio spans with
 `try_send`, and keeps at most 256 completed results. A full queue drops that span and stops cutting new spans for the call.
 
-The cut is the midpoint of the quietest 100 ms window in the last 15 seconds of
-a 120-second span. The next span begins at that cut, on the same source clock.
+Each cut is a point where the final pass's VAD chunker resets, on its 100 ms
+grid. A span that starts there gets the same chunks as the whole-stem pass, so
+Whisper decodes the same audio and the text is the same. The first choice, from
+105 seconds on, is the end of the longest pause: the chunker closes a chunk after
+800 ms of silence. In speech without such a pause, the chunker splits at 45
+seconds and resets too. A span that reaches 180 seconds takes the latest reset
+point in the span. Only with none at all does it fall back to the quietest
+100 ms window. The next span begins at that cut, on the same source clock.
 The canonical reader uses the final WAV decoder's sinc resampler, retaining its
 phase and lookahead across polls. It does not use the live sidecar's decimator.
 The final decoder can normalize quiet files by their whole-file peak. Until the
@@ -42,8 +48,11 @@ On normal Stop, the host stops the optional worker before finalizing capture.
 It takes only completed results without joining either thread or waiting for a
 decode. The same handoff applies to helper exit and finalization errors.
 Dropping the handle also signals Stop. Decoder errors and caught Rust panics
-end the optional worker. A real-time factor above 0.5, checked from the first
-span onward, disables remaining span work for that call. A process-wide lease
+end the optional worker. The two sources share one decoder, so a total
+real-time factor above 0.5 cannot keep up. After three spans, a total above 0.5
+disables remaining span work for that call. One span slower than real time
+disables it at once, from the first span on. A single slow span alone does
+not: Whisper's temperature fallback can make one hard chunk slow. A process-wide lease
 prevents repeated recordings from accumulating stalled decoders. Native aborts
 and process crashes are outside the Rust panic boundary.
 

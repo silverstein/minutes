@@ -1,0 +1,96 @@
+# CI timing, November 2026
+
+Measured 2026-11-09 from Actions jobs and timestamped job logs. Minutes are
+job start to job completion, excluding queue time. Compile/check time is the
+sum of Cargo's reported `Finished` durations (including linking); execution
+is the sum of suite summaries over 10 seconds, excluding child-test summaries.
+These are diagnostic breakdowns, not a benchmark on identical hardware.
+
+## Baseline sample
+
+All five sampled runs below were green. Values are minutes; cache sizes are
+compressed restore sizes from the logs. M means miss, H means exact hit.
+
+| Run | Event | macOS wall / compile / execution | Windows wall / compile / execution | Linux wall | Cache Mac / Windows / Linux |
+| --- | --- | --- | --- | --- | --- |
+| [42269098034](https://github.com/silverstein/minutes/actions/runs/42269098034) | main, Nov 6 | 62.6 / 38.9 / 20.7 | 46.0 / 21.8 / 20.3 | 16.9 | M / M / H 2,285 MiB |
+| [42569718457](https://github.com/silverstein/minutes/actions/runs/42569718457) | PR, Nov 9 | 38.6 / 16.3 / 19.3 | 52.1 / 27.6 / 23.4 | 17.8 | H 3,786 MiB / M / H 2,285 MiB |
+| [42576089540](https://github.com/silverstein/minutes/actions/runs/42576089540) | main, Nov 9 | 44.9 / 21.4 / 20.2 | 36.9 / 17.8 / 16.5 | 15.6 | H 3,786 MiB / H 1,977 MiB / H 2,285 MiB |
+| [42639660062](https://github.com/silverstein/minutes/actions/runs/42639660062) | PR, Nov 9 | 65.0 / 41.9 / 21.7 | 43.8 / 26.2 / 16.6 | 20.7 | M / M / M |
+| [42651976389](https://github.com/silverstein/minutes/actions/runs/42651976389) | main, Nov 9 | 56.5 / 33.7 / 20.1 | 55.1 / 26.9 / 22.7 | 21.5 | M / M / M |
+
+The release-prep PR's [latest jobs](https://github.com/silverstein/minutes/actions/runs/42652164389)
+were also green in the test matrix (the overall run failed elsewhere): macOS
+66.8 minutes, Windows 47.7, Linux 22.7. This differs from the earlier attempt
+quoted in the request; use the linked run/attempt rather than mixing attempts.
+
+PR hits including that release-prep run: macOS 1/3, Windows 0/3, Linux 2/3.
+The five green-run main/PR sample has Mac 2/5, Windows 1/5, Linux 3/5.
+Restore cost when warm: Mac 109-110 seconds, Windows 97 seconds, Linux 36-74
+seconds. Misses return in about a second. An exact lockfile-only key cannot
+reuse an older lockfile's cache, and multi-GB entries compete for 10 GB.
+An API snapshot at 18:22Z had no main macOS test cache. Missing keys alone do
+not distinguish eviction, runner-image turnover and not-yet-seeded locks.
+
+## Where the time goes
+
+From main run 42651976389, seconds (Cargo compilation versus suite execution):
+
+| Suite | macOS compile / execution | Windows compile / execution |
+| --- | --- | --- |
+| Core, no default features | 59.8 / 572.5 | about 75 / 448.5 |
+| Core, streaming | 59.6 / 528.9 | about 77 / 444.7 |
+| PocketStation full core suite | not applicable | about 104 / 451.7 |
+| Diarization filter | 54.5 / 42.6 | about 96 / 15.5 |
+| Desktop unit binary | 144 / 10.1 | already excluded upstream |
+| Core integration binary | 30.7 / 43.8 | already excluded upstream |
+
+Core is the slowest test binary. Libtest's completed-test log gaps identify
+follow-ups, not exact per-test CPU timings: `knowledge::tests::para_normal_updates_recycle_private_generations_beyond_128_then_retract`
+takes about 60-70 seconds on macOS; `knowledge::tests::source_revision_flip_before_or_after_write_leaves_no_derivative_in_any_adapter`
+about 71 seconds on Windows; the bounded audio decoder/ffmpeg watcher tests
+frequently take 15-30 seconds each. These repeat in the full feature suites.
+No assertion or test implementation is changed here.
+
+## Decision and safety
+
+The proposed split puts the complete no-default and streaming core suites,
+real model-free CLI build, and focused copilot/CLI contracts on independent
+runners alongside the existing feature/native/desktop matrix. Every suite
+keeps its existing OS coverage, filters, serial libtest execution and timeout.
+A core-only build is subsumed by the identical core-plus-CLI build.
+
+Reduce only CI dev/test debug information to `line-tables-only`, retaining
+source-line backtraces. Debug assertions, overflow checks, optimizations,
+release profiles and production artifacts keep their existing settings.
+See [Cargo profile documentation](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+The cache namespace must change for this profile. Both lanes read the same
+exact-image, toolchain-and-lockfile-scoped entry; only the feature lane on
+main saves. No additional multi-GB target cache is introduced.
+
+Earlier attempts matter: #1106 restricted saves to main after PR caches
+thrashed storage; #1109 disabled incremental compilation but did not reduce
+cache size; #1111 removed the noncritical Linux full-build cache to get below
+the budget. Keep all three protections and exact ImageOS/ImageVersion scoping.
+No fallback may restore native objects from a different Xcode/MSVC image.
+
+No platform tests move to Linux. History includes Windows named-pipe behavior,
+Windows path/atomic-move fixes, macOS socket permissions, #591's desktop test
+failure, #951/#952's unexecuted whisper/streaming regressions, and the native
+sherpa/ORT symbol collision (#683/#685). Their execution gates remain intact.
+`CI Gate` must depend on both matrices and fail on failure or cancellation;
+required check names remain `CI Gate` and `actionlint`. Tag preflight and
+release workflows are unchanged.
+
+Nextest process isolation and sharding could reduce long serial suites, but
+would change fixture execution semantics. Moving tests between OSes would
+reduce coverage. sccache would add a second storage system and cannot shorten
+the measured test execution. A version-only fast path would require a new
+classifier and weaken the simple full-main-CI release precondition. Defer all
+four until this smaller scheduling/profile change is measured.
+
+## This PR's comparison
+
+The first CI run measures the unchanged baseline on this PR. The optimized
+run and exact job timings will be recorded here after completion. Cold cache
+results will be labeled explicitly; no warm-cache gain is assumed.

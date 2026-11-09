@@ -112,6 +112,7 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/ci.yml'
 
+  # Baseline timing run for the CI split; keep the existing checks unchanged.
   test:
     name: Test (${{ matrix.os }})
     needs: changes

@@ -1363,7 +1363,10 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             "app-add-note",
             tr("Add Note…"),
             true,
-            Some("Cmd+Shift+N"),
+            // `CmdOrCtrl`, not `Cmd`: this File menu also builds on Windows
+            // and Linux, where a bare `Cmd` modifier makes menu construction
+            // fail and the app exits at startup (#1322).
+            Some("CmdOrCtrl+Shift+N"),
         )?;
         let list_item = MenuItem::with_id(
             app,
@@ -4496,6 +4499,36 @@ mod relaunch_tests {
         assert_eq!(
             enclosing_app_bundle(Path::new("/Users/x/target/release/minutes-app")),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod app_menu_accelerator_tests {
+    /// Menus outside the macOS-only app menu build on Windows and Linux too.
+    /// A bare `Cmd` modifier there fails menu construction, so the app never
+    /// starts (#1322). Those menus must spell it `CmdOrCtrl`.
+    #[test]
+    fn cross_platform_menus_do_not_use_a_mac_only_modifier() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("fn build_app_menu(")
+            .expect("build_app_menu exists");
+        let body_len = source[start + 1..]
+            .find("\nfn ")
+            .expect("a function follows build_app_menu");
+        let body = &source[start..start + 1 + body_len];
+        let mac_menu_start = body
+            .find("let app_menu = {")
+            .expect("macOS app menu block exists");
+        let mac_menu_end = body
+            .find("let file_menu = {")
+            .expect("File menu follows the macOS app menu");
+        let cross_platform = format!("{}{}", &body[..mac_menu_start], &body[mac_menu_end..]);
+        let bare_cmd = concat!("\"", "Cmd+");
+        assert!(
+            !cross_platform.contains(bare_cmd),
+            "a menu that also builds on Windows/Linux uses a bare Cmd accelerator; use CmdOrCtrl"
         );
     }
 }

@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 # One live run per PR: a new push supersedes the previous run's results, so
 # cancel it instead of letting it hold runners for 30+ minutes. Pushes to
 # main keep every run (each merge commit is worth a full result).

@@ -9,7 +9,7 @@ import {
 import { basename, dirname } from "path";
 import { TextDecoder } from "node:util";
 
-import { nodeChildEnvironment } from "./node-child.js";
+import { nodeChildEnvironment, resolveNodeHelperRuntime } from "./node-child.js";
 
 /**
  * Decode security-policy-bearing text without Unicode replacement.
@@ -425,12 +425,13 @@ class BoundParentReader {
 
   constructor(
     private readonly parent: string,
-    private readonly processReservationBytes: number
+    private readonly processReservationBytes: number,
+    binary: string
   ) {
     this.termination = new Promise<void>((resolve) => {
       this.resolveTermination = resolve;
     });
-    this.child = spawn(process.execPath, ["-e", BOUND_READER_SOURCE], {
+    this.child = spawn(binary, ["-e", BOUND_READER_SOURCE], {
       cwd: parent,
       env: nodeChildEnvironment({ ...process.env, MINUTES_BOUND_PARENT: parent }),
       stdio: ["pipe", "pipe", "pipe"],
@@ -879,6 +880,7 @@ async function readFromBoundParent(
       DEFAULT_BOUND_READER_MAX_RESERVED_BYTES
     ),
   };
+  const binary = await resolveNodeHelperRuntime();
   let reader = readers.get(parent);
   if (reader && !reader.isUsable()) {
     const termination = reader.evictIfIdle();
@@ -910,7 +912,7 @@ async function readFromBoundParent(
     globalReaderProcessCount += 1;
     globalReaderProcessBytes += BOUND_READER_CHILD_BASELINE_BYTES;
     try {
-      reader = new BoundParentReader(parent, BOUND_READER_CHILD_BASELINE_BYTES);
+      reader = new BoundParentReader(parent, BOUND_READER_CHILD_BASELINE_BYTES, binary);
     } catch (error) {
       globalReaderProcessCount = Math.max(0, globalReaderProcessCount - 1);
       globalReaderProcessBytes = Math.max(

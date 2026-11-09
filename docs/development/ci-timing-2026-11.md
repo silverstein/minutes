@@ -58,15 +58,16 @@ The proposed split puts the complete no-default and streaming core suites,
 real model-free CLI build, and focused copilot/CLI contracts on independent
 runners alongside the existing feature/native/desktop matrix. Every suite
 keeps its existing OS coverage, filters, serial libtest execution and timeout.
-A core-only build is subsumed by the identical core-plus-CLI build.
+Both core-only and core-plus-CLI builds remain: the CLI always enables
+core/streaming, so they check different feature configurations.
 
 Reduce only CI dev/test debug information to `line-tables-only`, retaining
 source-line backtraces. Debug assertions, overflow checks, optimizations,
 release profiles and production artifacts keep their existing settings.
 See [Cargo profile documentation](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
 The cache namespace must change for this profile. Both lanes read the same
-exact-image, toolchain-and-lockfile-scoped entry; only the feature lane on
-main saves. No additional multi-GB target cache is introduced.
+exact-image and toolchain/config-scoped entry, with a lockfile key and a
+fallback for lockfile edits; only the feature lane on main saves. No additional multi-GB target cache is introduced.
 
 Earlier attempts matter: #1106 restricted saves to main after PR caches
 thrashed storage; #1109 disabled incremental compilation but did not reduce

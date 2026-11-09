@@ -437,6 +437,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-lines-v1-${{ hashFiles('rust-toolchain.toml', '.cargo/**') }}-
 
+      - name: Build core (no whisper)
+        # CLI always enables core/streaming, so its build cannot replace this
+        # feature-empty, non-test compile check.
+        run: cargo build -p minutes-core --no-default-features
+
       - name: Build copilot core + CLI (cross-platform)
         # PR #9 gate: compiles the local-socket transport as a Unix domain
         # socket on macOS/Linux and a named pipe on Windows, together with the

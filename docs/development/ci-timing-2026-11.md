@@ -43,7 +43,7 @@ Earlier attempts matter: #1106 restricted saves to main after PR caches thrashed
 
 No platform tests move to Linux. History includes Windows named-pipe behavior, Windows path/atomic-move fixes, macOS socket permissions, #591's desktop test failure, #951/#952's unexecuted whisper/streaming regressions, and the native sherpa/ORT symbol collision (#683/#685). Their execution gates remain intact. `CI Gate` depends on every CI job, including both matrices and the previously omitted Desktop Recall contracts. It rejects failure, cancellation, missing path detection, and skipped required Rust matrices. Required check names remain `CI Gate` and `actionlint`. Tag preflight and release workflows are unchanged. Workflow permissions default to `contents: read`; only path detection additionally gets `pull-requests: read`, required by [paths-filter](https://github.com/dorny/paths-filter#supported-workflows).
 
-Nextest process isolation and sharding could reduce long serial suites, but would change fixture execution semantics. Moving tests between OSes would reduce coverage. sccache would add a second storage system and cannot shorten the measured test execution. A version-only fast path would require a new classifier and weaken the simple full-main-CI release precondition. Defer all four until this smaller scheduling/profile change is measured.
+Nextest process isolation and sharding could reduce long serial suites, but would change fixture execution semantics. Moving tests between OSes would reduce coverage. sccache would add a second storage system and cannot shorten the measured test execution. A version-only fast path would require a new classifier and separate PR smoke selection from the full main suite. Defer all four until this smaller scheduling/profile change is measured.
 
 ## This PR's comparison
 
@@ -60,6 +60,24 @@ Nextest process isolation and sharding could reduce long serial suites, but woul
 
 All 11 feature-profile inventories report success. The four Windows runnable-test name sets exactly match green main run 42651976389: PocketStation 2,061; streaming 2,054; speech 142; optional engines 160. No test assertions, implementation, platform selection or deadlines changed. The two lanes run in parallel, not one after the other.
 
-The [initial same-PR control](https://github.com/silverstein/minutes/actions/runs/42674095248/attempts/1) started during the [Actions/Checks incident](https://www.githubstatus.com/). GitHub failed to schedule much of its graph; its Windows streaming step remained active beyond its 15-minute deadline and required forced cancellation. Exclude that attempt from clean timing comparisons. A Windows-only retry after recovery is linked with paired results in the PR body; the historical green runs above remain the complete three-platform baseline.
+The [initial same-PR control](https://github.com/silverstein/minutes/actions/runs/42674095248/attempts/1) started during the [Actions/Checks incident](https://www.githubstatus.com/). GitHub failed to schedule much of its graph; its Windows streaming step remained active beyond its 15-minute deadline and required forced cancellation. Exclude that attempt from clean timing comparisons. The recovery retry reconstructed the missing matrix siblings and passed all three original jobs: macOS 49.8 minutes, Windows 43.1, Linux 22.9. Mac and Windows restored warm caches (3,798 and 1,984 MiB); Linux missed. All 11 runnable and ignored test-name sets exactly match the optimized runs.
 
 Residual risks: more concurrent runners and duplicated CLI fixture builds; reduced debugger variable/type detail in CI; and an initial cold cache. The new namespace is saved only after a main push, so warm reuse and compressed cache size still need verification after a separately approved merge. No warm-cache benefit is included in these results. Nextest/process-level sharding and the pathological fixture timings remain follow-ups.
+
+The final PR verification at [`43dd5ef7`](https://github.com/silverstein/minutes/actions/runs/42682945471) also passed with cold cargo caches. Its feature/core times were macOS 38.7/14.4 minutes, Windows 28.4/19.3, Linux 16.5/7.6. Whole-workflow elapsed time was 43.2 minutes. The Mac compile/link variation between the two optimized runs is material; the 28.8-minute first run is an observation, not a runtime guarantee.
+
+## Post-merge notes
+
+The [first main push run](https://github.com/silverstein/minutes/actions/runs/42691998341) at `567c153e` passed every job. Whole-workflow elapsed time was 43.8 minutes. The slowest Rust job was **Test features (macos-latest), 43.5 minutes**, including its 92-second cache save. PR runs did not measure cache upload time.
+
+| Platform | Features / core minutes | Cache save seconds | Saved cache GiB |
+| --- | --- | --- | --- |
+| macOS | 43.5 / 21.6 | 92 | 2.89 |
+| Windows | 29.5 / 17.5 | 35 | 1.26 |
+| Linux | 16.3 / 7.7 | 17 | 1.49 |
+
+All three feature jobs missed on restore, logged successful saves, and had matching new `cargo-lines-v1` entries under `refs/heads/main` in the cache API. The three entries total 5.65 GiB compressed. The repository-wide cache index snapshot was 12.33 GiB, including older namespaces and other workflows; warm reuse and retention under the cache quota remain unverified. No cache entries were deleted.
+
+`core_tests` does not set the macOS `CXXFLAGS` value used by the feature job. Restoring the feature job's cache may therefore cause C++ dependency recompilation in the core job. This cold run cannot verify that warm-restore effect; the flag difference is recorded for later measurement, with no workflow change here.
+
+The `split-core` concurrency namespace and its comment about finishing the original-workflow baseline are leftovers from the timing experiment. The controls have finished. Both remain in the merged workflow; per-PR cancellation semantics are unchanged.

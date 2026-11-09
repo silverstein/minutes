@@ -283,6 +283,51 @@ Google contract references verified September 16, 2026:
 - https://ai.google.dev/gemini-api/docs/live-api/tools
 - https://ai.google.dev/gemini-api/docs/generate-content/google-search
 
+## Voice delegation context
+
+Voice Live maintains a process-local working context as user transcription,
+assistant text and delivered read-tool evidence arrive. It also remembers text
+the host explicitly shares through `/work share` or selected-text sharing. It
+does not read private work history, search the archive speculatively, run a model
+or launch an agent in the background. Raw audio and images are not copied into
+the context. Voice transcripts remain hypotheses; no identity/text rewriting
+or automatic interpretation turns speech into an accepted decision.
+
+When `ask_agent` arrives, the session freezes a versioned snapshot before queueing
+the call. The existing local review includes that snapshot in `minutes_context`.
+Dispatch uses those exact reviewed bytes, even if the user continues talking
+while the job is queued or awaiting review. Corrections to a proposed task need
+a new proposal and review. A model cannot provide `minutes_context` or authorize
+dispatch. This adds no new approval step to other Voice Live tools.
+
+The snapshot retains at most 16 entries, at most 1,024 UTF-8 bytes per entry,
+and at most 8,192 bytes for its JSON envelope. Older material is shed first;
+truncation is explicit. Tool evidence carries its tool/call provenance and is
+historical, not proof a source is still current or authorized. Drafts and
+interrupted/generated assistant text are labeled separately from user input.
+Only successful, delivered public-research and source-attested `get_meeting`
+results are eligible. Meeting reads are compared with current authorized bytes
+when cached, and their canonical path and full-content hash are checked again
+immediately before agent dispatch. A changed, deleted or newly restricted source
+refuses the handoff and requires a new read and review. Aggregate searches and
+knowledge/graph results are omitted until complete source attestations exist;
+failed, cancelled, undelivered, arbitrary MCP and action results are excluded.
+Text explicitly shared by the host is separately labeled. Speaker-playback
+transcription without echo cancellation invalidates the cache instead of being
+accepted as user instructions. Contention never waits on the voice producer;
+missed updates invalidate older context and mark the next snapshot incomplete.
+Stopping clears the context, and a new session gets a distinct epoch.
+
+Context preparation is local and requires no OpenAI API key or API credit.
+Actual delegation continues to use the configured agent CLI and its existing
+authentication/billing. The Gemini Live voice connection is unchanged. This
+does not keep a model connection warm, eliminate agent startup or establish a
+measured latency improvement. `delegation_context_prepared` logs only revision,
+epoch, byte count, completeness and preparation duration, never its contents.
+Synthetic tests exercise correction/interrupt behavior and the actual review,
+dispatch and subprocess path using an offline echo executable. Native voice
+acceptance and live latency measurements remain separate release checks.
+
 ## Lint scope
 
 The portable harness uses global `-D warnings`. The integrated voice-only

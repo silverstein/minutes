@@ -616,6 +616,7 @@ struct QueuedCall {
     call: FunctionCall,
     origin: DispatchOrigin,
     music_epoch: u64,
+    delegation_context: Option<super::delegation_context::Snapshot>,
 }
 
 // A stop/pause invalidates autoplay for requests already admitted, including
@@ -790,11 +791,12 @@ impl Runner {
                             });
                         }
                         let host_origin = !matches!(queued.origin, DispatchOrigin::Model);
+                        let selection_origin = matches!(queued.origin, DispatchOrigin::Selection(_));
                         let cancellation = calls.lock().unwrap_or_else(|p|p.into_inner()).cancellation(&call.id);
                         let outcome = super::jobs::with_cancellation(cancellation, || match queued.origin {
                             DispatchOrigin::Approved(id) => tools.execute_approved(id),
                             DispatchOrigin::Selection(bundle) => tools.capture_selection_from_host(bundle.as_deref()),
-                            DispatchOrigin::Model => tools.execute(&call.name, &call.args),
+                            DispatchOrigin::Model => tools.execute_with_context(&call.name, &call.args, queued.delegation_context),
                         });
                         running.store(false, Ordering::Relaxed);
                         let stopped = outcome.is_error && matches!(call.name.as_str(), "build_prototype" | "continue_prototype_redirect" | "review_pull_request") && serde_json::from_str::<serde_json::Value>(&outcome.text).ok().and_then(|v|v["error"].as_str().map(|e|e.starts_with("agent_cancelled:"))).unwrap_or(false);
@@ -880,6 +882,13 @@ impl Runner {
                                 text: format!("{} finished after the socket closed", call.name),
                             });
                             continue;
+                        }
+                        if !stop_flag.load(Ordering::SeqCst) {
+                            if selection_origin && !outcome.is_error {
+                                tools.delegation_context.shared_text("host_selected_text", &outcome.text);
+                            } else {
+                                tools.observe_tool_delivery(&call.id, &call.name, &call.args, &outcome, true);
+                            }
                         }
                         if let Some(image) = outcome.image.as_ref().filter(|_| host_origin) {
                             if settle > Duration::ZERO {
@@ -1024,15 +1033,20 @@ impl Runner {
                             // asked for confirmation.
                             if self.audio.cancels_echo() || self.audio.is_idle() {
                                 self.tools.desktop.heard_user(&t);
+                                self.tools.delegation_context.user_chunk(&t);
+                            } else {
+                                self.tools.delegation_context.invalidate();
                             }
                             you.push_str(&t);
                             self.emit(VoiceLiveEvent::UserTranscript { text: t, partial: true });
                         }
                         ServerEvent::OutputTranscript(t) | ServerEvent::Text(t) => {
+                            self.tools.delegation_context.assistant_chunk(&t);
                             me.push_str(&t);
                             self.emit(VoiceLiveEvent::AssistantTranscript { text: t, partial: true });
                         }
                         ServerEvent::Interrupted => {
+                            self.tools.delegation_context.finish_turn(true);
                             self.log_line(serde_json::json!({"event":"provider_interruption","discarded_output_characters":me.chars().count(),"playback_pending":playback_pending}).to_string());
                             response_audio_started = false;
                             playback_pending = false;
@@ -1042,6 +1056,7 @@ impl Runner {
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         ServerEvent::TurnComplete => {
+                            self.tools.delegation_context.finish_turn(false);
                             self.log_line(serde_json::json!({"event":"provider_turn_complete"}).to_string());
                             response_audio_started = false;
                             // The end of the assistant's turn is the earliest
@@ -1097,7 +1112,14 @@ impl Runner {
                                         continue;
                                     }
                                 }
-                                let queued = QueuedCall { call, origin: DispatchOrigin::Model, music_epoch: music_autoplay.epoch };
+                                let prepared_at = Instant::now();
+                                let delegation_context = if call.name == "ask_agent" {
+                                    self.tools.delegation_context.snapshot()
+                                } else { None };
+                                if call.name == "ask_agent" {
+                                    self.log_line(delegation_context_log(&id, delegation_context.as_ref(), prepared_at.elapsed()));
+                                }
+                                let queued = QueuedCall { call, origin: DispatchOrigin::Model, music_epoch: music_autoplay.epoch, delegation_context };
                                 if let Err(rejected) = tool_txs[queued.lane()].try_send(queued) {
                                     calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
                                     let call = rejected.into_inner().call;
@@ -1243,6 +1265,7 @@ impl Runner {
                                     Ok(HostResult::Local(text)) => self.emit(VoiceLiveEvent::Local { text }),
                                     Ok(HostResult::Share(text)) => {
                                         if self.client().send_text_turn(&text).is_err() { break; }
+                                        self.tools.delegation_context.shared_text("host_shared_work", &text);
                                         activity.provider_status(ProviderActivity::InProgress);
                                     }
                                     Ok(HostResult::Approve(id)) => {
@@ -1252,6 +1275,7 @@ impl Runner {
                                             call: FunctionCall { id: call_id.clone(), name: "host-approved action".into(), args: serde_json::json!({}) },
                                             origin: DispatchOrigin::Approved(id),
                                             music_epoch: music_autoplay.epoch,
+                                            delegation_context: None,
                                         }).is_err() {
                                             calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&call_id);
                                             if let Ok(mut host) = self.tools.continuity.lock() { host.reject(); }
@@ -1280,6 +1304,7 @@ impl Runner {
                                                 call: FunctionCall { id: id.clone(), name: "user-shared selection".into(), args: serde_json::json!({}) },
                                                 origin: DispatchOrigin::Selection(bundle),
                                                 music_epoch: music_autoplay.epoch,
+                                                delegation_context: None,
                                             }).is_err() {
                                                 calls.lock().unwrap_or_else(|p| p.into_inner()).cancel(&id);
                                                 self.emit(VoiceLiveEvent::Local { text: "Selection was not queued; nothing captured or shared.".into() });
@@ -1306,6 +1331,7 @@ impl Runner {
                             self.log_line(format!("**You (typed):** {text}"));
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
                             if self.client().send_text_turn(&text).is_err() { break; }
+                            self.tools.delegation_context.typed_user(&text);
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         Ok(Control::Stop) | Err(_) => break,
@@ -1324,6 +1350,7 @@ impl Runner {
             host.reject();
         }
         self.flush_transcripts(&mut you, &mut me);
+        self.tools.delegation_context.close();
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
         self.tools.stop_shared_context();
@@ -1365,6 +1392,25 @@ impl Runner {
             l.write(&line);
         }
     }
+}
+
+fn delegation_context_log(
+    call_id: &str,
+    snapshot: Option<&super::delegation_context::Snapshot>,
+    elapsed: Duration,
+) -> String {
+    serde_json::json!({
+        "event":"delegation_context_prepared", "call_id":call_id,
+        "available":snapshot.is_some(),
+        "session_epoch":snapshot.map(|s|s.session_epoch),
+        "revision":snapshot.map(|s|s.revision),
+        "bytes":snapshot.map(|s|s.bytes()),
+        "incomplete":snapshot.map(|s|s.incomplete),
+        "truncated":snapshot.map(|s|s.truncated),
+        "elapsed_us":elapsed.as_micros(),
+        "scope":"local context preparation only; no inference or tool execution"
+    })
+    .to_string()
 }
 
 /// Unrelated tool completions must not redisplay an unchanged approval.
@@ -1585,6 +1631,22 @@ mod tests {
     }
 
     #[test]
+    fn delegation_timing_receipt_contains_metadata_without_dialogue_or_evidence() {
+        let context = super::super::delegation_context::Store::default();
+        context.user_chunk("private correction");
+        context.delivered_evidence("fixture", "research_public", "private evidence", None);
+        let snapshot = context.snapshot().unwrap();
+        let receipt =
+            delegation_context_log("delegate-1", Some(&snapshot), Duration::from_micros(11));
+        let value: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(value["elapsed_us"], 11);
+        assert_eq!(value["revision"], snapshot.revision);
+        assert!(value["bytes"].as_u64().unwrap() > 0);
+        assert!(!receipt.contains("private correction"));
+        assert!(!receipt.contains("private evidence"));
+    }
+
+    #[test]
     fn approval_is_logged_as_pending_not_executed() {
         let call = FunctionCall {
             id: "call-1".into(),
@@ -1652,6 +1714,7 @@ mod tests {
             },
             origin: DispatchOrigin::Model,
             music_epoch: 0,
+            delegation_context: None,
         }
     }
 

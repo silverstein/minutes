@@ -103,6 +103,15 @@ The desktop Dictation settings bring writing preferences, personal spellings and
 
 See [dictation behavior and evaluation boundaries](docs/design/dictation-experience.md) for supported fields, safe insertion and undo, clipboard restoration, and the synthetic benchmark.
 
+## Voice Live
+
+Voice Live's optional local-agent handoff prepares bounded recent dialogue and
+already-shared evidence while you talk. The exact context is included in the
+existing local review before dispatch. It uses your configured agent CLI and
+authentication; context preparation needs no OpenAI API key or model request.
+See [voice delegation context](docs/architecture/voice-continuity-integration.md#voice-delegation-context)
+for disclosure, truncation, and verification boundaries.
+
 ## Output format
 
 Meetings are plain markdown with structured YAML frontmatter:

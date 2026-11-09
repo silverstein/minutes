@@ -82,11 +82,30 @@ The Mac result bounds the opportunity more usefully than the shared Linux host: 
 
 The canonical installer produced a signed target-only Minutes Dev bundle with a strict seal on the same Mac. Signing from SSH first failed with `errSecInternalComponent`; one minimal probe reproduced the failure. That same probe and the canonical build succeeded from a fresh Apple Terminal instance. This is signing-context evidence, not a permission grant or installed-app acceptance. The intended identity is `com.useminutes.desktop.dev`, with signing authority `Apple Development: Mathieu Silverstein (97C8UF8QVF)` and observed TeamIdentifier `63TMLKT8HN`.
 
-A subsequent installed-app qualification attempt was interrupted by loss of SSH and Tailnet connectivity before the installation command returned a receipt. Whether that attempt started or changed the installed Dev bundle remains unconfirmed. The prior idle installed Dev process was PID 80937; no new running PID or installed executable time was verified. Do not treat the signed target bundle as the installed app. The production Minutes app was not an installation target.
+## Signed installed-app follow-up — 2026-11-09
 
-The prepared acceptance harness uses a separate config/data root, an exact pinned virtual input (`MMAudio Device`), a dedicated TextEdit document, and a unique shortcut. A private playback helper verified per-process routing of the public fixture to that virtual output while leaving the system default output unchanged. No app capture or insertion test completed, so this routing result does not prove virtual loopback, recognition, delivery, or release latency. No private microphone or meeting audio was used for the completed replay checks.
+Silverbook became reachable again. The missing launch/build receipts confirmed the interrupted November 6 installation command did not reach the host. The retained runtime checkout was still clean at `6534df23b044884e1c211da41f32b154037e5df3`. Current `main` had advanced without changes to the dictation runtime files; this qualification remains bound to the candidate commit rather than implying a main-branch release.
 
-Raw Mac replay and signing evidence remains in the owned Mac artifact directory `~/.codex/artifacts/minutes-dictation-reuse-mac-20261106/` (`tiny-metal.json`, `small-metal.json`, `model-regression.log`, and `aqua-signed-target-build.log`). Retrieval and the state of the attempted install must be checked when the Mac is reachable. `minutes-n843` remains open for installed-app acceptance and useful natural hit-rate evidence. The default remains off.
+Before replacing the idle Dev app, its newer November 7 signed bundle was preserved in the task's private artifact directory. The canonical installer then completed successfully from a fresh Apple Terminal instance. The installed bundle passed the strict deep seal check, and the installed-binary hotkey diagnostic returned exit 0 with `input_monitoring_granted: true` and `CGEventTap started successfully for this process identity.` This proves the event-tap diagnostic, not actual shortcut handling, microphone authorization, or destination insertion.
+
+| Installed-app evidence | Observed value |
+| --- | --- |
+| Runtime source | `6534df23b044884e1c211da41f32b154037e5df3` |
+| Installed path | `~/Applications/Minutes Dev.app` |
+| Identifier | `com.useminutes.desktop.dev` |
+| Authority / TeamIdentifier | `Apple Development: Mathieu Silverstein (97C8UF8QVF)` / `63TMLKT8HN` |
+| Installed executable SHA-256 | `946578c8aa667375dea8f0d8ffb6b49875ea02c679f81a00563e325ade1baa8b` |
+| Installed executable modification time | `2026-11-09T05:13:50.188936Z` |
+| Fresh isolated launch | PID `82539`, started `2026-11-09T05:14:10Z` |
+| Strict signature seal / native hotkey probe | Passed / exit 0 |
+
+The acceptance harness uses a separate config/data root, an exact pinned virtual input (`MMAudio Device`), a dedicated TextEdit document, and a unique shortcut. A private playback helper verified per-process routing of the repository fixture to that virtual output while leaving the system default output unchanged. The signed app preloaded the existing Tiny model in about 1.34–1.37 seconds across the three isolated launches. That is a diagnostic preload duration, not end-to-end startup performance.
+
+No dictation capture was established by the injected shortcut attempts (first F12, then K, each with Control/Option/Shift). A separate unmodified injected key changed the owned TextEdit field and was confirmed by AX readback; this does not prove that the OS dispatched the registered global chord. The initial foreground request also needed a retry before the driver independently verified the exact target. Actual shortcut handling, microphone capture, cancellation, and insertion remain unresolved. The app's screen-share protection produced a black app-window screenshot; its AX tree was inspectable, and the dedicated TextEdit screenshot rendered normally. No permission toggles or input-driver changes were made.
+
+At Mat's coordination request, native QA was released to the Silverbook lane qualifying PR #1319. The isolated profile reported recording and processing false, no capture PID marker existed, the custom Dev process (last PID `93287`) quit, and the task's native-driver session ended. The installed Dev bundle at handoff was this candidate; the normal user config/data and production app were not installation targets. Further native installs/launches wait for explicit handback from the coordinating lane.
+
+Raw public-fixture Mac replay pairs are checked in as [Tiny](fixtures/dictation-final-reuse-mac-tiny-2026-11-06.json) and [Small](fixtures/dictation-final-reuse-mac-small-2026-11-06.json). Private signing/runtime receipts remain in `~/.codex/artifacts/minutes-dictation-reuse-mac-20261106/` on the Mac, with retrieved evidence also preserved on the build host. `minutes-n843` remains open for installed-app behavior and useful natural hit-rate evidence. The default remains off.
 
 ## Final local checks
 
@@ -101,4 +120,4 @@ Raw Mac replay and signing evidence remains in the owned Mac artifact directory 
 | Coverage auditor tests and feature mapping audit | 16 tests passed; mapping audit passed (PyYAML supplied through an isolated uv environment) |
 | Rust formatting, diff checks, versions, generated agent docs | Passed; generated site test-count drift is explicitly non-failing in the existing checker |
 
-The model-dependent regression remains ignored in ordinary CI because it requires an explicit installed model. It was executed separately here. A signed Mac target-only build and Metal replay were completed as described above. Installed-app acceptance, app microphone capture, physical key-release timing, destination insertion, real-speaker accuracy, natural reuse hit rate, and battery measurement remain unverified. No default promotion or release follows from these checks.
+The model-dependent regression remains ignored in ordinary CI because it requires an explicit installed model. It was executed separately here. A signed installed Mac build, fresh-process verification, native event-tap diagnostic, and Metal replay were completed as described above. Actual shortcut behavior, app microphone capture, physical key-release timing, destination insertion, real-speaker accuracy, natural reuse hit rate, and battery measurement remain unverified. No default promotion or release follows from these checks.

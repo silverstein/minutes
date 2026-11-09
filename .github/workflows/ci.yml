@@ -9,8 +9,9 @@ on:
 # One live run per PR: a new push supersedes the previous run's results, so
 # cancel it instead of letting it hold runners for 30+ minutes. Pushes to
 # main keep every run (each merge commit is worth a full result).
+# Namespace the split topology so an in-flight pre-split baseline can finish.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-split-core-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -112,12 +113,16 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/ci.yml'
 
-  # Baseline timing run for the CI split; keep the existing checks unchanged.
   test:
-    name: Test (${{ matrix.os }})
+    name: Test features (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ${{ matrix.os }}
+    env:
+      # Keep filename/line backtraces, without full type/variable debug data.
+      # Assertions and overflow checks retain the normal debug-profile defaults.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +159,8 @@ jobs:
         shell: bash
         run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
 
+      # A lockfile edit can reuse dependencies, but never cross an image,
+      # toolchain or Cargo-config boundary. Cargo revalidates the changed graph.
       - name: Restore cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v6
@@ -162,20 +169,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-noincr-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-lines-v1-${{ hashFiles('rust-toolchain.toml', '.cargo/**') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-lines-v1-${{ hashFiles('rust-toolchain.toml', '.cargo/**') }}-
 
       - name: Test macOS call-detection device and attribution boundary
         if: runner.os == 'macOS'
         run: python3 scripts/test_mic_check.py
-
-      - name: Build core (no whisper)
-        run: cargo build -p minutes-core --no-default-features
-
-      - name: Build copilot core + CLI (cross-platform)
-        # PR #9 gate: compiles the local-socket transport as a Unix domain
-        # socket on macOS/Linux and a named pipe on Windows, together with the
-        # CLI attachment and measured model router.
-        run: cargo build -p minutes-core -p minutes-cli --no-default-features
 
       - name: Build core with diarization (cross-platform)
         run: cargo build -p minutes-core --no-default-features --features diarize
@@ -330,50 +330,6 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --no-default-features
 
-      - name: Unit tests (no whisper)
-        # Keep libtest output visible on hosted Windows so a platform-only
-        # assertion is diagnosable even if a later test reaches the job
-        # deadline. Privacy-B also substantially expanded this suite; three
-        # minutes no longer covers its bounded two-worker/QMD regressions.
-        run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
-        timeout-minutes: 15
-
-      - name: Unit tests (streaming feature)
-        # The step above runs with streaming off, so every #[cfg(test)] module
-        # inside a streaming-gated file was compiled by "Build core with
-        # streaming only" and then never executed. That covered the dual-source
-        # chunking invariants in streaming.rs and the mic-mute tests. Run the
-        # same suite once more with the feature on.
-        run: python scripts/test_coverage.py run streaming
-        timeout-minutes: 15
-
-      - name: Copilot attach, routing, and window-contract tests
-        # On Windows this executes the real named-pipe connect/reconnect path.
-        # On Unix it also asserts owner-only socket/discovery permissions.
-        run: "cargo test -p minutes-core --no-default-features --lib copilot:: -- --test-threads=1"
-        timeout-minutes: 4
-
-      - name: Copilot CLI contract tests
-        run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
-        timeout-minutes: 4
-
-      - name: CLI transcription renderer contracts
-        # Core attribution tests do not execute this independent CLI renderer.
-        # Exercise both formats, overlap/turn-crossing abstention, and absent
-        # evidence with deterministic injected results and no audio device.
-        run: cargo test -p minutes-cli --no-default-features -- transcribe_ --test-threads=1
-        timeout-minutes: 4
-
-      - name: CLI voice-enrollment contracts
-        run: cargo test -p minutes-cli --no-default-features -- enrollment_ --test-threads=1
-        timeout-minutes: 4
-
-      - name: CLI model-setup preferences
-        run: |
-          cargo test -p minutes-cli --no-default-features --bin minutes -- setup_ --test-threads=1
-          cargo test -p minutes-cli --no-default-features --test model_setup_preferences -- --test-threads=1
-        timeout-minutes: 4
-
       - name: Diarization unit tests (cross-platform)
         run: cargo test -p minutes-core --no-default-features --features diarize --lib -- diarize --test-threads=1
         timeout-minutes: 3
@@ -434,6 +390,111 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Keep libtest serial inside each process: fixtures mutate HOME and other
+  # process-global state. Parallelize independent runners instead. Both jobs
+  # run on every supported OS, and CI Gate depends on both complete matrices.
+  core_tests:
+    name: Test core (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install audio dev headers (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: .github/scripts/apt-install.sh libasound2-dev libpipewire-0.3-dev libspa-0.2-dev
+
+      - name: Resolve runner image for cache scope
+        id: runner-image
+        shell: bash
+        run: echo "scope=${ImageOS:-noimage}-${ImageVersion:-noversion}" >> "$GITHUB_OUTPUT"
+
+      # Read the feature job's main-only cache, never save a second target/
+      # per OS. Duplicating multi-GB entries caused eviction in #1106/#1109.
+      # The exact image and profile namespace must match the feature job;
+      # never restore native objects from a different Xcode/MSVC image.
+      - name: Restore cargo cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-lines-v1-${{ hashFiles('rust-toolchain.toml', '.cargo/**') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-lines-v1-${{ hashFiles('rust-toolchain.toml', '.cargo/**') }}-
+
+      - name: Build copilot core + CLI (cross-platform)
+        # PR #9 gate: compiles the local-socket transport as a Unix domain
+        # socket on macOS/Linux and a named pipe on Windows, together with the
+        # CLI attachment and measured model router.
+        run: cargo build -p minutes-core -p minutes-cli --no-default-features
+
+      - name: Unit tests (no whisper)
+        # Keep libtest output visible on hosted Windows so a platform-only
+        # assertion is diagnosable even if a later test reaches the job
+        # deadline. Privacy-B also substantially expanded this suite; three
+        # minutes no longer covers its bounded two-worker/QMD regressions.
+        run: cargo test -p minutes-core --no-default-features --lib -- --test-threads=1 --nocapture
+        timeout-minutes: 15
+
+      - name: Unit tests (streaming feature)
+        # The step above runs with streaming off, so every #[cfg(test)] module
+        # inside a streaming-gated file was compiled by "Build core with
+        # streaming only" and then never executed. That covered the dual-source
+        # chunking invariants in streaming.rs and the mic-mute tests. Run the
+        # same suite once more with the feature on.
+        run: python scripts/test_coverage.py run streaming
+        timeout-minutes: 15
+
+      - name: Copilot attach, routing, and window-contract tests
+        # On Windows this executes the real named-pipe connect/reconnect path.
+        # On Unix it also asserts owner-only socket/discovery permissions.
+        run: "cargo test -p minutes-core --no-default-features --lib copilot:: -- --test-threads=1"
+        timeout-minutes: 4
+
+      - name: Copilot CLI contract tests
+        run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI transcription renderer contracts
+        # Core attribution tests do not execute this independent CLI renderer.
+        # Exercise both formats, overlap/turn-crossing abstention, and absent
+        # evidence with deterministic injected results and no audio device.
+        run: cargo test -p minutes-cli --no-default-features -- transcribe_ --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI voice-enrollment contracts
+        run: cargo test -p minutes-cli --no-default-features -- enrollment_ --test-threads=1
+        timeout-minutes: 4
+
+      - name: CLI model-setup preferences
+        run: |
+          cargo test -p minutes-cli --no-default-features --bin minutes -- setup_ --test-threads=1
+          cargo test -p minutes-cli --no-default-features --test model_setup_preferences -- --test-threads=1
+        timeout-minutes: 4
+
+      - name: Upload executed feature-test inventory
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: feature-test-inventory-core-${{ runner.os }}
+          path: target/test-coverage/*.json
+          if-no-files-found: warn
+          retention-days: 14
 
   install:
     name: Install CLI (${{ matrix.os }})
@@ -1211,6 +1272,7 @@ jobs:
       - changes
       - sherpa_macos_packaging
       - test
+      - core_tests
       - install
       - linux_full_build
       - desktop_windows

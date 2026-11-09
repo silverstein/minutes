@@ -85,7 +85,7 @@ import {
   validatePathInDirectory,
 } from "./paths.js";
 import { isCliCompatible, parseVersion } from "./version.js";
-import { nodeChildEnvironment } from "./node-child.js";
+import { nodeChildEnvironment, resolveNodeHelperRuntime, NodeHelperRuntimeError } from "./node-child.js";
 import {
   hasFeature,
   probeCapabilitiesSync,
@@ -6732,7 +6732,8 @@ function killProcessAudioGroup(child: ReturnType<typeof spawn>): void {
   }
 }
 
-function processAudioHelperInvocation(): { binary: string; args: string[] } {
+async function processAudioHelperInvocation(): Promise<{ binary: string; args: string[] }> {
+  const binary = await resolveNodeHelperRuntime();
   const currentModule = fileURLToPath(import.meta.url);
   const sourceMode = extname(currentModule) === ".ts";
   const helper = fileURLToPath(
@@ -6742,8 +6743,8 @@ function processAudioHelperInvocation(): { binary: string; args: string[] } {
     )
   );
   return sourceMode
-    ? { binary: process.execPath, args: ["--import", "tsx", helper] }
-    : { binary: process.execPath, args: [helper] };
+    ? { binary, args: ["--import", "tsx", helper] }
+    : { binary, args: [helper] };
 }
 
 function writeBoundedProcessAudioHelperRequest(
@@ -6778,6 +6779,7 @@ export async function runIsolatedMcpProcessAudio(
   if (process.platform !== "linux" && process.platform !== "darwin") {
     throw new Error("Access denied: private audio processing is unavailable");
   }
+  const helper = await processAudioHelperInvocation();
   if (processAudioIsolationPoisoned) {
     throw new Error(
       "Access denied: private audio processing requires an MCP restart"
@@ -6803,7 +6805,6 @@ export async function runIsolatedMcpProcessAudio(
   try {
     const initialMeetingsRoot = await resolveEffectiveMeetingsRoot();
     requireProcessAudioBudget(budget);
-    const helper = processAudioHelperInvocation();
     const safeExtraEnv = { ...(options.extraEnv ?? {}) };
     delete safeExtraEnv.MINUTES_MCP_OUTER_PROCESS_GROUP;
 
@@ -7128,6 +7129,9 @@ export async function handleMcpProcessAudioRequest(
       releaseJob();
     }
   } catch (error) {
+    if (error instanceof NodeHelperRuntimeError) {
+      return mcpProcessAudioError("node-helper-runtime-unavailable", error.message);
+    }
     return mcpProcessAudioError(
       "processing-failed",
       "process_audio failed safely during authorization or execution. No CLI error details or input paths were returned."

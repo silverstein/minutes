@@ -25,7 +25,7 @@ import {
   type BoundFileRevision,
   writeOperatorDiagnostic,
 } from "./secure-read.js";
-import { nodeChildEnvironment } from "./node-child.js";
+import { nodeChildEnvironment, resolveNodeHelperRuntime } from "./node-child.js";
 
 const MAX_AUTHORIZATION_ATTEMPTS = 2;
 const DEFAULT_FENCE_TIMEOUT_MS = 5_000;
@@ -1846,22 +1846,23 @@ function releaseUnconfirmedCorpusWorker(): void {
 }
 let nextPauseId = 1;
 
-function corpusWorkerInvocation(scriptOverride?: string): {
+async function corpusWorkerInvocation(scriptOverride?: string): Promise<{
   binary: string;
   args: string[];
-} {
-  if (scriptOverride) return { binary: process.execPath, args: [scriptOverride] };
+}> {
+  const binary = await resolveNodeHelperRuntime();
+  if (scriptOverride) return { binary, args: [scriptOverride] };
   const sourceMode = import.meta.url.endsWith(".ts");
   const helper = fileURLToPath(
     new URL(`./corpus-lease-worker.${sourceMode ? "ts" : "js"}`, import.meta.url)
   );
-  if (!sourceMode) return { binary: process.execPath, args: [helper] };
+  if (!sourceMode) return { binary, args: [helper] };
   try {
     import.meta.resolve("tsx");
-    return { binary: process.execPath, args: ["--import", "tsx", helper] };
+    return { binary, args: ["--import", "tsx", helper] };
   } catch {
     const built = fileURLToPath(new URL("../dist/corpus-lease-worker.js", import.meta.url));
-    if (existsSync(built)) return { binary: process.execPath, args: [built] };
+    if (existsSync(built)) return { binary, args: [built] };
     throw new Error("Access denied: meeting corpus worker is unavailable");
   }
 }
@@ -1986,6 +1987,7 @@ async function dispatchStableCorpusLease<T>(
   if (hooks.beforeSentinelCreate) {
     return withStableCorpusLeaseInProcess(root, operation, hooks);
   }
+  const invocation = await corpusWorkerInvocation(hooks.workerScriptForTest);
   if (unconfirmedCorpusWorkers > 0) {
     throw new Error(
       "Access denied: a meeting corpus worker was killed without confirming it died"
@@ -1995,7 +1997,6 @@ async function dispatchStableCorpusLease<T>(
   const { budgetMs: authorizationBudgetMs, deadline } =
     authorizationWindow(hooks.timeoutMs);
   const timeoutMs = remainingAuthorizationMs(deadline);
-  const invocation = corpusWorkerInvocation(hooks.workerScriptForTest);
   const reservation = reserveCorpusMemory(budgets);
   const workerLimit = Math.min(MAX_ACTIVE_WATCHERS, budgets.maxWatcherCount);
   if (activeCorpusWorkerCount >= workerLimit) {

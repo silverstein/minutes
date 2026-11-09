@@ -939,6 +939,25 @@ fn transcribe_whisper_chunk_lines(
     hints: &DecodeHints,
 ) -> Result<ChunkLines, TranscribeError> {
     let ctx = load_whisper_context(config)?;
+    transcribe_whisper_chunk_lines_with_context(
+        &ctx,
+        samples,
+        chunk_ranges,
+        clock_offset,
+        config,
+        hints,
+    )
+}
+
+#[cfg(feature = "whisper")]
+fn transcribe_whisper_chunk_lines_with_context(
+    ctx: &whisper_rs::WhisperContext,
+    samples: &[f32],
+    chunk_ranges: &[(usize, usize)],
+    clock_offset: usize,
+    config: &Config,
+    hints: &DecodeHints,
+) -> Result<ChunkLines, TranscribeError> {
     let mut out = ChunkLines {
         lines: Vec::new(),
         stats: FilterStats::default(),
@@ -951,7 +970,7 @@ fn transcribe_whisper_chunk_lines(
         }
 
         let chunk_result = match transcribe_whisper_samples(
-            &ctx,
+            ctx,
             chunk_samples,
             Path::new("<vad-chunk>"),
             config,
@@ -977,6 +996,48 @@ fn transcribe_whisper_chunk_lines(
     }
 
     Ok(out)
+}
+
+/// A decoder owned by one checkpoint session. Config is frozen by the caller.
+#[derive(Default)]
+pub(crate) struct CheckpointChunkDecoder {
+    #[cfg(feature = "whisper")]
+    whisper: Option<whisper_rs::WhisperContext>,
+}
+
+impl CheckpointChunkDecoder {
+    pub(crate) fn transcribe(
+        &mut self,
+        samples: &[f32],
+        chunks: &[(usize, usize)],
+        offset: usize,
+        config: &Config,
+        hints: &DecodeHints,
+    ) -> Result<ChunkLines, TranscribeError> {
+        #[cfg(feature = "whisper")]
+        if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext
+        {
+            if self.whisper.is_none() {
+                self.whisper = Some(load_whisper_context(config)?);
+                tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
+                crate::logging::log_step(
+                    "capture_checkpoint_model_load",
+                    "",
+                    0,
+                    serde_json::json!({"engine":"whisper"}),
+                );
+            }
+            return transcribe_whisper_chunk_lines_with_context(
+                self.whisper.as_ref().expect("context loaded above"),
+                samples,
+                chunks,
+                offset,
+                config,
+                hints,
+            );
+        }
+        transcribe_chunk_lines(samples, chunks, offset, config, hints)
+    }
 }
 
 /// Meeting-specialized transcription path that can split long recordings at

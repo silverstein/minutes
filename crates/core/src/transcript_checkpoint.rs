@@ -105,6 +105,19 @@ pub fn decode_hints_for_queued_meeting(
     crate::pipeline::queued_meeting_decode_hints(title, pre_context, config)
 }
 
+/// Decode hints using the same recording-date calendar lookup as final
+/// processing. Run on the optional worker, never on the capture or Stop path.
+/// If a title, context, vocabulary, or calendar changes later, the final pass
+/// rejects the old spans and transcribes their audio again; never re-key text.
+pub fn decode_hints_for_queued_meeting_at(
+    title: Option<&str>,
+    pre_context: Option<&str>,
+    recorded_at: chrono::DateTime<chrono::Local>,
+    config: &Config,
+) -> DecodeHints {
+    crate::pipeline::queued_meeting_decode_hints_at(title, pre_context, recorded_at, config)
+}
+
 /// Transcribe one span of a source during the recording.
 ///
 /// `samples` are the source's canonical 16 kHz mono samples starting at
@@ -118,33 +131,63 @@ pub fn transcribe_span(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<CheckpointSpan, TranscribeError> {
-    if samples.is_empty() {
-        return Err(TranscribeError::EmptyAudio);
+    SpanTranscriber::new(config, hints).transcribe_span(samples, start_sample, source)
+}
+
+/// A meeting-scoped decoder with frozen settings and hints. A single Whisper
+/// context is loaded lazily and shared across all spans of both source stems.
+/// Own this on the optional worker thread; dropping it releases the model.
+pub struct SpanTranscriber {
+    config: Config,
+    hints: DecodeHints,
+    decoder: transcribe::CheckpointChunkDecoder,
+}
+
+impl SpanTranscriber {
+    pub fn new(config: &Config, hints: &DecodeHints) -> Self {
+        Self {
+            config: config.clone(),
+            hints: hints.clone(),
+            decoder: Default::default(),
+        }
     }
-    let (config, hints) = source_inputs(source, config, hints);
-    if transcribe::should_bypass_meeting_chunk_rotation(
-        &config,
-        crate::pipeline::private_audio_processing_available(),
-    ) {
-        return Err(TranscribeError::TranscriptionFailed(
-            "checkpoint spans need meeting chunk rotation, which this engine cannot use here"
-                .into(),
-        ));
+
+    pub fn transcribe_span(
+        &mut self,
+        samples: &[f32],
+        start_sample: u64,
+        source: CheckpointSource,
+    ) -> Result<CheckpointSpan, TranscribeError> {
+        if samples.is_empty() {
+            return Err(TranscribeError::EmptyAudio);
+        }
+        let (config, hints) = source_inputs(source, &self.config, &self.hints);
+        if transcribe::should_bypass_meeting_chunk_rotation(
+            &config,
+            crate::pipeline::private_audio_processing_available(),
+        ) {
+            return Err(TranscribeError::TranscriptionFailed(
+                "checkpoint spans need meeting chunk rotation, which this engine cannot use here"
+                    .into(),
+            ));
+        }
+        let chunks = transcribe::detect_meeting_vad_chunks(samples);
+        let clock_offset = usize::try_from(start_sample).map_err(|_| {
+            TranscribeError::UnsupportedFormat("span starts past the audio budget".into())
+        })?;
+        let lines = self
+            .decoder
+            .transcribe(samples, &chunks, clock_offset, &config, &hints)?
+            .lines;
+        Ok(CheckpointSpan {
+            source,
+            start_sample,
+            end_sample: start_sample + samples.len() as u64,
+            settings: settings_fingerprint(&config, &hints),
+            pcm_sha256: pcm_digest(samples),
+            lines,
+        })
     }
-    let chunks = transcribe::detect_meeting_vad_chunks(samples);
-    let clock_offset = usize::try_from(start_sample).map_err(|_| {
-        TranscribeError::UnsupportedFormat("span starts past the audio budget".into())
-    })?;
-    let lines =
-        transcribe::transcribe_chunk_lines(samples, &chunks, clock_offset, &config, &hints)?.lines;
-    Ok(CheckpointSpan {
-        source,
-        start_sample,
-        end_sample: start_sample + samples.len() as u64,
-        settings: settings_fingerprint(&config, &hints),
-        pcm_sha256: pcm_digest(samples),
-        lines,
-    })
 }
 
 /// The config and hints the final pass uses for `source`. Independent stems
@@ -202,6 +245,18 @@ pub(crate) fn transcribe_meeting_with_spans(
         audio_secs = samples.len() as f64 / SAMPLE_RATE as f64,
         "meeting transcription with checkpoint spans"
     );
+    crate::logging::log_step(
+        "transcript_checkpoint_reuse",
+        "",
+        0,
+        serde_json::json!({
+            "source": spans.first().map(|span| span.source),
+            "offered": spans.len(), "accepted": accepted.len(),
+            "rejected": spans.len().saturating_sub(accepted.len()),
+            "covered_secs": accepted.iter().map(|s| (s.end_sample - s.start_sample) as f64 / SAMPLE_RATE as f64).sum::<f64>(),
+            "audio_secs": samples.len() as f64 / SAMPLE_RATE as f64,
+        }),
+    );
     if accepted.is_empty() {
         return transcribe::transcribe_meeting_samples(audio_path, &samples, config, hints);
     }
@@ -257,7 +312,7 @@ fn accepted_spans<'a>(
         } else if span.end_sample > samples.len() as u64 {
             Some("ends after the audio")
         } else if span.settings != settings {
-            Some("different transcription settings")
+            Some("different transcription settings or decode hints (title/context/calendar/vocabulary)")
         } else if span.pcm_sha256
             != pcm_digest(&samples[span.start_sample as usize..span.end_sample as usize])
         {
@@ -266,13 +321,18 @@ fn accepted_spans<'a>(
             None
         };
         match reason {
-            Some(reason) => tracing::warn!(
-                source = ?span.source,
-                start_sample = span.start_sample,
-                end_sample = span.end_sample,
-                reason,
-                "ignoring checkpoint span; that range is transcribed again"
-            ),
+            Some(reason) => {
+                tracing::warn!(source = ?span.source, start_sample = span.start_sample,
+                    end_sample = span.end_sample, reason,
+                    "ignoring checkpoint span; that range is transcribed again");
+                crate::logging::log_step(
+                    "transcript_checkpoint_rejected",
+                    "",
+                    0,
+                    serde_json::json!({"source":span.source,"start_sample":span.start_sample,
+                        "end_sample":span.end_sample,"reason":reason}),
+                );
+            }
             None => {
                 covered_until = span.end_sample;
                 accepted.push(span);
@@ -537,6 +597,52 @@ mod tests {
             "{}",
             result.text
         );
+    }
+
+    #[test]
+    fn final_title_context_and_calendar_changes_reject_old_spans() {
+        let config = Config::default();
+        let event: crate::calendar::CalendarEvent = serde_json::from_value(serde_json::json!({
+            "title": "Priya product planning", "start": "2026-11-06 10:00", "minutes_until": 0,
+            "attendees": ["Priya Chen"],
+        }))
+        .unwrap();
+        let hints_for = |title, context, event| {
+            crate::pipeline::queued_meeting_decode_hints_for_event(
+                title, context, event, &config, None,
+            )
+        };
+        let title = Some("Priya product planning");
+        let context = Some("Discussing Project Tesseract");
+        let initial = hints_for(title, context, None);
+        let (source_config, initial) = source_inputs(CheckpointSource::Voice, &config, &initial);
+        let audio = ramp(16_000);
+        let old = span(
+            CheckpointSource::Voice,
+            0,
+            &audio,
+            &settings_fingerprint(&source_config, &initial),
+        );
+        for hints in [
+            hints_for(Some("Amara finance review"), context, None),
+            hints_for(title, Some("Discussing Meridian Holdings"), None),
+            hints_for(title, context, Some(&event)),
+        ] {
+            let (_, final_hints) = source_inputs(CheckpointSource::Voice, &config, &hints);
+            assert!(accepted_spans(
+                &audio,
+                &[&old],
+                &settings_fingerprint(&source_config, &final_hints)
+            )
+            .is_empty());
+        }
+        // A calendar match present at capture and final processing uses exactly
+        // the same shared hint builder and can reuse the completed span.
+        let calendar_hints = hints_for(title, context, Some(&event));
+        let (_, calendar_hints) = source_inputs(CheckpointSource::Voice, &config, &calendar_hints);
+        let settings = settings_fingerprint(&source_config, &calendar_hints);
+        let matching = span(CheckpointSource::Voice, 0, &audio, &settings);
+        assert_eq!(accepted_spans(&audio, &[&matching], &settings).len(), 1);
     }
 
     #[test]

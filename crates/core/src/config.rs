@@ -1074,6 +1074,9 @@ impl Default for VaultConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecordingConfig {
+    /// Transcribe completed native-call spans during capture. Default: true.
+    /// Optional work is skipped when it cannot keep up; Stop never waits.
+    pub transcript_checkpoints: bool,
     /// Seconds of continuous silence before sending a reminder notification.
     /// Set to 0 to disable. Default: 300 (5 minutes).
     pub silence_reminder_secs: u64,
@@ -1127,6 +1130,7 @@ pub struct SourcesConfig {
 impl Default for RecordingConfig {
     fn default() -> Self {
         Self {
+            transcript_checkpoints: true,
             silence_reminder_secs: 300,
             silence_threshold: 3,
             silence_auto_stop_secs: 1800,

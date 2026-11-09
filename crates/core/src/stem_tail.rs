@@ -67,6 +67,7 @@ pub(crate) struct StemTail {
     /// resampled stream stays continuous instead of restarting each time.
     resample_pos: f64,
     tracking: Option<StemTracking>,
+    canonical: Option<crate::audio_budget::StreamingMonoResampler>,
 }
 
 #[derive(Debug)]
@@ -127,7 +128,29 @@ impl StemTail {
             carry: Vec::new(),
             resample_pos: 0.0,
             tracking: track.then(|| StemTracking::new(file, path, data_offset)),
+            canonical: None,
         })
+    }
+
+    /// Checkpoints must match the final WAV decoder, including its sinc
+    /// resampler. The live sidecar keeps its existing low-cost decimation.
+    pub(crate) fn open_canonical(path: &Path) -> Result<Self, String> {
+        let mut tail = Self::open(path)?;
+        // This optional observer handles native capture rates only. Bounding
+        // expansion also bounds each 256 KiB poll's canonical allocation.
+        if tail.format.sample_rate < 8_000 || tail.format.channels > 32 {
+            return Err("checkpoint stem dimensions are unsupported".into());
+        }
+        tail.canonical = Some(
+            crate::audio_budget::StreamingMonoResampler::new(
+                tail.format.sample_rate,
+                TARGET_RATE,
+                crate::audio_budget::AudioWorkBudget::new(),
+                crate::audio_budget::MAX_CANONICAL_SAMPLES,
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        Ok(tail)
     }
 
     /// Read whatever has been appended since the last poll, as 16 kHz mono.
@@ -161,7 +184,11 @@ impl StemTail {
             return Ok(Vec::new());
         }
 
-        let want = (len - self.cursor) as usize;
+        let want = if self.canonical.is_some() {
+            (len - self.cursor).min(256 * 1024) as usize
+        } else {
+            (len - self.cursor) as usize
+        };
         let mut fresh = vec![0_u8; want];
         file.seek(SeekFrom::Start(self.cursor))
             .map_err(|e| format!("seek {}: {e}", self.path.display()))?;
@@ -184,7 +211,34 @@ impl StemTail {
         let usable = fresh.len() - (fresh.len() % frame);
         self.carry = fresh[usable..].to_vec();
 
-        let decoded = self.decode_to_mono_16k(&fresh[..usable]);
+        let decoded = if let Some(resampler) = self.canonical.as_mut() {
+            let width = self.format.encoding.bytes_per_sample();
+            for frame in fresh[..usable].chunks_exact(frame) {
+                let mut sum = 0.0_f64;
+                for bytes in frame.chunks_exact(width) {
+                    let sample = match self.format.encoding {
+                        Encoding::F32 => f32::from_le_bytes(bytes.try_into().unwrap()),
+                        Encoding::I16 => {
+                            i16::from_le_bytes(bytes.try_into().unwrap()) as f32 / 32768.0
+                        }
+                    };
+                    if !sample.is_finite() {
+                        return Err("non-finite stem sample".into());
+                    }
+                    sum += f64::from(sample);
+                }
+                let mono = (sum / f64::from(self.format.channels)) as f32;
+                if !mono.is_finite() {
+                    return Err("non-finite stem downmix".into());
+                }
+                resampler
+                    .push_mono_sample(mono)
+                    .map_err(|e| e.to_string())?;
+            }
+            resampler.take_live_output()
+        } else {
+            self.decode_to_mono_16k(&fresh[..usable])
+        };
         if let Some(tracking) = self.tracking.as_mut() {
             tracking.pcm_hash.update(&fresh[..usable]);
             tracking.pcm_bytes += usable as u64;

@@ -34,9 +34,9 @@ export class NodeHelperRuntimeError extends Error {
     super(
       "Claude Desktop cannot run Minutes helper processes because its Electron Node runtime is unavailable. " +
       (override
-        ? "MINUTES_NODE_PATH must name an absolute path to a working Node.js executable. "
+        ? "The Node.js path setting (MINUTES_NODE_PATH) must name an absolute path to a working Node.js executable. "
         : "No working system Node.js runtime was found. ") +
-      `Install Node.js ${MINIMUM_HELPER_NODE_MAJOR}+ or set MINUTES_NODE_PATH to its absolute executable path, then retry.`
+      `Install Node.js ${MINIMUM_HELPER_NODE_MAJOR}+ from nodejs.org or with Homebrew, or set Node.js path in the Minutes extension settings in Claude Desktop to its absolute executable path, then retry.`
     );
     this.name = "NodeHelperRuntimeError";
   }
@@ -168,7 +168,8 @@ export function createNodeHelperRuntimeResolver(options: Partial<RuntimeResolver
   return async (): Promise<string> => {
     if (!settings.electronVersion) return settings.execPath;
     const environment = settings.environment();
-    const override = environment.MINUTES_NODE_PATH;
+    const configuredPath = environment.MINUTES_NODE_PATH;
+    const override = configuredPath?.trim() ? configuredPath : undefined;
     const key = JSON.stringify([override, environment.PATH, environment.Path]);
     if (resolved?.key === key) return resolved.binary;
     if (pending?.key === key) return pending.promise;

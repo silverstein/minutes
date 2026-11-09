@@ -73,11 +73,18 @@ describe("Node helper runtime resolution", () => {
     expect(probe.mock.calls.map(([binary]) => binary)).toEqual([options.execPath, "/custom/node"]);
   });
 
-  it.each(["node", "", "/old-node", "/not-executable"])("rejects an unusable override (%s) with path-free guidance", async (override) => {
+  it.each(["", " ", "\t\n"])("discovers Node when the extension's optional path is blank (%j)", async (override) => {
+    const { options, probe } = fixture({ PATH: "/system", MINUTES_NODE_PATH: override });
+    probe.mockImplementation(async (binary) => binary === "/system/node" ? marker() : null);
+    expect(await createNodeHelperRuntimeResolver(options)()).toBe("/system/node");
+    expect(probe.mock.calls.map(([binary]) => binary)).toEqual([options.execPath, "/system/node"]);
+  });
+
+  it.each(["node", "/old-node", "/not-executable"])("rejects an unusable override (%s) with path-free guidance", async (override) => {
     const { options, probe } = fixture({ MINUTES_NODE_PATH: override });
     probe.mockImplementation(async (binary) => binary === "/old-node" ? marker(18) : null);
     await expect(createNodeHelperRuntimeResolver(options)()).rejects.toThrow(NodeHelperRuntimeError);
-    await expect(createNodeHelperRuntimeResolver(options)()).rejects.toThrow("MINUTES_NODE_PATH must name an absolute path");
+    await expect(createNodeHelperRuntimeResolver(options)()).rejects.toThrow("Node.js path setting (MINUTES_NODE_PATH) must name an absolute path");
   });
 
   it("validates PATH candidates, rejects bad output/old versions, and deduplicates", async () => {
@@ -132,7 +139,7 @@ describe("Node helper runtime resolution", () => {
   it("retries discovery after failure without repeating the failed Electron probe", async () => {
     const { options, probe } = fixture({ PATH: "/later" });
     const resolve = createNodeHelperRuntimeResolver(options);
-    await expect(resolve()).rejects.toThrow("Install Node.js 20+");
+    await expect(resolve()).rejects.toThrow("Install Node.js 20+ from nodejs.org or with Homebrew, or set Node.js path in the Minutes extension settings in Claude Desktop");
     probe.mockImplementation(async (binary) => binary === "/later/node" ? marker() : null);
     expect(await resolve()).toBe("/later/node");
     expect(probe.mock.calls.filter(([binary]) => binary === options.execPath)).toHaveLength(1);

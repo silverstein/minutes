@@ -233,7 +233,8 @@
       ],
       "env": {
         "MINUTES_HOME": "${user_config.minutes_home}",
-        "MEETINGS_DIR": "${user_config.meetings_dir}"
+        "MEETINGS_DIR": "${user_config.meetings_dir}",
+        "MINUTES_NODE_PATH": "${user_config.node_path}"
       }
     }
   },
@@ -251,6 +252,13 @@
       "description": "Where Minutes stores its configuration, logs, and PID files",
       "required": false,
       "default": "${HOME}/.minutes"
+    },
+    "node_path": {
+      "type": "string",
+      "title": "Node.js path (optional)",
+      "description": "Absolute path to the Node.js executable. Only needed if Minutes cannot find Node.js 20+.",
+      "required": false,
+      "default": ""
     }
   },
   "compatibility": {

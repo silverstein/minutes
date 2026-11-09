@@ -177,6 +177,11 @@ jobs:
         if: runner.os == 'macOS'
         run: python3 scripts/test_mic_check.py
 
+      - name: Build CLI worker for feature-test fixtures
+        # PocketStation runs the full core suite; decoder/watcher fixtures
+        # require a real worker binary beside the harness on this runner too.
+        run: cargo build -p minutes-core -p minutes-cli --no-default-features
+
       - name: Build core with diarization (cross-platform)
         run: cargo build -p minutes-core --no-default-features --features diarize
 
@@ -1281,6 +1286,7 @@ jobs:
       - install
       - linux_full_build
       - desktop_windows
+      - desktop_recall
       - mcp
       - mcp_lockfile_check
       - version_sync
@@ -1294,13 +1300,18 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if any required job failed or was cancelled
+      # A scheduling error can leave `changes` uncreated/skipped while the
+      # workflow itself fails. Do not let that produce a green required gate.
+      - name: Fail if required jobs did not pass
         if: >-
+          needs.changes.result != 'success' ||
           contains(needs.*.result, 'failure') ||
-          contains(needs.*.result, 'cancelled')
+          contains(needs.*.result, 'cancelled') ||
+          (needs.changes.outputs.rust == 'true' &&
+            (needs.test.result != 'success' || needs.core_tests.result != 'success'))
         run: |
           echo "Upstream job results: ${{ join(needs.*.result, ', ') }}"
-          echo "A required CI job failed or was cancelled."
+          echo "Required CI work failed, was cancelled, or did not execute."
           exit 1
 
       - name: Report success

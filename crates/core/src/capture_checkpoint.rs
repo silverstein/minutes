@@ -11,6 +11,21 @@ use std::time::{Duration, Instant};
 const RATE: usize = 16_000;
 const SPAN: usize = 120 * RATE;
 const POLL: Duration = Duration::from_millis(100);
+// The final pass's chunker measures 100 ms windows from the start of the
+// stem. It closes a chunk, and resets its state, after 800 ms of silence. A
+// span that starts at that point, on that grid, gets the same chunks as the
+// whole-stem pass, so whisper gets the same audio. Chunks are at most 45 s.
+const WINDOW: usize = RATE / 10;
+const MIN_PAUSE: usize = 8 * WINDOW;
+const MAX_CHUNK: usize = 45 * RATE;
+const SEARCH_BEFORE_TARGET: usize = 15 * RATE;
+// Two sources share one decoder, so a total RTF above 0.5 cannot keep up.
+// A single span may be slow (whisper temperature fallback on a hard chunk).
+// Judge the total after a few spans; stop at once only when one span is
+// slower than real time.
+const MAX_TOTAL_RTF: f64 = 0.5;
+const MAX_SPAN_RTF: f64 = 1.0;
+const MIN_SPANS_FOR_TOTAL: u32 = 3;
 // At most one abandoned decoder can remain alive after Stop in this process.
 static DECODER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -212,6 +227,7 @@ fn decode_loop<F>(
 ) where
     F: FnMut(&Work) -> Result<CheckpointSpan, String>,
 {
+    let mut speed = SpeedGuard::default();
     while !stop.load(Ordering::Acquire) {
         let work = match receive.recv_timeout(POLL) {
             Ok(work) => work,
@@ -223,7 +239,9 @@ fn decode_loop<F>(
         }
         let started = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode(&work)));
-        let rtf = started.elapsed().as_secs_f64() / (work.samples.len() as f64 / RATE as f64);
+        let decode_secs = started.elapsed().as_secs_f64();
+        let audio_secs = work.samples.len() as f64 / RATE as f64;
+        let rtf = decode_secs / audio_secs;
         if stop.load(Ordering::Acquire) {
             break;
         }
@@ -243,13 +261,42 @@ fn decode_loop<F>(
                 break;
             }
         }
-        if rtf > 0.5 {
-            tracing::info!(rtf, "checkpoint decoder too slow; skipping remaining spans");
+        if !speed.record(decode_secs, audio_secs) {
+            tracing::info!(
+                rtf,
+                total_rtf = speed.total_rtf(),
+                spans = speed.spans,
+                "checkpoint decoder too slow; skipping remaining spans"
+            );
             break;
         }
     }
     // Also ends the reader on decoder errors, panic, or slow-model cutoff.
     stop.store(true, Ordering::Release);
+}
+
+#[derive(Default)]
+struct SpeedGuard {
+    decode_secs: f64,
+    audio_secs: f64,
+    spans: u32,
+}
+
+impl SpeedGuard {
+    /// Returns false when the decoder cannot keep up with the call.
+    fn record(&mut self, decode_secs: f64, audio_secs: f64) -> bool {
+        self.decode_secs += decode_secs;
+        self.audio_secs += audio_secs;
+        self.spans += 1;
+        if decode_secs > audio_secs * MAX_SPAN_RTF {
+            return false;
+        }
+        self.spans < MIN_SPANS_FOR_TOTAL || self.total_rtf() <= MAX_TOTAL_RTF
+    }
+
+    fn total_rtf(&self) -> f64 {
+        self.decode_secs / self.audio_secs.max(f64::EPSILON)
+    }
 }
 
 struct Source {
@@ -259,6 +306,7 @@ struct Source {
     pending: Vec<f32>,
     start: u64,
     peak: f32,
+    checked_len: usize,
 }
 
 fn feed(
@@ -278,6 +326,7 @@ fn feed(
             pending: Vec::new(),
             start: 0,
             peak: 0.0,
+            checked_len: 0,
         })
         .collect::<Vec<_>>();
     while !stop.load(Ordering::Acquire) {
@@ -301,8 +350,17 @@ fn feed(
             };
             source.peak = samples.iter().map(|s| s.abs()).fold(source.peak, f32::max);
             source.pending.extend(samples);
-            while source.pending.len() >= span {
-                let cut = quiet_cut(&source.pending[..span]);
+            loop {
+                // The pause search reads up to 1.5 spans. Repeat it once a
+                // second at most, not on every poll.
+                if source.pending.len() < span || source.pending.len() < source.checked_len + RATE {
+                    break;
+                }
+                source.checked_len = source.pending.len();
+                let Some(cut) = span_cut(&source.pending, span) else {
+                    break;
+                };
+                source.checked_len = 0;
                 let rest = source.pending.split_off(cut);
                 let samples = std::mem::replace(&mut source.pending, rest);
                 let start = source.start;
@@ -335,6 +393,66 @@ fn feed(
         }
         std::thread::sleep(POLL);
     }
+}
+
+/// Where to end the open span, or None to wait for more audio. `pending`
+/// must start where the final pass's chunker is in its reset state, on its
+/// 100 ms grid: at the stem start, or at an earlier cut from this function.
+///
+/// The cut is a point where the chunker resets, so the next span starts in
+/// the state that the whole-stem pass has there, and gets the same chunks.
+/// The first choice, at or after 15 s before the target length, is the end of
+/// the longest pause, where the chunker closes a chunk after 800 ms of
+/// silence. In speech without such a pause, the chunker splits at 45 s and
+/// resets too. At 1.5x the target, take the latest reset point anywhere in the
+/// span. Only with none at all, fall back to the quietest 100 ms window.
+fn span_cut(pending: &[f32], span: usize) -> Option<usize> {
+    if pending.len() < span {
+        return None;
+    }
+    let max = span + span / 2;
+    let view = &pending[..pending.len().min(max)];
+    let earliest = span.saturating_sub(SEARCH_BEFORE_TARGET);
+    let chunks = crate::transcribe::detect_meeting_vad_chunks(view);
+    if chunks.is_empty() {
+        // No speech at all: any point on the grid is a pause.
+        return Some(span - span % WINDOW);
+    }
+    let next_starts = chunks
+        .iter()
+        .skip(1)
+        .map(|&(start, _)| start)
+        .chain([view.len()]);
+    // (cut, pause length). A chunk shorter than 1 s does not close, and a
+    // 45 s chunk closes without a pause.
+    let pauses: Vec<(usize, usize)> = chunks
+        .iter()
+        .zip(next_starts)
+        .filter(|&(&(start, end), next)| {
+            (RATE..MAX_CHUNK).contains(&(end - start)) && next >= end + MIN_PAUSE
+        })
+        .map(|(&(_, end), next)| (end + MIN_PAUSE, next - end))
+        .collect();
+    let splits = chunks
+        .iter()
+        .filter(|&&(start, end)| end - start >= MAX_CHUNK)
+        .map(|&(_, end)| end);
+    let preferred = pauses
+        .iter()
+        .filter(|&&(cut, _)| cut >= earliest)
+        .max_by_key(|&&(cut, pause)| (pause, std::cmp::Reverse(cut)))
+        .map(|&(cut, _)| cut)
+        .or_else(|| splits.clone().find(|&end| end >= earliest));
+    if preferred.is_some() || view.len() < max {
+        return preferred;
+    }
+    pauses
+        .iter()
+        .map(|&(cut, _)| cut)
+        .chain(splits)
+        .filter(|&cut| cut > 0 && cut <= view.len())
+        .max()
+        .or_else(|| Some(quiet_cut(view) / WINDOW * WINDOW))
 }
 
 fn quiet_cut(samples: &[f32]) -> usize {
@@ -498,9 +616,10 @@ mod tests {
             for role in ["voice", "system"] {
                 write_stem(&anchor.with_extension(format!("{role}.wav")), 5, 16_000);
             }
+            // A tone has no pause, so the cut falls back at 1.5 spans (4.5 s).
             let worker = CaptureCheckpoint::spawn(
                 &anchor,
-                4 * RATE,
+                3 * RATE,
                 |_| panic!("injected optional decoder panic"),
                 false,
             )
@@ -581,6 +700,190 @@ mod tests {
         samples[112 * RATE..112 * RATE + RATE / 10].fill(0.0);
         let cut = quiet_cut(&samples);
         assert_eq!(cut, 112 * RATE + RATE / 20);
+    }
+
+    fn speech_with_pauses(seconds: usize, pauses: &[(f32, f32)]) -> Vec<f32> {
+        let mut samples: Vec<f32> = (0..seconds * RATE)
+            .map(|n| 0.2 * (n as f32 * 0.031).sin())
+            .collect();
+        for &(from, to) in pauses {
+            samples[(from * RATE as f32) as usize..(to * RATE as f32) as usize].fill(0.0);
+        }
+        samples
+    }
+
+    #[test]
+    fn cuts_in_the_middle_of_a_real_pause_near_the_target() {
+        let samples = speech_with_pauses(125, &[(110.0, 111.5)]);
+        let cut = span_cut(&samples, SPAN).expect("a pause after 105 s");
+        assert!(
+            (110 * RATE..=111 * RATE + RATE / 2).contains(&cut),
+            "cut {cut} is outside the pause"
+        );
+    }
+
+    #[test]
+    fn waits_for_a_pause_rather_than_cutting_inside_speech() {
+        // Only a 100 ms dip, which is a gap between words, not a pause. The
+        // chunker splits this speech at 45 s and 90 s, before the window.
+        let samples = speech_with_pauses(120, &[(112.0, 112.1)]);
+        assert_eq!(span_cut(&samples, SPAN), None);
+        // The span grows until a pause comes.
+        let samples = speech_with_pauses(150, &[(140.0, 141.5)]);
+        let cut = span_cut(&samples, SPAN).expect("a pause at 140 s");
+        assert!((140 * RATE..=141 * RATE + RATE / 2).contains(&cut));
+    }
+
+    #[test]
+    fn speech_without_a_pause_is_cut_where_the_chunker_splits_at_45_s() {
+        let samples = speech_with_pauses(150, &[(112.0, 112.1)]);
+        assert_eq!(span_cut(&samples, SPAN), Some(135 * RATE));
+        // A pause before the window does not count, but it moves the splits.
+        let samples = speech_with_pauses(150, &[(60.0, 62.0)]);
+        let cut = span_cut(&samples, SPAN).unwrap();
+        assert!(cut >= SPAN - 15 * RATE && cut.is_multiple_of(WINDOW), "cut {cut}");
+    }
+
+    #[test]
+    fn falls_back_to_the_quietest_window_at_one_and_a_half_spans() {
+        // A 0.3 s sound and its 0.5 s hangover are shorter than a 1 s chunk,
+        // so the chunker never closes or splits it: no reset point.
+        let mut samples = vec![0.0; 185 * RATE];
+        for (n, sample) in samples[RATE..RATE + RATE * 3 / 10].iter_mut().enumerate() {
+            *sample = 0.2 * (n as f32 * 0.031).sin();
+        }
+        // The quietest window is in the last 15 s of the 180 s span.
+        let cut = span_cut(&samples, SPAN).unwrap();
+        assert!(cut >= 164 * RATE && cut.is_multiple_of(WINDOW), "cut {cut}");
+    }
+
+    /// Cut `samples` the way `feed` does, and return each span's range.
+    fn cut_like_feed(samples: &[f32], span: usize) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
+        let mut start = 0;
+        let mut len = span;
+        while start + len <= samples.len() {
+            match span_cut(&samples[start..start + len], span) {
+                Some(cut) => {
+                    spans.push((start, start + cut));
+                    start += cut;
+                    len = span;
+                }
+                None => len += RATE,
+            }
+        }
+        spans
+    }
+
+    fn assert_spans_chunk_like_the_whole_stem(samples: &[f32]) {
+        let whole = crate::transcribe::detect_meeting_vad_chunks(samples);
+        let spans = cut_like_feed(samples, SPAN);
+        assert!(spans.len() >= 2, "too few spans to compare");
+        let covered = spans.last().unwrap().1;
+        let per_span: Vec<_> = spans
+            .iter()
+            .flat_map(|&(a, b)| {
+                crate::transcribe::detect_meeting_vad_chunks(&samples[a..b])
+                    .into_iter()
+                    .map(move |(s, e)| (a + s, a + e))
+            })
+            .collect();
+        let whole: Vec<_> = whole.into_iter().filter(|&(s, _)| s < covered).collect();
+        if let Some(i) =
+            (0..per_span.len().max(whole.len())).find(|&i| per_span.get(i) != whole.get(i))
+        {
+            let secs = |v: Option<&(usize, usize)>| {
+                v.map(|&(s, e)| (s as f64 / RATE as f64, e as f64 / RATE as f64))
+            };
+            let near: Vec<_> = spans
+                .iter()
+                .map(|&(_, b)| b as f64 / RATE as f64)
+                .filter(|&b| {
+                    let t = whole.get(i).map_or(0.0, |c| c.0 as f64 / RATE as f64);
+                    (b - t).abs() < 120.0
+                })
+                .collect();
+            panic!(
+                "chunk {i} of {} differs: span pass {:?}, whole pass {:?}; previous {:?}; cuts near {near:?}",
+                whole.len(),
+                secs(per_span.get(i)),
+                secs(whole.get(i)),
+                secs(whole.get(i.wrapping_sub(1)))
+            );
+        }
+    }
+
+    #[test]
+    fn spans_give_the_same_chunks_as_the_whole_stem() {
+        // Speech with pauses of different lengths at odd sample offsets.
+        let mut pauses = Vec::new();
+        let mut t = 3.37_f32;
+        while t < 590.0 {
+            let len = [0.3, 1.2, 0.5, 2.1, 0.9][pauses.len() % 5];
+            pauses.push((t, t + len));
+            t += 7.913 + len;
+        }
+        assert_spans_chunk_like_the_whole_stem(&speech_with_pauses(600, &pauses));
+    }
+
+    /// Run on a real stem: MINUTES_REAL_STEM=/path/voice.wav cargo test
+    /// real_stem -- --ignored. It decodes no speech, so it is fast.
+    #[test]
+    #[ignore]
+    fn real_stem_spans_give_the_same_chunks_as_the_whole_stem() {
+        let path = std::env::var("MINUTES_REAL_STEM").expect("MINUTES_REAL_STEM");
+        let samples = crate::transcribe::load_audio_samples_with_format(
+            Path::new(&path),
+            Some("wav"),
+            &Config::default(),
+        )
+        .unwrap();
+        assert_spans_chunk_like_the_whole_stem(&samples);
+    }
+
+    #[test]
+    fn a_long_silence_after_an_early_pause_is_cut_at_that_pause() {
+        // Speech, a pause at 60 s, then silence with one short sound. The
+        // short sound stays an open chunk, so the early pause is the last
+        // point where the chunker resets.
+        let mut samples = speech_with_pauses(185, &[(60.0, 185.0)]);
+        for (n, sample) in samples[160 * RATE..160 * RATE + RATE * 3 / 10]
+            .iter_mut()
+            .enumerate()
+        {
+            *sample = 0.2 * (n as f32 * 0.031).sin();
+        }
+        let cut = span_cut(&samples, SPAN).unwrap();
+        assert!((60 * RATE..62 * RATE).contains(&cut), "cut {cut}");
+    }
+
+    #[test]
+    fn silence_is_cut_at_the_target() {
+        assert_eq!(span_cut(&vec![0.0; SPAN + RATE], SPAN), Some(SPAN));
+    }
+
+    #[test]
+    fn one_slow_span_does_not_stop_a_decoder_that_keeps_up() {
+        // The real 80-minute call: one 66 s chunk of temperature fallback.
+        let mut speed = SpeedGuard::default();
+        for rtf in [0.06, 0.42, 0.18, 0.07, 0.05, 0.24, 0.07, 0.55, 0.1, 0.1] {
+            assert!(speed.record(rtf * 110.0, 110.0), "stopped at rtf {rtf}");
+        }
+        assert!(speed.total_rtf() < MAX_TOTAL_RTF);
+    }
+
+    #[test]
+    fn a_decoder_that_cannot_keep_up_stops_after_three_spans() {
+        let mut speed = SpeedGuard::default();
+        assert!(speed.record(66.0, 110.0));
+        assert!(speed.record(66.0, 110.0));
+        assert!(!speed.record(66.0, 110.0));
+    }
+
+    #[test]
+    fn a_span_slower_than_real_time_stops_at_once() {
+        let mut speed = SpeedGuard::default();
+        assert!(!speed.record(187.0, 110.0));
     }
 
     #[test]

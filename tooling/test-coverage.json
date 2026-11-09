@@ -7,7 +7,7 @@
   "profiles": {
     "streaming": {
       "workflow": ".github/workflows/ci.yml",
-      "job": "test",
+      "job": "core_tests",
       "features": ["streaming"],
       "selection": "all",
       "platforms": ["linux", "macos", "windows"]

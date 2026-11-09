@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "runtime_source": "6534df23b044884e1c211da41f32b154037e5df3",
+  "method": "Repository demo.wav replayed in real time through exact virtual MMAudio Device into signed installed Minutes Dev; native Try dictation here button; isolated 30s silence deadline for delivery and120s for cancellation. Separately captured buffers are not proven byte-identical. No key-release timing or natural hit-rate sample.",
+  "fixture_sha256": "d32616b3f1a5a669c35885d815f9e82b1447d50d07a1892c4e08e710f7a85c8b",
+  "installed": {
+    "bundle_id": "com.useminutes.desktop.dev",
+    "authority": "Apple Development: Mathieu Silverstein (97C8UF8QVF)",
+    "team_id": "63TMLKT8HN",
+    "binary_sha256": "6d8b3302dc87bfe37252f3636299efc3f3e4f1346d6561f06a46d3ab0eca6e31",
+    "executable_mtime_utc": "2026-11-09T05:30:47.651657+00:00",
+    "strict_seal_passed": true,
+    "candidate_pid": 31998,
+    "baseline_pid": 40372,
+    "baseline_process_start_utc": "2026-11-09T05:44:40Z",
+    "native_event_tap_probe_passed": true
+  },
+  "live_pair": {
+    "candidate_text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and dictation transcriber against whisper and pericate before making a product decision.",
+    "baseline_text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speech transcriber and dictation transcriber against whisper and pericate before making a product decision.",
+    "text_identical": false,
+    "target_prefix_preserved": true,
+    "candidate_latency": {
+      "duration_ms": 46452,
+      "extra": {
+        "clipboard_restore_ms": null,
+        "clipboard_restored": false,
+        "engine_warm": true,
+        "final_to_verification_complete_ms": 29750,
+        "final_to_visible_ms": 29730,
+        "insertion_diagnostic": null,
+        "insertion_total_ms": 22,
+        "method": "native_ax",
+        "outcome": "typed",
+        "press_to_engine_ready_ms": 23,
+        "press_to_hud_ms": 55,
+        "press_to_listening_ms": 67,
+        "release_to_final_ms": null,
+        "release_to_visible_ms": null,
+        "session_total_ms": 46452,
+        "speech_end_to_final_ms": 211,
+        "speech_end_to_visible_ms": 29941,
+        "speech_to_first_partial_ms": 1994,
+        "target_class": "document",
+        "verification_ms": 4,
+        "verified": true,
+        "visible_insert_operation_ms": 2
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_latency",
+      "ts": "2026-11-09T00:39:06.220060-05:00"
+    },
+    "baseline_latency": {
+      "duration_ms": 46382,
+      "extra": {
+        "clipboard_restore_ms": null,
+        "clipboard_restored": false,
+        "engine_warm": true,
+        "final_to_verification_complete_ms": 29844,
+        "final_to_visible_ms": 29799,
+        "insertion_diagnostic": null,
+        "insertion_total_ms": 47,
+        "method": "native_ax",
+        "outcome": "typed",
+        "press_to_engine_ready_ms": 17,
+        "press_to_hud_ms": 50,
+        "press_to_listening_ms": 78,
+        "release_to_final_ms": null,
+        "release_to_visible_ms": null,
+        "session_total_ms": 46382,
+        "speech_end_to_final_ms": 129,
+        "speech_end_to_visible_ms": 29928,
+        "speech_to_first_partial_ms": 1987,
+        "target_class": "document",
+        "verification_ms": 28,
+        "verified": true,
+        "visible_insert_operation_ms": 2
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_latency",
+      "ts": "2026-11-09T00:47:19.806754-05:00"
+    },
+    "capture_pid_marker_remains": true,
+    "final_reuse_events": [
+      {
+        "duration_ms": 0,
+        "extra": {
+          "produced_text": false,
+          "reused": false
+        },
+        "file": "dictation",
+        "level": "info",
+        "step": "dictation_final_reuse",
+        "ts": "2026-11-09T00:34:28.952172-05:00"
+      },
+      {
+        "duration_ms": 211,
+        "extra": {
+          "produced_text": true,
+          "reused": false
+        },
+        "file": "dictation",
+        "level": "info",
+        "step": "dictation_final_reuse",
+        "ts": "2026-11-09T00:38:36.333166-05:00"
+      },
+      {
+        "duration_ms": 251,
+        "extra": {
+          "produced_text": true,
+          "reused": false
+        },
+        "file": "dictation",
+        "level": "info",
+        "step": "dictation_final_reuse",
+        "ts": "2026-11-09T00:42:16.988286-05:00"
+      }
+    ],
+    "capture_pid_marker_remains_after_cleanup": false,
+    "test_method": "real-time repository fixture through exact virtual input, native practice button, isolated silence deadline30s; no key release measurement",
+    "native_live_text_equality_passed": false,
+    "all_candidate_text_producing_decodes_reused": false,
+    "natural_hit_rate_measured": false
+  },
+  "cancellation": {
+    "target_text_unchanged": true,
+    "history_unchanged": true,
+    "insertion_count_before": 1,
+    "insertion_count_after": 1,
+    "capture_pid_marker_remains": true,
+    "cancel_action": {
+      "delivery": {
+        "mode": "background"
+      },
+      "effect": "unverifiable",
+      "route": "accessibility"
+    },
+    "final_target_text_unchanged": true,
+    "final_insertion_count": 1,
+    "final_capture_pid_marker_remains": false,
+    "history_last_modified_utc": "2026-11-09T05:39:06.221435+00:00",
+    "cancel_receipt_before_cleanup_utc": "2026-11-09T05:42:56.834273+00:00",
+    "history_not_written_after_immediate_check": true
+  },
+  "decision": "Keep opt-in and off by default. Native delivery and HUD cancellation verified; live text equality failed for this pair. The text-producing candidate decodes did not reuse. No demonstrated typical release-latency benefit."
+}

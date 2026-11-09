@@ -741,7 +741,10 @@ mod tests {
         // A pause before the window does not count, but it moves the splits.
         let samples = speech_with_pauses(150, &[(60.0, 62.0)]);
         let cut = span_cut(&samples, SPAN).unwrap();
-        assert!(cut >= SPAN - 15 * RATE && cut.is_multiple_of(WINDOW), "cut {cut}");
+        assert!(
+            cut >= SPAN - 15 * RATE && cut.is_multiple_of(WINDOW),
+            "cut {cut}"
+        );
     }
 
     #[test]

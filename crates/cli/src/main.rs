@@ -584,7 +584,7 @@ enum Commands {
     },
 
     /// Local semantic search: find meetings by meaning (EmbeddingGemma 2,
-    /// on this Mac). Restricted meetings are never indexed.
+    /// run locally). Restricted meetings are never indexed.
     Semantic {
         #[command(subcommand)]
         action: SemanticAction,

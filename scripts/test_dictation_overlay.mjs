@@ -245,3 +245,18 @@ test('capture remains silent with sounds enabled, including rapid restart after 
   h.state('typed'); h.state('listening');
   assert.equal(h.playing.size, 0);
 });
+
+test('capture keeps partial transcript updates hidden; final copied text remains available', () => {
+  const h = harness();
+  h.state('listening'); h.state('accumulating');
+  h.emit('dictation:partial', 'This provisional text is never displayed.');
+  for (const timer of [...h.timers.values()]) {
+    if (timer.ms === 150) timer.fn();
+  }
+  assert.equal(h.elements.get('text-row').classList.contains('visible'), false);
+  assert.equal(h.elements.get('pill').classList.contains('expanded'), false);
+  h.emit('dictation:result', 'The completed sentence.');
+  h.state('copied'); h.click('clipboard-button');
+  assert.equal(h.elements.get('text-content').textContent, 'The completed sentence.');
+  assert.equal(h.elements.get('text-row').classList.contains('visible'), true);
+});

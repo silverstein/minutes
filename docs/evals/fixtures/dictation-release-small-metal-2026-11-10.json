@@ -1,0 +1,212 @@
+{
+  "all_same_audio_references_match": true,
+  "measurement": "paced single-utterance component replay; 100ms input, bounded(64), original previews/100ms control poll versus candidate accumulate/20ms control poll; excludes VAD, native devices, cleanup and insertion",
+  "paced": [
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 147667,
+      "feed_total_us": 147677,
+      "final_decode_us": 144014,
+      "max_chunk_age_us": 73,
+      "oldest_queued_age_at_stop_us": 45328,
+      "previews": true,
+      "queued_at_stop": 1,
+      "release_to_final_us": 239862,
+      "release_to_stop_observed_us": 95844,
+      "released_during_feed": true,
+      "requested_release_ms": 2050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 32000,
+      "samples_consumed": 32000,
+      "text": "Matt and Wesley are reviewing the minute's apple"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 5,
+      "feed_total_us": 23,
+      "final_decode_us": 167725,
+      "max_chunk_age_us": 3712,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 184523,
+      "release_to_stop_observed_us": 16796,
+      "released_during_feed": false,
+      "requested_release_ms": 2050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 32000,
+      "samples_consumed": 32000,
+      "text": "Matt and Wesley are reviewing the minute's apple"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 3,
+      "feed_total_us": 4,
+      "final_decode_us": 174601,
+      "max_chunk_age_us": 1515,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 194625,
+      "release_to_stop_observed_us": 20022,
+      "released_during_feed": false,
+      "requested_release_ms": 2350,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 36800,
+      "samples_consumed": 36800,
+      "text": "Matt and Wesley are reviewing the minute's Apple Speed"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 144299,
+      "feed_total_us": 144318,
+      "final_decode_us": 145517,
+      "max_chunk_age_us": 46383,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": true,
+      "queued_at_stop": 0,
+      "release_to_final_us": 195946,
+      "release_to_stop_observed_us": 50427,
+      "released_during_feed": false,
+      "requested_release_ms": 2350,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 36800,
+      "samples_consumed": 38400,
+      "text": "Matt and Wesley are reviewing the minute's Apple speech."
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 187130,
+      "feed_total_us": 340478,
+      "final_decode_us": 200318,
+      "max_chunk_age_us": 61377,
+      "oldest_queued_age_at_stop_us": 85543,
+      "previews": true,
+      "queued_at_stop": 1,
+      "release_to_final_us": 434659,
+      "release_to_stop_observed_us": 234334,
+      "released_during_feed": false,
+      "requested_release_ms": 3950,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 62400,
+      "samples_consumed": 64000,
+      "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 1,
+      "feed_total_us": 2,
+      "final_decode_us": 229259,
+      "max_chunk_age_us": 241,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 248030,
+      "release_to_stop_observed_us": 18769,
+      "released_during_feed": false,
+      "requested_release_ms": 3950,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 62400,
+      "samples_consumed": 62400,
+      "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 1,
+      "feed_total_us": 7,
+      "final_decode_us": 210052,
+      "max_chunk_age_us": 93,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 230898,
+      "release_to_stop_observed_us": 20844,
+      "released_during_feed": false,
+      "requested_release_ms": 4050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 64000,
+      "samples_consumed": 64000,
+      "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 189739,
+      "feed_total_us": 347799,
+      "final_decode_us": 135550,
+      "max_chunk_age_us": 59230,
+      "oldest_queued_age_at_stop_us": 90372,
+      "previews": true,
+      "queued_at_stop": 1,
+      "release_to_final_us": 272202,
+      "release_to_stop_observed_us": 136645,
+      "released_during_feed": true,
+      "requested_release_ms": 4050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 64000,
+      "samples_consumed": 64000,
+      "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+    }
+  ],
+  "same_audio": [
+    {
+      "baseline": {
+        "audio_samples": 32000,
+        "feed_us": 97002,
+        "final_us": 97112,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the minute's apple"
+      },
+      "candidate": {
+        "audio_samples": 32000,
+        "feed_us": 4,
+        "final_us": 95760,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the minute's apple"
+      },
+      "text_identical": true
+    },
+    {
+      "baseline": {
+        "audio_samples": 64000,
+        "feed_us": 210891,
+        "final_us": 115392,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+      },
+      "candidate": {
+        "audio_samples": 64000,
+        "feed_us": 8,
+        "final_us": 115037,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to"
+      },
+      "text_identical": true
+    },
+    {
+      "baseline": {
+        "audio_samples": 170013,
+        "feed_us": 668790,
+        "final_us": 181263,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to compare speech transcriber and dictation transcriber against Whisper and Perikete before making a product decision."
+      },
+      "candidate": {
+        "audio_samples": 170013,
+        "feed_us": 18,
+        "final_us": 185704,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple Speech benchmark. They want to compare speech transcriber and dictation transcriber against Whisper and Perikete before making a product decision."
+      },
+      "text_identical": true
+    }
+  ],
+  "schema_version": 1
+}

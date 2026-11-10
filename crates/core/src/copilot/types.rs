@@ -353,11 +353,21 @@ pub struct CopilotSetupNeeded {
     pub action: CopilotSetupAction,
 }
 
+/// What Coach's user-facing copy calls the machine it runs on. Coach also runs
+/// on Windows and Linux, where "Mac" is wrong (#1336).
+pub const COACH_DEVICE_NAME: &str = if cfg!(target_os = "macos") {
+    "Mac"
+} else {
+    "computer"
+};
+
 impl CopilotSetupNeeded {
     pub fn private_ai() -> Self {
         Self {
             kind: CopilotSetupKind::PrivateAiRequired,
-            message: "Coach needs a small on-device AI model to run privately on your Mac. Setup usually takes about 30 seconds.".into(),
+            message: format!(
+                "Coach needs a small on-device AI model to run privately on your {COACH_DEVICE_NAME}. Setup usually takes about 30 seconds."
+            ),
             action: CopilotSetupAction {
                 kind: CopilotSetupActionKind::RunCommand,
                 label: "Set up Coach's private AI".into(),

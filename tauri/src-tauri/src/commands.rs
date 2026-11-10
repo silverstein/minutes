@@ -11,6 +11,7 @@ use minutes_core::capture::{
 use minutes_core::config::{
     ConsentMode, CopilotArmingBehavior, VALID_LIVE_TRANSCRIPT_BACKENDS, VALID_PARAKEET_MODELS,
 };
+use minutes_core::copilot::COACH_DEVICE_NAME;
 use minutes_core::markdown::ConsentBasis;
 use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
@@ -13709,7 +13710,11 @@ fn apply_coach_settings(config: &mut Config, settings: CoachSettingsInput) -> Re
     config.copilot.fast_provider = match settings.model_choice.as_str() {
         COACH_MODEL_ON_DEVICE => "auto-local".into(),
         COACH_MODEL_CLOUD if config.copilot.allow_cloud => "cloud".into(),
-        COACH_MODEL_CLOUD => return Err("Cloud is not configured for Coach on this Mac.".into()),
+        COACH_MODEL_CLOUD => {
+            return Err(format!(
+                "Cloud is not configured for Coach on this {COACH_DEVICE_NAME}."
+            ))
+        }
         _ => return Err("Choose an AI model from the options shown.".into()),
     };
     Ok(())
@@ -13802,7 +13807,11 @@ fn wait_for_coach_service() -> bool {
 
 fn install_coach_local_model(app: &tauri::AppHandle) -> Result<(), String> {
     if coach_local_model_readiness(&Config::load()).is_ready() {
-        emit_coach_setup_progress(app, "ready", "Coach is ready on this Mac.");
+        emit_coach_setup_progress(
+            app,
+            "ready",
+            format!("Coach is ready on this {COACH_DEVICE_NAME}."),
+        );
         return Ok(());
     }
 
@@ -13830,7 +13839,7 @@ fn install_coach_local_model(app: &tauri::AppHandle) -> Result<(), String> {
             run_coach_setup_step(
                 brew,
                 &["services", "start", "ollama"],
-                "Coach could not start the on-device AI. Restart your Mac, then try again.",
+                &format!("Coach could not start the on-device AI. Restart your {COACH_DEVICE_NAME}, then try again."),
             )?;
         } else {
             Command::new(&ollama)
@@ -13840,12 +13849,15 @@ fn install_coach_local_model(app: &tauri::AppHandle) -> Result<(), String> {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|_| {
-                    "Coach could not start the on-device AI. Restart your Mac, then try again."
-                        .to_string()
+                    format!(
+                        "Coach could not start the on-device AI. Restart your {COACH_DEVICE_NAME}, then try again."
+                    )
                 })?;
         }
         if !wait_for_coach_service() {
-            return Err("The on-device AI did not start. Restart your Mac, then try again.".into());
+            return Err(format!(
+                "The on-device AI did not start. Restart your {COACH_DEVICE_NAME}, then try again."
+            ));
         }
     }
 
@@ -13867,8 +13879,9 @@ fn install_coach_local_model(app: &tauri::AppHandle) -> Result<(), String> {
         .prewarm()
         .map_err(|error| {
             tracing::debug!(%error, "desktop Coach prewarm failed after setup");
-            "Coach finished setup but could not start. Restart your Mac, then try again."
-                .to_string()
+            format!(
+                "Coach finished setup but could not start. Restart your {COACH_DEVICE_NAME}, then try again."
+            )
         })?;
 
     let mut config = Config::load();
@@ -13883,7 +13896,11 @@ fn install_coach_local_model(app: &tauri::AppHandle) -> Result<(), String> {
     minutes_core::copilot::write_session_status(&status).map_err(|_| {
         "Coach is ready, but Minutes could not refresh its setup status.".to_string()
     })?;
-    emit_coach_setup_progress(app, "ready", "Coach is ready on this Mac.");
+    emit_coach_setup_progress(
+        app,
+        "ready",
+        format!("Coach is ready on this {COACH_DEVICE_NAME}."),
+    );
     Ok(())
 }
 
@@ -16068,7 +16085,7 @@ mod tests {
         };
         assert_eq!(
             apply_coach_settings(&mut config, input()).unwrap_err(),
-            "Cloud is not configured for Coach on this Mac."
+            format!("Cloud is not configured for Coach on this {COACH_DEVICE_NAME}.")
         );
 
         config.copilot.allow_cloud = true;

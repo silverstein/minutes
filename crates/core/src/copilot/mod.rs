@@ -54,7 +54,7 @@ pub use topic::{is_decisive_final, keywords as topic_keywords, TopicShift, Topic
 pub use types::{
     CopilotHealth, CopilotInputMode, CopilotRequest, CopilotSetupAction, CopilotSetupActionKind,
     CopilotSetupKind, CopilotSetupNeeded, CopilotState, CopilotUtterance, Nudge, NudgeDraft,
-    NudgeKind, TranscriptUpdateKind, COPILOT_CONTRACT_VERSION,
+    NudgeKind, TranscriptUpdateKind, COACH_DEVICE_NAME, COPILOT_CONTRACT_VERSION,
 };
 pub use window_contract::{
     current_window_environment, evaluate_copilot_window_contract, ContractSupport,

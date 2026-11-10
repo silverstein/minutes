@@ -16311,7 +16311,7 @@ fn report_ollama_pull_progress(
 
 fn ollama_download_guidance() -> String {
     format!(
-        "Coach needs the free Ollama app for its private AI. Download it at {OLLAMA_DOWNLOAD_URL}, open it once, then run `minutes coach setup` again. Coach runs on your Mac, and nothing leaves your machine."
+        "Coach needs the free Ollama app for its private AI. Download it at {OLLAMA_DOWNLOAD_URL}, open it once, then run `minutes coach setup` again. Coach runs locally, and nothing leaves your machine."
     )
 }
 

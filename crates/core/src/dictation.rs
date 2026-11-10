@@ -846,7 +846,9 @@ where
                             on_event(DictationEvent::PartialText(sr.text));
                         }
                     }
-                } else {
+                } else if whisper_ctx.is_some() {
+                    // Parakeet can run without a Whisper model; that path
+                    // already owns its audio in final_utterance_samples.
                     streaming.accumulate(&chunk.samples);
                 }
 

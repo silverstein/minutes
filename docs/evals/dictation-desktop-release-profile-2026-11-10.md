@@ -200,7 +200,13 @@ establish which backend a user's `auto` configuration selects.
 
 ## Signed installed-app acceptance
 
-Runtime source: `3e93b30d0062b0ba986f2bdce3aa0a8016ea36a6`.
+Native-tested runtime source: `3e93b30d0062b0ba986f2bdce3aa0a8016ea36a6`.
+A subsequent source-review guard skips the unused Whisper buffer when Parakeet
+runs without any Whisper context. It preserves the tested Whisper-present path;
+that model-absent Parakeet branch was not exercised in the installed app.
+After that guard, strict core Clippy, formatting, 108 dictation-related tests,
+the 144-test speech profile and the explicit Tiny recognition-count/text
+regression passed again on Linux.
 The canonical installer ran from a fresh Apple Terminal context after an SSH
 signing probe reproduced `errSecInternalComponent`. It built with
 `parakeet,metal,engine-sherpa` and installed `~/Applications/Minutes Dev.app`,

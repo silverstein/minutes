@@ -1,0 +1,1323 @@
+{
+  "all_text_identical": true,
+  "input": {
+    "Unix": [
+      116,
+      101,
+      115,
+      116,
+      115,
+      47,
+      101,
+      118,
+      97,
+      108,
+      47,
+      102,
+      105,
+      120,
+      116,
+      117,
+      114,
+      101,
+      115,
+      47,
+      97,
+      117,
+      100,
+      105,
+      111,
+      47,
+      97,
+      112,
+      112,
+      108,
+      101,
+      45,
+      115,
+      112,
+      101,
+      101,
+      99,
+      104,
+      45,
+      100,
+      105,
+      99,
+      116,
+      97,
+      116,
+      105,
+      111,
+      110,
+      46,
+      119,
+      97,
+      118
+    ]
+  },
+  "measurement": "unpaced component replay: production ChunkAccumulator, energy Vad, Whisper session; source-matched dictation routing, not dictation::run or native capture",
+  "pairs": [
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 515732,
+          "final_at_ms": 2000,
+          "final_us": 496635,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 32000,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 500179,
+          "final_at_ms": 2000,
+          "final_us": 0,
+          "reason": "explicit_stop",
+          "reused": true,
+          "samples": 32000,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "cutoff_ms": 2000,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 531236,
+          "final_at_ms": 2500,
+          "final_us": 505575,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 38400,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 509018,
+          "final_at_ms": 2500,
+          "final_us": 531546,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 38400,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "cutoff_ms": 2000,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 519008,
+          "final_at_ms": 2100,
+          "final_us": 507456,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 33600,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 523915,
+          "final_at_ms": 2100,
+          "final_us": 532008,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 33600,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "cutoff_ms": 2100,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 496480,
+          "final_at_ms": 2500,
+          "final_us": 526140,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 38400,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 517317,
+          "final_at_ms": 2500,
+          "final_us": 508627,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 38400,
+          "text": "Minutes benchmark dictation check"
+        }
+      ],
+      "cutoff_ms": 2100,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 479961,
+          "final_at_ms": 2200,
+          "final_us": 495808,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 35200,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 520703,
+          "final_at_ms": 2200,
+          "final_us": 509086,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 35200,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2200,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 511846,
+          "final_at_ms": 2800,
+          "final_us": 519054,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 43200,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 504907,
+          "final_at_ms": 2800,
+          "final_us": 492633,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 43200,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2200,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 497661,
+          "final_at_ms": 2300,
+          "final_us": 517773,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 36800,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 466437,
+          "final_at_ms": 2300,
+          "final_us": 470449,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 36800,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2300,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 494077,
+          "final_at_ms": 2900,
+          "final_us": 499181,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 44800,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 512202,
+          "final_at_ms": 2900,
+          "final_us": 474837,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 44800,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2300,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 510196,
+          "final_at_ms": 2400,
+          "final_us": 541632,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 38400,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 517157,
+          "final_at_ms": 2400,
+          "final_us": 505743,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 38400,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2400,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 501023,
+          "final_at_ms": 3000,
+          "final_us": 503815,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 46400,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 492362,
+          "final_at_ms": 3000,
+          "final_us": 503978,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 46400,
+          "text": "minutes benchmark dictation check."
+        }
+      ],
+      "cutoff_ms": 2400,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 485015,
+          "final_at_ms": 2500,
+          "final_us": 918464,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 40000,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 474642,
+          "final_at_ms": 2500,
+          "final_us": 937051,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 40000,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "cutoff_ms": 2500,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 501426,
+          "final_at_ms": 3100,
+          "final_us": 917706,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 48000,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 504321,
+          "final_at_ms": 3100,
+          "final_us": 967450,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 48000,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "cutoff_ms": 2500,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 507739,
+          "final_at_ms": 2600,
+          "final_us": 929146,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 41600,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 501109,
+          "final_at_ms": 2600,
+          "final_us": 940990,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 41600,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "cutoff_ms": 2600,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 508152,
+          "final_at_ms": 3200,
+          "final_us": 921205,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 49600,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 476631,
+          "final_at_ms": 3200,
+          "final_us": 926132,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 49600,
+          "text": "minutes benchmark dictation check. Apple's"
+        }
+      ],
+      "cutoff_ms": 2600,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 525625,
+          "final_at_ms": 2700,
+          "final_us": 517550,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 43200,
+          "text": "minutes benchmark dictation check. Apple speed."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 514535,
+          "final_at_ms": 2700,
+          "final_us": 532118,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 43200,
+          "text": "minutes benchmark dictation check. Apple speed."
+        }
+      ],
+      "cutoff_ms": 2700,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 513839,
+          "final_at_ms": 3300,
+          "final_us": 532361,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 51200,
+          "text": "minutes benchmark dictation check. Apple speed."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 506800,
+          "final_at_ms": 3300,
+          "final_us": 509839,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 51200,
+          "text": "minutes benchmark dictation check. Apple speed."
+        }
+      ],
+      "cutoff_ms": 2700,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 514039,
+          "final_at_ms": 2800,
+          "final_us": 516409,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 44800,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 525580,
+          "final_at_ms": 2800,
+          "final_us": 533134,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 44800,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "cutoff_ms": 2800,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 487392,
+          "final_at_ms": 3400,
+          "final_us": 510551,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 52800,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 506563,
+          "final_at_ms": 3400,
+          "final_us": 499712,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 52800,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "cutoff_ms": 2800,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 508129,
+          "final_at_ms": 2900,
+          "final_us": 542692,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 46400,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 523502,
+          "final_at_ms": 2900,
+          "final_us": 525948,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 46400,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "cutoff_ms": 2900,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 505270,
+          "final_at_ms": 3500,
+          "final_us": 514140,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 54400,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 530613,
+          "final_at_ms": 3500,
+          "final_us": 523479,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 54400,
+          "text": "minutes benchmark dictation check, Apple Speech"
+        }
+      ],
+      "cutoff_ms": 2900,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 508961,
+          "final_at_ms": 3000,
+          "final_us": 935252,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 48000,
+          "text": "minutes benchmark dictation check. Apple Speed Shift"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 499834,
+          "final_at_ms": 3000,
+          "final_us": 932361,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 48000,
+          "text": "minutes benchmark dictation check. Apple Speed Shift"
+        }
+      ],
+      "cutoff_ms": 3000,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 496094,
+          "final_at_ms": 3600,
+          "final_us": 950878,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 56000,
+          "text": "minutes benchmark dictation check. Apple Speed Shift"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 506290,
+          "final_at_ms": 3600,
+          "final_us": 944261,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 56000,
+          "text": "minutes benchmark dictation check. Apple Speed Shift"
+        }
+      ],
+      "cutoff_ms": 3000,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 521986,
+          "final_at_ms": 3100,
+          "final_us": 488854,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 49600,
+          "text": "minutes benchmark dictation check, Apple Speech should"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 514254,
+          "final_at_ms": 3100,
+          "final_us": 516266,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 49600,
+          "text": "minutes benchmark dictation check, Apple Speech should"
+        }
+      ],
+      "cutoff_ms": 3100,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 490349,
+          "final_at_ms": 3700,
+          "final_us": 553171,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 57600,
+          "text": "minutes benchmark dictation check, Apple Speech should help."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 520006,
+          "final_at_ms": 3700,
+          "final_us": 526755,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 57600,
+          "text": "minutes benchmark dictation check, Apple Speech should help."
+        }
+      ],
+      "cutoff_ms": 3100,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 526757,
+          "final_at_ms": 3200,
+          "final_us": 550726,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 51200,
+          "text": "minutes benchmark dictation check, Apple Speech should have"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 495172,
+          "final_at_ms": 3200,
+          "final_us": 536424,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 51200,
+          "text": "minutes benchmark dictation check, Apple Speech should have"
+        }
+      ],
+      "cutoff_ms": 3200,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 522061,
+          "final_at_ms": 3800,
+          "final_us": 531854,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 59200,
+          "text": "minutes benchmark dictation check, Apple Speech should have"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 526432,
+          "final_at_ms": 3800,
+          "final_us": 517609,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 59200,
+          "text": "minutes benchmark dictation check, Apple Speech should have"
+        }
+      ],
+      "cutoff_ms": 3200,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 485925,
+          "final_at_ms": 3300,
+          "final_us": 941281,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 52800,
+          "text": "minutes benchmark dictation check. Apple speech should hand."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 531475,
+          "final_at_ms": 3300,
+          "final_us": 970137,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 52800,
+          "text": "minutes benchmark dictation check. Apple speech should hand."
+        }
+      ],
+      "cutoff_ms": 3300,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 516874,
+          "final_at_ms": 3900,
+          "final_us": 951955,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 60800,
+          "text": "minutes benchmark dictation check. Apple speech should hand."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 518936,
+          "final_at_ms": 3900,
+          "final_us": 994412,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 60800,
+          "text": "minutes benchmark dictation check. Apple speech should hand."
+        }
+      ],
+      "cutoff_ms": 3300,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 527589,
+          "final_at_ms": 3400,
+          "final_us": 552825,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 54400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 532827,
+          "final_at_ms": 3400,
+          "final_us": 538057,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 54400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "cutoff_ms": 3400,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 525245,
+          "final_at_ms": 4000,
+          "final_us": 535181,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 62400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 530330,
+          "final_at_ms": 4000,
+          "final_us": 524310,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 62400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "cutoff_ms": 3400,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 512978,
+          "final_at_ms": 3500,
+          "final_us": 533302,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 56000,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 471262,
+          "final_at_ms": 3500,
+          "final_us": 509017,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 56000,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "cutoff_ms": 3500,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 1060633,
+          "final_at_ms": 4100,
+          "final_us": 530703,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 64000,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 1028994,
+          "final_at_ms": 4100,
+          "final_us": 0,
+          "reason": "vad_boundary",
+          "reused": true,
+          "samples": 64000,
+          "text": "minutes benchmark dictation check, Apple Speech should handle"
+        }
+      ],
+      "cutoff_ms": 3500,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 515125,
+          "final_at_ms": 3600,
+          "final_us": 528439,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 57600,
+          "text": "minutes benchmark dictation check, Apple Speech should handle show"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 511155,
+          "final_at_ms": 3600,
+          "final_us": 533547,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 57600,
+          "text": "minutes benchmark dictation check, Apple Speech should handle show"
+        }
+      ],
+      "cutoff_ms": 3600,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1035418,
+          "final_at_ms": 4200,
+          "final_us": 527456,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 65600,
+          "text": "minutes benchmark dictation check, Apple Speech should handle show"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1029194,
+          "final_at_ms": 4200,
+          "final_us": 547710,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 65600,
+          "text": "minutes benchmark dictation check, Apple Speech should handle show"
+        }
+      ],
+      "cutoff_ms": 3600,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 518477,
+          "final_at_ms": 3700,
+          "final_us": 542219,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 59200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 526456,
+          "final_at_ms": 3700,
+          "final_us": 518910,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 59200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "cutoff_ms": 3700,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1048369,
+          "final_at_ms": 4300,
+          "final_us": 520151,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 67200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1065098,
+          "final_at_ms": 4300,
+          "final_us": 504181,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 67200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "cutoff_ms": 3700,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 530725,
+          "final_at_ms": 3800,
+          "final_us": 528836,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 60800,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 529142,
+          "final_at_ms": 3800,
+          "final_us": 525016,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 60800,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short."
+        }
+      ],
+      "cutoff_ms": 3800,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1055788,
+          "final_at_ms": 4400,
+          "final_us": 546272,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 68800,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1049202,
+          "final_at_ms": 4400,
+          "final_us": 550060,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 68800,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short."
+        }
+      ],
+      "cutoff_ms": 3800,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 490170,
+          "final_at_ms": 3900,
+          "final_us": 497284,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 62400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 513013,
+          "final_at_ms": 3900,
+          "final_us": 513045,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 62400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "cutoff_ms": 3900,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 965433,
+          "final_at_ms": 4500,
+          "final_us": 463194,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 70400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 952117,
+          "final_at_ms": 4500,
+          "final_us": 501255,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 70400,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short"
+        }
+      ],
+      "cutoff_ms": 3900,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 984757,
+          "final_at_ms": 5200,
+          "final_us": 501737,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 83200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short-form voice notes locally."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 965340,
+          "final_at_ms": 5200,
+          "final_us": 524015,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 83200,
+          "text": "minutes benchmark dictation check, Apple Speech should handle short-form voice notes locally."
+        }
+      ],
+      "cutoff_ms": 5286,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 989250,
+          "final_at_ms": 5900,
+          "final_us": 520796,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 92800,
+          "text": "Minute Spence Mark Tiktation Check, Apple Speech should handle short-form voice notes locally."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1022366,
+          "final_at_ms": 5900,
+          "final_us": 511442,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 92800,
+          "text": "Minute Spence Mark Tiktation Check, Apple Speech should handle short-form voice notes locally."
+        }
+      ],
+      "cutoff_ms": 5286,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    }
+  ],
+  "schema_version": 1
+}

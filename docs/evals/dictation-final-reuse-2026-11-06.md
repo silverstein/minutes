@@ -2,6 +2,12 @@
 
 ## Scope and decision
 
+**November 10 follow-up:** [the bounded usefulness sweep](dictation-reuse-usefulness-2026-11-10.md)
+found only exact-alignment hits (4/80 phase cases, 0/4 complete-fixture controls).
+The decision is to close PR #1318 as a negative default-optimization experiment. The
+prototype is not merged or promoted; the historical qualification evidence below
+is preserved.
+
 Inspired by [Phonon's recognition scheduling](https://github.com/Infatoshi/phonon/blob/2e9a5b724845b7b5881701f06c08d00deccc3e5f/sidecar/stream_asr.py), this experiment tests whether completing recognition work during speech can reduce finalization cost without adding a refiner or downloading another speech model. The Minutes candidate only reuses a successful full-buffer Whisper decode when no additional samples have been fed into that utterance. It does not stitch text, trim silence, infer an immutable prefix, or promote a bounded-window partial. The default remains off. Subsequent native fixture runs verified delivery and HUD cancellation, but the live text pair differed and neither text-producing candidate decode reused a result. There is no demonstrated typical release-latency benefit.
 
 `MINUTES_DICTATION_FINAL_REUSE=1` opts a dictation process into the candidate. Other values and an unset variable preserve ordinary finalization. The flag applies only to Whisper finalization, including a configured final engine's Whisper fallback. It does not change the selected final engine, its availability gates, cleanup, insertion, or model downloads. The experiment retains one extra transcript string and schedules no additional recognition passes. It adds no model or audio copy.

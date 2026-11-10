@@ -1,0 +1,1293 @@
+{
+  "all_text_identical": true,
+  "input": {
+    "Unix": [
+      99,
+      114,
+      97,
+      116,
+      101,
+      115,
+      47,
+      97,
+      115,
+      115,
+      101,
+      116,
+      115,
+      47,
+      100,
+      101,
+      109,
+      111,
+      46,
+      119,
+      97,
+      118
+    ]
+  },
+  "measurement": "unpaced component replay: production ChunkAccumulator, energy Vad, Whisper session; source-matched dictation routing, not dictation::run or native capture",
+  "pairs": [
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 1463338,
+          "final_at_ms": 4000,
+          "final_us": 953960,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 64000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 1519867,
+          "final_at_ms": 4000,
+          "final_us": 0,
+          "reason": "explicit_stop",
+          "reused": true,
+          "samples": 64000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+        }
+      ],
+      "cutoff_ms": 4000,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1510140,
+          "final_at_ms": 4600,
+          "final_us": 959663,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 72000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1513636,
+          "final_at_ms": 4600,
+          "final_us": 953270,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 72000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to."
+        }
+      ],
+      "cutoff_ms": 4000,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1517094,
+          "final_at_ms": 4100,
+          "final_us": 956235,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 65600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1503212,
+          "final_at_ms": 4100,
+          "final_us": 984480,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 65600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+        }
+      ],
+      "cutoff_ms": 4100,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1473159,
+          "final_at_ms": 4700,
+          "final_us": 982438,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 73600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1459146,
+          "final_at_ms": 4700,
+          "final_us": 984343,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 73600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to..."
+        }
+      ],
+      "cutoff_ms": 4100,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1451474,
+          "final_at_ms": 4200,
+          "final_us": 959465,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 67200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to come"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1504513,
+          "final_at_ms": 4200,
+          "final_us": 971359,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 67200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to come"
+        }
+      ],
+      "cutoff_ms": 4200,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1445359,
+          "final_at_ms": 4800,
+          "final_us": 967049,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 75200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to come"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1492083,
+          "final_at_ms": 4800,
+          "final_us": 963924,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 75200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to come"
+        }
+      ],
+      "cutoff_ms": 4200,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1460121,
+          "final_at_ms": 4300,
+          "final_us": 541453,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 68800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compete."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1502981,
+          "final_at_ms": 4300,
+          "final_us": 548067,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 68800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compete."
+        }
+      ],
+      "cutoff_ms": 4300,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1501623,
+          "final_at_ms": 4900,
+          "final_us": 502187,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 76800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compete."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1473741,
+          "final_at_ms": 4900,
+          "final_us": 560455,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 76800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compete."
+        }
+      ],
+      "cutoff_ms": 4300,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1435258,
+          "final_at_ms": 4400,
+          "final_us": 945654,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 70400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1451681,
+          "final_at_ms": 4400,
+          "final_us": 986686,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 70400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4400,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1531788,
+          "final_at_ms": 5000,
+          "final_us": 966632,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 78400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1508763,
+          "final_at_ms": 5000,
+          "final_us": 916445,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 78400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4400,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1464961,
+          "final_at_ms": 4500,
+          "final_us": 965845,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 72000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1421945,
+          "final_at_ms": 4500,
+          "final_us": 982032,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 72000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4500,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1510039,
+          "final_at_ms": 5100,
+          "final_us": 968990,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 80000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1515200,
+          "final_at_ms": 5100,
+          "final_us": 975286,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 80000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4500,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1526785,
+          "final_at_ms": 4600,
+          "final_us": 534369,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 73600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1486490,
+          "final_at_ms": 4600,
+          "final_us": 523381,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 73600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4600,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1473593,
+          "final_at_ms": 5200,
+          "final_us": 557603,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 81600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1488569,
+          "final_at_ms": 5200,
+          "final_us": 555010,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 81600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare"
+        }
+      ],
+      "cutoff_ms": 4600,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1477135,
+          "final_at_ms": 4700,
+          "final_us": 997867,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 75200,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1516956,
+          "final_at_ms": 4700,
+          "final_us": 980820,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 75200,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "cutoff_ms": 4700,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1463208,
+          "final_at_ms": 5300,
+          "final_us": 957923,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 83200,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1532197,
+          "final_at_ms": 5300,
+          "final_us": 952514,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 83200,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "cutoff_ms": 4700,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1449224,
+          "final_at_ms": 4800,
+          "final_us": 984703,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 76800,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1489193,
+          "final_at_ms": 4800,
+          "final_us": 951116,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 76800,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "cutoff_ms": 4800,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1464332,
+          "final_at_ms": 5400,
+          "final_us": 961006,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 84800,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1455381,
+          "final_at_ms": 5400,
+          "final_us": 976965,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 84800,
+          "text": "Matt and Wesley are reviewing the minute-sackle speech benchmark. They want to compare speed"
+        }
+      ],
+      "cutoff_ms": 4800,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1482734,
+          "final_at_ms": 4900,
+          "final_us": 969728,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 78400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1486890,
+          "final_at_ms": 4900,
+          "final_us": 950921,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 78400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech"
+        }
+      ],
+      "cutoff_ms": 4900,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1471310,
+          "final_at_ms": 5500,
+          "final_us": 978813,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 86400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1501152,
+          "final_at_ms": 5500,
+          "final_us": 959373,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 86400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech"
+        }
+      ],
+      "cutoff_ms": 4900,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1475163,
+          "final_at_ms": 5000,
+          "final_us": 950484,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 80000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech to"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1467245,
+          "final_at_ms": 5000,
+          "final_us": 944867,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 80000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech to"
+        }
+      ],
+      "cutoff_ms": 5000,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1515031,
+          "final_at_ms": 5600,
+          "final_us": 979416,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 88000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech to"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1504932,
+          "final_at_ms": 5600,
+          "final_us": 969171,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 88000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech to"
+        }
+      ],
+      "cutoff_ms": 5000,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1490987,
+          "final_at_ms": 5100,
+          "final_us": 964234,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 81600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech track."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1532563,
+          "final_at_ms": 5100,
+          "final_us": 964897,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 81600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech track."
+        }
+      ],
+      "cutoff_ms": 5100,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1482950,
+          "final_at_ms": 5700,
+          "final_us": 972694,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 89600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech track."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1515746,
+          "final_at_ms": 5700,
+          "final_us": 957377,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 89600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech track."
+        }
+      ],
+      "cutoff_ms": 5100,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1488005,
+          "final_at_ms": 5200,
+          "final_us": 528987,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 83200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech trends."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1513795,
+          "final_at_ms": 5200,
+          "final_us": 529826,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 83200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech trends."
+        }
+      ],
+      "cutoff_ms": 5200,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1450271,
+          "final_at_ms": 5800,
+          "final_us": 523989,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 91200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech trends."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1467729,
+          "final_at_ms": 5800,
+          "final_us": 519755,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 91200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech trends."
+        }
+      ],
+      "cutoff_ms": 5200,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1488628,
+          "final_at_ms": 5300,
+          "final_us": 573074,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 84800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transfer."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1515333,
+          "final_at_ms": 5300,
+          "final_us": 533468,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 84800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transfer."
+        }
+      ],
+      "cutoff_ms": 5300,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1513310,
+          "final_at_ms": 5900,
+          "final_us": 569755,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 92800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transfer."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1482299,
+          "final_at_ms": 5900,
+          "final_us": 525444,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 92800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transfer."
+        }
+      ],
+      "cutoff_ms": 5300,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1493147,
+          "final_at_ms": 5400,
+          "final_us": 551419,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 86400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transquite."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1475341,
+          "final_at_ms": 5400,
+          "final_us": 562450,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 86400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transquite."
+        }
+      ],
+      "cutoff_ms": 5400,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1513451,
+          "final_at_ms": 6000,
+          "final_us": 557644,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 94400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transquite."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1508333,
+          "final_at_ms": 6000,
+          "final_us": 552578,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 94400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transquite."
+        }
+      ],
+      "cutoff_ms": 5400,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1474602,
+          "final_at_ms": 5500,
+          "final_us": 994920,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 88000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1492172,
+          "final_at_ms": 5500,
+          "final_us": 989797,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 88000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "cutoff_ms": 5500,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 2496784,
+          "final_at_ms": 6100,
+          "final_us": 992370,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 96000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": true,
+          "feed_us": 2502096,
+          "final_at_ms": 6100,
+          "final_us": 0,
+          "reason": "vad_boundary",
+          "reused": true,
+          "samples": 96000,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "cutoff_ms": 5500,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1492524,
+          "final_at_ms": 5600,
+          "final_us": 987450,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 89600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1474113,
+          "final_at_ms": 5600,
+          "final_us": 936804,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 89600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "cutoff_ms": 5600,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2483735,
+          "final_at_ms": 6200,
+          "final_us": 1035906,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 97600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2483415,
+          "final_at_ms": 6200,
+          "final_us": 1003770,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 97600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcribed"
+        }
+      ],
+      "cutoff_ms": 5600,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1517696,
+          "final_at_ms": 5700,
+          "final_us": 1044356,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 91200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1468405,
+          "final_at_ms": 5700,
+          "final_us": 978181,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 91200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber"
+        }
+      ],
+      "cutoff_ms": 5700,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2484149,
+          "final_at_ms": 6300,
+          "final_us": 1018408,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 99200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2546713,
+          "final_at_ms": 6300,
+          "final_us": 998379,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 99200,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber"
+        }
+      ],
+      "cutoff_ms": 5700,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1464864,
+          "final_at_ms": 5800,
+          "final_us": 983118,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 92800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1484340,
+          "final_at_ms": 5800,
+          "final_us": 983148,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 92800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "cutoff_ms": 5800,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2466238,
+          "final_at_ms": 6400,
+          "final_us": 1003647,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 100800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2465276,
+          "final_at_ms": 6400,
+          "final_us": 962865,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 100800,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "cutoff_ms": 5800,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1439773,
+          "final_at_ms": 5900,
+          "final_us": 966254,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 94400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 1408728,
+          "final_at_ms": 5900,
+          "final_us": 986219,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 94400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "cutoff_ms": 5900,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2491147,
+          "final_at_ms": 6500,
+          "final_us": 984584,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 102400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 2435115,
+          "final_at_ms": 6500,
+          "final_us": 953729,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 102400,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark. They want to compare speech transcriber and"
+        }
+      ],
+      "cutoff_ms": 5900,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 3559420,
+          "final_at_ms": 10600,
+          "final_us": 592761,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 169600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 3601027,
+          "final_at_ms": 10600,
+          "final_us": 564453,
+          "reason": "explicit_stop",
+          "reused": false,
+          "samples": 169600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+        }
+      ],
+      "cutoff_ms": 10625,
+      "iteration": 0,
+      "stop_mode": "release"
+    },
+    {
+      "all_text_identical": true,
+      "baseline": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 3450944,
+          "final_at_ms": 11200,
+          "final_us": 579048,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 177600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+        }
+      ],
+      "candidate": [
+        {
+          "alignment_eligible": false,
+          "feed_us": 3450562,
+          "final_at_ms": 11200,
+          "final_us": 561137,
+          "reason": "vad_boundary",
+          "reused": false,
+          "samples": 177600,
+          "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+        }
+      ],
+      "cutoff_ms": 10625,
+      "iteration": 0,
+      "stop_mode": "vad_end"
+    }
+  ],
+  "schema_version": 1
+}

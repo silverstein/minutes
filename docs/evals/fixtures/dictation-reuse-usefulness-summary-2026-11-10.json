@@ -1,0 +1,142 @@
+{
+  "demo": {
+    "release": {
+      "phase_sweep": {
+        "pairs": 20,
+        "segments": 20,
+        "text_segments": 20,
+        "reused_segments": 1,
+        "last_segment_reused_cases": 1,
+        "alignment_eligible_segments": 1,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [
+          4000
+        ],
+        "hit_baseline_final_ms": [
+          953.96
+        ],
+        "last_baseline_final_p50_ms": 961.8495,
+        "last_candidate_final_p50_ms": 958.0065,
+        "structural_saved_decode_fraction": 0.05
+      },
+      "full_fixture": {
+        "pairs": 1,
+        "segments": 1,
+        "text_segments": 1,
+        "reused_segments": 0,
+        "last_segment_reused_cases": 0,
+        "alignment_eligible_segments": 0,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [],
+        "hit_baseline_final_ms": [],
+        "last_baseline_final_p50_ms": 592.761,
+        "last_candidate_final_p50_ms": 564.453,
+        "structural_saved_decode_fraction": 0.0
+      }
+    },
+    "vad_end": {
+      "phase_sweep": {
+        "pairs": 20,
+        "segments": 20,
+        "text_segments": 20,
+        "reused_segments": 1,
+        "last_segment_reused_cases": 1,
+        "alignment_eligible_segments": 1,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [
+          5500
+        ],
+        "hit_baseline_final_ms": [
+          992.37
+        ],
+        "last_baseline_final_p50_ms": 968.0195,
+        "last_candidate_final_p50_ms": 955.553,
+        "structural_saved_decode_fraction": 0.05
+      },
+      "full_fixture": {
+        "pairs": 1,
+        "segments": 1,
+        "text_segments": 1,
+        "reused_segments": 0,
+        "last_segment_reused_cases": 0,
+        "alignment_eligible_segments": 0,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [],
+        "hit_baseline_final_ms": [],
+        "last_baseline_final_p50_ms": 579.048,
+        "last_candidate_final_p50_ms": 561.137,
+        "structural_saved_decode_fraction": 0.0
+      }
+    }
+  },
+  "dictation": {
+    "release": {
+      "phase_sweep": {
+        "pairs": 20,
+        "segments": 20,
+        "text_segments": 20,
+        "reused_segments": 1,
+        "last_segment_reused_cases": 1,
+        "alignment_eligible_segments": 1,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [
+          2000
+        ],
+        "hit_baseline_final_ms": [
+          496.635
+        ],
+        "last_baseline_final_p50_ms": 531.069,
+        "last_candidate_final_p50_ms": 528.9780000000001,
+        "structural_saved_decode_fraction": 0.05
+      },
+      "full_fixture": {
+        "pairs": 1,
+        "segments": 1,
+        "text_segments": 1,
+        "reused_segments": 0,
+        "last_segment_reused_cases": 0,
+        "alignment_eligible_segments": 0,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [],
+        "hit_baseline_final_ms": [],
+        "last_baseline_final_p50_ms": 501.737,
+        "last_candidate_final_p50_ms": 524.015,
+        "structural_saved_decode_fraction": 0.0
+      }
+    },
+    "vad_end": {
+      "phase_sweep": {
+        "pairs": 20,
+        "segments": 20,
+        "text_segments": 20,
+        "reused_segments": 1,
+        "last_segment_reused_cases": 1,
+        "alignment_eligible_segments": 1,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [
+          3500
+        ],
+        "hit_baseline_final_ms": [
+          530.703
+        ],
+        "last_baseline_final_p50_ms": 529.0795,
+        "last_candidate_final_p50_ms": 520.5440000000001,
+        "structural_saved_decode_fraction": 0.05
+      },
+      "full_fixture": {
+        "pairs": 1,
+        "segments": 1,
+        "text_segments": 1,
+        "reused_segments": 0,
+        "last_segment_reused_cases": 0,
+        "alignment_eligible_segments": 0,
+        "all_text_identical": true,
+        "hit_cutoffs_ms": [],
+        "hit_baseline_final_ms": [],
+        "last_baseline_final_p50_ms": 520.796,
+        "last_candidate_final_p50_ms": 511.442,
+        "structural_saved_decode_fraction": 0.0
+      }
+    }
+  }
+}

@@ -28,7 +28,7 @@ Minutes exposes a standard MCP server. Point any MCP-compatible client at it:
 }
 ```
 
-The Claude Desktop `.mcpb` extension requires a system Node.js 20+ when Claude Desktop cannot run Node helpers; install Node.js from [nodejs.org](https://nodejs.org) or with Homebrew, or set **Node.js path (optional)** to its absolute executable path in the Minutes extension settings in Claude Desktop. Leave this setting blank for automatic discovery. Other MCP clients can set `MINUTES_NODE_PATH` in the server environment.
+The Claude Desktop `.mcpb` extension requires a system Node.js 20+ when Claude Desktop cannot run Node helpers; install Node.js from [nodejs.org](https://nodejs.org) or with Homebrew, or set **Node.js path (optional)** to its absolute executable path in the Minutes extension settings in Claude Desktop. Leave this setting blank for automatic discovery. After changing it, quit and reopen Claude Desktop: the setting is read when Claude Desktop starts the Minutes server, and turning the extension off and on may not restart it. Other MCP clients can set `MINUTES_NODE_PATH` in the server environment.
 
 #### Transports
 

@@ -36,7 +36,7 @@ export class NodeHelperRuntimeError extends Error {
       (override
         ? "The Node.js path setting (MINUTES_NODE_PATH) must name an absolute path to a working Node.js executable. "
         : "No working system Node.js runtime was found. ") +
-      `Install Node.js ${MINIMUM_HELPER_NODE_MAJOR}+ from nodejs.org or with Homebrew, or set Node.js path in the Minutes extension settings in Claude Desktop to its absolute executable path, then retry.`
+      `Install Node.js ${MINIMUM_HELPER_NODE_MAJOR}+ from nodejs.org or with Homebrew, or set Node.js path in the Minutes extension settings in Claude Desktop to its absolute executable path, then quit and reopen Claude Desktop.`
     );
     this.name = "NodeHelperRuntimeError";
   }
@@ -130,6 +130,9 @@ export function createNodeHelperRuntimeResolver(options: Partial<RuntimeResolver
       "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
       paths.join(environment.VOLTA_HOME ?? paths.join(settings.home, ".volta"), "bin"),
       paths.join(settings.home, ".asdf", "shims"),
+      // Manual user-space installs (no package or version manager).
+      paths.join(settings.home, ".local", "bin"),
+      paths.join(settings.home, ".local", "node", "bin"),
     ]) yield paths.join(directory, node);
 
     for (const [directory, suffix] of [
@@ -169,7 +172,8 @@ export function createNodeHelperRuntimeResolver(options: Partial<RuntimeResolver
     if (!settings.electronVersion) return settings.execPath;
     const environment = settings.environment();
     const configuredPath = environment.MINUTES_NODE_PATH;
-    const override = configuredPath?.trim() ? configuredPath : undefined;
+    // A path pasted into the extension settings can carry stray whitespace.
+    const override = configuredPath?.trim() || undefined;
     const key = JSON.stringify([override, environment.PATH, environment.Path]);
     if (resolved?.key === key) return resolved.binary;
     if (pending?.key === key) return pending.promise;

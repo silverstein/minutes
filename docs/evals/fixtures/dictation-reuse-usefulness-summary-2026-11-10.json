@@ -138,5 +138,19 @@
         "structural_saved_decode_fraction": 0.0
       }
     }
+  },
+  "reproduction": {
+    "runtime_candidate": "6534df23b044884e1c211da41f32b154037e5df3",
+    "branch_source": "480e85e46dea7d64d4491fb300101365d1a28d54",
+    "main_checked": "3a69ff467a5004c7ec97d746c5b49284c294b3b7",
+    "model": "ggml-tiny.bin",
+    "model_sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+    "fixture_sha256": {
+      "crates/assets/demo.wav": "d32616b3f1a5a669c35885d815f9e82b1447d50d07a1892c4e08e710f7a85c8b",
+      "tests/eval/fixtures/audio/apple-speech-dictation.wav": "503b9728d70a694efca1da4b0bbf40d606130146d76f1e1a2ad450609727d8aa"
+    },
+    "method": "Unpaced component replay; artificial 100ms phase grid; not native capture or natural user hit rate",
+    "decision": "close_negative_default_experiment",
+    "new_model_downloads": 0
   }
 }

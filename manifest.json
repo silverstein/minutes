@@ -256,7 +256,7 @@
     "node_path": {
       "type": "string",
       "title": "Node.js path (optional)",
-      "description": "Absolute path to the Node.js executable. Only needed if Minutes cannot find Node.js 20+.",
+      "description": "Absolute path to the Node.js executable. Only needed if Minutes cannot find Node.js 20+. Quit and reopen Claude Desktop after changing it.",
       "required": false,
       "default": ""
     }

@@ -80,6 +80,13 @@ describe("Node helper runtime resolution", () => {
     expect(probe.mock.calls.map(([binary]) => binary)).toEqual([options.execPath, "/system/node"]);
   });
 
+  it.each([" /custom/node", "/custom/node ", "\t/custom/node\n"])("ignores whitespace pasted around the override (%j)", async (override) => {
+    const { options, probe } = fixture({ PATH: "/system", MINUTES_NODE_PATH: override });
+    probe.mockImplementation(async (binary) => binary === "/custom/node" || binary === "/system/node" ? marker() : null);
+    expect(await createNodeHelperRuntimeResolver(options)()).toBe("/custom/node");
+    expect(probe.mock.calls.map(([binary]) => binary)).toEqual([options.execPath, "/custom/node"]);
+  });
+
   it.each(["node", "/old-node", "/not-executable"])("rejects an unusable override (%s) with path-free guidance", async (override) => {
     const { options, probe } = fixture({ MINUTES_NODE_PATH: override });
     probe.mockImplementation(async (binary) => binary === "/old-node" ? marker(18) : null);
@@ -104,6 +111,8 @@ describe("Node helper runtime resolution", () => {
     "/usr/local/bin/node",
     "/home/test/.volta/bin/node",
     "/home/test/.asdf/shims/node",
+    "/home/test/.local/bin/node",
+    "/home/test/.local/node/bin/node",
     "/home/test/.nvm/versions/node/v24.1.0/bin/node",
     "/home/test/Library/Application Support/fnm/node-versions/v24.1.0/installation/bin/node",
     "/home/test/.local/share/fnm/node-versions/v24.1.0/installation/bin/node",

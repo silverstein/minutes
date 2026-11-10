@@ -13141,6 +13141,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     function applySemanticStatus(status) {
       semanticSearchEnabled = status.enabled && status.modelInstalled;
+      // Semantic search also ships on Windows and Linux; say "Mac" only on a Mac (#1336).
+      if (document.documentElement.dataset.platform !== 'macos') {
+        document.getElementById('settings-semantic-meta').textContent =
+          "Runs Google's EmbeddingGemma 2 on this computer. Turning it on downloads a 310 MB model once and keeps a small index in ~/.minutes/semantic. Restricted meetings are never indexed. Turning it off deletes the index.";
+      }
       setSettingsToggle('settings-semantic-search', status.enabled);
       const toggle = document.getElementById('settings-semantic-search');
       toggle.disabled = !status.workerAvailable && !status.enabled;

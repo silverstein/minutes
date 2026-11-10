@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "source_commit": "3e93b30d0062b0ba986f2bdce3aa0a8016ea36a6",
+  "host": "M4 Max, 128 GiB, macOS 26.6",
+  "installed_app": "~/Applications/Minutes Dev.app",
+  "bundle_id": "com.useminutes.desktop.dev",
+  "signing_authority": "Apple Development: Mathieu Silverstein (97C8UF8QVF)",
+  "team_identifier": "63TMLKT8HN",
+  "strict_seal_exit": 0,
+  "hotkey_diagnostic_exit": 0,
+  "binary_sha256": "fe67d4662ce877c5dfe7390d04bf52e9122fd60350fa0f92769ef0050b74b095",
+  "installed_binary_mtime_utc": "2026-11-10T04:16:12.939493+00:00",
+  "pid": 25911,
+  "process_started_at_utc": "2026-11-10T04:17:21Z",
+  "build_features": "parakeet,metal,engine-sherpa",
+  "dictation_backend": "whisper",
+  "model": "tiny",
+  "model_sha256": "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+  "fixture": "crates/assets/demo.wav",
+  "fixture_sha256": "d32616b3f1a5a669c35885d815f9e82b1447d50d07a1892c4e08e710f7a85c8b",
+  "input_device": "MMAudio Device",
+  "playback_output": "same virtual device, per-process selection",
+  "system_default_output_unchanged": true,
+  "harness_silence_timeout_ms": 30000,
+  "harness_silence_timeout_restored_ms": 2000,
+  "events": [
+    {
+      "duration_ms": 191,
+      "extra": {
+        "clipboard_restored": false,
+        "destination": "insert",
+        "insert_operation_ms": 158,
+        "method": "native_ax",
+        "outcome": "typed",
+        "release_to_inserted_ms": 191,
+        "verified": true
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_insert",
+      "ts": "2026-11-09T23:19:07.395434-05:00"
+    },
+    {
+      "duration_ms": 39654,
+      "extra": {
+        "clipboard_restore_ms": null,
+        "clipboard_restored": false,
+        "engine_warm": true,
+        "final_to_verification_complete_ms": 22810,
+        "final_to_visible_ms": 22792,
+        "insertion_diagnostic": null,
+        "insertion_total_ms": 19,
+        "method": "native_ax",
+        "outcome": "typed",
+        "press_to_engine_ready_ms": 13,
+        "press_to_hud_ms": 41,
+        "press_to_listening_ms": 81,
+        "release_to_final_ms": null,
+        "release_to_visible_ms": 34,
+        "session_total_ms": 39654,
+        "speech_end_to_final_ms": 129,
+        "speech_end_to_visible_ms": 22922,
+        "speech_to_first_partial_ms": null,
+        "target_class": "document",
+        "verification_ms": 0,
+        "verified": true,
+        "visible_insert_operation_ms": 1
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_latency",
+      "ts": "2026-11-09T23:19:07.395566-05:00"
+    },
+    {
+      "duration_ms": 190,
+      "extra": {
+        "clipboard_restored": false,
+        "destination": "insert",
+        "insert_operation_ms": 157,
+        "method": "native_ax",
+        "outcome": "typed",
+        "release_to_inserted_ms": 190,
+        "verified": true
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_insert",
+      "ts": "2026-11-09T23:21:10.329659-05:00"
+    },
+    {
+      "duration_ms": 21777,
+      "extra": {
+        "clipboard_restore_ms": null,
+        "clipboard_restored": false,
+        "engine_warm": true,
+        "final_to_verification_complete_ms": 4991,
+        "final_to_visible_ms": 4973,
+        "insertion_diagnostic": null,
+        "insertion_total_ms": 18,
+        "method": "native_ax",
+        "outcome": "typed",
+        "press_to_engine_ready_ms": 72,
+        "press_to_hud_ms": 27,
+        "press_to_listening_ms": 139,
+        "release_to_final_ms": null,
+        "release_to_visible_ms": 32,
+        "session_total_ms": 21777,
+        "speech_end_to_final_ms": 117,
+        "speech_end_to_visible_ms": 5090,
+        "speech_to_first_partial_ms": null,
+        "target_class": "document",
+        "verification_ms": 0,
+        "verified": true,
+        "visible_insert_operation_ms": 0
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_latency",
+      "ts": "2026-11-09T23:21:10.329763-05:00"
+    },
+    {
+      "duration_ms": 257,
+      "extra": {
+        "clipboard_restored": false,
+        "destination": "insert",
+        "insert_operation_ms": 172,
+        "method": "native_ax",
+        "outcome": "typed",
+        "release_to_inserted_ms": 257,
+        "verified": true
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_insert",
+      "ts": "2026-11-09T23:22:52.587977-05:00"
+    },
+    {
+      "duration_ms": 8913,
+      "extra": {
+        "clipboard_restore_ms": null,
+        "clipboard_restored": false,
+        "engine_warm": true,
+        "final_to_verification_complete_ms": 56,
+        "final_to_visible_ms": 25,
+        "insertion_diagnostic": null,
+        "insertion_total_ms": 36,
+        "method": "native_ax",
+        "outcome": "typed",
+        "press_to_engine_ready_ms": 11,
+        "press_to_hud_ms": 40,
+        "press_to_listening_ms": 78,
+        "release_to_final_ms": 65,
+        "release_to_visible_ms": 90,
+        "session_total_ms": 8913,
+        "speech_end_to_final_ms": 59,
+        "speech_end_to_visible_ms": 84,
+        "speech_to_first_partial_ms": null,
+        "target_class": "document",
+        "verification_ms": 12,
+        "verified": true,
+        "visible_insert_operation_ms": 5
+      },
+      "file": "dictation",
+      "level": "info",
+      "step": "dictation_latency",
+      "ts": "2026-11-09T23:22:52.588142-05:00"
+    }
+  ],
+  "audio_input_overload_warnings": [
+    {
+      "level": "warn",
+      "message": "audio input overload: possible audio gaps; continuing the existing stream; review the saved recording",
+      "step": "audio_input_overload",
+      "ts": "2026-11-09T23:18:32.747282-05:00",
+      "xruns": 1
+    },
+    {
+      "level": "warn",
+      "message": "audio input overload: possible audio gaps; continuing the existing stream; review the saved recording",
+      "step": "audio_input_overload",
+      "ts": "2026-11-09T23:20:53.610120-05:00",
+      "xruns": 1
+    },
+    {
+      "level": "warn",
+      "message": "audio input overload: possible audio gaps; continuing the existing stream; review the saved recording",
+      "step": "audio_input_overload",
+      "ts": "2026-11-09T23:22:48.669074-05:00",
+      "xruns": 1
+    }
+  ],
+  "timed_finish": {
+    "mode": "timed-finish",
+    "hud": 5871,
+    "click_request_seconds_after_playback_started": 2.2970369580000005,
+    "playback_was_active_at_request": true,
+    "time": "2026-11-10T04:23:00.836446+00:00"
+  },
+  "cancel": {
+    "playback_active_at_request": true,
+    "target_unchanged": true,
+    "history_unchanged": true,
+    "visible_hud_after_cancel": false
+  },
+  "limits": [
+    "One timed Finish run; no paired installed baseline, population or p95 estimate.",
+    "Finish button invokes the production stop command; physical shortcut/key-up and Escape were not tested.",
+    "The first two Finish clicks followed VAD finalization; release_to_final_ms is null and their 34/32ms visible delivery is not decode latency.",
+    "Harness extends the silence deadline only in its isolated profile to allow UI inspection.",
+    "Public virtual audio is not a representative transcription quality or acoustic capture assessment; a live session included stray tokens, and three input-overload warnings were logged across this QA window.",
+    "No battery, GPU utilization or natural user-frequency claim."
+  ]
+}

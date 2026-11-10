@@ -32,8 +32,9 @@ without requiring the end of speech to coincide with a completed partial.
 The baseline is `origin/main` at
 `3a69ff467a5004c7ec97d746c5b49284c294b3b7`. The implementation and example were
 also built in the owned Mac checkout; production source and example hashes match
-the Linux candidate. The installed Minutes Dev bundle, its processes and normal
-configuration were not test targets.
+the Linux candidate. The component profiles did not target the installed app.
+A separate signed installed-app acceptance check follows below; its isolated
+configuration did not replace the normal config.
 
 `dictation_release_profile` runs three kinds of explicit public-audio control:
 
@@ -192,6 +193,54 @@ final copied text remains accessible. The frontend controller is unchanged.
 | Rust formatting, source identities, JSON evidence and report links | Passed |
 
 The implementation and these limits are tracked in local Bead `minutes-mf86`.
-Installed-app key-up-to-visible latency and battery effects remain unmeasured;
-the next integration check should use the existing signed Dev identity and
-record the actual backend/model rather than assuming `auto` resolves to Whisper.
+A signed installed-app check exercised Finish and Cancel as described below.
+Physical key-up latency, a paired installed baseline and battery effects remain
+unmeasured. Backend selection was pinned explicitly for this check; it does not
+establish which backend a user's `auto` configuration selects.
+
+## Signed installed-app acceptance
+
+Runtime source: `3e93b30d0062b0ba986f2bdce3aa0a8016ea36a6`.
+The canonical installer ran from a fresh Apple Terminal context after an SSH
+signing probe reproduced `errSecInternalComponent`. It built with
+`parakeet,metal,engine-sherpa` and installed `~/Applications/Minutes Dev.app`,
+bundle ID `com.useminutes.desktop.dev`. Strict seal verification and the
+installed-app CGEventTap diagnostic passed. The latter establishes Input
+Monitoring/event-tap operation, not Accessibility or physical shortcut dispatch.
+
+Signing authority was `Apple Development: Mathieu Silverstein (97C8UF8QVF)`,
+TeamIdentifier `63TMLKT8HN`. Installed executable mtime was
+`2026-11-10T04:16:12.939493Z`; the fresh PID was `25911`, started at
+`2026-11-10T04:17:21Z`. The fixture records the installed executable hash.
+
+An isolated Dev acceptance profile used existing Whisper Tiny, deterministic
+rules cleanup, an owned TextEdit document and the public demo WAV routed through
+`MMAudio Device`. Playback selected that exact virtual output per process and
+verified that the system default output was unchanged. No production app was
+replaced. The harness temporarily extended its own silence deadline to 30 seconds
+so UI inspection could finish, then restored it to 2 seconds.
+
+| Native operation | Observed result |
+| --- | --- |
+| Finish during active fixture playback | 65 ms from production stop command to final text; 90 ms to visible text; `native_ax`, typed, verified |
+| Two manual Finish clicks after VAD recognition completed | 34 / 32 ms to visible delivery; `release_to_final_ms` null, so these are not release-to-decode measurements |
+| Cancel during active playback | Target text and history unchanged; HUD dismissed |
+
+The timed Finish request was issued about 2.30 seconds after playback started,
+while the playback process remained active. It clicked the real HUD Finish
+control, which invokes the production stop command. It is not a physical key-up
+measurement. Final target text was inspected independently through AX and a
+window screenshot. The timed Cancel request was similarly made about 2.26
+seconds into active playback, with target text/history checked before and after.
+
+This is one controlled timed Finish run, without a paired installed baseline or
+a p95 estimate. It establishes end-to-end delivery and cancellation for this
+explicit backend/model. It does not establish comparative native speed or
+transcription quality: captured buffers were not paired, one live session had
+stray tokens, and three input-overload warnings were logged during the QA window.
+No representative acoustic, names/numbers/negation, battery or GPU-use assessment
+is claimed. The selected component measurements above remain the comparative
+performance evidence.
+
+Raw content-free latency events, identity, fixture/model hashes, timing and
+cancel receipt: [native acceptance](fixtures/dictation-release-native-2026-11-10.json).

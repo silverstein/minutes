@@ -215,10 +215,9 @@ pub(crate) fn restart_without_destructors(app: &tauri::AppHandle) -> ! {
 
 #[cfg(target_os = "macos")]
 fn restart_macos_without_destructors(app: &tauri::AppHandle) -> ! {
-    // cleanup_before_exit removes the menu-bar status item, and AppKit traps
-    // (EXC_BREAKPOINT in -[BSServiceMainRunLoopQueue assertBarrierOnQueue])
-    // when that happens off the main thread. The updater restarts from a
-    // tokio worker, so hop to the main thread first and park this one.
+    // Process cleanup persists window state through AppKit. The updater
+    // restarts from a tokio worker, so keep that work on the main thread
+    // when available and park this one until the process exits.
     if unsafe { libc::pthread_main_np() } == 0 {
         let handle = app.clone();
         if app
@@ -229,7 +228,7 @@ fn restart_macos_without_destructors(app: &tauri::AppHandle) -> ! {
                 std::thread::park();
             }
         }
-        eprintln!("[restart] main thread unavailable; relaunching without framework cleanup");
+        eprintln!("[restart] main thread unavailable; relaunching with process cleanup only");
         let env = app.env();
         let binary = tauri::process::current_binary(&env);
         cleanup_before_process_exit(app);
@@ -240,12 +239,12 @@ fn restart_macos_without_destructors(app: &tauri::AppHandle) -> ! {
 
 #[cfg(target_os = "macos")]
 fn restart_macos_on_main_thread(app: &tauri::AppHandle) -> ! {
-    // Resolve Tauri state before its cleanup: no Tauri APIs may be used after
-    // cleanup_before_exit clears tray, window and webview resources.
+    // Match normal quit: preserve app state, then leave via _exit. Explicit
+    // Tauri cleanup removes the live NSStatusItem and AppKit erases its saved
+    // preferred position. Leave tray/window teardown to process termination.
     let env = app.env();
     let binary = tauri::process::current_binary(&env);
     cleanup_before_process_exit(app);
-    app.cleanup_before_exit();
     relaunch_and_exit(&env, binary)
 }
 
@@ -269,13 +268,11 @@ exec /usr/bin/open "$bundle""#;
 
 #[cfg(target_os = "macos")]
 fn relaunch_and_exit(env: &tauri::Env, binary: std::io::Result<std::path::PathBuf>) -> ! {
-    // Relaunch the way a person would: after this process is gone, through
-    // LaunchServices. Exec'ing the binary directly started the new copy while
-    // this one was still exiting and outside LaunchServices, and after an
-    // in-app update the menu bar icon came back at the far left instead of
-    // where the user had dragged it (the position is saved per app under
-    // "NSStatusItem Preferred Position Item-0"). Quit-and-reopen and
-    // reinstall-then-open both keep it.
+    // Keep the #1299 waiter: launch through LaunchServices only after the old
+    // PID is gone, so the two status items do not overlap. Position retention
+    // also requires leaving the old item intact until _exit; explicitly
+    // removing it erases "NSStatusItem Preferred Position Item-0" before the
+    // new process can restore it.
     match binary {
         Ok(path) => {
             let spawned = match enclosing_app_bundle(&path) {
@@ -4487,6 +4484,33 @@ mod tray_activity_tests {
 mod relaunch_tests {
     use super::enclosing_app_bundle;
     use std::path::{Path, PathBuf};
+
+    /// On 2026-11-09, a real 0.32.1 -> 0.33.0 update erased the preferred
+    /// position, while normal quit/reopen retained it (#1299 follow-up).
+    /// Restart must use the same process-only cleanup as normal quit: removing
+    /// the live NSStatusItem explicitly makes AppKit delete its position.
+    #[test]
+    fn macos_restart_does_not_remove_the_status_item_before_exit() {
+        let source = include_str!("main.rs");
+        let restart = source
+            .split_once("fn restart_macos_without_destructors(")
+            .expect("macOS restart entry exists")
+            .1
+            .split_once("/// The `.app` bundle")
+            .expect("bundle helper follows macOS restart")
+            .0;
+        let active_lines = restart
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !active_lines.contains(".cleanup_before_exit("),
+            "macOS restart must not explicitly remove the status item and erase its position"
+        );
+        assert!(active_lines.contains("cleanup_before_process_exit(app)"));
+        assert!(active_lines.contains("relaunch_and_exit(&env, binary)"));
+    }
 
     #[test]
     fn finds_the_app_bundle_around_the_binary() {

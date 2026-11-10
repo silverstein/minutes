@@ -7611,7 +7611,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
                 <input type="radio" name="settings-coach-model" value="on-device" checked>
                 <span class="coach-choice-copy">
                   <span class="coach-choice-title">On-device (private, recommended)</span>
-                  <span class="coach-choice-meta">Meeting speech stays on this Mac.</span>
+                  <span class="coach-choice-meta" id="settings-coach-on-device-meta">Meeting speech stays on this Mac.</span>
                 </span>
               </label>
               <label class="coach-choice is-hidden" id="settings-coach-cloud-choice">
@@ -13773,6 +13773,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       });
     }
 
+    // Coach also ships on Windows and Linux; say "Mac" only on a Mac (#1336).
+    function coachOnMac() {
+      return document.documentElement.dataset.platform === 'macos';
+    }
+
     function renderCoachSettings(settings) {
       if (!settings) return;
       coachSettingsState = settings;
@@ -13792,8 +13797,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const needsLocalSetup = requestedChoice === 'on-device' && !settings.localModelReady;
       const setupCard = document.getElementById('settings-coach-setup');
       setupCard.classList.toggle('is-hidden', !needsLocalSetup);
-      const guidedMessage = settings.guidedSetup?.message ||
-        'Coach needs a small on-device AI model to run privately on your Mac.';
+      document.getElementById('settings-coach-on-device-meta').textContent = coachOnMac()
+        ? 'Meeting speech stays on this Mac.'
+        : 'Meeting speech stays on this computer.';
+      const guidedMessage = settings.guidedSetup?.message || (coachOnMac()
+        ? 'Coach needs a small on-device AI model to run privately on your Mac.'
+        : 'Coach needs a small on-device AI model to run privately on your computer.');
       document.getElementById('settings-coach-setup-copy').textContent = guidedMessage;
 
       const onboardingSetup = document.getElementById('coach-onboarding-setup');
@@ -13840,7 +13849,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       try {
         const settings = await invoke('cmd_setup_coach_model');
         renderCoachSettings(settings);
-        setCoachSetupStatus('Coach is ready on this Mac.');
+        setCoachSetupStatus(coachOnMac() ? 'Coach is ready on this Mac.' : 'Coach is ready on this computer.');
         document.getElementById('settings-coach-save-status').textContent = 'On-device model ready';
       } catch (error) {
         setCoachSetupStatus(String(error || 'Coach setup could not finish. Try again.'), true);

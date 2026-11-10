@@ -177,8 +177,7 @@ impl StreamingWhisper {
     /// newest bounded window to avoid CPU runaway while staying current during
     /// long uninterrupted speech. `finalize()` still sees the full utterance.
     pub fn feed(&mut self, samples: &[f32], ctx: &WhisperContext) -> Option<StreamingResult> {
-        self.audio_buffer.extend_from_slice(samples);
-        self.samples_since_partial += samples.len();
+        self.accumulate(samples);
 
         // Only transcribe if enough new audio AND enough total audio
         if self.samples_since_partial >= PARTIAL_INTERVAL_SAMPLES
@@ -189,6 +188,16 @@ impl StreamingWhisper {
         }
 
         None
+    }
+
+    /// Preserve incoming audio without running a preview decode.
+    ///
+    /// Callers without a partial-text consumer can keep draining capture and
+    /// observe stop promptly, then recognize the complete utterance at finalize.
+    /// The final recognition parameters and full audio buffer are unchanged.
+    pub fn accumulate(&mut self, samples: &[f32]) {
+        self.audio_buffer.extend_from_slice(samples);
+        self.samples_since_partial += samples.len();
     }
 
     /// Finalize: run one last transcription and return the final result.
@@ -363,6 +372,54 @@ fn num_cpus() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accumulation_keeps_all_audio_without_creating_a_recognition_state() {
+        let samples: Vec<f32> = (0..45 * 16000).map(|n| n as f32).collect();
+        let mut streaming = StreamingWhisper::new(Some("en".into()));
+        for chunk in samples.chunks(1600) {
+            streaming.accumulate(chunk);
+        }
+        assert_eq!(streaming.audio_buffer, samples);
+        assert_eq!(streaming.transcription_window_start(true), 0);
+        assert!(!streaming.has_created_state);
+        streaming.reset();
+        assert!(streaming.audio_buffer.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires MINUTES_TEST_WHISPER_MODEL; public repository audio only"]
+    fn deferred_previews_preserve_final_text_and_remove_recognition_passes() {
+        let model = std::env::var_os("MINUTES_TEST_WHISPER_MODEL").unwrap();
+        let context = whisper_rs::WhisperContext::new_with_params(
+            model,
+            crate::transcribe::whisper_context_params(),
+        )
+        .unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../assets/demo.wav");
+        let mut reader = hound::WavReader::open(path).unwrap();
+        let samples: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| f32::from(s.unwrap()) / 32768.0)
+            .collect();
+        let mut previews = StreamingWhisper::new(Some("en".into()));
+        let before = recognition_passes_for_test();
+        for chunk in samples.chunks(1600) {
+            previews.feed(chunk, &context);
+        }
+        let baseline = previews.finalize(&context).unwrap();
+        assert!(recognition_passes_for_test() - before > 1);
+        let mut deferred = StreamingWhisper::new(Some("en".into()));
+        let before = recognition_passes_for_test();
+        for chunk in samples.chunks(1600) {
+            deferred.accumulate(chunk);
+        }
+        assert_eq!(recognition_passes_for_test() - before, 0);
+        let candidate = deferred.finalize(&context).unwrap();
+        assert_eq!(recognition_passes_for_test() - before, 1);
+        assert_eq!(candidate.text, baseline.text);
+        assert_eq!(candidate.duration_secs, baseline.duration_secs);
+    }
 
     #[test]
     fn new_streaming_whisper_has_empty_buffer() {

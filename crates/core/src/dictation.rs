@@ -21,6 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+// Stop/cancel must not wait for the next 100 ms capture frame. This is a
+// control check interval, not an audio chunk size or a transcription cadence.
+const CONTROL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
 // ── Model preload cache ──────────────────────────────────────
 //
 // The whisper model takes 1-15s to load depending on size and system load.
@@ -352,6 +356,9 @@ where
 /// explicitly controlled desktop shortcut gesture.
 #[derive(Debug, Clone)]
 pub struct DictationRunOptions {
+    /// Generate partial-text previews while capturing. CLI callers display
+    /// them; the compact desktop HUD has no visible partial-text consumer.
+    pub emit_partials: bool,
     /// End the session after the configured post-speech silence interval.
     /// Desktop hold/locked gestures disable this because the gesture owns the
     /// end of the session; command-line capture retains the legacy timeout.
@@ -370,6 +377,7 @@ pub struct DictationRunOptions {
 impl Default for DictationRunOptions {
     fn default() -> Self {
         Self {
+            emit_partials: true,
             auto_stop_on_silence: true,
             cancel_flag: None,
             recovery_audio_path: None,
@@ -786,11 +794,8 @@ where
                 }
             }
 
-            // Receive audio chunk (100ms timeout to allow stop checks)
-            let chunk = match stream
-                .receiver
-                .recv_timeout(std::time::Duration::from_millis(100))
-            {
+            // Keep control checks responsive between 100 ms capture frames.
+            let chunk = match stream.receiver.recv_timeout(CONTROL_POLL_INTERVAL) {
                 Ok(chunk) => chunk,
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
@@ -833,11 +838,16 @@ where
                     final_utterance_samples.extend_from_slice(&chunk.samples);
                 }
 
-                // Feed to streaming whisper — may emit a partial result
-                if let Some(context) = whisper_ctx.as_ref() {
-                    if let Some(sr) = streaming.feed(&chunk.samples, context) {
-                        on_event(DictationEvent::PartialText(sr.text));
+                // Do not block capture on previews the caller never displays.
+                // Both paths preserve the complete audio for final recognition.
+                if options.emit_partials {
+                    if let Some(context) = whisper_ctx.as_ref() {
+                        if let Some(sr) = streaming.feed(&chunk.samples, context) {
+                            on_event(DictationEvent::PartialText(sr.text));
+                        }
                     }
+                } else {
+                    streaming.accumulate(&chunk.samples);
                 }
 
                 // Force-finalize if max utterance reached
@@ -2443,6 +2453,7 @@ mod tests {
     #[test]
     fn shortcut_owned_sessions_ignore_silence_timeout() {
         let shortcut_options = DictationRunOptions {
+            emit_partials: false,
             auto_stop_on_silence: false,
             cancel_flag: None,
             recovery_audio_path: None,

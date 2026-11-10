@@ -24768,6 +24768,9 @@ fn start_dictation_session(
             stop_flag,
             &config,
             minutes_core::dictation::DictationRunOptions {
+                // The compact HUD deliberately hides partial transcript text.
+                // Keep its capture loop free of unused preview inference.
+                emit_partials: false,
                 auto_stop_on_silence: capture_style.is_none(),
                 cancel_flag: Some(cancel_flag),
                 recovery_audio_path: Some(recovery_audio_for_run),

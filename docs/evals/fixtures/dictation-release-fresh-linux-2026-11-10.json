@@ -1,0 +1,96 @@
+{
+  "measurement": "separate fresh processes, alternating order, existing Tiny CPU; OS and backend caches not cleared; CPU covers context load, replay and teardown, not battery",
+  "all_text_identical": true,
+  "runs": [
+    {
+      "context_load_us": 78639,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 3668900,
+        "final_us": 612671,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 0,
+      "mode": "--fresh-preview",
+      "wall_seconds": 4.419691910967231,
+      "child_cpu_seconds": 31.776277
+    },
+    {
+      "context_load_us": 73559,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 439,
+        "final_us": 626542,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 0,
+      "mode": "--fresh-final",
+      "wall_seconds": 0.7479897851590067,
+      "child_cpu_seconds": 4.656635000000001
+    },
+    {
+      "context_load_us": 72801,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 467,
+        "final_us": 611330,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 1,
+      "mode": "--fresh-final",
+      "wall_seconds": 0.732478410936892,
+      "child_cpu_seconds": 4.513928999999997
+    },
+    {
+      "context_load_us": 72631,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 3622528,
+        "final_us": 565820,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 1,
+      "mode": "--fresh-preview",
+      "wall_seconds": 4.307248785160482,
+      "child_cpu_seconds": 31.064937000000008
+    },
+    {
+      "context_load_us": 86917,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 3621159,
+        "final_us": 607666,
+        "previews": true,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 2,
+      "mode": "--fresh-preview",
+      "wall_seconds": 4.362594661070034,
+      "child_cpu_seconds": 31.371679
+    },
+    {
+      "context_load_us": 75157,
+      "measurement": "fresh-process context, no warmup; unpaced same-input work and final cost; shared OS/backend caches not cleared",
+      "replay": {
+        "audio_samples": 170013,
+        "feed_us": 416,
+        "final_us": 625969,
+        "previews": false,
+        "text": "Matt and Wesley are reviewing the Minutes Apple speech benchmark, they want to compare speech transcriber and dictation transcriber against whisper and periquete before making a product decision."
+      },
+      "iteration": 2,
+      "mode": "--fresh-final",
+      "wall_seconds": 0.748698408016935,
+      "child_cpu_seconds": 4.650034999999988
+    }
+  ]
+}

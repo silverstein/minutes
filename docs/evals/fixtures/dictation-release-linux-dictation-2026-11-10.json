@@ -1,0 +1,212 @@
+{
+  "all_same_audio_references_match": true,
+  "measurement": "paced single-utterance component replay; 100ms input, bounded(64), original previews/100ms control poll versus candidate accumulate/20ms control poll; excludes VAD, native devices, cleanup and insertion",
+  "paced": [
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 486064,
+      "feed_total_us": 486089,
+      "final_decode_us": 508912,
+      "max_chunk_age_us": 134,
+      "oldest_queued_age_at_stop_us": 386229,
+      "previews": true,
+      "queued_at_stop": 4,
+      "release_to_final_us": 945120,
+      "release_to_stop_observed_us": 436203,
+      "released_during_feed": true,
+      "requested_release_ms": 2050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 32000,
+      "samples_consumed": 32000,
+      "text": "Minutes benchmark dictation check"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 2,
+      "feed_total_us": 21,
+      "final_decode_us": 493136,
+      "max_chunk_age_us": 171,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 503871,
+      "release_to_stop_observed_us": 10733,
+      "released_during_feed": false,
+      "requested_release_ms": 2050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 32000,
+      "samples_consumed": 32000,
+      "text": "Minutes benchmark dictation check"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 2,
+      "feed_total_us": 24,
+      "final_decode_us": 516423,
+      "max_chunk_age_us": 354,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 526931,
+      "release_to_stop_observed_us": 10506,
+      "released_during_feed": false,
+      "requested_release_ms": 2350,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 36800,
+      "samples_consumed": 36800,
+      "text": "minutes benchmark dictation check."
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 501601,
+      "feed_total_us": 501625,
+      "final_decode_us": 511430,
+      "max_chunk_age_us": 156,
+      "oldest_queued_age_at_stop_us": 401764,
+      "previews": true,
+      "queued_at_stop": 5,
+      "release_to_final_us": 663182,
+      "release_to_stop_observed_us": 151746,
+      "released_during_feed": true,
+      "requested_release_ms": 2350,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 36800,
+      "samples_consumed": 32000,
+      "text": "Minutes benchmark dictation check"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 547944,
+      "feed_total_us": 1072319,
+      "final_decode_us": 527390,
+      "max_chunk_age_us": 424406,
+      "oldest_queued_age_at_stop_us": 448075,
+      "previews": true,
+      "queued_at_stop": 5,
+      "release_to_final_us": 1125451,
+      "release_to_stop_observed_us": 598056,
+      "released_during_feed": false,
+      "requested_release_ms": 3950,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 62400,
+      "samples_consumed": 64000,
+      "text": "minutes benchmark dictation check, Apple Speech should handle short form."
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 1,
+      "feed_total_us": 38,
+      "final_decode_us": 573042,
+      "max_chunk_age_us": 132,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 583651,
+      "release_to_stop_observed_us": 10608,
+      "released_during_feed": false,
+      "requested_release_ms": 3950,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 62400,
+      "samples_consumed": 62400,
+      "text": "minutes benchmark dictation check, Apple Speech should handle short"
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 20,
+      "feed_max_us": 17,
+      "feed_total_us": 56,
+      "final_decode_us": 531048,
+      "max_chunk_age_us": 136,
+      "oldest_queued_age_at_stop_us": null,
+      "previews": false,
+      "queued_at_stop": 0,
+      "release_to_final_us": 541675,
+      "release_to_stop_observed_us": 10624,
+      "released_during_feed": false,
+      "requested_release_ms": 4050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 64000,
+      "samples_consumed": 64000,
+      "text": "minutes benchmark dictation check, Apple Speech should handle short form."
+    },
+    {
+      "capture_send_drops": 0,
+      "control_poll_ms": 100,
+      "feed_max_us": 529569,
+      "feed_total_us": 1039041,
+      "final_decode_us": 539893,
+      "max_chunk_age_us": 409535,
+      "oldest_queued_age_at_stop_us": 429660,
+      "previews": true,
+      "queued_at_stop": 5,
+      "release_to_final_us": 1019573,
+      "release_to_stop_observed_us": 479676,
+      "released_during_feed": true,
+      "requested_release_ms": 4050,
+      "same_consumed_audio_reference_match": true,
+      "samples_captured_before_release": 64000,
+      "samples_consumed": 64000,
+      "text": "minutes benchmark dictation check, Apple Speech should handle short form."
+    }
+  ],
+  "same_audio": [
+    {
+      "baseline": {
+        "audio_samples": 32000,
+        "feed_us": 515864,
+        "final_us": 508914,
+        "previews": true,
+        "text": "Minutes benchmark dictation check"
+      },
+      "candidate": {
+        "audio_samples": 32000,
+        "feed_us": 15,
+        "final_us": 519715,
+        "previews": false,
+        "text": "Minutes benchmark dictation check"
+      },
+      "text_identical": true
+    },
+    {
+      "baseline": {
+        "audio_samples": 64000,
+        "feed_us": 1017311,
+        "final_us": 534837,
+        "previews": true,
+        "text": "minutes benchmark dictation check, Apple Speech should handle short form."
+      },
+      "candidate": {
+        "audio_samples": 64000,
+        "feed_us": 22,
+        "final_us": 544000,
+        "previews": false,
+        "text": "minutes benchmark dictation check, Apple Speech should handle short form."
+      },
+      "text_identical": true
+    },
+    {
+      "baseline": {
+        "audio_samples": 84589,
+        "feed_us": 1045384,
+        "final_us": 563689,
+        "previews": true,
+        "text": "Minute Spence Mark Tiktation Check, Apple Speech should handle short-form voice notes locally."
+      },
+      "candidate": {
+        "audio_samples": 84589,
+        "feed_us": 47,
+        "final_us": 541213,
+        "previews": false,
+        "text": "Minute Spence Mark Tiktation Check, Apple Speech should handle short-form voice notes locally."
+      },
+      "text_identical": true
+    }
+  ],
+  "schema_version": 1
+}

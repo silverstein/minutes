@@ -5,6 +5,22 @@ All notable changes to whisper-guard will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - unreleased
+
+### Added
+
+- **`find_repetition_loop(&str) -> Option<RepetitionLoop>`** - find a
+  repetition loop inside one segment, for example one sentence seven times in
+  one line. `dedup_segments` collapses loops across consecutive segments only,
+  so this case passed through cleanup. The function only reports the loop. The
+  caller decides what to do, for example decode that audio again in smaller
+  pieces. A loop is a phrase that repeats at least 4 times back to back and
+  covers at least 16 words (`LOOP_MIN_REPEATS`, `LOOP_MIN_WORDS`). Words use the
+  same key as `dedup_segments`, so a repeat with another name, number or a
+  negation is not a loop.
+
+No changes to existing functions.
+
 ## [0.3.2] - 2026-10-18
 
 ### Fixed

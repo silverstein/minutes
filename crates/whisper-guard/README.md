@@ -89,6 +89,10 @@ inside a repetition region rather than deleting the entire passage. This may
 retain more imperfect hallucination variants; high word overlap alone cannot
 justify deleting a real statement.
 
+- **Loops inside one segment are reported, not removed.** Whisper can repeat
+  one sentence many times inside a single segment. `find_repetition_loop` finds
+  a phrase that repeats 4+ times back to back and covers 16+ words. It does not
+  change the text: Minutes uses it to decode that audio again in smaller pieces.
 - **Filler-word floor.** Single trailing fillers (`Yeah.`, `Okay.`, `You.`) are
   intentionally preserved - they're often legitimate one-word closings.
   Only a 5+ run of filler at the end triggers trim. The bracketed noise tokens
@@ -108,7 +112,7 @@ justify deleting a real statement.
 
 ```toml
 [dependencies]
-whisper-guard = "0.3.2"
+whisper-guard = "0.3.3"
 ```
 
 ### Using a forked or pinned `whisper-rs`?
@@ -119,7 +123,7 @@ GPU patches, or model compatibility - looking at you, screenpipe-audio), use:
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.3.2", default-features = false }
+whisper-guard = { version = "0.3.3", default-features = false }
 ```
 
 …and the cleaning pipeline works regardless of which `whisper-rs` is in your tree.
@@ -214,7 +218,7 @@ you depend on `whisper-rs` directly.
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.3.2", features = ["whisper"] }
+whisper-guard = { version = "0.3.3", features = ["whisper"] }
 ```
 
 ## Examples

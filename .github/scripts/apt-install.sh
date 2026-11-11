@@ -30,14 +30,45 @@ sudo rm -f /etc/apt/sources.list.d/google-chrome*.list \
   /etc/apt/sources.list.d/microsoft-edge*.list \
   /etc/apt/sources.list.d/microsoft-edge*.sources
 
+# Hosted runners can lose the route to the configured Ubuntu archive. Select
+# a reachable mirror over IPv4 before apt starts; apt still verifies Ubuntu's
+# signed indexes using the existing keys. Probe time is bounded independently
+# of the apt lock/retry limits below.
+choose_ubuntu_mirror() {
+  local codename="$1" mirror
+  for mirror in https://mirrors.edge.kernel.org/ubuntu https://archive.ubuntu.com/ubuntu; do
+    if curl -4 --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+      --output /dev/null "$mirror/dists/$codename/InRelease"; then
+      printf '%s\n' "$mirror"
+      return 0
+    fi
+    echo "::warning::Ubuntu mirror probe failed: $mirror" >&2
+  done
+  echo "::error::No reachable Ubuntu archive mirror" >&2
+  return 1
+}
+
+ubuntu_codename="$(awk -F= '/^VERSION_CODENAME=/ {gsub(/"/, "", $2); print $2}' /etc/os-release)"
+ubuntu_mirror="$(choose_ubuntu_mirror "$ubuntu_codename")"
+echo "::notice::Using Ubuntu mirror $ubuntu_mirror ($ubuntu_codename), with IPv4"
+ubuntu_rewrite="s#https?://(azure\\.archive|archive|security)\\.ubuntu\\.com/ubuntu([/[:space:]]|$)#${ubuntu_mirror}\\2#g"
+# Recent images use deb822 sources or mirror+file lists instead of sources.list.
+for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+  /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt; do
+  [ -f "$source" ] || continue
+  sudo sed -E -i "$ubuntu_rewrite" "$source"
+done
+apt_network=(-o Acquire::ForceIPv4=true -o Acquire::Retries=1 \
+  -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+
 # Sized so all three attempts fit inside the twenty minute step backstop:
 # 3 x (120 + 240) seconds of work plus 45 seconds of pauses is 18m45s. Without
 # that the backstop would fire mid-retry and the third attempt would never run,
 # which is the opposite of the point.
 attempts=3
 for attempt in $(seq 1 "${attempts}"); do
-  if sudo timeout 120 apt-get update \
-    && sudo timeout 240 apt-get install -y "$@"; then
+  if sudo timeout 120 apt-get "${apt_network[@]}" update \
+    && sudo timeout 240 apt-get "${apt_network[@]}" install -y "$@"; then
     exit 0
   fi
 

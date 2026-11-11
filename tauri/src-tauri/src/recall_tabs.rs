@@ -160,7 +160,12 @@ impl TabStore {
                     )
                     .ok()
                     .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-                    .and_then(|value| value["current_meeting_path"].as_str().map(str::to_string)),
+                    .and_then(|value| {
+                        value["currentMeetingPath"]
+                            .as_str()
+                            .or_else(|| value["current_meeting_path"].as_str())
+                            .map(str::to_string)
+                    }),
                     claude_session_id: legacy,
                     capture_session_id: None,
                     capture_complete: false,
@@ -168,6 +173,15 @@ impl TabStore {
                     live: false,
                     note: None,
                 });
+                if let Some(tab) = self.tabs.last_mut() {
+                    if let Some(path) = &tab.meeting_path {
+                        tab.title = Path::new(path)
+                            .file_stem()
+                            .and_then(|p| p.to_str())
+                            .unwrap_or("Recall")
+                            .replace('-', " ");
+                    }
+                }
                 self.active = Some("assistant".into());
             }
             // Parent instructions must be neutral: nested tabs must not inherit a live or meeting focus.
@@ -701,10 +715,19 @@ mod migration_tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("CLAUDE.md"), "old instructions\n<!-- LIVE_TRANSCRIPT_START -->\nLive content\n<!-- LIVE_TRANSCRIPT_END -->").unwrap();
         fs::write(root.join("CURRENT_MEETING.md"), "legacy meeting").unwrap();
+        let meeting = temp.path().join("board-prep.md");
+        fs::write(&meeting, "authorized legacy meeting").unwrap();
+        fs::write(
+            temp.path().join("recall-workspace.json"),
+            serde_json::to_vec(&serde_json::json!({"currentMeetingPath": meeting})).unwrap(),
+        )
+        .unwrap();
         let mut store = TabStore::default();
         store.ensure(&root).unwrap();
         assert_eq!(store.tabs.len(), 1);
         assert_eq!(store.tabs[0].id, "assistant");
+        assert_eq!(store.tabs[0].meeting_path.as_deref(), meeting.to_str());
+        assert_eq!(store.tabs[0].title, "board prep");
         assert_eq!(
             fs::read_to_string(root.join("tabs/assistant/CURRENT_MEETING.md")).unwrap(),
             "legacy meeting"

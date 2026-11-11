@@ -17680,7 +17680,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const model = await invoke('cmd_recall_tabs');
       recallTabsModel = model; recallTabsController.update(model);
       await ensureRecallTabProcesses(model);
-      if (model.active) await activateRecallTab(model.active, model);
+      // Spawn discovers the configured shell. Never reapply the pre-spawn
+      // snapshot: it can turn the shell's first command into a context-gated question.
+      const restored = await invoke('cmd_recall_tabs');
+      recallTabsModel = restored; recallTabsController.update(restored);
+      if (restored.active) await activateRecallTab(restored.active, restored);
     }
     recallOpenQueue = restoreRecallTabs().catch(error => console.error('Recall restore:', error));
 

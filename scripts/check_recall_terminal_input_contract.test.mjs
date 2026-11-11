@@ -335,3 +335,17 @@ test("Discuss never pastes natural language into an idle shell", async () => {
   await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 1);
   assert.ok(pastes[0].includes('CURRENT_MEETING.md'));
 });
+
+test("restore activates freshly discovered shell metadata instead of the pre-spawn snapshot", async () => {
+  let spawned = false; const selected = []; const updated = [];
+  const before = { active: 'migrated', tabs: [{ id: 'migrated', shell: false }] };
+  const after = { active: 'migrated', tabs: [{ id: 'migrated', shell: true }] };
+  const restore = vm.runInNewContext(`(${extractFunction('restoreRecallTabs')})`, {
+    invoke: async command => { assert.equal(command, 'cmd_recall_tabs'); return spawned ? after : before; },
+    recallTabsController: { update: model => updated.push(model) }, recallTabsModel: null,
+    ensureRecallTabProcesses: async () => { spawned = true; },
+    activateRecallTab: async (id, model) => selected.push(model.tabs.find(tab => tab.id === id)),
+  });
+  await restore(); assert.equal(selected.length, 1); assert.equal(selected[0].shell, true);
+  assert.equal(updated.at(-1).tabs[0].shell, true);
+});

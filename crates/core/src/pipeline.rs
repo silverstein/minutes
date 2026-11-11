@@ -2457,6 +2457,7 @@ struct PreparedTranscriptionResult {
     sources: Option<crate::source_transcript::SourceTranscript>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transcribe_prepared_input_with_hints(
     prepared: &PreparedTranscriptionInput,
     original: &Path,
@@ -2465,13 +2466,25 @@ fn transcribe_prepared_input_with_hints(
     config: &Config,
     decode_hints: crate::transcribe::DecodeHints,
     checkpoint: Option<&crate::transcript_checkpoint::TranscriptCheckpoint>,
+    checkpoint_path: Option<&Path>,
 ) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
     use crate::transcript_checkpoint::{self as checkpoints, CheckpointSource};
-    // Host checkpoints apply to ambient meeting sources only; an authorized
+    // Checkpoints apply to ambient meeting sources only; an authorized
     // capability is always transcribed in full.
+    let ambient_meeting = input_authority.is_none() && content_type == ContentType::Meeting;
+    // A job's checkpoint file holds the host's spans and the spans that
+    // earlier attempts finished. The final pass adds the groups it finishes,
+    // so a retry decodes only the rest.
+    let mut progress = checkpoint_path
+        .filter(|_| ambient_meeting)
+        .map(checkpoints::CheckpointFile::open);
+    let offered = match &progress {
+        Some(file) => Some(file.checkpoint().clone()),
+        None => checkpoint.filter(|_| ambient_meeting).cloned(),
+    };
     let spans_for = |source| {
-        checkpoint
-            .filter(|_| input_authority.is_none() && content_type == ContentType::Meeting)
+        offered
+            .as_ref()
             .map(|checkpoint| checkpoint.spans_for(source))
             .unwrap_or_default()
     };
@@ -2480,6 +2493,8 @@ fn transcribe_prepared_input_with_hints(
             // Sequential calls bound model memory; this is final processing,
             // never the live capture/optional-consumer path. A short response
             // on one track must not fail the whole meeting's word threshold.
+            // Each source saves its finished groups before the next source
+            // starts, and both before diarization.
             return transcribe_independent_stems(
                 stems,
                 config.transcription.cross_source_echo_suppression,
@@ -2492,12 +2507,14 @@ fn transcribe_prepared_input_with_hints(
                     let (source_config, source_hints) =
                         checkpoints::source_inputs(source, config, &decode_hints);
                     let spans = spans_for(source);
-                    if !spans.is_empty() {
+                    if !spans.is_empty() || progress.is_some() {
                         return checkpoints::transcribe_meeting_with_spans(
                             path,
+                            source,
                             &source_config,
                             &source_hints,
                             &spans,
+                            progress.as_mut(),
                         );
                     }
                     crate::transcription_coordinator::transcribe_path_for_content_with_hints(
@@ -2511,12 +2528,14 @@ fn transcribe_prepared_input_with_hints(
         }
         if let PreparedTranscriptionInput::Original = prepared {
             let spans = spans_for(CheckpointSource::Recording);
-            if !spans.is_empty() {
+            if !spans.is_empty() || progress.is_some() {
                 let transcription = checkpoints::transcribe_meeting_with_spans(
                     original,
+                    CheckpointSource::Recording,
                     config,
                     &decode_hints,
                     &spans,
+                    progress.as_mut(),
                 )?;
                 return Ok(PreparedTranscriptionResult {
                     transcription,
@@ -3571,6 +3590,11 @@ pub struct BackgroundPipelineContext {
     /// settings, and transcribes the rest. See [`crate::transcript_checkpoint`].
     pub transcript_checkpoint:
         Option<std::sync::Arc<crate::transcript_checkpoint::TranscriptCheckpoint>>,
+    /// The job's checkpoint file. When set, final transcription reads its
+    /// spans from this file instead of `transcript_checkpoint`, and adds the
+    /// decode groups it finishes, so a retry after a crash decodes only the
+    /// rest. The queue worker removes the file when the job completes.
+    pub checkpoint_path: Option<PathBuf>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -5070,6 +5094,7 @@ fn transcribe_to_artifact_with_authority(
         config,
         decode_hints,
         context.transcript_checkpoint.as_deref(),
+        context.checkpoint_path.as_deref(),
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
@@ -6218,6 +6243,7 @@ where
         content_type,
         config,
         decode_hints,
+        None,
         None,
     )?;
     crate::process_trace::stage("transcribe.done");

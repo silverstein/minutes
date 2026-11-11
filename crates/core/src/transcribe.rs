@@ -581,7 +581,8 @@ pub(crate) fn transcribe_authorized_with_hints(
     }
 }
 
-fn transcribe_dispatch(
+/// One whole-file call through the batch dispatcher.
+pub(crate) fn transcribe_dispatch(
     audio_path: &Path,
     config: &Config,
     hints: &DecodeHints,
@@ -1276,6 +1277,10 @@ fn transcribe_meeting_with_hints_inner(
     transcribe_meeting_samples(audio_path, &samples, config, hints)
 }
 
+/// With fewer VAD chunks, the meeting path transcribes the whole file in one
+/// call.
+pub(crate) const MIN_MEETING_CHUNKS: usize = 2;
+
 /// The meeting path after decode. `samples` are `audio_path`'s canonical
 /// 16 kHz mono samples; the whole-file fallbacks still read `audio_path`.
 pub(crate) fn transcribe_meeting_samples(
@@ -1284,8 +1289,6 @@ pub(crate) fn transcribe_meeting_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
-    const MIN_MEETING_CHUNKS: usize = 2;
-
     let audio_duration_secs = samples.len() as f64 / 16000.0;
     let plan = crate::decode_groups::DecodePlan::for_source(samples, meeting_group_target(config));
 

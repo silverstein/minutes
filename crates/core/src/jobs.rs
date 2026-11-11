@@ -1585,6 +1585,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         context_session_id: job.context_session_id.clone(),
         template,
         transcript_checkpoint: load_transcript_checkpoint(&job.id),
+        checkpoint_path: Some(job_checkpoint_path(&job.id)),
     }
 }
 

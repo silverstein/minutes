@@ -192,14 +192,11 @@ pub fn remove_checkpoint_file(path: &Path) {
 /// A job's checkpoint file while the final pass adds the spans it finishes.
 /// It keeps the spans in memory and replaces the file after each change, so a
 /// failed save is written again with the next one.
-// The final pass uses it from the next change on.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CheckpointFile {
     path: std::path::PathBuf,
     checkpoint: TranscriptCheckpoint,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl CheckpointFile {
     /// The file at `path` with the spans it holds now. A missing, corrupt or
     /// unsupported file starts empty, and the first save replaces it.
@@ -359,14 +356,25 @@ pub(crate) fn source_inputs(
     }
 }
 
-/// Final-pass meeting transcription that reuses accepted `spans` of this
-/// source. `config` and `hints` are the ones the final pass would use for the
-/// source (see [`source_inputs`]).
+/// Save finished final-pass work about every this much source audio.
+const SAVE_EVERY_SAMPLES: usize = 120 * SAMPLE_RATE as usize;
+
+/// Final-pass meeting transcription of one source that reuses accepted
+/// `spans` of it. `config` and `hints` are the ones the final pass would use
+/// for the source (see [`source_inputs`]).
+///
+/// With `progress`, finished groups are saved there as spans of this source,
+/// about every two minutes of audio, and the rest of the source when its last
+/// group is done. A retry then reuses them like spans from the recording. An
+/// interrupted group is not saved. A failed save is logged and does not stop
+/// the transcription.
 pub(crate) fn transcribe_meeting_with_spans(
     audio_path: &Path,
+    source: CheckpointSource,
     config: &Config,
     hints: &DecodeHints,
     spans: &[&CheckpointSpan],
+    progress: Option<&mut CheckpointFile>,
 ) -> Result<TranscribeResult, TranscribeError> {
     transcribe::ensure_ambient_audio_path(audio_path)?;
     let samples = transcribe::load_audio_samples_with_format(
@@ -378,54 +386,162 @@ pub(crate) fn transcribe_meeting_with_spans(
         config,
         crate::pipeline::private_audio_processing_available(),
     );
-    let group_target = transcribe::meeting_group_target(config);
-    let plan = DecodePlan::for_source(&samples, group_target);
+    let pass = SourcePass::new(
+        &samples,
+        source,
+        settings_fingerprint(config, hints),
+        transcribe::meeting_group_target(config),
+    );
     let accepted = if bypass {
         Vec::new()
     } else {
-        accepted_spans(
-            &samples,
-            spans,
-            &settings_fingerprint(config, hints),
-            &plan,
-            group_target,
-        )
+        pass.accept(spans)
     };
+    let covered_secs = accepted
+        .iter()
+        .map(|s| (s.end_sample - s.start_sample) as f64 / SAMPLE_RATE as f64)
+        .sum::<f64>();
+    let audio_secs = samples.len() as f64 / SAMPLE_RATE as f64;
     tracing::info!(
+        ?source,
         offered = spans.len(),
         accepted = accepted.len(),
-        covered_secs = accepted
-            .iter()
-            .map(|s| (s.end_sample - s.start_sample) as f64 / SAMPLE_RATE as f64)
-            .sum::<f64>(),
-        audio_secs = samples.len() as f64 / SAMPLE_RATE as f64,
+        covered_secs,
+        audio_secs,
         "meeting transcription with checkpoint spans"
     );
-    crate::logging::log_step(
-        "transcript_checkpoint_reuse",
-        "",
-        0,
-        serde_json::json!({
-            "source": spans.first().map(|span| span.source),
-            "offered": spans.len(), "accepted": accepted.len(),
-            "rejected": spans.len().saturating_sub(accepted.len()),
-            "covered_secs": accepted.iter().map(|s| (s.end_sample - s.start_sample) as f64 / SAMPLE_RATE as f64).sum::<f64>(),
-            "audio_secs": samples.len() as f64 / SAMPLE_RATE as f64,
-        }),
-    );
-    if accepted.is_empty() {
+    if !spans.is_empty() {
+        crate::logging::log_step(
+            "transcript_checkpoint_reuse",
+            "",
+            0,
+            serde_json::json!({
+                "source": source,
+                "offered": spans.len(), "accepted": accepted.len(),
+                "rejected": spans.len().saturating_sub(accepted.len()),
+                "covered_secs": covered_secs, "audio_secs": audio_secs,
+            }),
+        );
+    }
+    // Spans are cut from decode groups. Where the meeting path does not
+    // decode groups, there is nothing to save.
+    let chunked = !bypass && pass.plan.chunk_count() >= transcribe::MIN_MEETING_CHUNKS;
+    let progress = progress.filter(|_| chunked);
+    if accepted.is_empty() && progress.is_none() {
         return transcribe::transcribe_meeting_samples(audio_path, &samples, config, hints);
     }
 
     let mut decoder = transcribe::MeetingGroupDecoder::default();
-    let out = assemble_source(&samples, &plan, &accepted, |groups| {
-        decoder.transcribe(&samples, groups, 0, config, hints)
+    let out = pass.assemble(&accepted, progress, |groups, finished| {
+        decoder.transcribe_reporting(&samples, groups, 0, config, hints, finished)
     })?;
 
     match transcribe::finish_chunk_lines(out) {
         Some(result) => Ok(result),
-        // No text anywhere: let the ordinary path decide what that means.
-        None => transcribe::transcribe_meeting_samples(audio_path, &samples, config, hints),
+        // No text anywhere, so decoding the groups again gives none either.
+        // Let the whole-file path decide what that means, as the meeting
+        // path does.
+        None => transcribe::transcribe_dispatch(audio_path, config, hints),
+    }
+}
+
+/// The final pass over one source after its audio is loaded.
+struct SourcePass<'a> {
+    samples: &'a [f32],
+    source: CheckpointSource,
+    /// The settings fingerprint of this pass, for spans it accepts and saves.
+    settings: String,
+    group_target: usize,
+    /// The whole-source plan, made once.
+    plan: DecodePlan,
+}
+
+impl<'a> SourcePass<'a> {
+    fn new(
+        samples: &'a [f32],
+        source: CheckpointSource,
+        settings: String,
+        group_target: usize,
+    ) -> Self {
+        Self {
+            plan: DecodePlan::for_source(samples, group_target),
+            samples,
+            source,
+            settings,
+            group_target,
+        }
+    }
+
+    /// The spans of `spans` that this pass can reuse.
+    fn accept<'s>(&self, spans: &[&'s CheckpointSpan]) -> Vec<&'s CheckpointSpan> {
+        accepted_spans(
+            self.samples,
+            spans,
+            &self.settings,
+            &self.plan,
+            self.group_target,
+        )
+    }
+
+    /// The lines of the whole source, before cleanup. `accepted` comes from
+    /// [`accept`](Self::accept). `decode` decodes groups of the source and
+    /// reports each finished group. With `progress`, finished groups are saved
+    /// as spans.
+    fn assemble(
+        &self,
+        accepted: &[&CheckpointSpan],
+        mut progress: Option<&mut CheckpointFile>,
+        decode: impl FnMut(
+            &[DecodeGroup],
+            &mut dyn FnMut(usize, &transcribe::ChunkLines),
+        ) -> Result<transcribe::ChunkLines, TranscribeError>,
+    ) -> Result<transcribe::ChunkLines, TranscribeError> {
+        let saving = progress.is_some();
+        let (mut saved, mut failed, mut saved_samples) = (0usize, 0usize, 0usize);
+        let out = assemble_source(
+            self.samples,
+            &self.plan,
+            accepted,
+            decode,
+            |range, lines| {
+                let Some(file) = progress.as_mut() else {
+                    return;
+                };
+                let span = CheckpointSpan {
+                    source: self.source,
+                    start_sample: range.start as u64,
+                    end_sample: range.end as u64,
+                    settings: self.settings.clone(),
+                    pcm_sha256: pcm_digest(&self.samples[range.clone()]),
+                    lines,
+                };
+                match file.add(span) {
+                    Ok(()) => {
+                        saved += 1;
+                        saved_samples += range.len();
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        tracing::warn!(source = ?self.source, start_sample = range.start,
+                        end_sample = range.end, error = %error,
+                        "could not save finished transcription; a retry decodes it again");
+                    }
+                }
+            },
+        );
+        if saving && (saved > 0 || failed > 0) {
+            crate::logging::log_step(
+                "transcript_checkpoint_saved",
+                "",
+                0,
+                serde_json::json!({
+                    "source": self.source, "saved": saved, "failed": failed,
+                    "saved_secs": saved_samples as f64 / SAMPLE_RATE as f64,
+                    "complete": out.is_ok(),
+                }),
+            );
+        }
+        out
     }
 }
 
@@ -433,11 +549,21 @@ pub(crate) fn transcribe_meeting_with_spans(
 /// span, and `decode` for each run of groups between them. `accepted` must
 /// come from [`accepted_spans`] with the same `plan`, so every group is
 /// either inside one span or in a gap.
+///
+/// As groups finish, `finished(range, lines)` gets runs of them as spans:
+/// about [`SAVE_EVERY_SAMPLES`] each, and the rest when the last group of a
+/// gap is done. A span starts where the chunker resets before its first
+/// group and ends where it resets after its last, so on a retry it has the
+/// whole-source groups. It never reaches into an accepted span.
 fn assemble_source(
     samples: &[f32],
     plan: &DecodePlan,
     accepted: &[&CheckpointSpan],
-    mut decode: impl FnMut(&[DecodeGroup]) -> Result<transcribe::ChunkLines, TranscribeError>,
+    mut decode: impl FnMut(
+        &[DecodeGroup],
+        &mut dyn FnMut(usize, &transcribe::ChunkLines),
+    ) -> Result<transcribe::ChunkLines, TranscribeError>,
+    mut finished: impl FnMut(std::ops::Range<usize>, Vec<String>),
 ) -> Result<transcribe::ChunkLines, TranscribeError> {
     let mut out = transcribe::ChunkLines {
         lines: Vec::new(),
@@ -447,7 +573,10 @@ fn assemble_source(
         },
     };
     let groups = plan.groups();
+    let cuts = plan.cuts();
     let mut next = 0usize;
+    // The end of the last accepted span.
+    let mut covered = 0usize;
     for span in accepted.iter().map(Some).chain([None]) {
         let gap_end = span.map_or(samples.len(), |s| s.start_sample as usize);
         let first = next;
@@ -455,12 +584,24 @@ fn assemble_source(
             next += 1;
         }
         if next > first {
-            let gap = decode(&groups[first..next])?;
+            let last = next - 1;
+            let mut from = if first == 0 { 0 } else { cuts[first - 1] }.max(covered);
+            let mut lines = Vec::new();
+            let gap = decode(&groups[first..next], &mut |index, group| {
+                let g = first + index;
+                lines.extend(group.lines.iter().cloned());
+                let to = cuts[g].min(gap_end);
+                if to.saturating_sub(from) >= SAVE_EVERY_SAMPLES || g == last {
+                    finished(from..to, std::mem::take(&mut lines));
+                    from = to;
+                }
+            })?;
             out.add_stats(&gap.stats);
             out.lines.extend(gap.lines);
         }
         if let Some(span) = span {
             out.lines.extend(span.lines.iter().cloned());
+            covered = span.end_sample as usize;
             while next < groups.len() && groups[next].start() < span.end_sample as usize {
                 next += 1;
             }
@@ -593,12 +734,17 @@ mod tests {
 
     /// Speech bursts of 1.2 to 9 s with pauses of 0.4 to 7 s, `secs` long.
     fn bursts(secs: f64) -> Vec<f32> {
+        bursts_from(secs, 0)
+    }
+
+    /// [`bursts`] whose words are `w<first_id>` and on.
+    fn bursts_from(secs: f64, first_id: u32) -> Vec<f32> {
         let mut bursts = Vec::new();
         let mut t = 0.7;
         let mut id = 0u32;
         while t < secs - 12.0 {
             let len = [1.2, 4.0, 9.0, 2.5, 6.3][id as usize % 5];
-            bursts.push((t, len, id % 300));
+            bursts.push((t, len, (first_id + id) % 300));
             t += len + [0.4, 1.5, 7.0, 0.9, 2.2, 3.1][id as usize % 6];
             id += 1;
         }
@@ -828,8 +974,15 @@ mod tests {
         let mut second = voice(&samples, c[1], samples.len(), &settings);
         second.lines = vec!["[0:01] second piece".into()];
 
-        let result =
-            transcribe_meeting_with_spans(&path, &config, &hints, &[&second, &first]).unwrap();
+        let result = transcribe_meeting_with_spans(
+            &path,
+            CheckpointSource::Voice,
+            &config,
+            &hints,
+            &[&second, &first],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.text, "[0:00] first piece\n[0:01] second piece\n");
         assert_eq!(result.stats.audio_duration_secs, 60.0);
@@ -865,7 +1018,15 @@ mod tests {
         second.lines = vec!["[0:01] thank you".into(), "[0:01] next topic".into()];
         let spans = [&first, &second];
 
-        let result = transcribe_meeting_with_spans(&path, &config, &hints, &spans).unwrap();
+        let result = transcribe_meeting_with_spans(
+            &path,
+            CheckpointSource::Recording,
+            &config,
+            &hints,
+            &spans,
+            None,
+        )
+        .unwrap();
 
         let all: Vec<String> = first.lines.iter().chain(&second.lines).cloned().collect();
         let expected = transcribe::finish_chunk_lines(transcribe::ChunkLines {
@@ -957,16 +1118,31 @@ mod tests {
         spans: &[&CheckpointSpan],
         decoder: &mut crate::decode_groups::fake::FakeWhisper,
     ) -> (String, usize) {
-        let plan = DecodePlan::for_source(audio, GROUP);
-        let accepted = accepted_spans(audio, spans, "s", &plan, GROUP);
-        assert_eq!(accepted.len(), spans.len(), "a span was rejected");
+        let accepted = SourcePass::new(audio, CheckpointSource::System, "s".into(), GROUP)
+            .accept(spans)
+            .len();
+        assert_eq!(accepted, spans.len(), "a span was rejected");
         let before = decoder.calls;
-        let lines = assemble_source(audio, &plan, &accepted, |groups| {
-            crate::decode_groups::decode_groups(decoder, audio, groups, 0)
-        })
-        .unwrap();
-        let text = transcribe::finish_chunk_lines(lines).unwrap().text;
+        let text = run_pass(audio, CheckpointSource::System, spans, None, decoder).unwrap();
         (text, decoder.calls - before)
+    }
+
+    /// The final pass over one source, as `transcribe_meeting_with_spans`
+    /// runs it after loading the audio, with any decoder and settings "s".
+    /// Returns the text after cleanup.
+    fn run_pass(
+        audio: &[f32],
+        source: CheckpointSource,
+        spans: &[&CheckpointSpan],
+        progress: Option<&mut CheckpointFile>,
+        decoder: &mut impl crate::decode_groups::AudioDecoder,
+    ) -> Result<String, TranscribeError> {
+        let pass = SourcePass::new(audio, source, "s".into(), GROUP);
+        let accepted = pass.accept(spans);
+        let lines = pass.assemble(&accepted, progress, |groups, finished| {
+            crate::decode_groups::decode_groups_reporting(decoder, audio, groups, 0, finished)
+        })?;
+        Ok(transcribe::finish_chunk_lines(lines).unwrap().text)
     }
 
     fn assert_checkpoints_do_not_change_the_transcript(loop_ids: &[u32]) {
@@ -1183,6 +1359,306 @@ mod tests {
         file.add(voice(&audio, 6 * RATE, 8 * RATE, "new")).unwrap();
         file.add(voice(&audio, 0, RATE, "new")).unwrap();
         assert_eq!(saved_spans(&path).len(), 4);
+    }
+
+    /// The fake decoder in a worker that dies after `left` more calls. The
+    /// call that fails is the interrupted group.
+    struct DiesAfter {
+        decoder: crate::decode_groups::fake::FakeWhisper,
+        left: usize,
+    }
+
+    impl DiesAfter {
+        fn new(left: usize) -> Self {
+            Self {
+                decoder: crate::decode_groups::fake::FakeWhisper::new(),
+                left,
+            }
+        }
+    }
+
+    impl crate::decode_groups::AudioDecoder for DiesAfter {
+        fn decode(
+            &mut self,
+            audio: &[f32],
+        ) -> Result<Option<crate::decode_groups::DecodedAudio>, TranscribeError> {
+            if self.left == 0 {
+                return Err(TranscribeError::TranscriptionFailed("worker died".into()));
+            }
+            self.left -= 1;
+            self.decoder.decode(audio)
+        }
+    }
+
+    /// One attempt of the final pass over both stems of a call, as the
+    /// pipeline runs it for a job: microphone first, then system, each with
+    /// the spans of the job's checkpoint file, saving to it as groups finish.
+    fn attempt(
+        path: &Path,
+        sources: &[(CheckpointSource, &[f32])],
+        settings: &str,
+        decoder: &mut impl crate::decode_groups::AudioDecoder,
+    ) -> Result<Vec<String>, TranscribeError> {
+        let mut file = CheckpointFile::open(path);
+        let offered = file.checkpoint().clone();
+        let mut texts = Vec::new();
+        for &(source, audio) in sources {
+            let pass = SourcePass::new(audio, source, settings.into(), GROUP);
+            let spans = offered.spans_for(source);
+            let accepted = pass.accept(&spans);
+            let lines = pass.assemble(&accepted, Some(&mut file), |groups, finished| {
+                crate::decode_groups::decode_groups_reporting(decoder, audio, groups, 0, finished)
+            })?;
+            texts.push(transcribe::finish_chunk_lines(lines).unwrap().text);
+        }
+        Ok(texts)
+    }
+
+    /// The saved spans of `source` as ranges, in order.
+    fn saved_ranges(path: &Path, source: CheckpointSource) -> Vec<(usize, usize)> {
+        load_checkpoint_file(path)
+            .unwrap()
+            .spans_for(source)
+            .iter()
+            .map(|s| (s.start_sample as usize, s.end_sample as usize))
+            .collect()
+    }
+
+    fn assert_contiguous_from_zero(ranges: &[(usize, usize)]) -> usize {
+        let mut end = 0;
+        for &(from, to) in ranges {
+            assert_eq!(from, end, "{ranges:?}");
+            end = to;
+        }
+        end
+    }
+
+    #[test]
+    fn interruption_in_the_second_stem_decodes_only_the_unfinished_groups() {
+        use crate::decode_groups::fake::FakeWhisper;
+        use CheckpointSource::{System, Voice};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let voice = bursts(420.0);
+        let system = bursts_from(420.0, 150);
+        let sources: [(CheckpointSource, &[f32]); 2] = [(Voice, &voice), (System, &system)];
+        let voice_groups = DecodePlan::for_source(&voice, GROUP).groups().len();
+        let system_plan = DecodePlan::for_source(&system, GROUP);
+        let system_groups = system_plan.groups().len();
+
+        // An uninterrupted run, without a checkpoint file.
+        let mut decoder = FakeWhisper::new();
+        let expected: Vec<String> = sources
+            .iter()
+            .map(|&(source, audio)| run_pass(audio, source, &[], None, &mut decoder).unwrap())
+            .collect();
+        assert_eq!(decoder.calls, voice_groups + system_groups);
+
+        // The worker dies halfway through the system stem.
+        let finished = voice_groups + system_groups / 2;
+        let mut dying = DiesAfter::new(finished);
+        assert!(attempt(&path, &sources, "s", &mut dying).is_err());
+        // The microphone stem was saved whole before the system stem started.
+        let saved_voice = saved_ranges(&path, Voice);
+        assert_eq!(assert_contiguous_from_zero(&saved_voice), voice.len());
+        // About every two minutes of audio, after a whole group.
+        for &(from, to) in &saved_voice[..saved_voice.len() - 1] {
+            assert!(
+                (120 * RATE..180 * RATE).contains(&(to - from)),
+                "{saved_voice:?}"
+            );
+        }
+        let saved_system = saved_ranges(&path, System);
+        let resume_at = assert_contiguous_from_zero(&saved_system);
+        assert!(
+            resume_at > 0 && resume_at < system.len(),
+            "{saved_system:?}"
+        );
+        // The interrupted group, and those after it, are not saved.
+        let interrupted = &system_plan.groups()[system_groups / 2];
+        assert!(resume_at <= interrupted.start(), "{resume_at}");
+
+        // The retry decodes only the system groups after the saved spans and
+        // gives the same transcript as the uninterrupted run.
+        let mut retry = FakeWhisper::new();
+        assert_eq!(attempt(&path, &sources, "s", &mut retry).unwrap(), expected);
+        let unfinished = system_plan
+            .groups()
+            .iter()
+            .filter(|group| group.start() >= resume_at)
+            .count();
+        assert_eq!(retry.calls, unfinished);
+        assert!(unfinished < system_groups - system_groups / 2 + 4);
+        assert_eq!(
+            assert_contiguous_from_zero(&saved_ranges(&path, System)),
+            system.len()
+        );
+
+        // A retry after diarization started finds both stems saved whole.
+        let mut after_diarization = FakeWhisper::new();
+        assert_eq!(
+            attempt(&path, &sources, "s", &mut after_diarization).unwrap(),
+            expected
+        );
+        assert_eq!(after_diarization.calls, 0);
+    }
+
+    #[test]
+    fn repeated_retries_finish_without_duplicate_or_lost_words() {
+        use crate::decode_groups::fake::FakeWhisper;
+        use CheckpointSource::Voice;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let voice = bursts(600.0);
+        let sources: [(CheckpointSource, &[f32]); 1] = [(Voice, &voice)];
+        let groups = DecodePlan::for_source(&voice, GROUP).groups().len();
+        let expected = vec![run_pass(&voice, Voice, &[], None, &mut FakeWhisper::new()).unwrap()];
+
+        // The host saved recording-time spans for the first part of the call.
+        let cuts = crate::capture_checkpoint::cut_like_feed(&voice, 120 * RATE, GROUP);
+        let mut producer = FakeWhisper::new();
+        let mut host = TranscriptCheckpoint::default();
+        for &cut in &cuts[..2] {
+            let mut span = fake_span(&voice, cut, &mut producer);
+            span.source = Voice;
+            host.spans.push(span);
+        }
+        save_checkpoint_file(&path, &host).unwrap();
+        let host_end = cuts[1].1;
+
+        // Each attempt dies after a few calls, until one finishes.
+        let mut attempts = 0;
+        let mut calls = 0;
+        let texts = loop {
+            attempts += 1;
+            assert!(attempts < 30, "no progress");
+            let mut dying = DiesAfter::new(4);
+            let result = attempt(&path, &sources, "s", &mut dying);
+            calls += dying.decoder.calls;
+            if let Ok(texts) = result {
+                break texts;
+            }
+            let saved = saved_ranges(&path, Voice);
+            assert_contiguous_from_zero(&saved);
+            // The host's spans stay, and nothing overlaps them.
+            assert_eq!(&saved[..2], &cuts[..2]);
+        };
+        assert!(attempts > 2, "{attempts}");
+        assert_eq!(texts, expected);
+        let words = |text: &str| -> Vec<String> {
+            let mut words: Vec<String> = text
+                .lines()
+                .map(|line| line.split_once("] ").unwrap().1.to_string())
+                .collect();
+            words.sort();
+            words
+        };
+        let mut unique = words(&texts[0]);
+        unique.dedup();
+        assert_eq!(words(&texts[0]), unique, "a word appears twice");
+        // No attempt decodes the host's spans. Work lost to an interruption
+        // is the groups since the last save, a few at most, never the call.
+        let after_host = DecodePlan::for_source(&voice, GROUP)
+            .groups()
+            .iter()
+            .filter(|g| g.start() >= host_end)
+            .count();
+        assert!(after_host < groups);
+        assert!(calls <= after_host + 4 * (attempts - 1), "{calls}");
+        assert_eq!(
+            assert_contiguous_from_zero(&saved_ranges(&path, Voice)),
+            voice.len()
+        );
+    }
+
+    #[test]
+    fn changed_settings_audio_or_version_decode_again_and_never_rekey_old_text() {
+        use crate::decode_groups::fake::FakeWhisper;
+        use CheckpointSource::Voice;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let voice = bursts(420.0);
+        let plan = DecodePlan::for_source(&voice, GROUP);
+        let groups = plan.groups().len();
+        let sources: [(CheckpointSource, &[f32]); 1] = [(Voice, &voice)];
+        let mut first = FakeWhisper::new();
+        let expected = attempt(&path, &sources, "s", &mut first).unwrap();
+        assert_eq!(first.calls, groups);
+        let spans_before = saved_ranges(&path, Voice);
+        assert!(spans_before.len() > 2);
+
+        // Other settings or hints: every span is rejected and decoded again.
+        // The new spans replace the old ones, and only they are saved.
+        let mut other = FakeWhisper::new();
+        assert_eq!(attempt(&path, &sources, "t", &mut other).unwrap(), expected);
+        assert_eq!(other.calls, groups);
+        let saved = load_checkpoint_file(&path).unwrap();
+        assert!(saved.spans.iter().all(|span| span.settings == "t"));
+        assert_eq!(saved_ranges(&path, Voice), spans_before);
+        let mut again = FakeWhisper::new();
+        attempt(&path, &sources, "t", &mut again).unwrap();
+        assert_eq!(again.calls, 0);
+
+        // Changed audio in the second span: only that span is decoded again.
+        let mut changed = voice.clone();
+        let (from, to) = spans_before[1];
+        let burst = (from..to).find(|&i| changed[i] != 0.0).unwrap();
+        changed[burst] += 0.0001;
+        let changed_sources: [(CheckpointSource, &[f32]); 1] = [(Voice, &changed)];
+        let mut decoder = FakeWhisper::new();
+        attempt(&path, &changed_sources, "t", &mut decoder).unwrap();
+        let in_span = plan
+            .groups()
+            .iter()
+            .filter(|g| g.start() >= from && g.end() <= to)
+            .count();
+        assert_eq!(decoder.calls, in_span);
+
+        // A checkpoint of another version is not read. Everything is decoded
+        // again, and the file is replaced with the current version.
+        let mut future = load_checkpoint_file(&path).unwrap();
+        future.version = CHECKPOINT_VERSION + 1;
+        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        let mut decoder = FakeWhisper::new();
+        assert_eq!(
+            attempt(&path, &sources, "t", &mut decoder).unwrap(),
+            expected
+        );
+        assert_eq!(decoder.calls, groups);
+        assert_eq!(
+            load_checkpoint_file(&path).unwrap().version,
+            CHECKPOINT_VERSION
+        );
+    }
+
+    #[test]
+    fn a_failed_save_does_not_stop_the_transcription() {
+        use crate::decode_groups::fake::FakeWhisper;
+        let dir = tempfile::tempdir().unwrap();
+        // The checkpoint path is a directory, so every replacement fails.
+        let path = dir.path().join("job-1.checkpoint.json");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), b"x").unwrap();
+        let voice = bursts(300.0);
+        let expected = run_pass(
+            &voice,
+            CheckpointSource::Voice,
+            &[],
+            None,
+            &mut FakeWhisper::new(),
+        )
+        .unwrap();
+        let mut file = CheckpointFile::open(&path);
+        let text = run_pass(
+            &voice,
+            CheckpointSource::Voice,
+            &[],
+            Some(&mut file),
+            &mut FakeWhisper::new(),
+        )
+        .unwrap();
+        assert_eq!(text, expected);
+        assert!(temporaries(dir.path()).is_empty());
     }
 
     #[test]

@@ -48,6 +48,11 @@ try {
   assert.equal(await page.getByRole('tab', { selected: true }).innerText(), 'Board prep');
   await page.getByRole('button', { name: 'Close Live call', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Close conversation', exact: true }).count(), 1);
+  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).evaluate(node => node === document.activeElement), true);
+  await page.keyboard.press('Enter');
+  assert.equal(await page.getByRole('button', { name: 'Close conversation', exact: true }).count(), 0);
+  assert.equal(await page.evaluate(() => fixture.actions.some(action => action[0] === 'close' && action[2])), false, 'Return cancels rather than destroying the conversation');
+  await page.getByRole('button', { name: 'Close Live call', exact: true }).click();
   await page.getByRole('button', { name: 'Close conversation', exact: true }).click();
   assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['close', 'live', true]);
   await page.evaluate(() => fixture.controls.chooseFinished(id => fixture.actions.push(['replace', id])));
@@ -119,6 +124,34 @@ try {
   assert.equal(await page.evaluate(()=>fixture.calls.filter(call=>call.command==='cmd_pty_input').length),beforeShortcut,'tab shortcut never reaches a PTY');
   await page.evaluate(()=>fixture.tabs.get('one').terminal.write('GRID-CANARY'));
   await page.waitForFunction(()=>document.querySelector('#recall-terminal-one .xterm-rows').textContent.includes('GRID-CANARY'));
+  await page.evaluate(()=>{
+    const metadata={id:'four',title:'Chat 4',status:'done',shell:true};
+    fixture.model.tabs.push(metadata);
+    return fixture.activate('one');
+  });
+  for (const cancelKey of ['Enter', 'Escape', 'click']) {
+    // Exercise the actual rejected open, including its initial container hide.
+    // Calling the chooser alone misses the native cancellation regression.
+    await page.evaluate(()=>fixture.openAtCap());
+    assert.equal(await page.getByRole('tab').count(),4);
+    assert.equal(await page.locator('#recall-terminal-container').isVisible(),true,'cap chooser keeps the selected PTY visible');
+    assert.equal(await page.getByRole('button',{name:'Cancel',exact:true}).evaluate(node=>node===document.activeElement),true);
+    if (cancelKey === 'click') await page.getByRole('button',{name:'Cancel',exact:true}).click();
+    else await page.keyboard.press(cancelKey);
+    assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false);
+    assert.equal(await page.locator('#recall-terminal-container').isVisible(),true,'cancelling a rejected open preserves the selected PTY');
+    await page.waitForFunction(()=>{
+      const {terminal,pty}=fixture.snapshot('one');
+      return terminal.cols>40 && terminal.rows>10 && terminal.cols===pty.cols && terminal.rows===pty.rows;
+    });
+    assert.ok((await page.locator('#recall-terminal-one .xterm-rows').innerText()).includes('GRID-CANARY'));
+  }
+  await page.evaluate(()=>fixture.tabs.get('one').terminal.focus());
+  await page.keyboard.type('pwd');
+  await page.evaluate(()=>fixture.tabs.get('one').queue);
+  assert.equal(await page.evaluate(()=>fixture.tabs.get('one').draft),'pwd','the cancelled tab still accepts terminal input');
+  await page.keyboard.press('Control+u');
+  await page.evaluate(()=>fixture.tabs.get('one').queue);
   await page.evaluate(()=>fixture.notice('Return to an empty shell prompt before resuming.','error'));
   await page.waitForFunction(()=>fixture.snapshot('one').terminal.rows===fixture.snapshot('one').pty.rows);
   await page.evaluate(async()=>{await fixture.activate('two');await fixture.activate('one');fixture.notice('');});
@@ -144,5 +177,5 @@ try {
   assert.deepEqual(await macPage.evaluate(()=>({draft:fixture.tabs.get('one').draft,reliable:fixture.tabs.get('one').reliable})),{draft:'',reliable:true});
   assert.equal(await macPage.evaluate(()=>fixture.calls.filter(call=>call.command==='cmd_pty_input').length),0,'Cmd+1 does not write into either terminal');
   await macPage.close();
-  console.log('Recall tabs rendered contracts passed: status, shortcuts, close/cap labels, three real xterm/PTY grids, resize deduplication, empty-chat reuse, themes.');
+  console.log('Recall tabs rendered contracts passed: status, shortcuts, safe close focus, rejected cap open/cancel, close/cap labels, real xterm/PTY grids, resize deduplication, empty-chat reuse, themes.');
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

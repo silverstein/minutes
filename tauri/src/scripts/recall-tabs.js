@@ -39,7 +39,7 @@
       }
       const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn btn-ghost btn-sm';
       cancel.textContent = 'Cancel'; cancel.addEventListener('click', dismiss); prompt.append(cancel);
-      prompt.querySelector('button')?.focus();
+      cancel.focus();
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
     function update(next) {

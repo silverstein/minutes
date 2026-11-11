@@ -17549,6 +17549,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         await activateRecallTab(options.tabId || model.active, model);
       } catch (error) {
         recallLoading.classList.remove('active');
+        // A rejected open leaves the current PTY selected. Restore its surface
+        // before showing the chooser; an idle shell may emit no more output.
+        if (recallExpanded && recallDevMode && activeRecallState()?.alive) {
+          recallTerminalContainer.classList.remove('hidden');
+          requestAnimationFrame(() => fitRecallTerminal());
+        }
         if (String(error).includes('RECALL_TAB_LIMIT')) { showRecallTabLimit(mode, meetingPath, options); return; }
         setRecallProviderNotice(String(error), 'error'); return;
       }
@@ -17648,7 +17654,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabsController.update({ ...model, active: id });
       setRecallProviderNotice(metadata?.note || '');
       renderRecallTabHeader(metadata);
-      requestAnimationFrame(() => { fitRecallTerminal(tab); if (tab.id === SESSION_ID) tab.terminal?.focus(); });
+      requestAnimationFrame(() => {
+        fitRecallTerminal(tab);
+        if (tab.id === SESSION_ID && document.getElementById('recall-tab-prompt').hidden) tab.terminal?.focus();
+      });
       refreshRecallContextChips();
     }
     async function resumeRecallTab(id) {

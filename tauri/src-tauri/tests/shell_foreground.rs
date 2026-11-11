@@ -36,6 +36,12 @@ fn exercise_foreground() {
     eprintln!("PTY fixture: shell started");
     drop(pair.slave);
     let mut writer = pair.master.take_writer().unwrap();
+    // Like production, drain output while the shell runs. On macOS a dying
+    // shell can wait for unread terminal output, leaving child.wait() blocked.
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let drain = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    });
     let idle_before = wait_for(|| foreground::shell_is_foreground(&*pair.master, &*child));
     writer.write_all(b"sleep 1\n").unwrap();
     writer.flush().unwrap();
@@ -44,6 +50,9 @@ fn exercise_foreground() {
     eprintln!("PTY fixture: terminating shell after foreground checks");
     let _ = child.kill();
     let _ = child.wait();
+    drop(writer);
+    drop(pair.master);
+    drain.join().unwrap();
     assert!(idle_before, "initial shell must own terminal");
     assert!(child_owns_terminal, "resume must refuse a foreground child");
     assert!(

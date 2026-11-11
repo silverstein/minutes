@@ -24,11 +24,9 @@ function extractFunction(name) {
 function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
   const source = `
     (() => {
-      let pendingRecallTerminalMeetingPath = ${JSON.stringify(meetingPath)};
-      let recallTerminalContextPending = true;
-      let recallTerminalInputDraft = '';
-      let recallTerminalInputReliable = true;
-      const SESSION_ID = 'recall';
+      const tab = { id: 'recall', meetingPath: ${JSON.stringify(meetingPath)}, pending: true, draft: '', reliable: true };
+      let active = tab;
+      const activeRecallState = () => active;
       const calls = [];
       const notices = [];
       let prepareError = null;
@@ -50,11 +48,13 @@ function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
 
       return {
         send: forwardRecallTerminalData,
+        switchTo: other => { active = other; },
+        originalTab: tab,
         state: () => ({
-          pending: pendingRecallTerminalMeetingPath,
-          contextPending: recallTerminalContextPending,
-          draft: recallTerminalInputDraft,
-          reliable: recallTerminalInputReliable,
+          pending: tab.meetingPath,
+          contextPending: tab.pending,
+          draft: tab.draft,
+          reliable: tab.reliable,
           calls: structuredClone(calls),
           notices: structuredClone(notices),
         }),
@@ -101,14 +101,14 @@ test("the first plain question prepares the meeting before Return", async () => 
 });
 
 test("a general question with no selected meeting prepares the meeting directory once", async () => {
-  const harness = createHarness({ meetingPath: null });
+  const harness = createHarness({ meetingPath: null, sessionId: "recall" });
   await harness.send("What did I commit to this week?\r", true);
   await harness.send("And last week?\r", true);
 
   const state = harness.state();
   const prepares = commands(harness, "cmd_prepare_recall_terminal_meeting");
   assert.equal(prepares.length, 1, "the general context is materialized exactly once");
-  assert.deepEqual(prepares[0].args, { meetingPath: null });
+  assert.deepEqual(prepares[0].args, { meetingPath: null, sessionId: "recall" });
   assert.equal(state.pending, null);
   assert.equal(state.contextPending, false);
   assert.match(state.notices.at(-1).message, /meeting directory is ready/);
@@ -116,7 +116,7 @@ test("a general question with no selected meeting prepares the meeting directory
 });
 
 test("a general question still cannot bypass the privacy checks", async () => {
-  const harness = createHarness({ meetingPath: null });
+  const harness = createHarness({ meetingPath: null, sessionId: "recall" });
   await harness.send("\r", true);
 
   const state = harness.state();
@@ -267,6 +267,32 @@ test("the panel wires xterm's user-input signal with a fail-closed fallback", ()
   assert.match(panel, /_core\?\.coreService\?\.onUserInput/);
   assert.match(
     panel,
-    /const isUserInput = !recallTerminalHasUserInputSignal \|\| recallTerminalNextDataIsUserInput/,
+    /const isUserInput = !tab.hasSignal \|\| tab.nextUser/,
   );
+});
+
+
+test("an input queued for tab A stays on A after selection switches to B", async () => {
+  const harness = createHarness();
+  const original = harness.originalTab;
+  const pending = harness.send("Question for A?\r", true, original);
+  const other = { id: "tab-b", meetingPath: "/meetings/b.md", pending: true, draft: "draft B", reliable: true };
+  harness.switchTo(other);
+  await pending;
+  assert.equal(other.draft, "draft B");
+  assert.equal(other.pending, true);
+  assert.ok(harness.state().calls.every(call => call.args.sessionId === "recall"));
+  assert.equal(original.pending, false);
+});
+
+
+test("queued input must never read another tab's selected meeting", async () => {
+  const harness = createHarness({ meetingPath: "/meetings/a.md" });
+  const a = harness.originalTab;
+  const b = { id: "tab-b", meetingPath: "/meetings/b.md", pending: true, draft: "", reliable: true };
+  harness.switchTo(b);
+  await harness.send("A question\r", true, a);
+  const preparation = harness.state().calls.find(call => call.command === 'cmd_prepare_recall_terminal_meeting');
+  assert.deepEqual(preparation.args, { meetingPath: "/meetings/a.md", sessionId: "recall" });
+  assert.equal(b.pending, true);
 });

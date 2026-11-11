@@ -37,6 +37,10 @@ if (process.env.MINUTES_RECALL_TAB_PREVIEW) {
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  if (process.env.MINUTES_RECALL_TEST_CPU_RATE) {
+    const session = await page.context().newCDPSession(page);
+    await session.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.MINUTES_RECALL_TEST_CPU_RATE) });
+  }
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   assert.equal(await page.getByRole('tab').count(), 4);
   for (const status of ['done', 'waiting']) {
@@ -144,7 +148,13 @@ try {
       const {terminal,pty}=fixture.snapshot('one');
       return terminal.cols>40 && terminal.rows>10 && terminal.cols===pty.cols && terminal.rows===pty.rows;
     });
-    assert.ok((await page.locator('#recall-terminal-one .xterm-rows').innerText()).includes('GRID-CANARY'));
+    assert.ok(await page.evaluate(()=>{
+      const buffer=fixture.tabs.get('one').terminal.buffer.active;
+      return Array.from({length:buffer.length},(_,index)=>buffer.getLine(index).translateToString()).join('\n').includes('GRID-CANARY');
+    }),'cancellation preserves terminal buffer contents');
+    // PTY resize acknowledgement does not wait for xterm's next paint frame.
+    // Require the visible text too, without racing that asynchronous repaint.
+    await page.waitForFunction(()=>document.querySelector('#recall-terminal-one .xterm-rows').textContent.includes('GRID-CANARY'));
   }
   await page.evaluate(()=>fixture.tabs.get('one').terminal.focus());
   await page.keyboard.type('pwd');

@@ -15,6 +15,7 @@ mod artifact_controls;
 pub mod audio_out;
 mod board;
 mod board_state;
+mod codex_app_server;
 pub(crate) mod continuity;
 pub use continuity::LocalWork;
 pub mod decimate;

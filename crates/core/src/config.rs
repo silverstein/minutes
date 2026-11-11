@@ -1229,8 +1229,9 @@ pub struct VoiceLiveConfig {
     ///
     /// Off by default. Only its answer travels onward, but the agent itself
     /// runs with whatever permissions it was configured with, and Minutes
-    /// cannot constrain what it does once asked. `delegate_agent_args` is the
-    /// control that matters; the flag here only decides whether to offer it.
+    /// cannot constrain what it does once asked in the default CLI transport.
+    /// `delegate_agent_args` controls that route; the opt-in Codex app-server
+    /// transport enforces its separate read-only capability profile.
     pub ask_agent: bool,
     /// Opt in to bounded HTML generation and sandboxed local previews.
     /// The coding agent receives only the brief and optional prior prototype.
@@ -1238,6 +1239,9 @@ pub struct VoiceLiveConfig {
     /// Which agent CLI to relay to. Empty follows `[assistant] agent`, then the
     /// first agent CLI found on the machine.
     pub delegate_agent: String,
+    /// "cli" (default), or opt-in "codex_app_server" for read-only Codex handoffs.
+    /// The latter owns a stdio server per voice session and a fresh thread per review.
+    pub delegate_transport: String,
     /// How long to wait for that agent before giving up.
     pub delegate_timeout_secs: u64,
     /// Launch flags for the relayed agent. Empty follows `[assistant] agent_args`.
@@ -1338,6 +1342,7 @@ impl Default for VoiceLiveConfig {
             ask_agent: false,
             html_prototypes: false,
             delegate_agent: String::new(),
+            delegate_transport: "cli".into(),
             delegate_timeout_secs: 120,
             delegate_agent_args: Vec::new(),
             delegate_cwd: String::new(),

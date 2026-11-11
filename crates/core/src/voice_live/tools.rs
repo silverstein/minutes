@@ -45,6 +45,7 @@ pub struct ToolContext {
     pub(crate) calls: Arc<Mutex<crate::interaction::calls::Calls>>,
     pub(crate) continuity: Mutex<super::continuity::Continuity>,
     pub(super) delegation_context: super::delegation_context::Store,
+    codex_app_server: super::codex_app_server::Transport,
 }
 
 /// Result of one tool call.
@@ -113,6 +114,12 @@ impl ToolContext {
             shared.stop();
         }
     }
+    pub(crate) fn stop_agent_transport(&self) {
+        self.codex_app_server.stop();
+    }
+    pub(crate) fn finish_agent_transport(&self) {
+        self.codex_app_server.finish();
+    }
     /// Resolve the knowledge root from config when brain search is on.
     pub fn new(config: Config, names: Arc<NameIndex>) -> Self {
         let brain_root =
@@ -141,6 +148,7 @@ impl ToolContext {
             redirects: Mutex::default(),
             calls: Arc::default(),
             delegation_context: Default::default(),
+            codex_app_server: Default::default(),
             continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
                 Config::minutes_dir().join("work-capsules"),
             )),
@@ -1000,6 +1008,7 @@ impl ToolContext {
                     delegation_input(&question, args.get(super::delegation_context::CONTEXT_KEY))
                 );
                 validate_delegation_sources(args.get(super::delegation_context::CONTEXT_KEY), cfg)?;
+                let approved_context = args.get(super::delegation_context::CONTEXT_KEY);
                 let args = if delegate_agent(cfg).as_deref() == Some(agent.as_str()) {
                     delegate_agent_args(cfg)
                 } else {
@@ -1007,8 +1016,22 @@ impl ToolContext {
                     Vec::new()
                 };
                 let cwd = delegate_cwd(cfg);
-                crate::summarize::run_agent_prompt(&agent, &prompt, &args, cwd.as_deref(), timeout)
-                    .map(|answer| json!({ "agent": agent, "answer": answer }))
+                let answer = match cfg.voice_live.delegate_transport.as_str() {
+                    "cli" => crate::summarize::run_agent_prompt(
+                        &agent, &prompt, &args, cwd.as_deref(), timeout,
+                    ),
+                    "codex_app_server" => {
+                        if cfg.voice_live.delegate_writes
+                            || Path::new(&agent).file_stem().and_then(|s| s.to_str()) != Some("codex")
+                        {
+                            return Err("codex_app_server requires Codex and delegate_writes=false; use delegate_transport=cli for other configurations".into());
+                        }
+                        self.codex_app_server.run(&agent, &args, cwd.as_deref(), &prompt, timeout,
+                            &|| validate_delegation_sources(approved_context, cfg))
+                    }
+                    _ => Err("unknown voice delegate_transport; use cli or codex_app_server".into()),
+                }?;
+                Ok(json!({ "agent": agent, "answer": answer }))
             }
             "list_preps" => {
                 if !cfg.voice_live.prep_artifacts {
@@ -1659,6 +1682,7 @@ mod tests {
             redirects: Mutex::default(),
             calls: Arc::default(),
             delegation_context: Default::default(),
+            codex_app_server: Default::default(),
             continuity: Mutex::new(crate::voice_live::continuity::Continuity::new(
                 Config::minutes_dir().join("work-capsules"),
             )),

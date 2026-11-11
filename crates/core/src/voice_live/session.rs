@@ -1358,11 +1358,13 @@ impl Runner {
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
         self.tools.stop_shared_context();
+        self.tools.stop_agent_transport();
         self.tools.mcp.shutdown();
         drop(tool_txs);
         for w in workers.into_iter().flatten() {
             let _ = w.join();
         }
+        self.tools.finish_agent_transport();
         let final_client = {
             let slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
             Arc::clone(&slot)

@@ -26,7 +26,7 @@ cd ../mcp && npm install && npm run build           # MCP server
 ### Prerequisites
 
 - **Rust** (latest stable) + **cmake** (`brew install cmake`)
-- **Node.js** 18+ (for MCP server and SDK)
+- **Node.js** 22 (matches CI for MCP server and SDK builds and tests)
 - **Python 3** (optional — only for diarization via pyannote)
 
 ## Architecture

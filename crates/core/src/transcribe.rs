@@ -795,6 +795,7 @@ fn parakeet_chunk_ranges(
     Some(fixed_length_chunks(total_samples, 16000 * chunk_secs))
 }
 
+#[cfg(feature = "parakeet")]
 fn transcribe_chunk_ranges(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
@@ -826,6 +827,9 @@ impl ChunkLines {
     }
 }
 
+/// One call per chunk through the batch dispatcher, for engines other than
+/// in-process Whisper. Whisper decodes groups of chunks: see
+/// [`MeetingGroupDecoder`].
 pub(crate) fn transcribe_chunk_lines(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
@@ -833,11 +837,6 @@ pub(crate) fn transcribe_chunk_lines(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<ChunkLines, TranscribeError> {
-    #[cfg(feature = "whisper")]
-    if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext {
-        return transcribe_whisper_chunk_lines(samples, chunk_ranges, clock_offset, config, hints);
-    }
-
     let mut session = BatchTranscriptionSession::new(config);
     let mut out = ChunkLines {
         lines: Vec::new(),
@@ -938,86 +937,119 @@ pub(crate) fn should_bypass_meeting_chunk_rotation(
         && chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::DispatchPerChunk
 }
 
-#[cfg(feature = "whisper")]
-fn transcribe_whisper_chunk_lines(
-    samples: &[f32],
-    chunk_ranges: &[(usize, usize)],
-    clock_offset: usize,
-    config: &Config,
-    hints: &DecodeHints,
-) -> Result<ChunkLines, TranscribeError> {
-    let ctx = load_whisper_context(config)?;
-    transcribe_whisper_chunk_lines_with_context(
-        &ctx,
-        samples,
-        chunk_ranges,
-        clock_offset,
-        config,
-        hints,
-    )
-}
-
-#[cfg(feature = "whisper")]
-fn transcribe_whisper_chunk_lines_with_context(
-    ctx: &whisper_rs::WhisperContext,
-    samples: &[f32],
-    chunk_ranges: &[(usize, usize)],
-    clock_offset: usize,
-    config: &Config,
-    hints: &DecodeHints,
-) -> Result<ChunkLines, TranscribeError> {
-    let mut out = ChunkLines {
-        lines: Vec::new(),
-        stats: FilterStats::default(),
-    };
-
-    for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
-        let chunk_samples = &samples[*start_sample..*end_sample];
-        if chunk_samples.is_empty() {
-            continue;
+/// The VAD group target for meeting transcription with `config`: Whisper
+/// packs chunks into groups, other engines keep one call per chunk (0).
+pub(crate) fn meeting_group_target(config: &Config) -> usize {
+    match chunk_transcription_strategy(config) {
+        ChunkTranscriptionStrategy::SharedWhisperContext => {
+            crate::decode_groups::whisper_group_target_samples()
         }
-
-        let chunk_result = match transcribe_whisper_samples(
-            ctx,
-            chunk_samples,
-            Path::new("<vad-chunk>"),
-            config,
-            hints,
-        ) {
-            Ok(result) => result,
-            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
-                tracing::debug!(
-                    chunk_index,
-                    start_sample,
-                    end_sample,
-                    "skipping empty VAD chunk"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
-        let offset_lines =
-            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-        out.add_stats(&chunk_result.stats);
-        out.lines.extend(offset_lines);
+        ChunkTranscriptionStrategy::DispatchPerChunk => 0,
     }
-
-    Ok(out)
 }
 
-/// A decoder owned by one checkpoint session. Config is frozen by the caller.
+/// One Whisper call through the batch path, with its per-call settings and
+/// cleanup. Times are relative to the start of `audio`.
+#[cfg(feature = "whisper")]
+struct WhisperCall<'a> {
+    ctx: &'a whisper_rs::WhisperContext,
+    config: &'a Config,
+    hints: &'a DecodeHints,
+}
+
+#[cfg(feature = "whisper")]
+impl crate::decode_groups::AudioDecoder for WhisperCall<'_> {
+    fn decode(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<Option<crate::decode_groups::DecodedAudio>, TranscribeError> {
+        match transcribe_whisper_samples(
+            self.ctx,
+            audio,
+            Path::new("<decode-group>"),
+            self.config,
+            self.hints,
+        ) {
+            Ok(result) => Ok(Some(crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: result.stats,
+            })),
+            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The lines of one call with their times. Exact segment times when the
+/// lines are the segments, else the whole seconds of each `[m:ss]` label.
+/// Lines without a time label, such as cleanup annotations, are dropped, as
+/// they were in the per-chunk path.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
+fn timed_lines(result: &TranscribeResult) -> Vec<crate::decode_groups::TimedText> {
+    use crate::decode_groups::TimedText;
+    let lines: Vec<&str> = result
+        .text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    let exact = lines.len() == result.segments.len()
+        && lines.iter().zip(&result.segments).all(|(line, segment)| {
+            line.split_once(']')
+                .is_some_and(|(_, text)| text.trim() == segment.text)
+        });
+    if exact {
+        return result
+            .segments
+            .iter()
+            .map(|segment| TimedText {
+                start: segment.start,
+                end: segment.end,
+                text: segment.text.clone(),
+            })
+            .collect();
+    }
+    lines
+        .iter()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix('[')?;
+            let (timestamp, text) = rest.split_once(']')?;
+            let (mins, secs) = timestamp.split_once(':')?;
+            let start = (mins.parse::<u64>().ok()? * 60 + secs.parse::<u64>().ok()?) as f64;
+            Some(TimedText {
+                start,
+                end: start,
+                text: text.trim().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The meeting decoder shared by the whole-file pass, checkpoint spans and
+/// gap fills, so that all three decode a group the same way. Whisper decodes
+/// each group in one call with the loop guard, and loads its model once per
+/// decoder. Other engines decode one chunk per call. Config is frozen by the
+/// caller.
 #[derive(Default)]
-pub(crate) struct CheckpointChunkDecoder {
+pub(crate) struct MeetingGroupDecoder {
     #[cfg(feature = "whisper")]
     whisper: Option<whisper_rs::WhisperContext>,
 }
 
-impl CheckpointChunkDecoder {
+impl MeetingGroupDecoder {
+    /// Whether this decoder holds a loaded model.
+    pub(crate) fn model_loaded(&self) -> bool {
+        #[cfg(feature = "whisper")]
+        return self.whisper.is_some();
+        #[cfg(not(feature = "whisper"))]
+        false
+    }
+
+    /// Lines for `groups` of `samples`, on the source clock. `offset` is the
+    /// source sample at which `samples` starts.
     pub(crate) fn transcribe(
         &mut self,
         samples: &[f32],
-        chunks: &[(usize, usize)],
+        groups: &[crate::decode_groups::DecodeGroup],
         offset: usize,
         config: &Config,
         hints: &DecodeHints,
@@ -1027,24 +1059,19 @@ impl CheckpointChunkDecoder {
         {
             if self.whisper.is_none() {
                 self.whisper = Some(load_whisper_context(config)?);
-                tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
-                crate::logging::log_step(
-                    "capture_checkpoint_model_load",
-                    "",
-                    0,
-                    serde_json::json!({"engine":"whisper"}),
-                );
             }
-            return transcribe_whisper_chunk_lines_with_context(
-                self.whisper.as_ref().expect("context loaded above"),
-                samples,
-                chunks,
-                offset,
+            let mut call = WhisperCall {
+                ctx: self.whisper.as_ref().expect("context loaded above"),
                 config,
                 hints,
-            );
+            };
+            return crate::decode_groups::decode_groups(&mut call, samples, groups, offset);
         }
-        transcribe_chunk_lines(samples, chunks, offset, config, hints)
+        let chunks: Vec<(usize, usize)> = groups
+            .iter()
+            .flat_map(|group| group.chunks.iter().copied())
+            .collect();
+        transcribe_chunk_lines(samples, &chunks, offset, config, hints)
     }
 }
 
@@ -1087,9 +1114,9 @@ pub(crate) fn transcribe_meeting_samples(
     const MIN_MEETING_CHUNKS: usize = 2;
 
     let audio_duration_secs = samples.len() as f64 / 16000.0;
-    let vad_chunks = detect_meeting_vad_chunks(samples);
+    let plan = crate::decode_groups::DecodePlan::for_source(samples, meeting_group_target(config));
 
-    if vad_chunks.len() < MIN_MEETING_CHUNKS {
+    if plan.chunk_count() < MIN_MEETING_CHUNKS {
         return transcribe_dispatch(audio_path, config, hints);
     }
 
@@ -1109,14 +1136,16 @@ pub(crate) fn transcribe_meeting_samples(
     }
 
     tracing::info!(
-        chunks = vad_chunks.len(),
+        chunks = plan.chunk_count(),
+        groups = plan.groups().len(),
         audio_secs = format!("{:.1}", audio_duration_secs),
         "meeting transcription using VAD-driven chunk rotation"
     );
 
-    if let Some(result) =
-        transcribe_chunk_ranges(samples, &vad_chunks, audio_duration_secs, config, hints)?
-    {
+    let mut lines =
+        MeetingGroupDecoder::default().transcribe(samples, plan.groups(), 0, config, hints)?;
+    lines.stats.audio_duration_secs = audio_duration_secs;
+    if let Some(result) = finish_chunk_lines(lines) {
         return Ok(result);
     }
 
@@ -2453,12 +2482,19 @@ fn decode_with_ffmpeg_binary(
 // resample() and normalize_audio() are provided by whisper_guard::audio
 // and re-exported at the top of this file.
 
+/// The meeting VAD chunker's analysis window, 100 ms.
+pub(crate) const VAD_WINDOW_SAMPLES: usize = 1_600;
+/// The silence after a chunk at which the chunker closes it and resets.
+pub(crate) const VAD_CLOSE_PAUSE_SAMPLES: usize = 8 * VAD_WINDOW_SAMPLES;
+/// The chunker splits speech without such a pause at this length.
+pub(crate) const VAD_MAX_CHUNK_SAMPLES: usize = 45 * 16_000;
+
 pub(crate) fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
     const SAMPLE_RATE: usize = 16_000;
-    const WINDOW_SAMPLES: usize = 1_600; // 100ms
-    const ROTATE_SILENCE_MS: u64 = 800;
+    const WINDOW_SAMPLES: usize = VAD_WINDOW_SAMPLES; // 100ms
+    const ROTATE_SILENCE_MS: u64 = (VAD_CLOSE_PAUSE_SAMPLES / (SAMPLE_RATE / 1000)) as u64;
     const MIN_CHUNK_SAMPLES: usize = SAMPLE_RATE; // 1s
-    const MAX_CHUNK_SAMPLES: usize = SAMPLE_RATE * 45;
+    const MAX_CHUNK_SAMPLES: usize = VAD_MAX_CHUNK_SAMPLES;
     const NOISE_FLOOR_MIN: f32 = 0.0001;
     const NOISE_FLOOR_MAX: f32 = 0.02;
     const NOISE_MULTIPLIER: f32 = 4.0;

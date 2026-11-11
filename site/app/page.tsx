@@ -127,7 +127,7 @@ function FlowList({ name, steps: flow }: { name: string; steps: FlowStep[] }) {
   );
 }
 
-// Homepage storage and agent-access rows spot-checked October 19, 2026.
+// Homepage hosting/MCP/provider claims spot-checked November 11, 2026.
 // Sources: granola.ai/security, help.granola.ai/article/granola-mcp,
 // help.otter.ai/hc/en-us/articles/35287607569687-Otter-MCP-Server,
 // otter.ai/pricing, anarlog.so/privacy and anarlog.so.

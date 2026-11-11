@@ -7,11 +7,15 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const FRAME_BYTES: usize = 256 * 1024;
+// Effective configuration includes origins and can exceed 256 KiB even when
+// model output is tiny. Bound that frame separately from prompts and queue RAM.
+const FRAME_BYTES: usize = 2 * 1024 * 1024;
+const PROMPT_BYTES: usize = 128 * 1024;
+const QUEUED_BYTES: usize = 4 * 1024 * 1024;
 const CALL_BYTES: usize = 8 * 1024 * 1024;
 const ANSWER_BYTES: usize = 32 * 1024;
 const POLL: Duration = Duration::from_millis(20);
@@ -70,7 +74,7 @@ impl Transport {
             );
         }
         validate_args(args)?;
-        if prompt.len() > FRAME_BYTES / 2 {
+        if prompt.len() > PROMPT_BYTES {
             return Err("codex_app_server prompt exceeds its bounded input budget".into());
         }
         let deadline = Instant::now() + timeout;
@@ -142,6 +146,7 @@ struct Server {
     writer: Option<mpsc::SyncSender<Vec<u8>>>,
     frames: mpsc::Receiver<Frame>,
     fault: Arc<AtomicBool>,
+    queued_bytes: Arc<AtomicUsize>,
     next_id: u64,
     bytes: usize,
     active_thread: Option<String>,
@@ -172,6 +177,7 @@ impl Server {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let fault = Arc::new(AtomicBool::new(false));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         let (writer, writes) = mpsc::sync_channel::<Vec<u8>>(8);
         let write_fault = fault.clone();
         std::thread::spawn(move || {
@@ -188,6 +194,7 @@ impl Server {
         });
         let (output, frames) = mpsc::sync_channel(64);
         let read_fault = fault.clone();
+        let read_queued = queued_bytes.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
@@ -212,12 +219,13 @@ impl Server {
                         break;
                     }
                 };
-                if output
-                    .try_send(Frame {
-                        value,
-                        bytes: bytes.len(),
-                    })
-                    .is_err()
+                if read_queued.fetch_add(bytes.len(), Ordering::SeqCst) + bytes.len() > QUEUED_BYTES
+                    || output
+                        .try_send(Frame {
+                            value,
+                            bytes: bytes.len(),
+                        })
+                        .is_err()
                 {
                     read_fault.store(true, Ordering::SeqCst);
                     break;
@@ -233,6 +241,7 @@ impl Server {
             writer: Some(writer),
             frames,
             fault,
+            queued_bytes,
             next_id: 1,
             bytes: 0,
             active_thread: None,
@@ -267,6 +276,7 @@ impl Server {
             }
             match self.frames.recv_timeout(POLL) {
                 Ok(frame) => {
+                    self.queued_bytes.fetch_sub(frame.bytes, Ordering::SeqCst);
                     self.bytes += frame.bytes;
                     if self.bytes > CALL_BYTES {
                         return Err("codex_app_server call exceeded output budget".into());
@@ -279,7 +289,14 @@ impl Server {
                     return Ok(frame.value);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(_) => return Err("codex_app_server output disconnected".into()),
+                Err(_) => {
+                    return Err(if self.fault.load(Ordering::SeqCst) {
+                        "codex_app_server closed or exceeded its protocol/output budget"
+                    } else {
+                        "codex_app_server output disconnected"
+                    }
+                    .into());
+                }
             }
         }
     }
@@ -608,6 +625,7 @@ for line in sys.stdin:
  record({'method':method,'params':p})
  result={}
  if method=='config/read': result={'config':{'mcp_servers':{'outside.server':{}},'plugins':{'writer@market':{'enabled':True}}}}
+ if method=='config/read' and mode=='big_config': result['origins']={'synthetic_padding':'x'*600000}
  if method=='thread/start':
   assert p['sandbox']=='read-only' and p['approvalPolicy']=='never'
   assert p['config']['mcp_servers']['outside.server']['enabled']==False
@@ -620,7 +638,7 @@ for line in sys.stdin:
    subprocess.Popen([sys.executable,'-c',"import pathlib,time,sys\np=pathlib.Path(sys.argv[1])\nwhile True:\n p.write_text(str(time.monotonic_ns()))\n time.sleep(.05)",str(root/'child-heartbeat')])
    time.sleep(60)
   if mode=='malformed': print('not-json',flush=True); time.sleep(60)
-  if mode=='oversize': print('x'*300000,flush=True); time.sleep(60)
+  if mode=='oversize': print('x'*3000000,flush=True); time.sleep(60)
   if mode=='request': emit({'id':'server-owned-request','method':'item/commandExecution/requestApproval','params':{}}); time.sleep(60)
   # Events may arrive before the turn/start acknowledgement.
   emit({'method':'item/completed','params':{'threadId':'unrelated','turnId':turn,'item':{'type':'agentMessage','text':'wrong thread'}}})
@@ -701,7 +719,7 @@ if mode=='slow_exit': time.sleep(60)
     #[cfg(unix)]
     #[test]
     fn reuses_only_the_server_and_archives_each_fresh_thread_before_release() {
-        let fixture = Fixture::new("normal");
+        let fixture = Fixture::new("big_config");
         let transport = Transport::default();
         assert_eq!(
             fixture

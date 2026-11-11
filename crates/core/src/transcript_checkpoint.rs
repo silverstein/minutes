@@ -97,6 +97,138 @@ impl TranscriptCheckpoint {
     }
 }
 
+/// Load a checkpoint file. `None` when the file is missing, unreadable,
+/// corrupt or of another version: the job then transcribes as if it had no
+/// checkpoint.
+pub fn load_checkpoint_file(path: &Path) -> Option<TranscriptCheckpoint> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error,
+                "ignoring an unreadable transcript checkpoint; the job transcribes in full");
+            return None;
+        }
+    };
+    match serde_json::from_slice::<TranscriptCheckpoint>(&bytes) {
+        Ok(checkpoint) if checkpoint.version == CHECKPOINT_VERSION => Some(checkpoint),
+        Ok(checkpoint) => {
+            tracing::warn!(path = %path.display(), version = checkpoint.version,
+                "ignoring a transcript checkpoint of another version; the job transcribes in full");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error,
+                "ignoring a corrupt transcript checkpoint; the job transcribes in full");
+            None
+        }
+    }
+}
+
+/// Replace a checkpoint file with `checkpoint`. The new content goes to a
+/// temporary file beside it, which is owner-only from the start (0600 on
+/// Unix). The temporary file is written and synced, then renamed over the
+/// checkpoint in one step. If any step fails, the previous file stays as it
+/// was, and a reader never sees a partial file.
+pub fn save_checkpoint_file(path: &Path, checkpoint: &TranscriptCheckpoint) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
+    replace_file_with(path, &bytes, |temporary, path| {
+        temporary
+            .persist(path)
+            .map(drop)
+            .map_err(|error| error.error)
+    })
+}
+
+/// [`save_checkpoint_file`] with the last step, the rename, given by the
+/// caller, so tests can make it fail.
+fn replace_file_with(
+    path: &Path,
+    bytes: &[u8],
+    persist: impl FnOnce(tempfile::NamedTempFile, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // tempfile creates the file with O_EXCL and mode 0600 on Unix. On
+    // Windows, persist replaces the target with MoveFileExW and
+    // MOVEFILE_REPLACE_EXISTING.
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&temporary_prefix(path))
+        .suffix(TEMPORARY_SUFFIX)
+        .tempfile_in(dir)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    persist(temporary, path)
+}
+
+const TEMPORARY_SUFFIX: &str = ".tmp";
+
+fn temporary_prefix(path: &Path) -> String {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    format!("{name}.")
+}
+
+/// Remove a checkpoint file and any temporary file that a crash left beside
+/// it. The spans hold transcript text, so nothing of them should stay.
+pub fn remove_checkpoint_file(path: &Path) {
+    std::fs::remove_file(path).ok();
+    let (Some(dir), Some(_)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let prefix = temporary_prefix(path);
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(&prefix) && name.ends_with(TEMPORARY_SUFFIX) {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
+/// A job's checkpoint file while the final pass adds the spans it finishes.
+/// It keeps the spans in memory and replaces the file after each change, so a
+/// failed save is written again with the next one.
+// The final pass uses it from the next change on.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct CheckpointFile {
+    path: std::path::PathBuf,
+    checkpoint: TranscriptCheckpoint,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl CheckpointFile {
+    /// The file at `path` with the spans it holds now. A missing, corrupt or
+    /// unsupported file starts empty, and the first save replaces it.
+    pub(crate) fn open(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            checkpoint: load_checkpoint_file(path).unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn checkpoint(&self) -> &TranscriptCheckpoint {
+        &self.checkpoint
+    }
+
+    /// Add `span` and save. Spans of the same source that overlap it are
+    /// dropped: the final pass writes a span only for audio that no accepted
+    /// span covers, so what it overlaps was rejected. Spans of the other
+    /// source are kept, because each source has its own clock.
+    pub(crate) fn add(&mut self, span: CheckpointSpan) -> std::io::Result<()> {
+        self.checkpoint.spans.retain(|old| {
+            old.source != span.source
+                || old.end_sample <= span.start_sample
+                || old.start_sample >= span.end_sample
+        });
+        self.checkpoint.spans.push(span);
+        save_checkpoint_file(&self.path, &self.checkpoint)
+    }
+}
+
 /// The decode hints a queued meeting job uses when no calendar event matches
 /// it. Pass them to [`transcribe_span`] so spans fit the final pass. If the
 /// job's hints turn out different (another title, a calendar match), its
@@ -896,6 +1028,161 @@ mod tests {
         // and in the tail that the final pass decodes.
         let ids: Vec<u32> = (0..300).step_by(7).collect();
         assert_checkpoints_do_not_change_the_transcript(&ids);
+    }
+
+    fn saved_spans(path: &Path) -> Vec<(CheckpointSource, u64, u64)> {
+        let mut spans: Vec<_> = load_checkpoint_file(path)
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| (s.source, s.start_sample, s.end_sample))
+            .collect();
+        spans.sort_by_key(|&(source, start, _)| (source as u8, start));
+        spans
+    }
+
+    fn temporaries(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_saved_checkpoint_is_owner_only_and_loads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let audio = ramp(32_000);
+        let checkpoint = TranscriptCheckpoint {
+            spans: vec![span(CheckpointSource::Voice, 0, &audio, "s")],
+            ..Default::default()
+        };
+        save_checkpoint_file(&path, &checkpoint).unwrap();
+        assert_eq!(load_checkpoint_file(&path), Some(checkpoint));
+        assert!(temporaries(dir.path()).is_empty());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn missing_corrupt_and_unsupported_files_load_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        assert_eq!(load_checkpoint_file(&path), None);
+        // A file cut off in the middle, as a plain write could leave it.
+        let audio = ramp(16_000);
+        let full = serde_json::to_vec(&TranscriptCheckpoint {
+            spans: vec![span(CheckpointSource::Voice, 0, &audio, "s")],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(&path, &full[..full.len() / 2]).unwrap();
+        assert_eq!(load_checkpoint_file(&path), None);
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(load_checkpoint_file(&path), None);
+        let future = TranscriptCheckpoint {
+            version: CHECKPOINT_VERSION + 1,
+            spans: vec![span(CheckpointSource::Voice, 0, &audio, "s")],
+        };
+        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert_eq!(load_checkpoint_file(&path), None);
+        // The final pass then starts empty, and its first save replaces the file.
+        let mut file = CheckpointFile::open(&path);
+        assert!(file.checkpoint().is_empty());
+        file.add(span(CheckpointSource::System, 0, &audio, "s"))
+            .unwrap();
+        assert_eq!(
+            saved_spans(&path),
+            vec![(CheckpointSource::System, 0, 16_000)]
+        );
+    }
+
+    #[test]
+    fn a_failed_replacement_keeps_the_previous_checkpoint_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let audio = ramp(32_000);
+        let before = TranscriptCheckpoint {
+            spans: vec![span(CheckpointSource::Voice, 0, &audio[..16_000], "s")],
+            ..Default::default()
+        };
+        save_checkpoint_file(&path, &before).unwrap();
+        let after = TranscriptCheckpoint {
+            spans: vec![span(CheckpointSource::Voice, 0, &audio, "s")],
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&after).unwrap();
+
+        // The rename fails. The temporary file was complete and owner-only.
+        let error = replace_file_with(&path, &bytes, |temporary, _| {
+            assert_eq!(std::fs::read(temporary.path()).unwrap(), bytes);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = temporary.as_file().metadata().unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+            Err(std::io::Error::other("rename failed"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "rename failed");
+        assert_eq!(load_checkpoint_file(&path), Some(before.clone()));
+        assert!(temporaries(dir.path()).is_empty());
+
+        // The process dies before the rename: the temporary file stays.
+        let _ = replace_file_with(&path, &bytes, |temporary, _| {
+            temporary.into_temp_path().keep().unwrap();
+            Err(std::io::Error::other("killed"))
+        });
+        assert_eq!(temporaries(dir.path()).len(), 1);
+        assert_eq!(load_checkpoint_file(&path), Some(before));
+
+        // Removal takes the checkpoint and what a crash left beside it, and
+        // only the files of this job.
+        let other = dir.path().join("job-2.checkpoint.json");
+        save_checkpoint_file(&other, &after).unwrap();
+        remove_checkpoint_file(&path);
+        assert!(!path.exists());
+        assert!(temporaries(dir.path()).is_empty());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn added_spans_replace_overlapping_spans_of_their_own_source_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-1.checkpoint.json");
+        let audio = ramp(10 * RATE);
+        let old = TranscriptCheckpoint {
+            spans: vec![
+                voice(&audio, 0, 2 * RATE, "old"),
+                voice(&audio, 2 * RATE, 5 * RATE, "old"),
+                voice(&audio, 5 * RATE, 7 * RATE, "old"),
+                span(CheckpointSource::System, 0, &audio, "old"),
+            ],
+            ..Default::default()
+        };
+        save_checkpoint_file(&path, &old).unwrap();
+        let mut file = CheckpointFile::open(&path);
+        assert_eq!(file.checkpoint(), &old);
+        file.add(voice(&audio, RATE, 6 * RATE, "new")).unwrap();
+        use CheckpointSource::*;
+        assert_eq!(
+            saved_spans(&path),
+            vec![
+                (Voice, RATE as u64, 6 * RATE as u64),
+                (System, 0, 10 * RATE as u64),
+            ]
+        );
+        // Adjacent spans stay.
+        file.add(voice(&audio, 6 * RATE, 8 * RATE, "new")).unwrap();
+        file.add(voice(&audio, 0, RATE, "new")).unwrap();
+        assert_eq!(saved_spans(&path).len(), 4);
     }
 
     #[test]

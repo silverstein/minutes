@@ -30,6 +30,19 @@ sudo rm -f /etc/apt/sources.list.d/google-chrome*.list \
   /etc/apt/sources.list.d/microsoft-edge*.list \
   /etc/apt/sources.list.d/microsoft-edge*.sources
 
+# Some runner images point Ubuntu sources at the Azure HTTP mirror. On
+# 2026-11-11 that endpoint timed out on every Linux job. Keep the configured
+# suites, components and signing keys, but use the official HTTPS endpoints.
+# Recent images use deb822 sources or mirror+file lists instead of sources.list.
+for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+  /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt; do
+  [ -f "$source" ] || continue
+  sudo sed -E -i \
+    -e 's|https?://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)|https://archive.ubuntu.com/ubuntu\1|g' \
+    -e 's|http://(archive|security)\.ubuntu\.com/ubuntu([/[:space:]]|$)|https://\1.ubuntu.com/ubuntu\2|g' \
+    "$source"
+done
+
 # Sized so all three attempts fit inside the twenty minute step backstop:
 # 3 x (120 + 240) seconds of work plus 45 seconds of pauses is 18m45s. Without
 # that the backstop would fire mid-retry and the third attempt would never run,

@@ -335,14 +335,51 @@ missed updates invalidate older context and mark the next snapshot incomplete.
 Stopping clears the context, and a new session gets a distinct epoch.
 
 Context preparation is local and requires no OpenAI API key or API credit.
-Actual delegation continues to use the configured agent CLI and its existing
-authentication/billing. The Gemini Live voice connection is unchanged. This
-does not keep a model connection warm, eliminate agent startup or establish a
-measured latency improvement. `delegation_context_prepared` logs only revision,
+Delegation uses the configured local agent and its existing authentication/billing.
+The Gemini Live voice connection is unchanged. Context preparation alone does
+not eliminate agent startup or establish a measured latency improvement.
+`delegation_context_prepared` logs only revision,
 epoch, byte count, completeness and preparation duration, never its contents.
 Synthetic tests exercise correction/interrupt behavior and the actual review,
 dispatch and subprocess path using an offline echo executable. Native voice
 acceptance and live latency measurements remain separate release checks.
+
+### Opt-in Codex app-server transport
+
+The default `delegate_transport = "cli"` still waits for the existing per-call
+CLI process to exit. On Unix, `[voice_live] delegate_transport = "codex_app_server"`
+instead owns one `codex app-server --stdio` process for this voice session. It
+starts only at an approved handoff; there is no speculative prompt or daemon.
+Existing Codex authentication is used, including a ChatGPT login when configured.
+This does not supply credits or change provider billing.
+
+This route requires Codex and `delegate_writes = false`. Each approved question
+starts a fresh read-only thread with approval policy `never`; the response must
+confirm both before a turn is sent. Effective MCP servers and plugins are
+individually disabled in thread-local overrides, along with apps, computer use,
+multi-agent delegation, web search and Codex memory use/generation. Global Codex configuration and hooks are
+unchanged. The regular CLI route remains available for other capabilities.
+Launch arguments accept only paired `-c`/`--config`, `--enable` and `--disable`
+options; unsupported configurations fail explicitly without falling back.
+
+The worker serializes approved calls with cancellable, deadline-bounded waits,
+and rechecks meeting-source authorization after startup/queueing, immediately
+before `turn/start`. Only the matching thread and turn's final agent message is
+eligible. A successful `turn/completed` and acknowledged `thread/archive` are
+required before delivering the answer. No old thread is resumed or reused;
+archived records follow Codex's own local history policy. The server may reuse
+its provider connection, but prior question transcripts are never submitted as
+history for another question.
+
+Input, frame size, queued output, per-call output and answer size are bounded.
+Malformed output, authorization requests, failed turns, archive errors, timeout
+and cancellation discard the owned server and withhold the answer. There is no
+automatic retry of a possibly executed question. Stop closes stdin for graceful
+shutdown, then kills and reaps the owned process group after a bounded grace
+period. Idle cleanup runs off the capture thread; in-flight workers observe
+session stop. Windows retains the CLI route until equivalent descendant cleanup
+is qualified. Transport qualification and paired end-to-end latency remain
+separate from context-correctness and native voice-output acceptance.
 
 ## Lint scope
 

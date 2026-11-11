@@ -1358,6 +1358,7 @@ impl Runner {
         set_state(&self, &mut state, VoiceLiveState::Closed);
         self.audio.stop();
         self.tools.stop_shared_context();
+        self.tools.stop_agent_transport();
         self.tools.mcp.shutdown();
         drop(tool_txs);
         for w in workers.into_iter().flatten() {

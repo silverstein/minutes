@@ -195,6 +195,22 @@ pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
 
 /// Create an isolated assistant workspace without changing another tab.
 pub fn create_workspace_at(config: &Config, workspace: &Path) -> Result<PathBuf, String> {
+    create_workspace_inner(config, workspace, true)
+}
+
+/// Tabs inherit the assistant repository's trust; no nested git repositories.
+pub(crate) fn create_tab_workspace_at(
+    config: &Config,
+    workspace: &Path,
+) -> Result<PathBuf, String> {
+    create_workspace_inner(config, workspace, false)
+}
+
+fn create_workspace_inner(
+    config: &Config,
+    workspace: &Path,
+    initialize_git: bool,
+) -> Result<PathBuf, String> {
     let workspace = workspace.to_path_buf();
     fs::create_dir_all(&workspace).map_err(|e| format!("Failed to create workspace: {}", e))?;
 
@@ -237,22 +253,29 @@ pub fn create_workspace_at(config: &Config, workspace: &Path) -> Result<PathBuf,
     // .claude stays user-owned, including legacy global-config symlinks.
     // Claude loads the managed skill pack via --add-dir at terminal spawn.
 
-    // git init on the assistant workspace (idempotent) so agent CLIs discover
-    // repo-scoped instruction files like CLAUDE.md and AGENTS.md.
-    if !workspace.join(".git").exists() {
-        let git_status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(&workspace)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| format!("Failed to run git init: {}", e))?;
-        if !git_status.success() {
-            return Err("git init failed in assistant workspace. Is git installed?".into());
-        }
+    if initialize_git {
+        ensure_workspace_repository(&workspace)?;
     }
 
     Ok(workspace)
+}
+
+/// One stable repository supplies Recall's trust boundary. Per-tab instructions
+/// are loaded from the starting directory without a nested repository.
+pub(crate) fn ensure_workspace_repository(workspace: &Path) -> Result<(), String> {
+    if !workspace.join(".git").exists() {
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(workspace)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("Failed to run git init: {e}"))?;
+        if !status.success() {
+            return Err("git init failed in assistant workspace. Is git installed?".into());
+        }
+    }
+    Ok(())
 }
 
 /// Longest meeting body copied into CURRENT_MEETING.md, in characters.
@@ -1128,5 +1151,37 @@ mod tests {
             .unwrap(),
             "codex prep"
         );
+    }
+}
+
+#[cfg(test)]
+mod recall_repository_tests {
+    use super::*;
+    #[test]
+    fn tab_directories_use_parent_repository_without_nested_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        ensure_workspace_repository(root).unwrap();
+        let config = Config {
+            output_dir: root.join("meetings-output"),
+            ..Config::default()
+        };
+        for id in ["one", "two"] {
+            let tab = root.join("tabs").join(id);
+            create_tab_workspace_at(&config, &tab).unwrap();
+            assert!(!tab.join(".git").exists());
+            let git = std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .current_dir(tab)
+                .output()
+                .unwrap();
+            assert!(git.status.success());
+            assert_eq!(
+                Path::new(String::from_utf8(git.stdout).unwrap().trim())
+                    .canonicalize()
+                    .unwrap(),
+                root.canonicalize().unwrap()
+            );
+        }
     }
 }

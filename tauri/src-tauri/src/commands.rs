@@ -9204,9 +9204,18 @@ pub fn cmd_recall_context_items(
             return Ok(crate::context::LoadedContext::default());
         };
         match manager.session_command(&id) {
-            Some(command) if !is_shell_command(&command) => manager
-                .session_context_dir(&id)
-                .unwrap_or_else(crate::context::workspace_dir),
+            Some(command)
+                if !is_shell_command(&command)
+                    || manager
+                        .tabs
+                        .tabs
+                        .iter()
+                        .any(|tab| tab.id == id && tab.claude_active) =>
+            {
+                manager
+                    .session_context_dir(&id)
+                    .unwrap_or_else(crate::context::workspace_dir)
+            }
             _ => return Ok(crate::context::LoadedContext::default()),
         }
     };
@@ -9225,6 +9234,9 @@ pub fn cmd_recall_drop_context(
 ) -> Result<(), String> {
     use crate::context::assistant_skills::FocusNotice;
     let workspace = selected_recall_workspace(&state)?;
+    if matches!(item.as_str(), "meeting" | "all_meetings") {
+        crate::recall_tabs::mark_context_ready(&workspace)?;
+    }
     let (kind, notice) = match item.as_str() {
         "meeting" => {
             crate::context::clear_active_meeting_context(&workspace)?;
@@ -9274,7 +9286,7 @@ pub fn cmd_set_open_artifact(
     let Ok(selected) = selected_recall_workspace(&state) else {
         return Ok(());
     };
-    let workspace = crate::context::create_workspace_at(&config, &selected)?;
+    let workspace = crate::context::create_tab_workspace_at(&config, &selected)?;
     crate::context::write_deferred_assistant_context(&workspace)?;
     crate::context::write_active_artifact_context(&workspace, &canonical)?;
     let artifact_name = canonical.file_name().and_then(|name| name.to_str());
@@ -10741,7 +10753,7 @@ fn sync_workspace_for_mode(
     }
 }
 
-fn is_shell_command(command: &str) -> bool {
+pub(crate) fn is_shell_command(command: &str) -> bool {
     matches!(
         Path::new(command)
             .file_name()
@@ -10797,7 +10809,7 @@ pub struct AgentResolveError {
 }
 
 impl AgentResolveError {
-    fn user_message(&self) -> String {
+    pub(crate) fn user_message(&self) -> String {
         let install_hint = if self.name == "claude" {
             " Reinstall Claude Code, or choose another assistant in Settings."
         } else {
@@ -10989,6 +11001,47 @@ pub fn spawn_terminal(
     )
 }
 
+fn recall_tab_claude_args(
+    args: Vec<String>,
+    workspace: &Path,
+    resume: Option<&str>,
+) -> Vec<String> {
+    let managed = crate::context::assistant_skills::claude_skill_directory(workspace)
+        .join("claude-focus-settings.json");
+    let mut result = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if matches!(arg.as_str(), "--resume" | "-r" | "--session-id") {
+            let _ = iter.next();
+            continue;
+        }
+        if matches!(arg.as_str(), "--continue" | "-c" | "--fork-session")
+            || arg.starts_with("--resume=")
+            || arg.starts_with("--session-id=")
+        {
+            continue;
+        }
+        if arg == "--settings" {
+            if let Some(value) = iter.next() {
+                if Path::new(&value) != managed {
+                    result.extend([arg, value]);
+                }
+            }
+        } else if arg
+            .strip_prefix("--settings=")
+            .is_some_and(|value| Path::new(value) == managed)
+        {
+            continue;
+        } else {
+            result.push(arg);
+        }
+    }
+    if let Some(resume) = resume.filter(|id| crate::recall_tabs::valid_id(id)) {
+        result.extend(["--resume".into(), resume.into()]);
+    }
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_terminal_tab(
     app: &tauri::AppHandle,
@@ -11027,7 +11080,7 @@ fn spawn_terminal_tab(
         .cloned()
         .ok_or("Recall tab not found")?;
     let workspace =
-        crate::context::create_workspace_at(&config, &crate::recall_tabs::workspace(&id)?)?;
+        crate::context::create_tab_workspace_at(&config, &crate::recall_tabs::workspace(&id)?)?;
     let title = tab.title.clone();
     if manager.session_command(&id).is_none() {
         // Every session starts deferred; neither restoring nor selecting reads meeting history.
@@ -11041,96 +11094,20 @@ fn spawn_terminal_tab(
             filtered_agent_args(agent_name, &config.assistant.agent_args),
             &workspace,
         );
-        let mut focus_hook =
-            crate::context::assistant_skills::has_focus_hook(&agent_args, &workspace);
-        if command_is_claude(agent_name) {
-            // A tab owns resume and hooks. Merge user settings as a separate --settings
-            // source rather than editing the user's global/project configuration.
-            let mut cleaned = Vec::new();
-            let mut skip = false;
-            for arg in agent_args {
-                if skip {
-                    skip = false;
-                    continue;
-                }
-                if matches!(arg.as_str(), "--resume" | "-r" | "--session-id") {
-                    skip = true;
-                    continue;
-                }
-                if matches!(arg.as_str(), "--continue" | "-c" | "--fork-session")
-                    || arg.starts_with("--resume=")
-                    || arg.starts_with("--session-id=")
-                {
-                    continue;
-                }
-                cleaned.push(arg);
-            }
-            agent_args = cleaned;
-            // Claude combines hook arrays from settings sources; use one explicit
-            // JSON source containing the managed hooks, preserving configured settings.
-            let hook_path = crate::recall_tabs::settings(&workspace)?;
-            let hook_json: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&hook_path).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
-            let mut merged = serde_json::json!({});
-            let mut args = Vec::new();
-            let mut iter = agent_args.into_iter();
-            while let Some(arg) = iter.next() {
-                let settings = if arg == "--settings" {
-                    iter.next()
-                } else {
-                    arg.strip_prefix("--settings=").map(str::to_string)
-                };
-                if let Some(value) = settings {
-                    if value.ends_with("claude-focus-settings.json") {
-                        continue;
-                    }
-                    let raw = if value.trim_start().starts_with('{') {
-                        value
-                    } else {
-                        std::fs::read_to_string(value)
-                            .map_err(|e| format!("Cannot read assistant settings: {e}"))?
-                    };
-                    let value: serde_json::Value =
-                        serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-                    if let Some(object) = value.as_object() {
-                        for (key, val) in object {
-                            merged[key] = val.clone();
-                        }
-                    }
-                } else {
-                    args.push(arg);
-                }
-            }
-            for (event, entries) in hook_json["hooks"]
-                .as_object()
-                .ok_or("Invalid Recall hooks")?
-            {
-                if !merged["hooks"].is_object() {
-                    merged["hooks"] = serde_json::json!({});
-                }
-                let mut combined = merged["hooks"][event]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                combined.extend(entries.as_array().cloned().unwrap_or_default());
-                merged["hooks"][event] = serde_json::Value::Array(combined);
-            }
-            let merged_path = workspace.join(".recall-settings.json");
-            crate::recall_tabs::private_write(
-                &merged_path,
-                &serde_json::to_vec(&merged).map_err(|e| e.to_string())?,
-            )?;
-            args.extend([
-                "--settings".to_string(),
-                merged_path.to_string_lossy().into_owned(),
-            ]);
-            if let Some(resume) = &tab.claude_session_id {
-                args.extend(["--resume".to_string(), resume.clone()]);
-            }
-            agent_args = args;
-            focus_hook = true;
+        // Claude discovers these project-local hooks even when started manually
+        // inside a configured shell. Never modify ~/.claude or duplicate --settings hooks.
+        crate::recall_tabs::settings(&workspace)?;
+        crate::recall_tabs::set_focus_target(&workspace, tab.meeting_path.as_deref(), false)?;
+        let shell = is_shell_command(&agent_bin.to_string_lossy());
+        if let Some(metadata) = manager.tabs.tabs.iter_mut().find(|t| t.id == id) {
+            metadata.shell = shell;
+            metadata.claude_active = false;
         }
+        if command_is_claude(agent_name) {
+            agent_args =
+                recall_tab_claude_args(agent_args, &workspace, tab.claude_session_id.as_deref());
+        }
+        let focus_hook = command_is_claude(agent_name) || shell;
         crate::context::assistant_skills::clear_focus_notices(&workspace);
         if let Some(note) = &tab.note {
             crate::context::assistant_skills::queue_focus_notice(
@@ -11157,6 +11134,7 @@ fn spawn_terminal_tab(
             rows,
         )?;
     }
+    manager.tabs.save(&root)?;
     let tabs = manager.tabs.clone();
     drop(manager);
     if !background && app.get_webview_window("main").is_some() {
@@ -11386,7 +11364,7 @@ fn claude_auth_status_is_logged_in(stdout: &[u8]) -> bool {
         == Some(true)
 }
 
-fn claude_terminal_is_authenticated(agent_bin: &str, cwd: Option<&Path>) -> bool {
+pub(crate) fn claude_terminal_is_authenticated(agent_bin: &str, cwd: Option<&Path>) -> bool {
     recall_agent_probe(agent_bin, &["auth", "status", "--json"], cwd).is_some_and(|output| {
         output.status.success() && claude_auth_status_is_logged_in(&output.stdout)
     })
@@ -13488,6 +13466,9 @@ fn prepare_recall_terminal_meeting(
         (command, cwd)
     };
 
+    if is_shell_command(&agent_command) {
+        return Err("Shell tabs share meeting context only at Claude’s next prompt.".into());
+    }
     if command_is_claude(&agent_command)
         && !claude_terminal_is_authenticated(&agent_command, Some(&agent_cwd))
     {
@@ -13499,7 +13480,8 @@ fn prepare_recall_terminal_meeting(
 
     let config = Config::load_strict()?;
     let workspace = agent_cwd;
-    materialize_recall_terminal_context(&workspace, &config, meeting_path.as_deref())
+    materialize_recall_terminal_context(&workspace, &config, meeting_path.as_deref())?;
+    crate::recall_tabs::mark_context_ready(&workspace)
 }
 
 /// Write exactly one of the two Terminal context files and clear the other, so
@@ -13507,7 +13489,7 @@ fn prepare_recall_terminal_meeting(
 /// a selected meeting the session used to get nothing at all, and the
 /// instruction stub then had the assistant announce a missing
 /// `CURRENT_MEETING.md` on every general question.
-fn materialize_recall_terminal_context(
+pub(crate) fn materialize_recall_terminal_context(
     workspace: &Path,
     config: &Config,
     meeting_path: Option<&str>,
@@ -26442,6 +26424,30 @@ mod external_stop_tests {
         assert_eq!(
             external_stop_decision(true, false),
             ExternalStopDecision::RefuseForeign
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_shell_launch_tests {
+    use super::*;
+    #[test]
+    fn direct_claude_keeps_user_settings_but_has_one_managed_hook_source() {
+        let workspace = Path::new("/tab");
+        let args = crate::context::assistant_skills::terminal_args(
+            "claude",
+            vec!["--settings".into(), "user.json".into(), "--continue".into()],
+            workspace,
+        );
+        let result = recall_tab_claude_args(args, workspace, Some("session-1"));
+        assert_eq!(result, ["--settings", "user.json", "--resume", "session-1"]);
+        let managed = crate::context::assistant_skills::claude_skill_directory(workspace)
+            .join("claude-focus-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            recall_tab_claude_args(vec!["--settings".into(), managed], workspace, None),
+            Vec::<String>::new()
         );
     }
 }

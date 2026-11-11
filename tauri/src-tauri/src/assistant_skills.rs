@@ -181,6 +181,7 @@ fn write_focus_settings(workspace: &Path) -> Result<PathBuf, String> {
 }
 
 /// Whether these spawn arguments wire Minutes' focus hook into Claude.
+#[cfg(test)]
 pub(crate) fn has_focus_hook(args: &[String], workspace: &Path) -> bool {
     let path = focus_settings_path(workspace)
         .to_string_lossy()

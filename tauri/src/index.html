@@ -16261,7 +16261,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const recallTabStates = new Map();
     let recallTabsModel = { tabs: [], active: null };
     function recallStateFor(id) {
-      if (!recallTabStates.has(id)) recallTabStates.set(id, { id, terminal: null, fit: null, alive: false, dark: null, initialized: false, resize: null, themeHandler: null, themeObserver: null, pending: true, draft: '', reliable: true, queue: Promise.resolve(), hasSignal: false, nextUser: false, meetingPath: null, listeners: [], container: null });
+      if (!recallTabStates.has(id)) recallTabStates.set(id, { id, terminal: null, fit: null, alive: false, dark: null, initialized: false, resize: null, themeHandler: null, themeObserver: null, pending: true, shell: false, claudeActive: false, resuming: false, draft: '', reliable: true, queue: Promise.resolve(), hasSignal: false, nextUser: false, meetingPath: null, listeners: [], container: null });
       return recallTabStates.get(id);
     }
     function activeRecallState() { return recallStateFor(SESSION_ID); }
@@ -17208,7 +17208,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // So an edited line is classified by what the shadow still knows: a
         // leading "/" means an account command, anything else is a question.
         // Only a line known to be empty is held back.
-        if (tab.pending && !question && tab.reliable) {
+        if (!tab.shell && tab.pending && !question && tab.reliable) {
           setRecallProviderNotice(
             'Not sent. Minutes did not see a question on the line. Type your question, then press Return. No meeting context was read.',
             'error'
@@ -17216,7 +17216,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           return;
         }
         const isAccountCommand = question.startsWith('/');
-        if (tab.pending && !isAccountCommand && (question || !tab.reliable)) {
+        if (!tab.shell && tab.pending && !isAccountCommand && (question || !tab.reliable)) {
           // null means "no meeting selected": the backend writes the general
           // meeting-directory context instead, under the same auth gate.
           const meetingPath = tab.meetingPath;
@@ -17593,13 +17593,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       invoke, isRecording: () => isRecording,
       select: id => openRecall('assistant', null, { tabId: id }),
       create: () => openRecall('assistant', null, { newTab: true }),
-      close: closeRecallTab,
+      close: closeRecallTab, resume: resumeRecallTab,
     });
     async function activateRecallTab(id, model) {
       if (!id) return;
       recallTabsModel = model; SESSION_ID = id;
       const metadata = model.tabs.find(t => t.id === id);
       const tab = activeRecallState();
+      tab.shell = !!metadata?.shell; tab.claudeActive = !!metadata?.claude_active;
       if (!tab.initialized) { tab.meetingPath = metadata?.meeting_path || null; tab.pending = true; }
       recallSelectedMeetingPath = metadata?.meeting_path || null;
       await invoke('cmd_recall_tab_select', { tabId: id });
@@ -17609,6 +17610,23 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       setRecallProviderNotice(metadata?.note || '');
       requestAnimationFrame(() => { tab.fit?.fit(); tab.terminal?.focus(); });
       refreshRecallContextChips();
+    }
+    async function resumeRecallTab(id) {
+      const tab = recallStateFor(id);
+      if (tab.resuming) return;
+      tab.resuming = true;
+      // Serialize with human input; never overwrite a pending or uncertain line.
+      tab.queue = tab.queue.catch(() => {}).then(async () => {
+        if (!tab.shell || tab.claudeActive || tab.draft || !tab.reliable) {
+          setRecallProviderNotice('Return to an empty shell prompt before resuming the previous conversation.', 'error');
+          return;
+        }
+        try {
+          await invoke('cmd_recall_tab_resume', { tabId: id });
+          tab.terminal?.focus();
+        } catch (error) { setRecallProviderNotice(String(error), 'error'); }
+      }).finally(() => { tab.resuming = false; });
+      await tab.queue;
     }
     async function closeRecallTab(id, confirmed = false) {
       try {
@@ -17634,9 +17652,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabsModel = model;
       for (const metadata of model.tabs) {
         const state = recallTabStates.get(metadata.id);
+        if (state) { state.shell = !!metadata.shell; state.claudeActive = !!metadata.claude_active; }
         if (state && state.meetingPath !== metadata.meeting_path) { state.meetingPath = metadata.meeting_path; state.pending = true; }
       }
       recallTabsController.update({ ...model, active: SESSION_ID });
+      refreshRecallContextChips();
       if (model.pending_live_path) recallTabsController.chooseFinished(async id => {
         if (await closeRecallTab(id)) await openRecall('meeting', model.pending_live_path);
       });
@@ -17648,6 +17668,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const tab = recallStateFor(metadata.id);
         if (tab.initialized) continue;
         tab.meetingPath = metadata.meeting_path || null; tab.pending = true;
+        tab.shell = !!metadata.shell; tab.claudeActive = !!metadata.claude_active;
         initRecallTerminal(tab); await registerPtyListeners(tab);
         try {
           await invoke('cmd_spawn_terminal', { mode: 'deferred', tabId: tab.id, background: true, themeDark: isEffectiveDarkTheme() });
@@ -19295,6 +19316,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (!recallDevMode || !activeRecallState().terminal || !activeRecallState().alive) return;
       activeRecallState().terminal.focus();
       // Never type over something the person already started.
+      if (activeRecallState().shell && !activeRecallState().claudeActive) return;
       if (activeRecallState().draft || !activeRecallState().reliable) return;
       // Name the file, not just the meeting: Minutes writes the selected
       // meeting (summary and full transcript) to CURRENT_MEETING.md on submit,

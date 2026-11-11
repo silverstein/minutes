@@ -25,7 +25,7 @@
     if (event.key.toLowerCase() === 'w') return { type: 'close' };
     return null;
   }
-  function create({ strip, prompt, invoke, select, create: createTab, close, isRecording }) {
+  function create({ strip, prompt, invoke, select, create: createTab, close, resume, isRecording }) {
     let model = snapshot;
     function dismiss() { prompt.replaceChildren(); prompt.hidden = true; }
     function show(text, actions) {
@@ -41,7 +41,6 @@
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
     function update(next) {
-      const previous = model;
       snapshot = model = next;
       const focus = strip.contains(document.activeElement) ? document.activeElement?.dataset?.tabId : null;
       strip.replaceChildren();
@@ -68,6 +67,18 @@
       }
       const add = document.createElement('button'); add.type = 'button'; add.className = 'recall-tab-add'; add.textContent = '+';
       add.setAttribute('aria-label', 'New Recall chat'); add.addEventListener('click', createTab); strip.append(add);
+      const active = model.tabs.find(tab => tab.id === model.active);
+      let resumeButton = strip.parentElement.querySelector('#recall-resume');
+      if (!resumeButton && active?.shell && active.claude_session_id && !active.claude_active) {
+        resumeButton = document.createElement('button'); resumeButton.id = 'recall-resume';
+        resumeButton.type = 'button'; resumeButton.className = 'btn btn-secondary btn-sm';
+        resumeButton.textContent = 'Resume previous conversation';
+        strip.after(resumeButton);
+      }
+      if (resumeButton) {
+        resumeButton.hidden = !(active?.shell && active.claude_session_id && !active.claude_active);
+        resumeButton.onclick = () => resume?.(model.active);
+      }
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
       if (focus) strip.querySelector(`[data-tab-id="${focus}"]`)?.focus();
       strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });

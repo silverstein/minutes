@@ -3467,6 +3467,7 @@ fn main() {
             commands::cmd_spawn_terminal,
             recall_tabs::cmd_recall_tabs,
             recall_tabs::cmd_recall_tab_open,
+            recall_tabs::cmd_recall_tab_resume,
             recall_tabs::cmd_recall_tab_select,
             recall_tabs::cmd_recall_tab_close,
             commands::cmd_pty_input,

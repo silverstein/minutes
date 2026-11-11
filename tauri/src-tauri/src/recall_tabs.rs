@@ -26,6 +26,10 @@ pub struct Tab {
     pub meeting_path: Option<String>,
     pub claude_session_id: Option<String>,
     #[serde(default)]
+    pub shell: bool,
+    #[serde(default)]
+    pub claude_active: bool,
+    #[serde(default)]
     pub capture_session_id: Option<String>,
     #[serde(default)]
     pub capture_complete: bool,
@@ -167,6 +171,8 @@ impl TabStore {
                             .map(str::to_string)
                     }),
                     claude_session_id: legacy,
+                    shell: false,
+                    claude_active: false,
                     capture_session_id: None,
                     capture_complete: false,
                     status: Status::Done,
@@ -197,11 +203,13 @@ impl TabStore {
             }
             self.save(root)?;
         }
+        crate::context::ensure_workspace_repository(root)?;
         self.loaded = true;
         self.refresh(root)?;
         for tab in &mut self.tabs {
             tab.live = false;
             tab.status = Status::Done;
+            tab.claude_active = false;
             let dir = workspace_at(root, &tab.id)?;
             let _ = fs::remove_file(dir.join(STATE));
             let _ = fs::remove_file(dir.join(".live-tab"));
@@ -292,6 +300,8 @@ impl TabStore {
             title,
             meeting_path: meeting.map(str::to_string),
             claude_session_id: None,
+            shell: false,
+            claude_active: false,
             capture_session_id: None,
             capture_complete: false,
             status: Status::Done,
@@ -308,6 +318,7 @@ impl TabStore {
             if let Ok(raw) = read_small(&workspace_at(root, &tab.id)?.join(STATE)) {
                 if let Ok(state) = serde_json::from_slice::<HookState>(&raw) {
                     tab.status = state.status;
+                    tab.claude_active = state.claude_active;
                     if state.session_id.as_deref().is_some_and(valid_id) {
                         tab.claude_session_id = state.session_id;
                     }
@@ -320,6 +331,8 @@ impl TabStore {
 
 #[derive(Serialize, Deserialize)]
 struct HookState {
+    #[serde(default)]
+    claude_active: bool,
     status: Status,
     session_id: Option<String>,
 }
@@ -370,6 +383,7 @@ pub fn maybe_run_hook() -> Option<i32> {
         let input: serde_json::Value = serde_json::from_str(&input).map_err(|e| e.to_string())?;
         if let Some(status) = status_for_event(event, &input) {
             let state = HookState {
+                claude_active: event != "SessionEnd",
                 status,
                 session_id: input["session_id"]
                     .as_str()
@@ -382,6 +396,7 @@ pub fn maybe_run_hook() -> Option<i32> {
             )?;
         }
         if event == "UserPromptSubmit" {
+            prepare_prompt_context(dir, &input)?;
             // Preserve #1308: notices are context for the next prompt, never typed turns.
             print!(
                 "{}",
@@ -412,15 +427,143 @@ pub fn settings(workspace: &Path) -> Result<PathBuf, String> {
         "StopFailure",
         "SessionEnd",
     ] {
-        hooks.insert(event.into(), serde_json::json!([{ "hooks": [{ "type": "command", "command": executable, "args": ["--recall-hook", workspace, event], "timeout": 5 }] }]));
+        hooks.insert(event.into(), serde_json::json!([{ "hooks": [{ "type": "command", "command": executable, "args": ["--recall-hook", workspace, event], "timeout": if event == "UserPromptSubmit" { 15 } else { 5 } }] }]));
     }
-    let path = workspace.join(".recall-hooks.json");
+    let directory = workspace.join(".claude");
+    // Shared project settings are discovered from Claude's starting directory.
+    // settings.local.json now resolves at the repository root on modern Claude,
+    // so using it here would collapse tab hooks into the shared parent.
+    let path = directory.join("settings.json");
+    for target in [&directory, &path] {
+        if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err("Recall will not write through a .claude settings symlink".into());
+        }
+    }
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut settings: serde_json::Value = if path.exists() {
+        serde_json::from_slice(&read_small(&path)?).map_err(|e| e.to_string())?
+    } else {
+        serde_json::json!({})
+    };
+    if !settings.is_object() {
+        return Err("Recall local settings must be an object".into());
+    }
+    if settings
+        .get("hooks")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Err("Recall local hooks must be an object".into());
+    }
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = serde_json::json!({});
+    }
+    for (event, managed) in hooks {
+        let entries = settings["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        let entries = entries
+            .as_array_mut()
+            .ok_or("Recall hook entries must be an array")?;
+        // Replace only our own commands, retaining custom hooks, matchers and settings.
+        for entry in entries.iter_mut() {
+            if let Some(commands) = entry["hooks"].as_array_mut() {
+                commands.retain(|command| {
+                    !command["args"].as_array().is_some_and(|args| {
+                        args.first().and_then(|v| v.as_str()) == Some("--recall-hook")
+                    })
+                });
+            }
+        }
+        entries.retain(|entry| !entry["hooks"].as_array().is_some_and(Vec::is_empty));
+        entries.extend(managed.as_array().unwrap().iter().cloned());
+    }
     private_write(
         &path,
-        &serde_json::to_vec_pretty(&serde_json::json!({"hooks": hooks}))
-            .map_err(|e| e.to_string())?,
+        &serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?,
     )?;
     Ok(path)
+}
+
+#[derive(Serialize, Deserialize)]
+struct FocusTarget {
+    meeting_path: Option<String>,
+    context_ready: bool,
+}
+
+pub(crate) fn set_focus_target(
+    workspace: &Path,
+    meeting: Option<&str>,
+    ready: bool,
+) -> Result<(), String> {
+    private_write(
+        &workspace.join(".recall-focus.json"),
+        &serde_json::to_vec(&FocusTarget {
+            meeting_path: meeting.map(str::to_string),
+            context_ready: ready,
+        })
+        .map_err(|e| e.to_string())?,
+    )
+}
+
+pub(crate) fn mark_context_ready(workspace: &Path) -> Result<(), String> {
+    let path = workspace.join(".recall-focus.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut target: FocusTarget =
+        serde_json::from_slice(&read_small(&path)?).map_err(|e| e.to_string())?;
+    target.context_ready = true;
+    private_write(
+        &path,
+        &serde_json::to_vec(&target).map_err(|e| e.to_string())?,
+    )
+}
+
+fn prepare_prompt_context(workspace: &Path, input: &serde_json::Value) -> Result<(), String> {
+    prepare_prompt_context_with(workspace, input, |meeting| {
+        // Running from Claude's prompt hook proves the shell launched Claude.
+        // Verify subscription auth before reading stored meeting contents.
+        let binary =
+            crate::commands::resolve_agent_binary("claude").map_err(|e| e.user_message())?;
+        if !crate::commands::claude_terminal_is_authenticated(
+            &binary.to_string_lossy(),
+            Some(workspace),
+        ) {
+            return Err("Sign in to Claude before sharing meeting context".into());
+        }
+        let config = minutes_core::Config::load_strict()?;
+        crate::commands::materialize_recall_terminal_context(workspace, &config, meeting)
+    })
+}
+
+fn prepare_prompt_context_with(
+    workspace: &Path,
+    input: &serde_json::Value,
+    prepare: impl FnOnce(Option<&str>) -> Result<(), String>,
+) -> Result<(), String> {
+    let prompt = input["prompt"].as_str().unwrap_or("").trim();
+    if prompt.is_empty() || prompt.starts_with('/') {
+        return Ok(());
+    }
+    let path = workspace.join(".recall-focus.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let target: FocusTarget =
+        serde_json::from_slice(&read_small(&path)?).map_err(|e| e.to_string())?;
+    if target.context_ready {
+        return Ok(());
+    }
+    prepare(target.meeting_path.as_deref())?;
+    mark_context_ready(workspace)
 }
 
 /// Poll only tiny tab state files, on a failure-isolated optional worker. No
@@ -511,6 +654,8 @@ pub fn start_observer(app: tauri::AppHandle) {
                                     .unwrap_or("Debrief")
                                     .replace('-', " ");
                                 if let Ok(dir) = workspace_at(&root, &tab.id) {
+                                    let _ =
+                                        set_focus_target(&dir, tab.meeting_path.as_deref(), false);
                                     let _ = crate::context::clear_active_meeting_context(&dir);
                                     let _ = crate::context::assistant_skills::queue_focus_notice(&dir, crate::context::assistant_skills::FocusNotice::Meeting,
                                         "Recording ended. This conversation is now the meeting debrief. Read the tab's CURRENT_MEETING.md if Minutes has shared it for this question.");
@@ -586,6 +731,7 @@ mod tests {
             "RECALL_TAB_LIMIT"
         );
         let hook = HookState {
+            claude_active: true,
             status: Status::Waiting,
             session_id: Some("session-a".into()),
         };
@@ -654,6 +800,46 @@ pub fn cmd_recall_tab_select(
     }
     manager.tabs.active = Some(tab_id);
     manager.tabs.save(&crate::context::workspace_dir())
+}
+
+/// Called only by the explicit in-panel action, never restoration or focus.
+#[tauri::command]
+pub fn cmd_recall_tab_resume(
+    state: tauri::State<crate::commands::AppState>,
+    tab_id: String,
+) -> Result<(), String> {
+    let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
+    manager.tabs.refresh(&crate::context::workspace_dir())?;
+    let tab = manager
+        .tabs
+        .tabs
+        .iter()
+        .find(|t| t.id == tab_id)
+        .ok_or("Recall tab not found")?;
+    let resume = shell_resume_command(tab)?;
+    if !manager
+        .session_command(&tab_id)
+        .is_some_and(|command| crate::commands::is_shell_command(&command))
+        || !manager.shell_is_foreground(&tab_id)
+    {
+        return Err(
+            "Return to an idle shell before resuming. You can also run claude --resume yourself."
+                .into(),
+        );
+    }
+    manager.write_input(&tab_id, resume.as_bytes())
+}
+
+fn shell_resume_command(tab: &Tab) -> Result<String, String> {
+    if !tab.shell || tab.claude_active {
+        return Err("Claude is already running in this tab".into());
+    }
+    let id = tab
+        .claude_session_id
+        .as_deref()
+        .filter(|id| valid_id(id))
+        .ok_or("No saved Claude conversation for this tab")?;
+    Ok(format!("claude --resume {id}\r"))
 }
 
 #[tauri::command]
@@ -804,5 +990,137 @@ mod migration_tests {
             status_for_event("StopFailure", &serde_json::json!({})),
             Some(Status::Error)
         );
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    #[test]
+    fn project_hooks_are_idempotent_and_preserve_custom_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), r#"{"model":"custom-model","hooks":{"UserPromptSubmit":[{"matcher":"custom","hooks":[{"type":"command","command":"custom-hook"}]}]}}"#).unwrap();
+        settings(dir).unwrap();
+        settings(dir).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(value["model"], "custom-model");
+        assert_eq!(
+            value["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            value["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "custom-hook"
+        );
+        assert!(!dir.join(".claude/settings.local.json").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(dir.join(".claude/settings.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn project_hooks_never_follow_global_settings_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global");
+        let tab = temp.path().join("tab");
+        fs::create_dir_all(&global).unwrap();
+        fs::create_dir_all(&tab).unwrap();
+        fs::write(global.join("settings.json"), "untouched").unwrap();
+        std::os::unix::fs::symlink(&global, tab.join(".claude")).unwrap();
+        assert!(settings(&tab).is_err());
+        assert_eq!(
+            fs::read_to_string(global.join("settings.json")).unwrap(),
+            "untouched"
+        );
+    }
+    #[test]
+    fn manual_claude_defers_context_until_real_authenticated_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        set_focus_target(dir, Some("/private/meeting.md"), false).unwrap();
+        for prompt in ["", " /login", "/model opus"] {
+            prepare_prompt_context_with(dir, &serde_json::json!({"prompt":prompt}), |_| {
+                panic!("account command must not read context")
+            })
+            .unwrap();
+        }
+        assert!(prepare_prompt_context_with(
+            dir,
+            &serde_json::json!({"prompt":"What did we decide?"}),
+            |_| Err("not authenticated".into())
+        )
+        .is_err());
+        let target: FocusTarget =
+            serde_json::from_slice(&read_small(&dir.join(".recall-focus.json")).unwrap()).unwrap();
+        assert!(!target.context_ready);
+        prepare_prompt_context_with(
+            dir,
+            &serde_json::json!({"prompt":"What did we decide?"}),
+            |meeting| {
+                assert_eq!(meeting, Some("/private/meeting.md"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        prepare_prompt_context_with(dir, &serde_json::json!({"prompt":"Next question"}), |_| {
+            panic!("do not rematerialize dropped/ready context")
+        })
+        .unwrap();
+    }
+    #[test]
+    fn explicit_shell_resume_validates_id_and_active_conversation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        store.open(temp.path(), None, true).unwrap();
+        let tab = &mut store.tabs[0];
+        tab.shell = true;
+        assert!(shell_resume_command(tab).is_err());
+        tab.claude_session_id = Some("saved-123".into());
+        assert_eq!(
+            shell_resume_command(tab).unwrap(),
+            "claude --resume saved-123\r"
+        );
+        tab.claude_active = true;
+        assert!(shell_resume_command(tab).is_err());
+        tab.claude_active = false;
+        tab.claude_session_id = Some("x;touch bad".into());
+        assert!(shell_resume_command(tab).is_err());
+    }
+    #[test]
+    fn hook_refresh_tracks_manual_claude_lifecycle_and_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        let id = store.open(temp.path(), None, true).unwrap();
+        let dir = workspace_at(temp.path(), &id).unwrap();
+        for active in [true, false] {
+            private_write(
+                &dir.join(STATE),
+                &serde_json::to_vec(&HookState {
+                    status: Status::Done,
+                    session_id: Some("manual-session".into()),
+                    claude_active: active,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            store.refresh(temp.path()).unwrap();
+            assert_eq!(store.tabs[0].claude_active, active);
+            assert_eq!(
+                store.tabs[0].claude_session_id.as_deref(),
+                Some("manual-session")
+            );
+        }
     }
 }

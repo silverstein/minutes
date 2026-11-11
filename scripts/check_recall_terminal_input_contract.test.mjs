@@ -21,10 +21,10 @@ function extractFunction(name) {
   throw new Error(`unterminated ${name} in ${PANEL}`);
 }
 
-function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
+function createHarness({ meetingPath = "/meetings/private.md", shell = false } = {}) {
   const source = `
     (() => {
-      const tab = { id: 'recall', meetingPath: ${JSON.stringify(meetingPath)}, pending: true, draft: '', reliable: true };
+      const tab = { shell: ${JSON.stringify(shell)}, id: 'recall', meetingPath: ${JSON.stringify(meetingPath)}, pending: true, draft: '', reliable: true };
       let active = tab;
       const activeRecallState = () => active;
       const calls = [];
@@ -295,4 +295,43 @@ test("queued input must never read another tab's selected meeting", async () => 
   const preparation = harness.state().calls.find(call => call.command === 'cmd_prepare_recall_terminal_meeting');
   assert.deepEqual(preparation.args, { meetingPath: "/meetings/a.md", sessionId: "recall" });
   assert.equal(b.pending, true);
+});
+
+test("shell commands and manual Claude questions never invoke the frontend context gate", async () => {
+  const harness = createHarness({ shell: true });
+  for (const input of ['claude\r', '\r', '/login\r', 'What did we decide?\r']) await harness.send(input, true);
+  assert.equal(commands(harness, 'cmd_prepare_recall_terminal_meeting').length, 0);
+  assert.equal(commands(harness, 'cmd_pty_input').filter(call => call.args.data === '\r').length, 4);
+  assert.equal(harness.state().contextPending, true);
+});
+
+test("shell resume requires explicit action and an empty reliable inactive line", async () => {
+  const calls = []; const notices = [];
+  const tab = { id: 'shell', shell: true, claudeActive: false, draft: '', reliable: true, queue: Promise.resolve() };
+  const resume = vm.runInNewContext(`(${extractFunction('resumeRecallTab')})`, {
+    recallStateFor: () => tab,
+    invoke: async (command, args) => calls.push({ command, args }),
+    setRecallProviderNotice: message => notices.push(message),
+  });
+  assert.equal(calls.length, 0);
+  for (const patch of [{ draft: 'unfinished' }, { draft: '', reliable: false }, { reliable: true, claudeActive: true }]) {
+    Object.assign(tab, patch); await resume(tab.id);
+  }
+  assert.equal(calls.length, 0); assert.equal(notices.length, 3);
+  tab.claudeActive = false;
+  await resume(tab.id);
+  assert.deepEqual(calls.map(call => call.command), ['cmd_recall_tab_resume']);
+  assert.equal(calls[0].args.tabId, 'shell');
+});
+
+test("Discuss never pastes natural language into an idle shell", async () => {
+  const pastes = [];
+  const tab = { shell: true, claudeActive: false, alive: true, draft: '', reliable: true, terminal: { focus() {}, paste: text => pastes.push(text) } };
+  const discuss = vm.runInNewContext(`(${extractFunction('discussMeetingWithAgent')})`, {
+    openRecall: async () => {}, setRecallPhase() {}, recallDevMode: true, activeRecallState: () => tab,
+  });
+  await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 0);
+  tab.claudeActive = true;
+  await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 1);
+  assert.ok(pastes[0].includes('CURRENT_MEETING.md'));
 });

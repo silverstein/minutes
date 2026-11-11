@@ -15,7 +15,7 @@ const html = `<!doctype html><html><head><style>${css}</style></head><body>
 <div id="recall-panel" class="recall-panel expanded"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
 <span data-recall-meeting="/live.md"></span><span data-recall-meeting="/prep.md"></span></div><script>${controller}</script><script>
 const actions=[];let model={active:'live',tabs:[{id:'live',title:'Live call',meeting_path:'/live.md',status:'working',live:true},{id:'prep',title:'Board prep',meeting_path:'/prep.md',status:'working'},{id:'chat',title:'Chat',status:'done'},{id:'other',title:'Other',status:'done'}]};
-const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});
+const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),resume:id=>actions.push(['resume',id]),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});
 controls.update(structuredClone(model));window.fixture={actions,model,controls};</script></body></html>`;
 const server = createServer((_, response) => { response.setHeader('Content-Type', 'text/html'); response.end(html); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -38,6 +38,13 @@ try {
   await page.evaluate(() => fixture.controls.chooseFinished(id => fixture.actions.push(['replace', id])));
   assert.equal(await page.getByRole('button', { name: 'Close Chat', exact: true }).count(), 2); // strip + chooser
   assert.equal(await page.getByRole('button', { name: 'Close Board prep', exact: true }).count(), 1); // waiting excluded
+  await page.evaluate(() => { Object.assign(fixture.model.tabs[1], { shell: true, claude_session_id: 'saved-1', claude_active: false }); fixture.controls.update(structuredClone(fixture.model)); });
+  assert.equal(await page.getByRole('button', { name: 'Resume previous conversation' }).count(), 1);
+  assert.equal(await page.evaluate(() => fixture.actions.some(action => action[0] === 'resume')), false);
+  await page.getByRole('button', { name: 'Resume previous conversation' }).click();
+  assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['resume', 'prep']);
+  await page.evaluate(() => { fixture.model.tabs[1].claude_active = true; fixture.controls.update(structuredClone(fixture.model)); });
+  assert.equal(await page.getByRole('button', { name: 'Resume previous conversation' }).count(), 0);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await page.locator('.recall-tab-glyph.working').first().evaluate(node => getComputedStyle(node).animationName), 'none');
   for (const scheme of ['dark', 'light']) {

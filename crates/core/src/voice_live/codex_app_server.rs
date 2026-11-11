@@ -20,17 +20,37 @@ const POLL: Duration = Duration::from_millis(20);
 pub(super) struct Transport {
     stopped: AtomicBool,
     server: Mutex<Option<Server>>,
+    cleanup: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Transport {
     pub(super) fn stop(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return;
+        }
         // Never wait behind an in-flight question on the capture/session thread.
         // Its worker sees the flag and owns process cleanup.
         if let Ok(mut server) = self.server.try_lock() {
             if let Some(server) = server.take() {
-                std::thread::spawn(move || drop(server));
+                let cleanup = std::thread::spawn(move || drop(server));
+                *self.cleanup.lock().unwrap_or_else(|p| p.into_inner()) = Some(cleanup);
             }
+        }
+    }
+
+    /// Called after audio stops and workers join. A CLI must not exit while
+    /// the idle cleanup thread still owns the server's kill/reap obligation.
+    pub(super) fn finish(&self) {
+        // A worker can finish successfully just as stop observes its lock as
+        // busy. After workers join, also collect any server left in that race.
+        drop(self.server.lock().unwrap_or_else(|p| p.into_inner()).take());
+        if let Some(cleanup) = self
+            .cleanup
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        {
+            let _ = cleanup.join();
         }
     }
 
@@ -613,6 +633,7 @@ for line in sys.stdin:
   emit({'id':ident,'error':{'code':-1,'message':'synthetic archive failure'}}); continue
  emit({'id':ident,'result':result})
 record({'method':'EOF'})
+if mode=='slow_exit': time.sleep(60)
 "##).unwrap();
             std::fs::set_permissions(
                 root.path().join("codex"),
@@ -730,6 +751,7 @@ record({'method':'EOF'})
             2
         );
         transport.stop();
+        transport.finish();
         fixture.assert_reaped();
         assert!(fixture.events().iter().any(|e| e["method"] == "EOF"));
         assert!(fixture
@@ -833,6 +855,37 @@ record({'method':'EOF'})
             .any(|e| e["method"] == "thread/start"));
         assert!(!fixture.events().iter().any(|e| e["method"] == "turn/start"));
         fixture.assert_reaped();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_finish_waits_for_idle_server_kill_and_reap_after_nonblocking_stop() {
+        for simulate_busy in [false, true] {
+            let fixture = Fixture::new("slow_exit");
+            let transport = Transport::default();
+            assert_eq!(
+                fixture
+                    .run(&transport, "ready", Duration::from_secs(5))
+                    .unwrap(),
+                "ready"
+            );
+            let begin = Instant::now();
+            let busy = simulate_busy.then(|| transport.server.lock().unwrap());
+            transport.stop();
+            assert!(begin.elapsed() < Duration::from_millis(100));
+            drop(busy);
+            transport.finish();
+            let pid: i32 = std::fs::read_to_string(fixture.root.path().join("pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                unsafe { libc::kill(pid, 0) },
+                -1,
+                "finish returned before reaping idle server"
+            );
+            assert!(begin.elapsed() < Duration::from_secs(3));
+        }
     }
 
     #[cfg(unix)]

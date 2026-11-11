@@ -117,6 +117,9 @@ impl ToolContext {
     pub(crate) fn stop_agent_transport(&self) {
         self.codex_app_server.stop();
     }
+    pub(crate) fn finish_agent_transport(&self) {
+        self.codex_app_server.finish();
+    }
     /// Resolve the knowledge root from config when brain search is on.
     pub fn new(config: Config, names: Arc<NameIndex>) -> Self {
         let brain_root =

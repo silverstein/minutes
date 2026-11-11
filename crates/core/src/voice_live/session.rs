@@ -1364,6 +1364,7 @@ impl Runner {
         for w in workers.into_iter().flatten() {
             let _ = w.join();
         }
+        self.tools.finish_agent_transport();
         let final_client = {
             let slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
             Arc::clone(&slot)

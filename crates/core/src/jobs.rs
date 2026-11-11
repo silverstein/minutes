@@ -133,6 +133,44 @@ pub struct ProcessingJob {
     /// abort the same way. The next attempt transcribes with whisper instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub crashed_while_transcribing: bool,
+    /// What the first transcription was built from, kept apart from
+    /// `title`. Set when a transcript artifact first replaces `title` with
+    /// the generated display title. A retry builds its decode hints from it,
+    /// so the spans that an earlier attempt finished still match. Absent in
+    /// older job files and while `title` is still the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_inputs: Option<DecodeInputs>,
+}
+
+/// The job inputs that decode hints are built from and that display updates
+/// must not change. Settings, vocabulary and calendar are read again on each
+/// attempt, so a change there still rejects old spans.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecodeInputs {
+    /// The title the job was queued with. `None` for an untitled call.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl ProcessingJob {
+    /// The title that transcription uses for decode hints and the calendar
+    /// match: the queued title, also after the display title replaced it.
+    pub fn decode_title(&self) -> Option<&str> {
+        match &self.decode_inputs {
+            Some(inputs) => inputs.title.as_deref(),
+            None => self.title.as_deref(),
+        }
+    }
+
+    /// Show `title`, and keep the queued title for decoding.
+    fn set_display_title(&mut self, title: String) {
+        if self.decode_inputs.is_none() {
+            self.decode_inputs = Some(DecodeInputs {
+                title: self.title.clone(),
+            });
+        }
+        self.title = Some(title);
+    }
 }
 
 fn next_job_id() -> String {
@@ -289,6 +327,7 @@ pub fn queue_live_capture_with_transcript_checkpoint(
         owner_pid: None,
         retry_count: 0,
         crashed_while_transcribing: false,
+        decode_inputs: None,
     };
     if let Err(error) = write_job(&job) {
         remove_transcript_checkpoint(&job.id);
@@ -744,6 +783,7 @@ fn enqueue_capture_job_with_id(
         owner_pid: None,
         retry_count: 0,
         crashed_while_transcribing: false,
+        decode_inputs: None,
     };
     write_job(&job)?;
     maybe_mark_context_session_processing(&job, Path::new(&job.audio_path));
@@ -1399,7 +1439,7 @@ fn apply_transcript_artifact_metadata(
     artifact: &pipeline::TranscriptArtifact,
 ) {
     job.output_path = Some(artifact.write_result.path.display().to_string());
-    job.title = Some(artifact.write_result.title.clone());
+    job.set_display_title(artifact.write_result.title.clone());
     job.word_count = Some(artifact.write_result.word_count);
     // Core-only `.mov` recovery discovers degradation after the job was
     // queued, so the artifact is authoritative. Persist it back to the job;
@@ -1581,6 +1621,7 @@ fn job_context(job: &ProcessingJob) -> BackgroundPipelineContext {
         calendar_event: job.calendar_event.clone(),
         recorded_at: job.recording_started_at.or(job.recording_finished_at),
         requested_title: job.title.clone(),
+        decode_title: Some(job.decode_title().map(str::to_owned)),
         recording_health: job.recording_health.clone(),
         context_session_id: job.context_session_id.clone(),
         template,
@@ -1853,7 +1894,7 @@ fn process_pending_jobs_with_transcriber(
                     job.state = terminal_state;
                     job.stage = terminal_state.default_stage();
                     job.output_path = Some(result.path.display().to_string());
-                    job.title = Some(result.title.clone());
+                    job.set_display_title(result.title.clone());
                     job.word_count = Some(result.word_count);
                     job.recording_health = artifact.frontmatter.recording_health.clone();
                     job.finished_at = Some(Local::now());
@@ -2301,6 +2342,149 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_after_diarization_decodes_with_the_queued_title_and_keeps_spans() {
+        use crate::transcript_checkpoint::{
+            CheckpointSource, CheckpointSpan, TranscriptCheckpoint,
+        };
+        with_temp_home(|dir| {
+            let config = Config {
+                output_dir: dir.path().join("output"),
+                ..Config::default()
+            };
+            for queued_title in [None, Some("Planning".to_string())] {
+                let current_wav = dir.path().join("current.wav");
+                create_sample_bearing_wav(&current_wav);
+                let queued = queue_live_capture(
+                    CaptureMode::Meeting,
+                    queued_title.clone(),
+                    &current_wav,
+                    None,
+                    None,
+                    None,
+                    Some(Local::now()),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    job_context(&queued).decode_title,
+                    Some(queued_title.clone())
+                );
+
+                // The first attempt saved its spans and the first artifact,
+                // and its worker died while separating speakers.
+                let saved = TranscriptCheckpoint {
+                    spans: vec![CheckpointSpan {
+                        source: CheckpointSource::Recording,
+                        start_sample: 0,
+                        end_sample: 1_600,
+                        settings: "first attempt".into(),
+                        pcm_sha256: "digest".into(),
+                        lines: vec!["[0:00] finished before the crash".into()],
+                    }],
+                    ..Default::default()
+                };
+                write_transcript_checkpoint(&queued.id, &saved).unwrap();
+                let artifact = fake_no_speech_artifact(Path::new(&queued.audio_path));
+                update_job_state(&queued.id, |job| {
+                    apply_transcript_artifact_metadata(job, &artifact);
+                    job.state = JobState::Diarizing;
+                    job.owner_pid = Some(99_999_999);
+                })
+                .unwrap();
+
+                let recovered = list_jobs()
+                    .into_iter()
+                    .find(|job| job.id == queued.id)
+                    .unwrap();
+                assert_eq!(recovered.state, JobState::Queued);
+                assert!(!recovered.crashed_while_transcribing);
+                assert_eq!(
+                    recovered.title.as_deref(),
+                    Some("Capture reliability fixture")
+                );
+                assert_eq!(recovered.decode_title(), queued_title.as_deref());
+                // The job file keeps the queued title, also for an untitled call.
+                let raw: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(job_path(&queued.id)).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    raw["decode_inputs"],
+                    serde_json::json!({ "title": queued_title })
+                );
+
+                // The retry shows the display title, decodes with the queued
+                // one, and sees the spans of the first attempt.
+                let mut seen = None;
+                let mut transcribe = |_: &Path,
+                                      _: ContentType,
+                                      title: Option<&str>,
+                                      _: &Config,
+                                      context: &BackgroundPipelineContext,
+                                      _: Option<&Path>| {
+                    seen = Some((
+                        title.map(str::to_owned),
+                        context.decode_title.clone(),
+                        context.checkpoint_path.clone(),
+                        context.transcript_checkpoint.as_deref().cloned(),
+                    ));
+                    Err(TranscribeError::TranscriptionFailed("stop here".into()).into())
+                };
+                process_pending_jobs_with_transcriber(&config, &mut |_| {}, &mut transcribe)
+                    .unwrap();
+                let (title, decode_title, checkpoint_path, checkpoint) = seen.unwrap();
+                assert_eq!(title.as_deref(), Some("Capture reliability fixture"));
+                assert_eq!(decode_title, Some(queued_title.clone()));
+                assert_eq!(checkpoint_path, Some(job_checkpoint_path(&queued.id)));
+                assert_eq!(checkpoint, Some(saved));
+                // A failed attempt keeps the spans for the next one.
+                assert!(job_checkpoint_path(&queued.id).exists());
+                remove_capture_artifacts(&load_job(&queued.id).unwrap());
+            }
+        });
+    }
+
+    #[test]
+    fn job_files_without_decode_inputs_decode_with_their_title() {
+        let mut job = crash_test_job("job-old", JobState::Queued);
+        job.title = Some("Old".into());
+        let json = serde_json::to_value(&job).unwrap();
+        assert!(json.get("decode_inputs").is_none());
+        let restored: ProcessingJob = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.decode_title(), Some("Old"));
+        // The first display title keeps the queued one; later ones do not
+        // replace it again.
+        job.set_display_title("Generated".into());
+        job.set_display_title("Refined".into());
+        assert_eq!(job.title.as_deref(), Some("Refined"));
+        assert_eq!(job.decode_title(), Some("Old"));
+    }
+
+    #[test]
+    fn list_jobs_skips_checkpoint_files() {
+        with_temp_home(|dir| {
+            let current_wav = dir.path().join("current.wav");
+            create_sample_bearing_wav(&current_wav);
+            let job = queue_live_capture(
+                CaptureMode::Meeting,
+                None,
+                &current_wav,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            write_transcript_checkpoint(&job.id, &Default::default()).unwrap();
+            assert_eq!(list_jobs().len(), 1);
+        });
+    }
+
+    #[test]
     fn queue_without_checkpoint_writes_no_checkpoint_file() {
         with_temp_home(|dir| {
             let current_wav = dir.path().join("current.wav");
@@ -2643,6 +2827,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -2703,6 +2888,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -2768,6 +2954,7 @@ mod tests {
                     owner_pid: None,
                     retry_count: 0,
                     crashed_while_transcribing: false,
+                    decode_inputs: None,
                 };
                 write_job(&job).unwrap();
 
@@ -2875,6 +3062,7 @@ mod tests {
                 owner_pid: Some(99_999_999),
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -2916,6 +3104,7 @@ mod tests {
             owner_pid: None,
             retry_count: 0,
             crashed_while_transcribing: false,
+            decode_inputs: None,
         }
     }
 
@@ -2991,6 +3180,7 @@ mod tests {
                 owner_pid: Some(99_999_999),
                 retry_count: MAX_AUTO_RETRIES,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -3048,6 +3238,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: MAX_AUTO_RETRIES + 1,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
             fs::write(&audio_path, b"fake-wav").unwrap();
@@ -3091,6 +3282,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
             fs::write(&audio_path, b"fake-wav").unwrap();
@@ -3138,6 +3330,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -3185,6 +3378,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             write_job(&job).unwrap();
 
@@ -3229,6 +3423,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
             let queued = ProcessingJob {
                 id: "job-queued".into(),
@@ -3258,6 +3453,7 @@ mod tests {
                 owner_pid: None,
                 retry_count: 0,
                 crashed_while_transcribing: false,
+                decode_inputs: None,
             };
 
             write_job(&active).unwrap();
@@ -3302,6 +3498,7 @@ mod tests {
             owner_pid: None,
             retry_count: 0,
             crashed_while_transcribing: false,
+            decode_inputs: None,
         }
     }
 

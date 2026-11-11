@@ -878,6 +878,12 @@ jobs:
           node scripts/check_recall_chunk_contract.mjs
           node crates/sdk/node_modules/typescript/bin/tsc -p tauri/tsconfig.recall.json
 
+      - name: Prepare Ubuntu archive for browser dependencies
+        # Playwright installs OS packages itself, so prepare its sources through
+        # the same reachable, signed Ubuntu mirror as the Rust jobs.
+        run: .github/scripts/apt-install.sh ca-certificates
+        timeout-minutes: 20
+
       - name: Install pinned browser harness
         run: |
           node -e "require('node:fs').mkdirSync('target/recall-browser', { recursive: true }); require('node:fs').writeFileSync('target/recall-browser/package.json', JSON.stringify({ private: true }))"

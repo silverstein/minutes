@@ -917,15 +917,37 @@ impl ChunkLines {
     }
 }
 
-/// One call per chunk through the batch dispatcher, for engines other than
-/// in-process Whisper. Whisper decodes groups of chunks: see
-/// [`MeetingGroupDecoder`].
-pub(crate) fn transcribe_chunk_lines(
+/// [`transcribe_chunk_lines_reporting`] without the report.
+#[cfg(feature = "parakeet")]
+fn transcribe_chunk_lines(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
     clock_offset: usize,
     config: &Config,
     hints: &DecodeHints,
+) -> Result<ChunkLines, TranscribeError> {
+    transcribe_chunk_lines_reporting(
+        samples,
+        chunk_ranges,
+        clock_offset,
+        config,
+        hints,
+        &mut |_, _| {},
+    )
+}
+
+/// One call per chunk through the batch dispatcher, for engines other than
+/// in-process Whisper. Whisper decodes groups of chunks: see
+/// [`MeetingGroupDecoder`]. After each chunk, also a chunk with no speech,
+/// `finished(index, lines)` gets that chunk's lines. `index` is the chunk's
+/// place in `chunk_ranges`.
+fn transcribe_chunk_lines_reporting(
+    samples: &[f32],
+    chunk_ranges: &[(usize, usize)],
+    clock_offset: usize,
+    config: &Config,
+    hints: &DecodeHints,
+    finished: &mut dyn FnMut(usize, &ChunkLines),
 ) -> Result<ChunkLines, TranscribeError> {
     let mut session = BatchTranscriptionSession::new(config);
     let mut out = ChunkLines {
@@ -933,40 +955,65 @@ pub(crate) fn transcribe_chunk_lines(
         stats: FilterStats::default(),
     };
 
-    for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
-        let chunk_samples = &samples[*start_sample..*end_sample];
-        if chunk_samples.is_empty() {
-            continue;
-        }
-
-        let mut tmp_wav =
-            crate::pipeline::PrivateAudioTempFile::new("minutes-meeting-chunk-", ".wav")
-                .map_err(TranscribeError::Io)?;
-        write_wav_16k_mono_to_writer(tmp_wav.prepare_for_write()?, chunk_samples)?;
-        tmp_wav.finish_write().map_err(TranscribeError::Io)?;
-        let processing_path = tmp_wav.processing_path();
-        let chunk_hints = hints.clone().with_audio_format_extension("wav");
-
-        let chunk_result = match session.transcribe(&processing_path, &chunk_hints) {
-            Ok(result) => result,
-            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
-                tracing::debug!(
-                    chunk_index,
-                    start_sample,
-                    end_sample,
-                    "skipping empty VAD chunk"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
-        let offset_lines =
-            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-        out.add_stats(&chunk_result.stats);
-        out.lines.extend(offset_lines);
+    for (chunk_index, &(start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
+        let lines = transcribe_one_chunk(
+            &mut session,
+            samples,
+            chunk_index,
+            (start_sample, end_sample),
+            clock_offset,
+            hints,
+        )?;
+        finished(chunk_index, &lines);
+        out.add_stats(&lines.stats);
+        out.lines.extend(lines.lines);
     }
 
+    Ok(out)
+}
+
+/// The lines of one chunk through the batch dispatcher. No lines for an
+/// empty chunk or a chunk without speech.
+fn transcribe_one_chunk(
+    session: &mut BatchTranscriptionSession<'_>,
+    samples: &[f32],
+    chunk_index: usize,
+    (start_sample, end_sample): (usize, usize),
+    clock_offset: usize,
+    hints: &DecodeHints,
+) -> Result<ChunkLines, TranscribeError> {
+    let mut out = ChunkLines {
+        lines: Vec::new(),
+        stats: FilterStats::default(),
+    };
+    let chunk_samples = &samples[start_sample..end_sample];
+    if chunk_samples.is_empty() {
+        return Ok(out);
+    }
+
+    let mut tmp_wav = crate::pipeline::PrivateAudioTempFile::new("minutes-meeting-chunk-", ".wav")
+        .map_err(TranscribeError::Io)?;
+    write_wav_16k_mono_to_writer(tmp_wav.prepare_for_write()?, chunk_samples)?;
+    tmp_wav.finish_write().map_err(TranscribeError::Io)?;
+    let processing_path = tmp_wav.processing_path();
+    let chunk_hints = hints.clone().with_audio_format_extension("wav");
+
+    let chunk_result = match session.transcribe(&processing_path, &chunk_hints) {
+        Ok(result) => result,
+        Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
+            tracing::debug!(
+                chunk_index,
+                start_sample,
+                end_sample,
+                "skipping empty VAD chunk"
+            );
+            return Ok(out);
+        }
+        Err(error) => return Err(error),
+    };
+    let chunk_offset_secs = (clock_offset + start_sample) as f64 / 16000.0;
+    out.stats = chunk_result.stats;
+    out.lines = offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
     Ok(out)
 }
 
@@ -1134,6 +1181,21 @@ impl MeetingGroupDecoder {
         config: &Config,
         hints: &DecodeHints,
     ) -> Result<ChunkLines, TranscribeError> {
+        self.transcribe_reporting(samples, groups, offset, config, hints, &mut |_, _| {})
+    }
+
+    /// [`transcribe`](Self::transcribe), and `finished(index, lines)` after
+    /// each group, before the next group starts. `index` is the group's place
+    /// in `groups`.
+    pub(crate) fn transcribe_reporting(
+        &mut self,
+        samples: &[f32],
+        groups: &[crate::decode_groups::DecodeGroup],
+        offset: usize,
+        config: &Config,
+        hints: &DecodeHints,
+        finished: &mut dyn FnMut(usize, &ChunkLines),
+    ) -> Result<ChunkLines, TranscribeError> {
         #[cfg(feature = "whisper")]
         if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext
         {
@@ -1145,13 +1207,44 @@ impl MeetingGroupDecoder {
                 config,
                 hints,
             };
-            return crate::decode_groups::decode_groups(&mut call, samples, groups, offset);
+            return crate::decode_groups::decode_groups_reporting(
+                &mut call, samples, groups, offset, finished,
+            );
         }
-        let chunks: Vec<(usize, usize)> = groups
-            .iter()
-            .flat_map(|group| group.chunks.iter().copied())
-            .collect();
-        transcribe_chunk_lines(samples, &chunks, offset, config, hints)
+        // One call per chunk, in one batch session. A group is finished
+        // when its last chunk is.
+        let mut chunks = Vec::new();
+        let mut last_chunk_of = Vec::new();
+        for (index, group) in groups.iter().enumerate() {
+            chunks.extend(group.chunks.iter().copied());
+            last_chunk_of.push((chunks.len() - 1, index));
+        }
+        let mut group_lines = ChunkLines {
+            lines: Vec::new(),
+            stats: FilterStats::default(),
+        };
+        let mut ends = last_chunk_of.into_iter().peekable();
+        transcribe_chunk_lines_reporting(
+            samples,
+            &chunks,
+            offset,
+            config,
+            hints,
+            &mut |chunk, lines| {
+                group_lines.add_stats(&lines.stats);
+                group_lines.lines.extend(lines.lines.iter().cloned());
+                if let Some(&(last, group)) = ends.peek() {
+                    if last == chunk {
+                        ends.next();
+                        finished(group, &group_lines);
+                        group_lines = ChunkLines {
+                            lines: Vec::new(),
+                            stats: FilterStats::default(),
+                        };
+                    }
+                }
+            },
+        )
     }
 }
 

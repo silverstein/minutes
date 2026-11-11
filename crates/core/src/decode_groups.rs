@@ -288,16 +288,32 @@ where
     }
 }
 
-/// Decode `groups` of `samples`, one call per group, with the loop guard.
-/// Lines are `[m:ss] text` on the source clock: `clock_offset` is the source
-/// sample at which `samples` starts. Lines are not cleaned up here. Cleanup
-/// runs once over the whole assembled source.
-#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
+/// [`decode_groups_reporting`] without the report.
+#[cfg(test)]
 pub(crate) fn decode_groups(
     decoder: &mut impl AudioDecoder,
     samples: &[f32],
     groups: &[DecodeGroup],
     clock_offset: usize,
+) -> Result<ChunkLines, TranscribeError> {
+    decode_groups_reporting(decoder, samples, groups, clock_offset, &mut |_, _| {})
+}
+
+/// Decode `groups` of `samples`, one call per group, with the loop guard.
+/// Lines are `[m:ss] text` on the source clock: `clock_offset` is the source
+/// sample at which `samples` starts. Lines are not cleaned up here. Cleanup
+/// runs once over the whole assembled source.
+///
+/// After each group, before the next group starts, `finished(index, lines)`
+/// gets that group's lines. `index` is the group's place in `groups`. The
+/// final pass uses this to save finished work while a source still decodes.
+#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
+pub(crate) fn decode_groups_reporting(
+    decoder: &mut impl AudioDecoder,
+    samples: &[f32],
+    groups: &[DecodeGroup],
+    clock_offset: usize,
+    finished: &mut dyn FnMut(usize, &ChunkLines),
 ) -> Result<ChunkLines, TranscribeError> {
     let mut out = ChunkLines {
         lines: Vec::new(),
@@ -306,7 +322,7 @@ pub(crate) fn decode_groups(
     let mut calls = 0usize;
     let mut retried = 0usize;
     let mut still_looping = 0usize;
-    for group in groups {
+    for (index, group) in groups.iter().enumerate() {
         calls += 1;
         let mut lines = decode_chunks(decoder, samples, &group.chunks, clock_offset)?;
         if group.chunks.len() > 1 {
@@ -344,6 +360,7 @@ pub(crate) fn decode_groups(
                 }
             }
         }
+        finished(index, &lines);
         out.add_stats(&lines.stats);
         out.lines.extend(lines.lines);
     }
@@ -968,6 +985,34 @@ mod tests {
         let expected = decode_groups(&mut clean, &samples, plan.groups(), 0).unwrap();
         assert_eq!(out.lines, expected.lines);
         assert!(out.lines.iter().all(|l| find_repetition_loop(l).is_none()));
+    }
+
+    #[test]
+    fn each_group_is_reported_once_in_order_with_its_final_lines() {
+        let (samples, bursts) = fixture();
+        let plan = DecodePlan::for_source(&samples, 30 * S);
+        let looped = plan
+            .groups()
+            .iter()
+            .find(|group| group.chunks.len() > 2)
+            .unwrap();
+        let id = bursts
+            .iter()
+            .find(|b| (b.0 * S as f64) as usize >= looped.start())
+            .unwrap()
+            .2;
+        let mut fake = FakeWhisper::looping(&[id]);
+        let mut reported = Vec::new();
+        let out = decode_groups_reporting(&mut fake, &samples, plan.groups(), 0, &mut |i, l| {
+            reported.push((i, l.lines.clone()))
+        })
+        .unwrap();
+        let order: Vec<usize> = reported.iter().map(|(i, _)| *i).collect();
+        assert_eq!(order, (0..plan.groups().len()).collect::<Vec<_>>());
+        // The report holds the retried lines, not the looping first call.
+        let joined: Vec<String> = reported.into_iter().flat_map(|(_, l)| l).collect();
+        assert_eq!(joined, out.lines);
+        assert!(joined.iter().all(|l| find_repetition_loop(l).is_none()));
     }
 
     #[test]

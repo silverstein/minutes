@@ -1,8 +1,11 @@
 # Transcript checkpoints
 
 A host that transcribes a meeting while it records can hand that work to the
-queued job, so final processing transcribes only what is left. It is off unless
-a host supplies a checkpoint. Without one, processing is unchanged.
+queued job, so final processing transcribes only what is left. The final pass of
+a queued job also saves the work it finishes in the same file, so a retry after a
+crash or a forced quit transcribes only what is left (see
+[Final-pass progress](#final-pass-progress)). A finished transcript is the same
+with or without checkpoints.
 
 ## API
 
@@ -19,9 +22,9 @@ a host supplies a checkpoint. Without one, processing is unchanged.
   matches it.
 - `jobs::queue_live_capture_with_transcript_checkpoint(.., checkpoint)` queues the
   capture with the spans. They are written beside the job (`<job>.checkpoint.json`,
-  owner-only on Unix), removed when the job finishes, and kept after a failure so
-  a retry can use them. A checkpoint that cannot be written is dropped with a
-  warning; the job still queues.
+  owner-only on Unix, see [Persistence](#persistence)), kept after a failure so a
+  retry can use them, and removed when the job completes. A checkpoint that
+  cannot be written is dropped with a warning; the job still queues.
 
 Start and end a span only at a cut of the source's decode plan:
 `decode_groups::DecodePlan::for_growing_source(samples, target).cuts()`, where
@@ -69,6 +72,63 @@ without checkpoints. Rejected spans are logged with the reason.
 Checkpoints are not used for authorized private-audio inputs, for a single
 surviving stem, for non-meeting content, or where meeting chunk rotation is
 bypassed. Those inputs are transcribed in full.
+
+## Final-pass progress
+
+The queue worker gives the final pass the path of the job's checkpoint file
+(`BackgroundPipelineContext::checkpoint_path`). The final pass then reads its
+offered spans from that file, and adds the decode groups it finishes, as spans of
+the same kind. One file holds both: spans from the recording and spans from
+earlier attempts.
+
+- A span is saved when a group ends and the span holds about two minutes of
+  audio, and when the last group before an accepted span or at the end of the
+  source is done. So each source is saved whole before the next source starts,
+  and both sources before diarization. A group that was interrupted is not saved.
+- A span runs from the cut before its first group to the cut after its last
+  group, so a retry plans the same groups for it. It never reaches into an
+  accepted span. Its lines are kept before transcript cleanup, which runs once
+  over the assembled source.
+- Spans are added per source, on that source's clock. A new span replaces the
+  spans of the same source that it overlaps. Those spans were rejected, because
+  the final pass decodes only audio that no accepted span covers.
+- A retry accepts the saved spans by the rules in
+  [What the final pass accepts](#what-the-final-pass-accepts), and decodes only
+  the rest. After a crash in `Diarizing`, both sources are saved whole: the retry
+  decodes nothing and runs diarization again. No speaker results are saved.
+- `crashed_while_transcribing` only switches a Sherpa retry to Whisper. It does
+  not decide whether spans are reused. The engine is part of the settings
+  fingerprint, so Sherpa spans do not match a Whisper retry.
+- A failed save is logged, and the transcription goes on. The logs
+  `transcript_checkpoint_saved` (per source: spans saved and failed, seconds
+  saved) and `transcript_checkpoint_reuse` (offered, accepted, rejected) show
+  what happened.
+
+The decode hints use the job's title, and saving the first transcript artifact
+replaces `job.title` with the generated display title. The job therefore keeps
+the title it was queued with in `decode_inputs.title`, also when it was none, and
+a retry builds its hints and calendar match from that title. Settings,
+vocabulary and the calendar are read again on each attempt. A real change there
+still rejects the old spans, and their text is never given the new fingerprint.
+Job files from before this field load as before and use `job.title`.
+
+Final-pass spans are saved only where the meeting path decodes groups. Private
+audio, a single surviving stem, non-meeting content and whole-file dispatch are
+not saved, as they are not reused.
+
+## Persistence
+
+`transcript_checkpoint::save_checkpoint_file` writes the whole checkpoint to a
+temporary file beside it (`<job>.checkpoint.json.<random>.tmp`). The file is
+created owner-only (`O_EXCL`, mode 0600 on Unix), written and synced, then renamed
+over the checkpoint in one step (`tempfile::NamedTempFile::persist`: `rename` on
+Unix, `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows, as config saves
+use). If a step fails, the previous file stays valid, and a reader never sees a
+partial file. A missing, unreadable, corrupt or other-version file loads as no
+checkpoint, and the job transcribes in full. Removal also deletes temporary files
+that a crash left beside the checkpoint. The checkpoint is removed when the job
+completes, or when it ends as "needs review", and is kept through failure and
+retry.
 
 ## Trust
 

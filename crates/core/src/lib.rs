@@ -214,6 +214,7 @@ pub mod screen;
 pub(crate) mod sealed_audio;
 pub mod search;
 pub mod search_index;
+pub(crate) mod self_reference;
 pub mod sensitive;
 // Always compiled: the path/resolution helpers are pure std/Config so `setup`
 // can install models without the engine. Only `transcribe_samples` is gated.

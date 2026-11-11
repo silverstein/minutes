@@ -254,7 +254,7 @@ pub fn queue_live_capture_with_transcript_checkpoint(
                 error = %error,
                 "could not save the transcript checkpoint; the job transcribes in full"
             );
-            fs::remove_file(job_checkpoint_path(&job_id)).ok();
+            remove_transcript_checkpoint(&job_id);
         }
     }
     let new_screen_anchor = native_stem_group_for_survivor(&audio_path)
@@ -291,7 +291,7 @@ pub fn queue_live_capture_with_transcript_checkpoint(
         crashed_while_transcribing: false,
     };
     if let Err(error) = write_job(&job) {
-        fs::remove_file(job_checkpoint_path(&job.id)).ok();
+        remove_transcript_checkpoint(&job.id);
         if audio_path.exists() {
             move_capture_artifacts(&audio_path, current_wav).ok();
         }
@@ -362,39 +362,19 @@ fn write_transcript_checkpoint(
     job_id: &str,
     checkpoint: &crate::transcript_checkpoint::TranscriptCheckpoint,
 ) -> std::io::Result<()> {
-    let path = job_checkpoint_path(job_id);
-    let json = serde_json::to_vec(checkpoint).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    }
-    fs::rename(&tmp, &path)
+    crate::transcript_checkpoint::save_checkpoint_file(&job_checkpoint_path(job_id), checkpoint)
 }
 
 fn load_transcript_checkpoint(
     job_id: &str,
 ) -> Option<std::sync::Arc<crate::transcript_checkpoint::TranscriptCheckpoint>> {
-    let path = job_checkpoint_path(job_id);
-    let bytes = fs::read(&path).ok()?;
-    match serde_json::from_slice(&bytes) {
-        Ok(checkpoint) => Some(std::sync::Arc::new(checkpoint)),
-        Err(error) => {
-            tracing::warn!(
-                job_id,
-                error = %error,
-                "ignoring an unreadable transcript checkpoint; the job transcribes in full"
-            );
-            None
-        }
-    }
+    crate::transcript_checkpoint::load_checkpoint_file(&job_checkpoint_path(job_id))
+        .map(std::sync::Arc::new)
 }
 
-/// Spans hold transcript text, so they go once the transcript is saved.
+/// Spans hold transcript text, so they go once the job is done.
 fn remove_transcript_checkpoint(job_id: &str) {
-    fs::remove_file(job_checkpoint_path(job_id)).ok();
+    crate::transcript_checkpoint::remove_checkpoint_file(&job_checkpoint_path(job_id));
 }
 
 pub fn job_capture_path(job_id: &str) -> PathBuf {
@@ -914,6 +894,13 @@ fn list_jobs_raw() -> Vec<ProcessingJob> {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        // A checkpoint can hold a whole transcript. It is not a job.
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".checkpoint.json"))
+        {
             continue;
         }
         if let Ok(text) = fs::read_to_string(&path) {

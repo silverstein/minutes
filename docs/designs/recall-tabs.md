@@ -95,6 +95,11 @@ or keyboard focus. Status uses tokens, capture blue only for live, red for error
 and a static dotted working glyph under reduced motion. System notifications are
 omitted; background status is visible in the strip and meeting list.
 
+The real Unix PTY foreground regression shares the production identity predicate
+and runs in a fresh integration-test process with a 20-second parent deadline.
+It does not inherit the desktop unit suite's native runtimes or background threads.
+Native QA still verifies shell operation inside the actual desktop process.
+
 Linux Rust execution and browser contracts do not prove signed Mac behavior.
 The PR remains unmerged for t17 to install its exact head in Minutes Dev and test
 a live call plus two prep sessions, shortcuts, matching background status,

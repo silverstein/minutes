@@ -31,6 +31,7 @@ mod dictation_field;
 mod palette_dispatch;
 mod parakeet_install_commands;
 mod pty;
+mod pty_foreground;
 mod recall_tabs;
 mod recording_audio;
 mod secret_store;

@@ -180,22 +180,9 @@ impl PtyManager {
     /// Explicit resume actions may write only while the original shell owns
     /// the terminal foreground. Never send a command into another TUI/process.
     pub fn shell_is_foreground(&self, session_id: &str) -> bool {
-        #[cfg(unix)]
-        {
-            self.sessions.get(session_id).is_some_and(|session| {
-                session
-                    .master
-                    .process_group_leader()
-                    .and_then(|pid| u32::try_from(pid).ok())
-                    .zip(session.child.process_id())
-                    .is_some_and(|(foreground, shell)| foreground == shell)
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = session_id;
-            false
-        }
+        self.sessions.get(session_id).is_some_and(|session| {
+            crate::pty_foreground::shell_is_foreground(&*session.master, &*session.child)
+        })
     }
 
     /// Whether the session's agent reads focus changes through Minutes'
@@ -435,66 +422,4 @@ pub fn kill_session(mut session: PtySession) -> PathBuf {
 
 pub fn kill_all(sessions: Vec<PtySession>) -> Vec<PathBuf> {
     sessions.into_iter().map(kill_session).collect()
-}
-
-#[cfg(all(test, unix))]
-mod shell_foreground_tests {
-    use super::*;
-    fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            if condition() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        false
-    }
-    #[test]
-    fn explicit_resume_refuses_a_foreground_child_and_allows_the_returned_shell() {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        let mut command = CommandBuilder::new("/bin/sh");
-        command.arg("-i");
-        let child = pair.slave.spawn_command(command).unwrap();
-        drop(pair.slave);
-        let writer = pair.master.take_writer().unwrap();
-        let mut manager = PtyManager::default();
-        manager.sessions.insert(
-            "shell-test".into(),
-            PtySession {
-                master: pair.master,
-                writer,
-                reader_handle: None,
-                child,
-                context_dir: PathBuf::new(),
-                title: String::new(),
-                command: "/bin/sh".into(),
-                theme_dark: None,
-                focus_hook: true,
-            },
-        );
-        let idle_before = wait_for(|| manager.shell_is_foreground("shell-test"));
-        manager.write_input("shell-test", b"sleep 1\n").unwrap();
-        let child_owns_terminal = wait_for(|| !manager.shell_is_foreground("shell-test"));
-        let idle_after = wait_for(|| manager.shell_is_foreground("shell-test"));
-        let mut session = manager.take_session("shell-test").unwrap();
-        let _ = session.child.kill();
-        let _ = session.child.wait();
-        assert!(idle_before, "initial shell must own the terminal");
-        assert!(
-            child_owns_terminal,
-            "resume must refuse input while another process is foreground"
-        );
-        assert!(
-            idle_after,
-            "resume becomes available when the shell regains foreground"
-        );
-    }
 }

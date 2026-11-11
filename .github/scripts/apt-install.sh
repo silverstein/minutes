@@ -38,8 +38,8 @@ for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
   /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt; do
   [ -f "$source" ] || continue
   sudo sed -E -i \
-    -e 's|https?://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)|https://archive.ubuntu.com/ubuntu\1|g' \
-    -e 's|http://(archive|security)\.ubuntu\.com/ubuntu([/[:space:]]|$)|https://\1.ubuntu.com/ubuntu\2|g' \
+    -e 's#https?://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)#https://archive.ubuntu.com/ubuntu\1#g' \
+    -e 's#http://(archive|security)\.ubuntu\.com/ubuntu([/[:space:]]|$)#https://\1.ubuntu.com/ubuntu\2#g' \
     "$source"
 done
 

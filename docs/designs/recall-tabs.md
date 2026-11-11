@@ -14,6 +14,11 @@ focus notices. The parent instruction files are neutral so nested Claude session
 cannot inherit another tab's live or stored meeting focus. Newly authored tab
 artifacts also appear in Documents.
 
+Closing a tab stops its process and removes its active metadata. Its workspace
+remains because it can hold authored Documents files or custom skills/settings;
+closing a conversation must not erase those files. Safe cleanup of unchanged
+generated-only closed workspaces is a separate lifecycle follow-up.
+
 The first load copies legacy singleton context into an `assistant` tab. Its
 Claude conversation is located using the old project directory's most recent
 transcript filename and modification time, without reading transcript contents or
@@ -85,12 +90,36 @@ A deleted meeting restores as chat with a visible note and cleared stored focus.
 
 ## UI and qualification
 
+Free chats have stable numbered names, including an upgrade of existing generic
+Chat labels. The cap chooser uses the same name and current shortcut position.
+New Chat reuses a new, known-untouched shell tab in the current app session; any
+human input, saved Claude session, live binding, draft or uncertain line excludes
+it. Restored shells are not assumed to be empty.
+
+Meeting labels use the app's existing metadata inventory, and the selected title
+and prep/debrief phase are persisted with the tab. Restore and generic spawn
+events keep that focus in the header. Resolving the label reads no new meeting
+body and does not bypass deferred context materialization.
+
+Each terminal tracks the grid last acknowledged by its own PTY. Activation,
+reveal, zoom and container resizing fit xterm and synchronize that grid, even if
+xterm was already fitted. Per-tab IPC ordering prevents an old resize from
+overwriting a newer one, and equal acknowledged grids avoid unnecessary redraws.
+Activation reveals even an idle terminal before fitting, without waiting for
+child output. A visible fit repaints terminal rows after a notice changes height.
+Tab shortcuts are suppressed at xterm's own keyboard boundary so they cannot
+contaminate the human-input draft used by explicit resume.
+The rendered regression switches three real xterms initially backed by 10-column
+PTY doubles and checks their grids after each selection.
+
 The native File Close action routes Cmd/Ctrl+W to Recall before the OS can hide
 the window; the window close button keeps its existing behavior. Cmd+1–4,
 Ctrl+Tab, Cmd+T and Cmd+W operate within Recall; Windows/Linux use Ctrl
 for the Cmd shortcuts. Tab buttons also support arrows, Home and End. At the cap,
-an in-panel chooser offers finished, non-live tabs. Closing work or a live tab
-requires an in-panel confirmation. Background output changes no panel visibility
+an in-panel chooser offers finished, non-live tabs. Closing work, a live tab, an
+active Claude process or any tab with a saved conversation ID requires an
+in-panel confirmation. Closing the active tab selects its neighbour.
+Background output changes no panel visibility
 or keyboard focus. Status uses tokens, capture blue only for live, red for errors,
 and a static dotted working glyph under reduced motion. System notifications are
 omitted; background status is visible in the strip and meeting list.

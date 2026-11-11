@@ -12923,6 +12923,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         finishMeetingInventoryLoading();
         setSearchError(null);
         lastMeetingInventory = meetings;
+        syncRecallTabPresentation();
         renderMeetings(meetings);
       } catch (e) {
         if (generation !== meetingInventoryGeneration) return;
@@ -16261,7 +16262,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const recallTabStates = new Map();
     let recallTabsModel = { tabs: [], active: null };
     function recallStateFor(id) {
-      if (!recallTabStates.has(id)) recallTabStates.set(id, { id, terminal: null, fit: null, alive: false, dark: null, initialized: false, resize: null, themeHandler: null, themeObserver: null, pending: true, shell: false, claudeActive: false, resuming: false, draft: '', reliable: true, queue: Promise.resolve(), hasSignal: false, nextUser: false, meetingPath: null, listeners: [], container: null });
+      if (!recallTabStates.has(id)) recallTabStates.set(id, { id, terminal: null, fit: null, alive: false, dark: null, initialized: false, resize: null, ptySize: null, resizeQueue: Promise.resolve(), untouched: false, themeHandler: null, themeObserver: null, pending: true, shell: false, claudeActive: false, resuming: false, draft: '', reliable: true, queue: Promise.resolve(), hasSignal: false, nextUser: false, meetingPath: null, listeners: [], container: null });
       return recallTabStates.get(id);
     }
     function activeRecallState() { return recallStateFor(SESSION_ID); }
@@ -16285,7 +16286,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function markRecallPtyAlive(tab = activeRecallState()) {
+      if (!tab.alive) tab.ptySize = null;
       tab.alive = true;
+      requestAnimationFrame(() => fitRecallTerminal(tab));
       refreshRecallContextChips();
       invoke('cmd_terminal_info', { sessionId: tab.id })
         .then((info) => { tab.dark = info?.theme_dark ?? null; })
@@ -16295,6 +16298,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     function markRecallPtyEnded(tab = activeRecallState()) {
       tab.alive = false;
+      tab.ptySize = null;
       tab.dark = null;
       applyRecallTerminalTheme(tab);
       if (tab.id === SESSION_ID) renderRecallContextChips(null);
@@ -16443,6 +16447,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallProviderNotice.dataset.tone = tone;
       recallProviderNotice.classList.toggle('active', Boolean(text) && !suppressed);
       recallProviderNotice.classList.toggle('error', tone === 'error');
+      requestAnimationFrame(() => fitRecallTerminal());
     }
 
     function dismissRecallProviderNotice() {
@@ -16454,6 +16459,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         try { localStorage.setItem(RECALL_READY_NOTICE_SEEN_KEY, '1'); } catch {}
       }
       recallProviderNotice.classList.remove('active');
+      requestAnimationFrame(() => fitRecallTerminal());
     }
 
     function syncRecallModeControls({ persist = true } = {}) {
@@ -16791,7 +16797,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       document.body.style.userSelect = 'none';
       const move = (ev) => {
         onMove(ev);
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       };
       const up = () => {
         handle.classList.remove('dragging');
@@ -16800,7 +16806,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
         onDone();
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       };
       document.addEventListener('mousemove', move);
       document.addEventListener('mouseup', up);
@@ -16819,7 +16825,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     docSplitHandle?.addEventListener('dblclick', () => {
       localStorage.removeItem('minutes.docRatio');
       applyDocRatio(DEFAULT_DOC_RATIO);
-      if (activeRecallState().fit) activeRecallState().fit.fit();
+      fitRecallTerminal();
     });
 
     splitHandle.addEventListener('mousedown', (e) => {
@@ -16846,7 +16852,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const rightPx = bodyW - ev.clientX;
         const ratio = clampRecallRatio(rightPx / bodyW);
         applyRecallRatio(ratio);
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       };
       const onUp = () => {
         splitHandle.classList.remove('dragging');
@@ -16859,7 +16865,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const ratio = clampRecallRatio(panelW / bodyW);
         localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
         persistRecallWorkspaceState({ recallRatio: ratio });
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
@@ -16869,14 +16875,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (document.body.classList.contains('doc-open')) {
         localStorage.removeItem('minutes.listRatioDocOpen');
         applyListRatioDocOpen(DEFAULT_LIST_RATIO_DOC_OPEN);
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
         return;
       }
       const ratio = clampRecallRatio(DEFAULT_RECALL_RATIO);
       localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
       applyRecallRatio(ratio);
       persistRecallWorkspaceState({ recallRatio: ratio });
-      if (activeRecallState().fit) activeRecallState().fit.fit();
+      fitRecallTerminal();
     });
 
     // ── Phase management ──
@@ -16943,9 +16949,32 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // narrower panel that wrapped and left a stray inverted % on its own line
     // that the later resize could not remove. Fit first and spawn at the real
     // grid; the backend falls back to 120x30 when this is empty.
+    function fitRecallTerminal(tab = activeRecallState()) {
+      if (!tab.fit || !tab.terminal || !recallExpanded || tab.id !== SESSION_ID
+        || tab.container?.hidden || !tab.container?.clientWidth || !tab.container?.clientHeight) return;
+      const buffer = tab.terminal.buffer.active;
+      const wasAtBottom = buffer.viewportY >= buffer.baseY;
+      tab.fit.fit();
+      // Explicitly repaint visible rows after a notice or tab switch restores
+      // geometry; fitting an unchanged grid alone does not invalidate them.
+      tab.terminal.refresh(0, tab.terminal.rows - 1);
+      if (wasAtBottom) tab.terminal.scrollToBottom();
+      const { cols, rows } = tab.terminal;
+      if (!tab.alive) return;
+      // Compare with the PTY's last acknowledged grid, not xterm's previous
+      // grid: a hidden tab may already have been fitted without notifying it.
+      // Serialize per tab so an older IPC cannot overwrite a newer size.
+      tab.resizeQueue = tab.resizeQueue.catch(() => {}).then(async () => {
+        if (!tab.alive || (tab.ptySize?.cols === cols && tab.ptySize?.rows === rows)) return;
+        await invoke('cmd_pty_resize', { sessionId: tab.id, cols, rows });
+        tab.ptySize = { cols, rows };
+      }).catch(() => {});
+      return tab.resizeQueue;
+    }
+
     function recallSpawnSize() {
       try {
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       } catch (_) { /* hidden or zero-size container: use the fallback */ }
       const cols = activeRecallState().terminal?.cols;
       const rows = activeRecallState().terminal?.rows;
@@ -16995,6 +17024,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       tab.container.setAttribute('aria-labelledby', `recall-tab-${tab.id}`);
       recallTerminalContainer.appendChild(tab.container);
       tab.terminal.open(tab.container);
+      // Suppress shortcut keydown/keypress/keyup at xterm's own input boundary.
+      // WebKit may deliver later key events to the newly focused tab even when
+      // the document's keydown handler already selected another tab.
+      tab.terminal.attachCustomKeyEventHandler(event => {
+        const shortcut = window.MinutesRecallTabs.shortcut(event, isMac);
+        if (recallExpanded && shortcut) { tab.nextUser = false; event.preventDefault(); return false; }
+        return true;
+      });
       // xterm's public onData event mixes real keyboard/paste input with
       // automatic terminal replies generated for cursor and capability
       // queries. Its internal user-input signal fires synchronously just
@@ -17009,7 +17046,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         });
       }
       window.MINUTES_XTERM_THEME_QUERY.addEventListener('change', tab.themeHandler);
-      tab.zoomHandler = () => { tab.terminal.options.fontSize = getTerminalFontSize(); if (tab.id === SESSION_ID) tab.fit?.fit(); };
+      tab.zoomHandler = () => { tab.terminal.options.fontSize = getTerminalFontSize(); fitRecallTerminal(tab); };
       document.addEventListener('uizoomchange', tab.zoomHandler);
 
       let fitTimeout;
@@ -17018,32 +17055,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         clearTimeout(fitTimeout);
         fitTimeout = setTimeout(() => {
           if (!tab.fit || !tab.terminal) return;
-          // Resizing reflows the buffer, and a TUI answering the SIGWINCH
-          // redraws from scratch — both of which used to leave the viewport
-          // parked at the top of scrollback. Every window drag, pane open,
-          // or list collapse threw the reader back up to the beginning of a
-          // long answer. Remember whether they were following the tail and
-          // put them back there.
-          const buf = tab.terminal.buffer.active;
-          const wasAtBottom = buf.viewportY >= buf.baseY;
-          const prevCols = tab.terminal.cols;
-          const prevRows = tab.terminal.rows;
-          tab.fit.fit();
-          if (wasAtBottom) tab.terminal.scrollToBottom();
-          // Only tell the child when the grid actually changed. A width jitter
-          // that rounds to the same cell grid still fired SIGWINCH and forced a
-          // full TUI redraw for nothing.
-          const gridChanged = tab.terminal.cols !== prevCols || tab.terminal.rows !== prevRows;
-          if (tab.alive && gridChanged) {
-            invoke('cmd_pty_resize', {
-              sessionId: tab.id,
-              cols: tab.terminal.cols,
-              rows: tab.terminal.rows,
-            }).catch(() => { });
-          }
+          fitRecallTerminal(tab);
         }, 100);
       });
       tab.resize.observe(recallTerminalContainer);
+      tab.resize.observe(tab.container);
 
       tab.terminal.onData((data) => {
         if (!tab.alive) return;
@@ -17052,7 +17068,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // Typing into the terminal is the moment the "ask your question here"
         // notice stops being useful. Automatic terminal replies are invisible
         // plumbing and should not dismiss it.
-        if (isUserInput) dismissRecallProviderNotice();
+        if (isUserInput) { tab.untouched = false; dismissRecallProviderNotice(); }
         // Serialize PTY writes so the context-preparation command completes
         // before the Enter that submits the first real question. Normal typing
         // still follows the same one-invoke-per-input path as before.
@@ -17260,7 +17276,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (tab.id !== SESSION_ID || !recallDevMode) return;
         recallLastOutputAt = Date.now();
         recallLoading.classList.remove('active');
+        const wasHidden = recallTerminalContainer.classList.contains('hidden');
         recallTerminalContainer.classList.remove('hidden');
+        if (wasHidden) requestAnimationFrame(() => fitRecallTerminal(tab));
       }));
       tab.listeners.push(await currentWindow.listen('pty:exit:' + tab.id, () => {
         markRecallPtyEnded(tab);
@@ -17329,7 +17347,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // Re-fit once the container is actually visible so xterm measures the
         // real width; focus for immediate typing.
         setTimeout(() => {
-          if (activeRecallState().fit) activeRecallState().fit.fit();
+          fitRecallTerminal();
           if (activeRecallState().terminal) activeRecallState().terminal.focus();
         }, 60);
       } else {
@@ -17430,7 +17448,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         initRecallTerminal();
         await registerPtyListeners();
         setTimeout(() => {
-          if (activeRecallState().fit) activeRecallState().fit.fit();
+          fitRecallTerminal();
           if (activeRecallState().terminal) activeRecallState().terminal.focus();
         }, 260);
       } else {
@@ -17525,7 +17543,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       try {
         const model = options.tabId
           ? await invoke('cmd_recall_tabs')
-          : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab });
+          : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab, meetingTitle: options.meetingTitle || lastMeetingInventory.find(meeting => meeting.path === requestedMeeting)?.title || null, phase: options.phase || null });
+        const target = recallStateFor(options.tabId || model.active);
+        if (options.newTab && !target.initialized) target.untouched = true;
         await activateRecallTab(options.tabId || model.active, model);
       } catch (error) {
         recallLoading.classList.remove('active');
@@ -17560,19 +17580,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallLoading.classList.remove('active');
           recallTerminalContainer.classList.remove('hidden');
           recallEndBtn.classList.add('active');
-          // Re-fit after reveal so xterm uses the full panel width
-          if (activeRecallState().fit) {
-            requestAnimationFrame(() => {
-              activeRecallState().fit.fit();
-              if (activeRecallState().alive && activeRecallState().terminal) {
-                invoke('cmd_pty_resize', {
-                  sessionId: SESSION_ID,
-                  cols: activeRecallState().terminal.cols,
-                  rows: activeRecallState().terminal.rows,
-                }).catch(() => { });
-              }
-            });
-          }
+          requestAnimationFrame(() => fitRecallTerminal());
         } else if (/not found on PATH|not found in PATH|not found in common install/i.test(msg)) {
           // The assistant needs an external agent CLI (Claude Code by
           // default). It's OPTIONAL — the rest of the app works without it —
@@ -17592,23 +17600,55 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       strip: document.getElementById('recall-tabs'), prompt: document.getElementById('recall-tab-prompt'),
       invoke, isRecording: () => isRecording,
       select: id => openRecall('assistant', null, { tabId: id }),
-      create: () => openRecall('assistant', null, { newTab: true }),
+      create: openNewRecallChat,
       close: closeRecallTab, resume: resumeRecallTab,
     });
+    function withRecallMeetingTitles(model) {
+      return { ...model, tabs: model.tabs.map(tab => {
+        const meeting = lastMeetingInventory.find(meeting => meeting.path === tab.meeting_path);
+        return meeting?.title ? { ...tab, title: meeting.title } : tab;
+      }) };
+    }
+    function renderRecallTabHeader(tab) {
+      if (!tab) return;
+      setRecallPhase(tab.live ? 'listening' : tab.phase || (tab.meeting_path ? 'debrief' : 'recall'), tab.meeting_path ? tab.title : null);
+    }
+    function syncRecallTabPresentation() {
+      recallTabsModel = withRecallMeetingTitles(recallTabsModel);
+      recallTabsController.update(recallTabsModel);
+      if (recallPhase !== 'weekly') renderRecallTabHeader(recallTabsModel.tabs.find(tab => tab.id === SESSION_ID));
+    }
+    function openNewRecallChat() {
+      const empty = recallTabsModel.tabs.find(metadata => {
+        const state = recallTabStates.get(metadata.id);
+        return !metadata.meeting_path && !metadata.live && !metadata.capture_session_id
+          && !metadata.claude_session_id && !metadata.claude_active && metadata.status === 'done'
+          && state?.untouched && state.alive && !state.draft && state.reliable;
+      });
+      return openRecall('assistant', null, empty ? { tabId: empty.id } : { newTab: true });
+    }
     async function activateRecallTab(id, model) {
       if (!id) return;
+      model = withRecallMeetingTitles(model);
       recallTabsModel = model; SESSION_ID = id;
       const metadata = model.tabs.find(t => t.id === id);
       const tab = activeRecallState();
       tab.shell = !!metadata?.shell; tab.claudeActive = !!metadata?.claude_active;
       if (!tab.initialized) { tab.meetingPath = metadata?.meeting_path || null; tab.pending = true; }
       recallSelectedMeetingPath = metadata?.meeting_path || null;
-      await invoke('cmd_recall_tab_select', { tabId: id });
+      await invoke('cmd_recall_tab_select', { tabId: id, meetingTitle: metadata?.meeting_path ? metadata.title : null, phase: metadata?.phase || null });
       initRecallTerminal(); await registerPtyListeners();
       for (const state of recallTabStates.values()) if (state.container) state.container.hidden = state.id !== id;
+      // Switching to an idle PTY may produce no output event to reveal it.
+      // Restore visibility before fitting rather than waiting for child output.
+      if (recallExpanded && recallDevMode) {
+        recallTerminalContainer.classList.remove('hidden');
+        recallLoading.classList.remove('active');
+      }
       recallTabsController.update({ ...model, active: id });
       setRecallProviderNotice(metadata?.note || '');
-      requestAnimationFrame(() => { tab.fit?.fit(); tab.terminal?.focus(); });
+      renderRecallTabHeader(metadata);
+      requestAnimationFrame(() => { fitRecallTerminal(tab); if (tab.id === SESSION_ID) tab.terminal?.focus(); });
       refreshRecallContextChips();
     }
     async function resumeRecallTab(id) {
@@ -17623,12 +17663,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
         try {
           await invoke('cmd_recall_tab_resume', { tabId: id });
+          setRecallProviderNotice('');
           tab.terminal?.focus();
         } catch (error) { setRecallProviderNotice(String(error), 'error'); }
       }).finally(() => { tab.resuming = false; });
       await tab.queue;
     }
-    async function closeRecallTab(id, confirmed = false) {
+    async function closeRecallTab(id, confirmed = false, afterClose = null) {
       try {
         const model = await invoke('cmd_recall_tab_close', { tabId: id, confirmed });
         const previous = SESSION_ID;
@@ -17636,19 +17677,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         recallTabsModel = model; recallTabsController.update(model);
         if (model.active) await openRecall('assistant', null, { tabId: model.active });
         else { markRecallPtyEnded(); recallExitBanner.classList.add('active'); }
+        if (afterClose) await afterClose();
         return true;
       } catch (error) {
-        if (String(error).includes('RECALL_CLOSE_CONFIRM')) recallTabsController.confirmClose(id);
+        if (String(error).includes('RECALL_CLOSE_CONFIRM')) recallTabsController.confirmClose(id, () => closeRecallTab(id, true, afterClose));
         else setRecallProviderNotice(String(error), 'error');
         return false;
       }
     }
     function showRecallTabLimit(mode, path, options) {
-      recallTabsController.chooseFinished(async id => {
-        if (await closeRecallTab(id)) await openRecall(mode, path, options);
-      });
+      recallTabsController.chooseFinished(id => closeRecallTab(id, false, () => openRecall(mode, path, options)));
     }
     currentWindow.listen('recall:tabs-changed', ({ payload: model }) => {
+      model = withRecallMeetingTitles(model);
       recallTabsModel = model;
       for (const metadata of model.tabs) {
         const state = recallTabStates.get(metadata.id);
@@ -17657,9 +17698,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
       recallTabsController.update({ ...model, active: SESSION_ID });
       refreshRecallContextChips();
-      if (model.pending_live_path) recallTabsController.chooseFinished(async id => {
-        if (await closeRecallTab(id)) await openRecall('meeting', model.pending_live_path);
-      });
+      if (recallPhase !== 'weekly') renderRecallTabHeader(model.tabs.find(tab => tab.id === SESSION_ID));
+      if (model.pending_live_path) recallTabsController.chooseFinished(id => closeRecallTab(id, false, () => openRecall('meeting', model.pending_live_path)));
       recallOpenQueue = recallOpenQueue.then(() => ensureRecallTabProcesses(model)).catch(error => console.error('Recall background tab:', error));
     });
     // Start background PTYs without selecting them or moving keyboard focus.
@@ -19187,7 +19227,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const { title, mode, tab_id: tabId } = event.payload;
       if (tabId && tabId !== SESSION_ID) return;
       const context = (title || '').replace('Minutes Assistant', '').replace('Discussing: ', '').trim();
-      if (mode === 'meeting') {
+      const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+      if (tab) {
+        renderRecallTabHeader(tab);
+      } else if (mode === 'meeting') {
         setRecallPhase('debrief', context);
       } else {
         setRecallPhase('recall', context || null);
@@ -19209,7 +19252,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const fs = await currentWindow.isFullscreen().catch(() => false);
       if (wasFullscreen && !fs && recallExpanded) {
         await ensureRecallWindowRoom().catch(() => { });
-        if (activeRecallState().fit) activeRecallState().fit.fit();
+        fitRecallTerminal();
       }
       wasFullscreen = fs;
     });
@@ -19315,7 +19358,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // context gate still holds: Minutes reads the meeting only on submit.
     async function discussMeetingWithAgent(path, title, intent = 'discuss') {
       const name = title || 'Meeting';
-      await openRecall('meeting', path);
+      await openRecall('meeting', path, { meetingTitle: name, phase: intent === 'prep' ? 'prep' : 'debrief' });
       setRecallPhase(intent === 'prep' ? 'prep' : 'debrief', name);
       if (!recallDevMode || !activeRecallState().terminal || !activeRecallState().alive) return;
       activeRecallState().terminal.focus();
@@ -20720,9 +20763,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (assistantAvailable && recallWorkspaceState.recallExpanded) {
         setTimeout(async () => {
           await openRecall('assistant');
-          if (recallWorkspaceState.recallPhase) {
-            setRecallPhase(recallWorkspaceState.recallPhase, null);
-          }
+          const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+          if (tab) renderRecallTabHeader(tab);
+          else if (recallWorkspaceState.recallPhase) setRecallPhase(recallWorkspaceState.recallPhase, null);
         }, 500);
       }
 

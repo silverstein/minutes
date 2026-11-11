@@ -23,6 +23,8 @@ pub enum Status {
 pub struct Tab {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub phase: Option<String>,
     pub meeting_path: Option<String>,
     pub claude_session_id: Option<String>,
     #[serde(default)]
@@ -159,6 +161,7 @@ impl TabStore {
                 self.tabs.push(Tab {
                     id: "assistant".into(),
                     title: "Recall".into(),
+                    phase: None,
                     meeting_path: fs::read(
                         root.parent().unwrap_or(root).join("recall-workspace.json"),
                     )
@@ -227,6 +230,7 @@ impl TabStore {
                 tab.meeting_path = None;
                 tab.capture_session_id = None;
                 tab.title = "Chat".into();
+                tab.phase = None;
                 tab.note = Some(
                     "The meeting for this tab was deleted. This conversation is now a plain chat."
                         .into(),
@@ -243,7 +247,47 @@ impl TabStore {
         {
             self.active = self.tabs.first().map(|t| t.id.clone());
         }
+        // Upgrade generic free-chat names once, retaining their identity on
+        // subsequent restores and after other tabs are closed.
+        for index in 0..self.tabs.len() {
+            if self.tabs[index].meeting_path.is_none() && self.tabs[index].title == "Chat" {
+                self.tabs[index].title = self.next_chat_title();
+            }
+        }
         self.save(root)
+    }
+
+    fn next_chat_title(&self) -> String {
+        (1..=self.tabs.len() + 1)
+            .map(|number| format!("Chat {number}"))
+            .find(|title| self.tabs.iter().all(|tab| &tab.title != title))
+            .expect("one more candidate than existing tabs")
+    }
+
+    fn set_presentation(&mut self, id: &str, title: Option<&str>, phase: Option<&str>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+            if tab.meeting_path.is_some() {
+                if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+                    tab.title = title.chars().take(256).collect();
+                }
+                if let Some(phase) = phase.filter(|phase| matches!(*phase, "prep" | "debrief")) {
+                    tab.phase = Some(phase.into());
+                }
+            }
+        }
+    }
+
+    fn remove(&mut self, id: &str) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        self.tabs.remove(index);
+        if self.active.as_deref() == Some(id) {
+            self.active = self
+                .tabs
+                .get(index.saturating_sub(1))
+                .map(|tab| tab.id.clone());
+        }
     }
 
     pub fn save(&self, root: &Path) -> Result<(), String> {
@@ -294,10 +338,11 @@ impl TabStore {
             .and_then(|p| Path::new(p).file_stem())
             .and_then(|p| p.to_str())
             .map(|s| s.replace('-', " "))
-            .unwrap_or_else(|| "Chat".into());
+            .unwrap_or_else(|| self.next_chat_title());
         self.tabs.push(Tab {
             id: id.clone(),
             title,
+            phase: None,
             meeting_path: meeting.map(str::to_string),
             claude_session_id: None,
             shell: false,
@@ -646,6 +691,7 @@ pub fn start_observer(app: tauri::AppHandle) {
                             l.kind == minutes_core::context_store::ContextLinkKind::MarkdownArtifact
                         }) {
                             tab.capture_complete = true;
+                            tab.phase = Some("debrief".into());
                             if tab.meeting_path.as_deref() != Some(&link.target) {
                                 tab.meeting_path = Some(link.target.clone());
                                 tab.title = Path::new(&link.target)
@@ -793,11 +839,16 @@ pub fn cmd_recall_tabs(state: tauri::State<crate::commands::AppState>) -> Result
 pub fn cmd_recall_tab_select(
     state: tauri::State<crate::commands::AppState>,
     tab_id: String,
+    meeting_title: Option<String>,
+    phase: Option<String>,
 ) -> Result<(), String> {
     let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
     if !manager.tabs.tabs.iter().any(|t| t.id == tab_id) {
         return Err("Recall tab not found".into());
     }
+    manager
+        .tabs
+        .set_presentation(&tab_id, meeting_title.as_deref(), phase.as_deref());
     manager.tabs.active = Some(tab_id);
     manager.tabs.save(&crate::context::workspace_dir())
 }
@@ -859,13 +910,10 @@ pub fn cmd_recall_tab_close(
             .iter()
             .find(|t| t.id == tab_id)
             .ok_or("Recall tab not found")?;
-        if (tab.status == Status::Working || tab.live) && !confirmed.unwrap_or(false) {
+        if requires_close_confirmation(tab) && !confirmed.unwrap_or(false) {
             return Err("RECALL_CLOSE_CONFIRM".into());
         }
-        manager.tabs.tabs.retain(|t| t.id != tab_id);
-        if manager.tabs.active.as_deref() == Some(&tab_id) {
-            manager.tabs.active = manager.tabs.tabs.first().map(|t| t.id.clone());
-        }
+        manager.tabs.remove(&tab_id);
         manager.tabs.save(&root)?;
         (manager.take_session(&tab_id), manager.tabs.clone())
     };
@@ -881,14 +929,27 @@ pub fn cmd_recall_tab_open(
     state: tauri::State<crate::commands::AppState>,
     meeting_path: Option<String>,
     new_tab: Option<bool>,
+    meeting_title: Option<String>,
+    phase: Option<String>,
 ) -> Result<TabStore, String> {
     let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
-    manager.tabs.open(
+    let id = manager.tabs.open(
         &crate::context::workspace_dir(),
         meeting_path.as_deref(),
         new_tab.unwrap_or(false),
     )?;
+    manager
+        .tabs
+        .set_presentation(&id, meeting_title.as_deref(), phase.as_deref());
+    manager.tabs.save(&crate::context::workspace_dir())?;
     Ok(manager.tabs.clone())
+}
+
+fn requires_close_confirmation(tab: &Tab) -> bool {
+    tab.status == Status::Working
+        || tab.live
+        || tab.claude_active
+        || tab.claude_session_id.is_some()
 }
 
 #[cfg(test)]
@@ -996,6 +1057,89 @@ mod migration_tests {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+    #[test]
+    fn saved_or_active_idle_conversations_require_close_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        store.open(temp.path(), None, true).unwrap();
+        let tab = &mut store.tabs[0];
+        assert!(!requires_close_confirmation(tab));
+        tab.claude_active = true;
+        assert!(requires_close_confirmation(tab));
+        tab.claude_active = false;
+        tab.claude_session_id = Some("saved-session".into());
+        assert!(requires_close_confirmation(tab));
+    }
+    #[test]
+    fn selected_meeting_title_and_phase_survive_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let meeting = temp.path().join("2026-03-04-northwind-call.md");
+        fs::write(
+            &meeting,
+            "not read: metadata was already authorized in the UI inventory",
+        )
+        .unwrap();
+        let mut store = TabStore::default();
+        let id = store.open(temp.path(), meeting.to_str(), false).unwrap();
+        store.set_presentation(
+            &id,
+            Some("Northwind Customer Call — SSO Friction"),
+            Some("prep"),
+        );
+        store.save(temp.path()).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(temp.path()).unwrap();
+        assert_eq!(
+            restored.tabs[0].title,
+            "Northwind Customer Call — SSO Friction"
+        );
+        assert_eq!(restored.tabs[0].phase.as_deref(), Some("prep"));
+    }
+    #[test]
+    fn closing_active_tab_selects_its_neighbour_and_keeps_unrelated_focus() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        let first = store.open(temp.path(), None, true).unwrap();
+        let middle = store.open(temp.path(), None, true).unwrap();
+        let last = store.open(temp.path(), None, true).unwrap();
+        store.remove(&last);
+        assert_eq!(store.active.as_deref(), Some(middle.as_str()));
+        store.remove(&first);
+        assert_eq!(store.active.as_deref(), Some(middle.as_str()));
+        store.remove(&middle);
+        assert_eq!(store.active, None);
+    }
+    #[test]
+    fn free_chat_titles_are_distinct_and_survive_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        for _ in 0..3 {
+            store.open(temp.path(), None, true).unwrap();
+        }
+        assert_eq!(
+            store
+                .tabs
+                .iter()
+                .map(|tab| tab.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Chat 1", "Chat 2", "Chat 3"]
+        );
+        // Upgrade the generic titles saved by the first tabs implementation,
+        // without changing a name that is already distinct.
+        store.tabs[1].title = "Chat".into();
+        store.tabs[2].title = "Chat".into();
+        store.save(temp.path()).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(temp.path()).unwrap();
+        let titles: Vec<_> = restored.tabs.iter().map(|tab| tab.title.clone()).collect();
+        assert_eq!(titles, ["Chat 1", "Chat 2", "Chat 3"]);
+        let mut again = TabStore::default();
+        again.ensure(temp.path()).unwrap();
+        assert_eq!(
+            again.tabs.iter().map(|tab| &tab.title).collect::<Vec<_>>(),
+            titles.iter().collect::<Vec<_>>()
+        );
+    }
     #[test]
     fn project_hooks_are_idempotent_and_preserve_custom_settings() {
         let temp = tempfile::tempdir().unwrap();

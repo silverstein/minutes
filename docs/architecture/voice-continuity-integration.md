@@ -300,6 +300,22 @@ while the job is queued or awaiting review. Corrections to a proposed task need
 a new proposal and review. A model cannot provide `minutes_context` or authorize
 dispatch. This adds no new approval step to other Voice Live tools.
 
+An `ask_agent` proposal is an `AwaitingApproval` receipt, not an agent answer.
+Voice instructions distinguish waiting for local review from dispatched work
+and ask the voice model to wait for the requested agent rather than substitute
+its own answer. Unrelated conversation remains available while the agent runs.
+After approved execution returns, the host sends a new conversational turn with
+an explicit completion caption and a separate JSON receipt. The caption asks for
+the substantive returned answer with agent attribution, or the actual error,
+rather than a generic follow-up. Returned text stays untrusted result data and
+cannot grant permission for another action. Explicitly shared selections use
+their own caption and do not acquire action or agent provenance.
+
+Completion still waits for the configured agent process to exit successfully.
+An earlier stdout message or streamed agent-turn event is not a successful
+process exit. This path does not disable lifecycle hooks, bypass process cleanup
+or keep an agent connection warm to reduce latency.
+
 The snapshot retains at most 16 entries, at most 1,024 UTF-8 bytes per entry,
 and at most 8,192 bytes for its JSON envelope. Older material is shed first;
 truncation is explicit. Tool evidence carries its tool/call provenance and is

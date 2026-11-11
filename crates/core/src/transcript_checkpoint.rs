@@ -853,17 +853,9 @@ mod tests {
             .all(|line| whisper_guard::find_repetition_loop(line).is_none()));
         assert!(whole.lines().count() > 40, "{}", whole.lines().count());
 
-        // Spans that end at every fourth cut. The audio after the last one is
-        // left to the final pass.
-        let c: Vec<usize> = std::iter::once(0)
-            .chain(plan.cuts().iter().copied())
-            .step_by(4)
-            .collect();
-        let cuts: Vec<(usize, usize)> = c
-            .windows(2)
-            .map(|pair| (pair[0], pair[1]))
-            .filter(|&(_, end)| end < audio.len())
-            .collect();
+        // The recording-time producer's spans. The audio after the last cut
+        // was not finished at Stop and is left to the final pass.
+        let cuts = crate::capture_checkpoint::cut_like_feed(&audio, 120 * RATE, GROUP);
         assert!(cuts.len() >= 2, "{cuts:?}");
         let mut producer = FakeWhisper::looping(loop_ids);
         let spans: Vec<CheckpointSpan> = cuts

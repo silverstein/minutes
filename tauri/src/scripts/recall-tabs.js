@@ -14,6 +14,7 @@
   function renderMeetingStatus(node, path) {
     const tab = snapshot.tabs.find(tab => tab.meeting_path === path);
     node.replaceChildren();
+    node.hidden = !tab;
     if (tab) node.append(glyph(tab));
   }
   function shortcut(event, mac) {
@@ -29,7 +30,8 @@
     let model = snapshot;
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
-    function dismiss() { prompt.replaceChildren(); prompt.hidden = true; }
+    let chooser = null, pendingLive = null;
+    function dismiss() { chooser = null; prompt.replaceChildren(); prompt.hidden = true; }
     function show(text, actions) {
       dismiss(); prompt.hidden = false;
       const description = document.createElement('p'); description.textContent = text; prompt.append(description);
@@ -40,6 +42,11 @@
       const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn btn-ghost btn-sm';
       cancel.textContent = 'Cancel'; cancel.addEventListener('click', dismiss); prompt.append(cancel);
       cancel.focus();
+    }
+    function chooseFinished(action, liveId = null) {
+      const finished = model.tabs.filter(tab => tab.status === 'done' && !tab.live);
+      show(finished.length ? 'Four conversations are open. Close a finished one to continue.' : 'Four conversations are open. Wait for one to finish, or close a tab first.', finished.map(tab => [`Close ${tab.title} (${keyHint(model.tabs.findIndex(item => item.id === tab.id))})`, () => action(tab.id)]));
+      chooser = { action, liveId, signature: JSON.stringify(model.tabs) };
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
     function update(next) {
@@ -85,6 +92,7 @@
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
       if (focus) strip.querySelector(`[data-tab-id="${focus}"]`)?.focus();
       strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      if (chooser && chooser.signature !== JSON.stringify(model.tabs)) chooseFinished(chooser.action, chooser.liveId);
 
     }
     document.addEventListener('keydown', event => {
@@ -103,9 +111,15 @@
     }, true);
     return { update,
       confirmClose: (id, action = () => close(id, true)) => show('Close this conversation? Its process will stop and its saved conversation will leave Recall. Your agent keeps its transcript history.', [['Close conversation', action]]),
-      chooseFinished: action => {
-        const finished = model.tabs.filter(t => t.status === 'done' && !t.live);
-        show(finished.length ? 'Four conversations are open. Close a finished one to continue.' : 'Four conversations are open. Wait for one to finish, or close a tab first.', finished.map(t => [`Close ${t.title} (${keyHint(model.tabs.findIndex(tab => tab.id === t.id))})`, () => action(t.id)]));
+      chooseFinished,
+      syncPendingLive: (id, action) => {
+        if (!id) {
+          pendingLive = null;
+          if (chooser?.liveId) dismiss();
+        } else if (id !== pendingLive) {
+          pendingLive = id;
+          chooseFinished(action, id);
+        }
       },
       dismiss,
     };

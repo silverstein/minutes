@@ -84,6 +84,24 @@ try {
   for (let index=1;index<=4;index++) {
     assert.equal(await page.getByRole('button',{name:`Close Chat ${index} (Ctrl+${index})`,exact:true}).count(),1);
   }
+  await page.evaluate(()=>{
+    fixture.controls.dismiss();
+    fixture.controls.syncPendingLive('capture-a',id=>fixture.actions.push(['admit-live',id]));
+    fixture.model.tabs[3].live=true;
+    fixture.model.tabs.unshift(fixture.model.tabs.pop());
+    fixture.controls.update(structuredClone(fixture.model));
+  });
+  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 4 (Ctrl+1)',exact:true}).count(),0,'live tabs never appear in an updated chooser');
+  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 1 (Ctrl+2)',exact:true}).count(),1,'chooser positions follow current strip order');
+  await page.evaluate(()=>fixture.controls.syncPendingLive(null,()=>{}));
+  assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false,'admitting live dismisses its old cap chooser');
+  await page.evaluate(()=>fixture.controls.syncPendingLive('capture-b',()=>{}));
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.evaluate(()=>{
+    fixture.controls.update(structuredClone(fixture.model));
+    fixture.controls.syncPendingLive('capture-b',()=>{});
+  });
+  assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false,'metadata updates do not reopen a cancelled chooser for the same capture');
   await page.goto(`http://127.0.0.1:${server.address().port}/grid`);
   await page.waitForFunction(() => fixture.ready);
   for (const id of ['one', 'two', 'three', 'one']) {
@@ -176,6 +194,28 @@ try {
   assert.equal(await page.getByRole('tab',{selected:true}).innerText(),'Northwind Customer Call — SSO Friction');
   assert.equal(await page.locator('#fixture-header').innerText(),'prep — Northwind Customer Call — SSO Friction');
   assert.equal(await page.evaluate(()=>fixture.calls.filter(call=>call.command==='cmd_recall_tab_select').at(-1).args.meetingTitle),'Northwind Customer Call — SSO Friction');
+  await page.evaluate(()=>{
+    document.getElementById('fixture-meetings').append(fixture.buildRow({path:'/synthetic/northwind.md',title:'A long meeting title that must truncate while its status stays visible '.repeat(3)}));
+  });
+  assert.deepEqual(await page.locator('#fixture-meetings .meeting-title-row').evaluate(row=>{
+    const title=row.querySelector('.meeting-title'),glyph=row.querySelector('.recall-tab-glyph');
+    const r=row.getBoundingClientRect(),g=glyph.getBoundingClientRect();
+    return {truncated:title.scrollWidth>title.clientWidth,glyphInside:g.width>0&&g.right<=r.right&&g.left>=r.left};
+  }),{truncated:true,glyphInside:true},'production meeting row reserves glyph space beside a truncated title');
+  await page.evaluate(()=>{
+    const model=structuredClone(fixture.model);
+    Object.assign(model.tabs[0],{live:true,title:'Live call',phase:null,meeting_path:null});
+    fixture.applyModel(model);
+    document.getElementById('recall-terminal-container').classList.add('hidden');
+    fixture.afterCapture();
+    model.tabs[0].live=false;
+    fixture.applyModel(model);
+  });
+  assert.equal(await page.locator('#fixture-header').innerText(),'recall —');
+  assert.equal(await page.locator('#recall-terminal-container').isVisible(),true,'Stop metadata repaints the selected terminal without a tab switch');
+  await page.waitForFunction(()=>document.querySelector('#recall-terminal-one .xterm-rows').textContent.includes('GRID-CANARY'));
+  assert.equal(await page.locator('#fixture-meetings .meeting-item').isVisible(),true);
+  assert.deepEqual(await page.evaluate(()=>fixture.refreshes),[0],'Stop schedules the list refresh while processing continues');
   const macPage = await browser.newPage();
   await macPage.addInitScript(()=>Object.defineProperty(navigator,'platform',{value:'MacIntel'}));
   await macPage.goto(`http://127.0.0.1:${server.address().port}/grid`);

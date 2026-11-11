@@ -3931,6 +3931,9 @@ fn start_native_call_recording(
         requested_title.clone(),
         recording_started_at,
     );
+    let recall_capture_id = context_session_id
+        .clone()
+        .or_else(crate::recall_tabs::recording_capture_id);
 
     starting.store(false, Ordering::Relaxed);
     recording.store(true, Ordering::Relaxed);
@@ -4245,6 +4248,12 @@ fn start_native_call_recording(
                     checkpoint.map(|worker| worker.finish()),
                 ) {
                     Ok(job) => {
+                        crate::recall_tabs::capture_finished(
+                            app_handle,
+                            recall_capture_id.clone(),
+                            Some(job.id.clone()),
+                            None,
+                        );
                         processing.store(true, Ordering::Relaxed);
                         set_processing_stage(processing_stage, job.stage.as_deref());
                         minutes_core::pid::set_processing_status(
@@ -4361,6 +4370,12 @@ fn start_native_call_recording(
 
         match queue_result {
             Ok(job) => {
+                crate::recall_tabs::capture_finished(
+                    app_handle,
+                    recall_capture_id.clone(),
+                    Some(job.id.clone()),
+                    None,
+                );
                 processing.store(true, Ordering::Relaxed);
                 set_processing_stage(processing_stage, job.stage.as_deref());
                 minutes_core::pid::set_processing_status(
@@ -4499,6 +4514,12 @@ fn start_native_call_recording(
         checkpoint,
     ) {
         Ok(job) => {
+            crate::recall_tabs::capture_finished(
+                app_handle,
+                recall_capture_id.clone(),
+                Some(job.id.clone()),
+                None,
+            );
             processing.store(true, Ordering::Relaxed);
             set_processing_stage(processing_stage, job.stage.as_deref());
             minutes_core::pid::set_processing_status(
@@ -7037,6 +7058,9 @@ pub fn start_recording(
         requested_title.clone(),
         recording_started_at,
     );
+    let recall_capture_id = context_session_id
+        .clone()
+        .or_else(crate::recall_tabs::recording_capture_id);
     minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
         .ok();
     crate::sync_tray_state(&app_handle);
@@ -7133,6 +7157,12 @@ pub fn start_recording(
                     None,
                 ) {
                     Ok(job) => {
+                        crate::recall_tabs::capture_finished(
+                            &app_handle,
+                            recall_capture_id.clone(),
+                            Some(job.id.clone()),
+                            None,
+                        );
                         processing.store(true, Ordering::Relaxed);
                         set_processing_stage(&processing_stage, job.stage.as_deref());
                         minutes_core::pid::set_processing_status(
@@ -13494,6 +13524,12 @@ pub(crate) fn materialize_recall_terminal_context(
     config: &Config,
     meeting_path: Option<&str>,
 ) -> Result<(), String> {
+    // A live capture has no saved meeting yet. Its bounded live reader is the
+    // only context source; a missing meeting must not become general history.
+    if meeting_path.is_none() && workspace.join(".live-tab").is_file() {
+        crate::context::clear_active_meeting_context(workspace)?;
+        return crate::context::clear_general_assistant_context(workspace);
+    }
     match meeting_path {
         Some(path) => {
             let meeting = PathBuf::from(path);
@@ -23328,6 +23364,12 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         update_assistant_live_context(&workspace, false);
     }
 
+    let recall_capture_id = live_context_session_id.clone().or_else(|| {
+        capture_relay
+            .as_ref()
+            .map(|relay| format!("relay:{}", relay.discovery().session_id))
+    });
+
     // End the capture-only consumers before advertising that a new Live
     // session can start. The durable processing worker never owns them.
     drop(capture_relay);
@@ -23416,6 +23458,15 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
                     }
                 }
             }
+
+            crate::recall_tabs::capture_finished(
+                &app,
+                recall_capture_id,
+                queued_job.as_ref().map(|job| job.id.clone()),
+                path.extension()
+                    .is_some_and(|ext| ext == "md")
+                    .then(|| path.display().to_string()),
+            );
 
             // The archive and durable queue record are safe. Clear Live before
             // the stopped event so the UI and shortcuts can start another

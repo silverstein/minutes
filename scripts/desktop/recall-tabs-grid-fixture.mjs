@@ -20,6 +20,7 @@ function productionFunction(source, name) {
 
 export function gridFixture(source, css, controller) {
   return `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/vendor/xterm/xterm.css"><style>${css}</style></head><body>
+<div id="fixture-meetings" style="position:absolute;left:780px;top:0;width:180px"></div>
 <div id="recall-panel" class="recall-panel expanded" style="position:relative;width:750px;height:540px;transform:none">
 <div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
 <span id="fixture-header"></span><div id="recall-provider-notice" class="recall-provider-notice"></div>
@@ -39,12 +40,14 @@ window.MINUTES_XTERM_THEME_QUERY=matchMedia('(prefers-color-scheme:dark)');
 const applyRecallTerminalTheme=()=>({background:'#171717',foreground:'#fafafa'}),refreshRecallContextChips=()=>{};
 const setRecallPhase=(phase,title)=>{recallPhase=phase;document.getElementById('fixture-header').textContent=phase+' — '+(title||'');};
 const registerPtyListeners=async()=>{},registerRecallTerminalFileDrop=async()=>{};
+const activeSearchQuery='',meetingRowsState=null,setHighlightedText=(node,text)=>{node.textContent=text;},formatTime=()=> '12:00';
+const refreshes=[],scheduleMeetingsRefresh=delay=>refreshes.push(delay);
 const invoke=async(command,args)=>{calls.push({command,args});if(command==='cmd_recall_tab_open')throw new Error('RECALL_TAB_LIMIT');if(command==='cmd_pty_resize')grids.set(args.sessionId,{cols:args.cols,rows:args.rows});};
-${['recallStateFor','activeRecallState','fitRecallTerminal','initRecallTerminal','activateRecallTab','openNewRecallChat','withRecallMeetingTitles','renderRecallTabHeader','setRecallProviderNotice','dismissRecallProviderNotice','forwardRecallTerminalData','forwardRecallTerminalInput','updateRecallTerminalInputDraft','resumeRecallTab','openRecallImpl','showRecallTabLimit'].map(name => productionFunction(source, name)).join('\n')}
+${['recallStateFor','activeRecallState','fitRecallTerminal','initRecallTerminal','activateRecallTab','openNewRecallChat','withRecallMeetingTitles','renderRecallTabHeader','setRecallProviderNotice','dismissRecallProviderNotice','forwardRecallTerminalData','forwardRecallTerminalInput','updateRecallTerminalInputDraft','resumeRecallTab','openRecallImpl','showRecallTabLimit','applyRecallTabsModel','refreshRecallAfterCapture','buildMeetingRow'].map(name => productionFunction(source, name)).join('\n')}
 const opens=[];const openRecall=(...args)=>opens.push(args);
 const recallTabsController=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke,select:id=>activateRecallTab(id,recallTabsModel),create:openNewRecallChat,close:()=>{}});
 for(const metadata of recallTabsModel.tabs){const tab=recallStateFor(metadata.id);initRecallTerminal(tab);tab.alive=true;tab.untouched=true;tab.terminal.resize(10,4);grids.set(tab.id,{cols:10,rows:4});}
-window.fixture={calls,opens,grids,tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),
+window.fixture={calls,opens,grids,tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),applyModel:applyRecallTabsModel,buildRow:buildMeetingRow,afterCapture:refreshRecallAfterCapture,refreshes,
 snapshot:id=>{const tab=recallTabStates.get(id);return {terminal:{cols:tab.terminal.cols,rows:tab.terminal.rows},pty:grids.get(id)};}};
 setTimeout(()=>{window.fixture.ready=true;},150);
 </script></body></html>`;

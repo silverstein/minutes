@@ -1,4 +1,4 @@
-//! Recall tab metadata and Claude hook protocol. No capture thread calls this module.
+//! Recall tab metadata and Claude hook protocol. Optional consumers never block capture.
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Read;
@@ -34,6 +34,8 @@ pub struct Tab {
     #[serde(default)]
     pub capture_session_id: Option<String>,
     #[serde(default)]
+    pub capture_job_id: Option<String>,
+    #[serde(default)]
     pub capture_complete: bool,
     #[serde(default)]
     pub status: Status,
@@ -48,7 +50,7 @@ pub struct TabStore {
     pub tabs: Vec<Tab>,
     pub active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_live_path: Option<String>,
+    pub pending_live_id: Option<String>,
     #[serde(skip)]
     loaded: bool,
 }
@@ -177,6 +179,7 @@ impl TabStore {
                     shell: false,
                     claude_active: false,
                     capture_session_id: None,
+                    capture_job_id: None,
                     capture_complete: false,
                     status: Status::Done,
                     live: false,
@@ -221,14 +224,14 @@ impl TabStore {
                     crate::commands::update_assistant_live_context_file(&dir.join(name), false);
                 }
             }
-            if (tab.capture_session_id.is_none() || tab.capture_complete)
-                && tab
-                    .meeting_path
-                    .as_ref()
-                    .is_some_and(|p| !Path::new(p).is_file())
+            if tab
+                .meeting_path
+                .as_ref()
+                .is_some_and(|p| !Path::new(p).is_file())
             {
                 tab.meeting_path = None;
                 tab.capture_session_id = None;
+                tab.capture_job_id = None;
                 tab.title = "Chat".into();
                 tab.phase = None;
                 tab.note = Some(
@@ -236,6 +239,7 @@ impl TabStore {
                         .into(),
                 );
                 let dir = workspace_at(root, &tab.id)?;
+                set_focus_target(&dir, None, false)?;
                 crate::context::clear_active_meeting_context(&dir)?;
                 crate::context::clear_general_assistant_context(&dir)?;
             }
@@ -348,6 +352,7 @@ impl TabStore {
             shell: false,
             claude_active: false,
             capture_session_id: None,
+            capture_job_id: None,
             capture_complete: false,
             status: Status::Done,
             live: false,
@@ -611,6 +616,281 @@ fn prepare_prompt_context_with(
     mark_context_ready(workspace)
 }
 
+#[derive(Clone)]
+struct ActiveCapture {
+    id: String,
+    title: String,
+}
+
+// The recording PID file is written once per capture and removed on stop.
+// Its owner/version stays stable even after the optional transcript relay
+// shuts down. This also supports microphone capture with context tracking off.
+pub(crate) fn recording_capture_id() -> Option<String> {
+    recording_capture_id_at(&minutes_core::pid::pid_path())
+}
+
+fn recording_capture_id_at(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let modified = file
+        .metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let mut owner = String::new();
+    file.take(128).read_to_string(&mut owner).ok()?;
+    let pid = owner.trim().parse::<u32>().ok()?;
+    Some(format!("recording:{pid}:{modified}"))
+}
+
+// The relay ID is a producer identity, not a guessed future Markdown path.
+// Deserialize only identity fields; never copy the relay capability token.
+fn relay_capture_id() -> Option<String> {
+    #[derive(Deserialize)]
+    struct Identity {
+        session_id: String,
+        owner_pid: u32,
+        heartbeat_at: chrono::DateTime<chrono::Utc>,
+    }
+    let raw = read_small(&minutes_core::copilot::capture_relay_discovery_path()).ok()?;
+    let identity: Identity = serde_json::from_slice(&raw).ok()?;
+    (identity.owner_pid == std::process::id()
+        && chrono::Utc::now()
+            .signed_duration_since(identity.heartbeat_at)
+            .num_seconds()
+            <= 10)
+        .then(|| format!("relay:{}", identity.session_id))
+}
+
+fn active_capture(
+    live: &minutes_core::live_transcript::SessionStatus,
+    recording: &minutes_core::pid::RecordingStatus,
+) -> Option<ActiveCapture> {
+    if !recording.recording
+        && (!live.active
+            || live.source
+                == Some(minutes_core::live_transcript::TranscriptSource::RecordingSidecar))
+    {
+        return None;
+    }
+    let id = if recording.recording {
+        minutes_core::pid::read_recording_metadata()
+            .and_then(|meta| meta.context_session_id)
+            .or_else(recording_capture_id)
+    } else {
+        live.session_id.clone()
+    }
+    .or_else(relay_capture_id)?;
+    let title = id
+        .starts_with("ctx-")
+        .then(|| minutes_core::context_store::get_session(&id).ok().flatten())
+        .flatten()
+        .and_then(|session| session.title)
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "Live call".into());
+    Some(ActiveCapture { id, title })
+}
+
+impl TabStore {
+    fn record_capture_completion(
+        &mut self,
+        root: &Path,
+        capture_id: &str,
+        job_id: Option<&str>,
+        meeting: Option<&str>,
+    ) -> Result<(), String> {
+        for tab in &mut self.tabs {
+            if tab.capture_session_id.as_deref() != Some(capture_id) {
+                continue;
+            }
+            tab.capture_job_id = job_id.map(str::to_string);
+            if let Some(path) = meeting {
+                finish_tab_capture(root, tab, path, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn admit_capture(&mut self, root: &Path, capture: &ActiveCapture) -> Result<String, String> {
+        if let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.capture_session_id.as_deref() == Some(&capture.id))
+        {
+            return Ok(tab.id.clone());
+        }
+        let previous = self.active.clone();
+        let id = self.open(root, None, true)?;
+        self.active = previous;
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == id)
+            .ok_or("Recall tab not found")?;
+        tab.capture_session_id = Some(capture.id.clone());
+        tab.title = capture.title.chars().take(256).collect();
+        self.pending_live_id = None;
+        Ok(id)
+    }
+
+    fn sync_live_capture(
+        &mut self,
+        root: &Path,
+        capture: Option<&ActiveCapture>,
+    ) -> Result<(), String> {
+        self.sync_live_capture_with(root, capture, completed_capture)
+    }
+
+    fn sync_live_capture_with(
+        &mut self,
+        root: &Path,
+        capture: Option<&ActiveCapture>,
+        completed: impl Fn(&Tab) -> Option<(String, Option<String>)>,
+    ) -> Result<(), String> {
+        self.pending_live_id = None;
+        if let Some(capture) = capture {
+            if let Err(error) = self.admit_capture(root, capture) {
+                if error != "RECALL_TAB_LIMIT" {
+                    return Err(error);
+                }
+                self.pending_live_id = Some(capture.id.clone());
+            }
+        }
+        for tab in &mut self.tabs {
+            let is_live = capture
+                .is_some_and(|capture| tab.capture_session_id.as_deref() == Some(&capture.id));
+            if is_live {
+                tab.capture_complete = false;
+            }
+            if !is_live && !tab.capture_complete {
+                if let Some((path, title)) = completed(tab) {
+                    finish_tab_capture(root, tab, &path, title.as_deref())?;
+                }
+            }
+            if tab.live != is_live {
+                tab.live = is_live;
+                let dir = workspace_at(root, &tab.id)?;
+                if is_live {
+                    private_write(&dir.join(".live-tab"), b"live\n")?;
+                } else {
+                    let _ = fs::remove_file(dir.join(".live-tab"));
+                }
+                for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
+                    crate::commands::update_assistant_live_context_file(&dir.join(name), is_live);
+                }
+            }
+        }
+        self.tabs.sort_by_key(|tab| !tab.live);
+        Ok(())
+    }
+}
+
+fn completed_capture(tab: &Tab) -> Option<(String, Option<String>)> {
+    if let Some(job) = tab
+        .capture_job_id
+        .as_deref()
+        .filter(|id| valid_id(id))
+        .and_then(minutes_core::jobs::load_job)
+    {
+        if let Some(completed) = completed_job(&job) {
+            return Some(completed);
+        }
+    }
+    let id = tab
+        .capture_session_id
+        .as_deref()
+        .filter(|id| id.starts_with("ctx-"))?;
+    let links = minutes_core::context_store::list_links_for_session(id).ok()?;
+    links
+        .into_iter()
+        .rev()
+        .find(|link| {
+            link.kind == minutes_core::context_store::ContextLinkKind::MarkdownArtifact
+                && Path::new(&link.target).is_file()
+        })
+        .map(|link| (link.target, None))
+}
+
+fn completed_job(job: &minutes_core::jobs::ProcessingJob) -> Option<(String, Option<String>)> {
+    if matches!(
+        job.state,
+        minutes_core::jobs::JobState::Complete | minutes_core::jobs::JobState::NeedsReview
+    ) {
+        if let Some(path) = job
+            .output_path
+            .as_ref()
+            .filter(|path| Path::new(path).is_file())
+        {
+            return Some((path.clone(), job.title.clone()));
+        }
+    }
+    None
+}
+
+fn finish_tab_capture(
+    root: &Path,
+    tab: &mut Tab,
+    path: &str,
+    title: Option<&str>,
+) -> Result<(), String> {
+    // Only a real completion receipt may turn live focus into a saved meeting.
+    if !Path::new(path).is_file() {
+        return Ok(());
+    }
+    let dir = workspace_at(root, &tab.id)?;
+    set_focus_target(&dir, Some(path), false)?;
+    crate::context::clear_active_meeting_context(&dir)?;
+    crate::context::assistant_skills::queue_focus_notice(&dir, crate::context::assistant_skills::FocusNotice::Meeting,
+        "Recording ended. This conversation is now the meeting debrief. Read the tab's CURRENT_MEETING.md if Minutes has shared it for this question.")?;
+    tab.capture_complete = true;
+    tab.phase = Some("debrief".into());
+    tab.meeting_path = Some(path.into());
+    tab.title = title.map(str::to_string).unwrap_or_else(|| {
+        Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Meeting")
+            .replace('-', " ")
+    });
+    Ok(())
+}
+
+/// Capture has already been preserved/queued. Never wait for an optional Recall
+/// lock or filesystem write on capture/Stop; this consumer owns its own worker.
+pub(crate) fn capture_finished(
+    app: &tauri::AppHandle,
+    capture_id: Option<String>,
+    job_id: Option<String>,
+    meeting: Option<String>,
+) {
+    let Some(capture_id) = capture_id else {
+        return;
+    };
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("recall-completion".into())
+        .spawn(move || {
+            let state = app.state::<crate::commands::AppState>();
+            let Ok(mut manager) = state.pty_manager.lock() else {
+                return;
+            };
+            if !manager.tabs.loaded {
+                return;
+            }
+            let root = crate::context::workspace_dir();
+            let _ = manager.tabs.record_capture_completion(
+                &root,
+                &capture_id,
+                job_id.as_deref(),
+                meeting.as_deref(),
+            );
+            let _ = manager.tabs.save(&root);
+            let _ = app.emit_to("main", "recall:tabs-changed", &manager.tabs);
+        });
+}
+
 /// Poll only tiny tab state files, on a failure-isolated optional worker. No
 /// capture locks, channels, or Stop dependencies. UI can be closed while it runs.
 pub fn start_observer(app: tauri::AppHandle) {
@@ -629,106 +909,8 @@ pub fn start_observer(app: tauri::AppHandle) {
         // Read live state on this worker, never from capture or Stop.
         let live = minutes_core::live_transcript::session_status();
         let recording = minutes_core::pid::status();
-        let live_path = if recording.recording {
-            recording
-                .wav_path
-                .as_deref()
-                .map(|p| Path::new(p).with_extension("md"))
-        } else if live.active {
-            live.jsonl_path
-                .as_deref()
-                .map(|p| Path::new(p).with_extension("md"))
-        } else {
-            None
-        };
-        manager.tabs.pending_live_path = None;
-        if let Some(path) = &live_path {
-            let path = path.to_string_lossy().into_owned();
-            if manager.tabs.tabs.len() >= LIMIT
-                && !manager
-                    .tabs
-                    .tabs
-                    .iter()
-                    .any(|t| t.meeting_path.as_deref() == Some(&path))
-            {
-                manager.tabs.pending_live_path = Some(path.clone());
-            }
-            if !manager
-                .tabs
-                .tabs
-                .iter()
-                .any(|t| t.meeting_path.as_deref() == Some(&path))
-                && manager.tabs.tabs.len() < LIMIT
-            {
-                let active = manager.tabs.active.clone();
-                let _ = manager.tabs.open(&root, Some(&path), false);
-                manager.tabs.active = active;
-            }
-        }
-        let capture_id = live.session_id.clone().or_else(|| {
-            recording
-                .wav_path
-                .as_deref()
-                .and_then(|p| {
-                    minutes_core::context_store::get_session_for_artifact(p)
-                        .ok()
-                        .flatten()
-                })
-                .map(|s| s.id)
-        });
-        for tab in &mut manager.tabs.tabs {
-            let is_live = live_path
-                .as_ref()
-                .is_some_and(|p| tab.meeting_path.as_deref() == p.to_str());
-            if is_live {
-                tab.capture_session_id = capture_id.clone();
-                tab.capture_complete = false;
-            }
-            if !is_live && !tab.capture_complete {
-                if let Some(id) = &tab.capture_session_id {
-                    if let Ok(links) = minutes_core::context_store::list_links_for_session(id) {
-                        if let Some(link) = links.iter().find(|l| {
-                            l.kind == minutes_core::context_store::ContextLinkKind::MarkdownArtifact
-                        }) {
-                            tab.capture_complete = true;
-                            tab.phase = Some("debrief".into());
-                            if tab.meeting_path.as_deref() != Some(&link.target) {
-                                tab.meeting_path = Some(link.target.clone());
-                                tab.title = Path::new(&link.target)
-                                    .file_stem()
-                                    .and_then(|p| p.to_str())
-                                    .unwrap_or("Debrief")
-                                    .replace('-', " ");
-                                if let Ok(dir) = workspace_at(&root, &tab.id) {
-                                    let _ =
-                                        set_focus_target(&dir, tab.meeting_path.as_deref(), false);
-                                    let _ = crate::context::clear_active_meeting_context(&dir);
-                                    let _ = crate::context::assistant_skills::queue_focus_notice(&dir, crate::context::assistant_skills::FocusNotice::Meeting,
-                                        "Recording ended. This conversation is now the meeting debrief. Read the tab's CURRENT_MEETING.md if Minutes has shared it for this question.");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if tab.live != is_live {
-                tab.live = is_live;
-                if let Ok(dir) = workspace_at(&root, &tab.id) {
-                    if is_live {
-                        let _ = private_write(&dir.join(".live-tab"), b"live\n");
-                    } else {
-                        let _ = fs::remove_file(dir.join(".live-tab"));
-                    }
-                    for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
-                        crate::commands::update_assistant_live_context_file(
-                            &dir.join(name),
-                            is_live,
-                        );
-                    }
-                }
-            }
-        }
-        manager.tabs.tabs.sort_by_key(|t| !t.live);
+        let capture = active_capture(&live, &recording);
+        let _ = manager.tabs.sync_live_capture(&root, capture.as_ref());
         if before != serde_json::to_vec(&manager.tabs).ok() {
             let _ = manager.tabs.save(&root);
             let _ = app.emit_to("main", "recall:tabs-changed", &manager.tabs);
@@ -931,13 +1113,36 @@ pub fn cmd_recall_tab_open(
     new_tab: Option<bool>,
     meeting_title: Option<String>,
     phase: Option<String>,
+    capture_id: Option<String>,
 ) -> Result<TabStore, String> {
     let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
-    let id = manager.tabs.open(
-        &crate::context::workspace_dir(),
-        meeting_path.as_deref(),
-        new_tab.unwrap_or(false),
-    )?;
+    let root = crate::context::workspace_dir();
+    manager.tabs.ensure(&root)?;
+    let id = if let Some(capture_id) = capture_id {
+        if let Some(tab) = manager
+            .tabs
+            .tabs
+            .iter()
+            .find(|tab| tab.capture_session_id.as_deref() == Some(&capture_id))
+        {
+            tab.id.clone()
+        } else {
+            let capture = active_capture(
+                &minutes_core::live_transcript::session_status(),
+                &minutes_core::pid::status(),
+            )
+            .filter(|capture| capture.id == capture_id)
+            .ok_or("The recording has ended; no live tab was opened.")?;
+            let id = manager.tabs.admit_capture(&root, &capture)?;
+            manager.tabs.sync_live_capture(&root, Some(&capture))?;
+            id
+        }
+    } else {
+        manager
+            .tabs
+            .open(&root, meeting_path.as_deref(), new_tab.unwrap_or(false))?
+    };
+    manager.tabs.active = Some(id.clone());
     manager
         .tabs
         .set_presentation(&id, meeting_title.as_deref(), phase.as_deref());
@@ -1266,5 +1471,195 @@ mod shell_tests {
                 Some("manual-session")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn recording_identity_survives_relay_shutdown_without_guessing_an_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("recording.pid");
+        assert!(recording_capture_id_at(&path).is_none());
+        fs::write(&path, "42").unwrap();
+        let first = recording_capture_id_at(&path).unwrap();
+        assert!(first.starts_with("recording:42:"));
+        assert_eq!(recording_capture_id_at(&path).as_ref(), Some(&first));
+        fs::write(&path, "43").unwrap();
+        assert_ne!(recording_capture_id_at(&path).as_ref(), Some(&first));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn live_without_a_saved_meeting_never_materializes_general_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("live");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join(".live-tab"), "live").unwrap();
+        fs::write(workspace.join("CURRENT_MEETING.md"), "stale meeting").unwrap();
+        fs::write(workspace.join("ASSISTANT_CONTEXT.md"), "stale history").unwrap();
+        let config = minutes_core::Config {
+            output_dir: temp.path().join("missing-corpus-must-not-be-read"),
+            ..Default::default()
+        };
+        crate::commands::materialize_recall_terminal_context(&workspace, &config, None).unwrap();
+        assert!(!workspace.join("CURRENT_MEETING.md").exists());
+        assert!(!workspace.join("ASSISTANT_CONTEXT.md").exists());
+    }
+
+    #[test]
+    fn live_admission_at_cap_is_idempotent_and_has_no_invented_meeting() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut store = TabStore::default();
+        for _ in 0..LIMIT {
+            store.open(root, None, true).unwrap();
+        }
+        let capture = ActiveCapture {
+            id: "relay:producer-a".into(),
+            title: "Live call".into(),
+        };
+        store
+            .sync_live_capture_with(root, Some(&capture), |_| None)
+            .unwrap();
+        assert_eq!(store.tabs.len(), LIMIT);
+        assert_eq!(store.pending_live_id.as_deref(), Some("relay:producer-a"));
+        let closed = store.tabs[0].id.clone();
+        store.remove(&closed);
+        store
+            .sync_live_capture_with(root, Some(&capture), |_| None)
+            .unwrap();
+        let id = store.tabs[0].id.clone();
+        assert!(store.tabs[0].live);
+        assert_eq!(store.tabs[0].title, "Live call");
+        assert!(store.tabs[0].meeting_path.is_none());
+        assert!(store.pending_live_id.is_none());
+        assert_eq!(store.admit_capture(root, &capture).unwrap(), id);
+        assert_eq!(store.tabs.len(), LIMIT);
+        store.sync_live_capture_with(root, None, |_| None).unwrap();
+        assert!(!store.tabs[0].live);
+        assert!(store.tabs[0].phase.is_none());
+        assert!(store.tabs[0].meeting_path.is_none());
+        assert!(!workspace_at(root, &id).unwrap().join(".live-tab").exists());
+    }
+
+    #[test]
+    fn failed_then_retried_exact_job_moves_only_its_tab_and_focus_on_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("assistant");
+        let meeting = temp.path().join("renamed-meeting.md");
+        fs::write(
+            &meeting,
+            "synthetic artifact; never materialized by completion",
+        )
+        .unwrap();
+        let mut store = TabStore::default();
+        let prep = store.open(&root, None, true).unwrap();
+        let capture = ActiveCapture {
+            id: "relay:producer-a".into(),
+            title: "Live call".into(),
+        };
+        store
+            .sync_live_capture_with(&root, Some(&capture), |_| None)
+            .unwrap();
+        let id = store.tabs[0].id.clone();
+        store
+            .record_capture_completion(&root, "relay:other-producer", Some("wrong-job"), None)
+            .unwrap();
+        assert!(store.tabs[0].capture_job_id.is_none());
+        store
+            .record_capture_completion(&root, &capture.id, Some("job-a"), None)
+            .unwrap();
+        let mut job: minutes_core::jobs::ProcessingJob = serde_json::from_value(serde_json::json!({
+            "id":"job-a", "mode":"live-transcript", "content_type":"meeting", "title":"Saved call",
+            "audio_path":"synthetic.wav", "output_path":meeting, "state":"failed", "created_at":chrono::Local::now()
+        })).unwrap();
+        for state in [
+            minutes_core::jobs::JobState::Failed,
+            minutes_core::jobs::JobState::Queued,
+            minutes_core::jobs::JobState::Saving,
+        ] {
+            job.state = state;
+            store
+                .sync_live_capture_with(&root, None, |tab| {
+                    if tab.capture_job_id.as_deref() == Some(&job.id) {
+                        completed_job(&job)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert!(store.tabs[0].meeting_path.is_none());
+            assert!(!store.tabs[0].capture_complete);
+        }
+        job.state = minutes_core::jobs::JobState::Complete;
+        store
+            .sync_live_capture_with(&root, None, |tab| {
+                if tab.capture_job_id.as_deref() == Some(&job.id) {
+                    completed_job(&job)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let tab = store.tabs.iter().find(|tab| tab.id == id).unwrap();
+        assert!(tab.capture_complete);
+        assert_eq!(tab.phase.as_deref(), Some("debrief"));
+        assert_eq!(tab.title, "Saved call");
+        assert_eq!(tab.meeting_path.as_deref(), meeting.to_str());
+        let dir = workspace_at(&root, &id).unwrap();
+        let focus: FocusTarget =
+            serde_json::from_slice(&fs::read(dir.join(".recall-focus.json")).unwrap()).unwrap();
+        assert_eq!(focus.meeting_path.as_deref(), meeting.to_str());
+        assert!(!focus.context_ready);
+        assert!(
+            !dir.join("CURRENT_MEETING.md").exists(),
+            "completion never reads the meeting into prompt context"
+        );
+        assert!(store
+            .tabs
+            .iter()
+            .find(|tab| tab.id == prep)
+            .unwrap()
+            .meeting_path
+            .is_none());
+        store.save(&root).unwrap();
+        fs::remove_file(&meeting).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(&root).unwrap();
+        let tab = restored.tabs.iter().find(|tab| tab.id == id).unwrap();
+        assert!(tab.meeting_path.is_none());
+        assert!(tab.note.as_ref().unwrap().contains("deleted"));
+        let focus: FocusTarget =
+            serde_json::from_slice(&fs::read(dir.join(".recall-focus.json")).unwrap()).unwrap();
+        assert!(focus.meeting_path.is_none());
+    }
+
+    #[test]
+    fn missing_artifact_or_failed_focus_write_cannot_mark_capture_complete() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("assistant");
+        let mut store = TabStore::default();
+        let id = store.open(&root, None, true).unwrap();
+        let tab = store.tabs.iter_mut().find(|tab| tab.id == id).unwrap();
+        finish_tab_capture(
+            &root,
+            tab,
+            temp.path().join("missing.md").to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        assert!(!tab.capture_complete);
+        let meeting = temp.path().join("saved.md");
+        fs::write(&meeting, "synthetic").unwrap();
+        let blocked = temp.path().join("not-a-directory");
+        fs::write(&blocked, "blocked").unwrap();
+        assert!(finish_tab_capture(&blocked, tab, meeting.to_str().unwrap(), None).is_err());
+        assert!(
+            !tab.capture_complete,
+            "observer must be able to retry a focus-file failure"
+        );
     }
 }

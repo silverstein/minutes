@@ -3334,6 +3334,9 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .meeting-title-row { display: flex; align-items: center; gap: 6px; }
+    .meeting-title-row > .meeting-title { flex: 1; min-width: 0; }
+    .meeting-title-row > [data-recall-meeting] { flex-shrink: 0; }
 
     .document-title {
       font-size: var(--text-sm);
@@ -12752,7 +12755,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
       const recallStatus = document.createElement('span');
       recallStatus.dataset.recallMeeting = m.path;
-      title.appendChild(recallStatus);
+      const titleRow = document.createElement('div');
+      titleRow.className = 'meeting-title-row';
+      titleRow.append(title, recallStatus);
       window.MinutesRecallTabs?.renderMeetingStatus(recallStatus, m.path);
 
       const meta = document.createElement('div');
@@ -12765,7 +12770,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const kindLabel = { memo: 'Memo', dictation: 'Dictation' }[m.content_type] || '';
       meta.textContent = kindLabel ? `${when} · ${kindLabel}` : when;
 
-      info.appendChild(title);
+      info.appendChild(titleRow);
       info.appendChild(meta);
 
       if (activeSearchQuery && m.snippet) {
@@ -17499,10 +17504,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
     async function openRecallImpl(mode, meetingPath, options = {}) {
       const requestedMeeting = meetingPath || null;
-      const experience = options.tabId || options.newTab
+      const experience = options.tabId || options.newTab || options.captureId
         ? { mode: 'deferred', meetingPath: null }
         : await chooseRecallExperience(mode, meetingPath);
-      if (options.tabId || options.newTab || requestedMeeting) { recallDevMode = true; syncRecallModeControls(); }
+      if (options.tabId || options.newTab || options.captureId || requestedMeeting) { recallDevMode = true; syncRecallModeControls(); }
       mode = experience.mode;
       meetingPath = experience.meetingPath;
       recallLoading.classList.add('active');
@@ -17543,7 +17548,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       try {
         const model = options.tabId
           ? await invoke('cmd_recall_tabs')
-          : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab, meetingTitle: options.meetingTitle || lastMeetingInventory.find(meeting => meeting.path === requestedMeeting)?.title || null, phase: options.phase || null });
+          : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab, captureId: options.captureId || null, meetingTitle: options.meetingTitle || lastMeetingInventory.find(meeting => meeting.path === requestedMeeting)?.title || null, phase: options.phase || null });
         const target = recallStateFor(options.tabId || model.active);
         if (options.newTab) target.untouched = true;
         await activateRecallTab(options.tabId || model.active, model);
@@ -17697,7 +17702,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function showRecallTabLimit(mode, path, options) {
       recallTabsController.chooseFinished(id => closeRecallTab(id, false, () => openRecall(mode, path, options)));
     }
-    currentWindow.listen('recall:tabs-changed', ({ payload: model }) => {
+    function applyRecallTabsModel(model) {
       model = withRecallMeetingTitles(model);
       recallTabsModel = model;
       for (const metadata of model.tabs) {
@@ -17708,8 +17713,33 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabsController.update({ ...model, active: SESSION_ID });
       refreshRecallContextChips();
       if (recallPhase !== 'weekly') renderRecallTabHeader(model.tabs.find(tab => tab.id === SESSION_ID));
-      if (model.pending_live_path) recallTabsController.chooseFinished(id => closeRecallTab(id, false, () => openRecall('meeting', model.pending_live_path)));
-      recallOpenQueue = recallOpenQueue.then(() => ensureRecallTabProcesses(model)).catch(error => console.error('Recall background tab:', error));
+      recallTabsController.syncPendingLive(model.pending_live_id, id => closeRecallTab(id, false, () => openRecall('assistant', null, { captureId: model.pending_live_id })));
+      // Metadata/phase changes can alter the available height without PTY
+      // output. Reveal and repaint the selected idle terminal after layout.
+      if (recallExpanded && recallDevMode && recallPhase !== 'weekly' && activeRecallState().alive) {
+        recallTerminalContainer.classList.remove('hidden');
+        requestAnimationFrame(() => fitRecallTerminal());
+      }
+    }
+    function refreshRecallAfterCapture() {
+      const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+      if (recallDevMode && tab && recallPhase !== 'weekly') {
+        renderRecallTabHeader({ ...tab, live: false });
+        if (recallExpanded && activeRecallState().alive) {
+          recallTerminalContainer.classList.remove('hidden');
+          requestAnimationFrame(() => fitRecallTerminal());
+        }
+      }
+      scheduleMeetingsRefresh(0);
+    }
+    currentWindow.listen('recall:tabs-changed', () => {
+      // Events and command replies can interleave. Fetch current state inside
+      // the operation queue rather than reapplying an old cap/order snapshot.
+      recallOpenQueue = recallOpenQueue.then(async () => {
+        const model = await invoke('cmd_recall_tabs');
+        applyRecallTabsModel(model);
+        await ensureRecallTabProcesses(model);
+      }).catch(error => console.error('Recall background tab:', error));
     });
     // Start background PTYs without selecting them or moving keyboard focus.
     async function ensureRecallTabProcesses(model) {
@@ -19119,6 +19149,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       hideLiveCallWarning();
       liveBar.classList.remove('active');
       setFooterCaptureMode(false);
+      refreshRecallAfterCapture();
       const processing = !!event.payload?.processing;
       if (processing) {
         statusPill.className = 'status-pill processing';
@@ -19389,22 +19420,24 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       if (recallExpanded) {
         if (isRecording && !prevRecording) {
-          setRecallPhase('listening', null);
+          if (recallDevMode) renderRecallTabHeader(recallTabsModel.tabs.find(tab => tab.id === SESSION_ID));
+          else setRecallPhase('listening', null);
           quickNote.classList.remove('active');
         } else if (!isRecording && prevRecording) {
           // Stop recording → leave the "Listening" pulse immediately. The agent
           // can already discuss what was said from the in-memory transcript while
           // the summary finishes; staying on 'listening' through the entire
           // processing window misrepresents what's happening.
-          setRecallPhase('debrief', null);
+          if (!recallDevMode) setRecallPhase('debrief', null);
         } else if (!isRecording && !isProcessing && recallPhase === 'listening') {
           setRecallPhase('recall', null);
         }
       }
 
       if (!isRecording && prevRecording) {
+        refreshRecallAfterCapture();
         if (!recallExpanded) {
-          autoExpandRecall('debrief', null);
+          autoExpandRecall(recallDevMode ? 'assistant' : 'debrief', null);
         }
       }
 

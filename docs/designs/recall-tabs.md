@@ -8,7 +8,8 @@ status render from the same metadata snapshot.
 ## Workspace and migration
 
 `~/.minutes/assistant/recall-tabs.json` holds tab order, active tab, meeting path,
-Claude session ID and capture session ID. Each tab owns `tabs/<id>/`, including
+Claude session ID, capture identity and exact processing job ID. Each tab owns
+`tabs/<id>/`, including
 `CLAUDE.md`, `AGENTS.md`, `CURRENT_MEETING.md`, `CURRENT_ARTIFACT.md`, skills and
 focus notices. The parent instruction files are neutral so nested Claude sessions
 cannot inherit another tab's live or stored meeting focus. Newly authored tab
@@ -71,13 +72,22 @@ conversation resume are specific to Claude Code.
 
 ## Live call and isolation
 
-The optional observer reads existing capture status; capture and Stop do not
-call it or wait for it. Only the matching live tab receives `.live-tab` and the
+The optional observer reads existing capture status. After desktop capture is
+preserved and queued, a separate Recall worker receives the exact producer and
+processing job IDs; capture and Stop never wait for Recall locks or writes.
+Only the matching live tab receives `.live-tab` and the
 bounded live-transcript guidance. Prep and free-chat workspaces have no active
 live section. Recording may precede finalized Markdown: a question in that live
 tab can use its bounded reader guidance without reading unrelated meeting
-history. On completion the capture's canonical Markdown link moves the same tab
-into debrief, even when summarization changed the filename.
+history. A live tab is labelled Live call (or its existing capture title), with
+no invented meeting path. A namespaced recording-owner/version or relay identity
+is used when desktop context tracking is off; this does not enable desktop
+context collection. On
+completion the exact job output or capture's canonical Markdown link moves that
+same tab and its per-tab focus into debrief, even after failed processing and
+a later successful Retry, or when summarization changed the filename. A stopped
+capture without a saved meeting remains a conversation rather than a debrief
+of a nonexistent file.
 
 Stored meeting/history materialization remains deferred until a real question
 passes the running provider's authentication check. For shell tabs, only Claude's
@@ -91,7 +101,10 @@ A deleted meeting restores as chat with a visible note and cleared stored focus.
 ## UI and qualification
 
 Free chats have stable numbered names, including an upgrade of existing generic
-Chat labels. The cap chooser uses the same name and current shortcut position.
+Chat labels. The cap chooser uses the same name and current shortcut position,
+refreshes its choices on metadata changes, excludes live tabs, and dismisses
+when its pending live capture is admitted. Admission by capture ID is idempotent
+if closing a tab races the observer; it never opens a guessed meeting path.
 New Chat reuses a new, known-untouched shell tab in the current app session; any
 human input, saved Claude session, live binding, draft or uncertain line excludes
 it. Restored shells are not assumed to be empty.

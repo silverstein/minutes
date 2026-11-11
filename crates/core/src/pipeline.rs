@@ -3578,6 +3578,12 @@ pub struct BackgroundPipelineContext {
     pub calendar_event: Option<crate::calendar::CalendarEvent>,
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
+    /// The title for decode hints and the calendar match in
+    /// [`transcribe_to_artifact`], when it is not the `title` argument.
+    /// `Some(None)` is an untitled call. A queued job sets it to the title it
+    /// was queued with: a retry gets the generated display title as `title`,
+    /// and hints from that title would reject every finished span.
+    pub decode_title: Option<Option<String>>,
     pub recording_health: Option<crate::markdown::RecordingHealth>,
     /// Canonical context session for desktop and screen evidence captured
     /// alongside this recording.
@@ -5048,9 +5054,13 @@ fn transcribe_to_artifact_with_authority(
         }
     }
 
+    let decode_title = decode_title(title, context);
     let matched_event = if content_type == ContentType::Meeting {
         context.calendar_event.clone().or_else(|| {
-            select_calendar_event(&crate::calendar::events_overlapping(recording_date), title)
+            select_calendar_event(
+                &crate::calendar::events_overlapping(recording_date),
+                decode_title,
+            )
         })
     } else {
         None
@@ -5061,7 +5071,7 @@ fn transcribe_to_artifact_with_authority(
         .unwrap_or_default();
     let vocabulary = load_vocabulary_for_decode_hints();
     let mut decode_hints = queued_meeting_decode_hints_for_event(
-        title,
+        decode_title,
         context.pre_context.as_deref(),
         matched_event.as_ref(),
         config,
@@ -5143,6 +5153,18 @@ fn transcribe_to_artifact_with_authority(
         ),
     }
     artifact
+}
+
+/// The title that decode hints and the calendar match use: the context's
+/// decode title when it has one, else the display `title`.
+fn decode_title<'a>(
+    title: Option<&'a str>,
+    context: &'a BackgroundPipelineContext,
+) -> Option<&'a str> {
+    match &context.decode_title {
+        Some(decode_title) => decode_title.as_deref(),
+        None => title,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12027,6 +12049,32 @@ mod tests {
             ],
         );
         assert_eq!(merged, vec!["Andrea", "Dan", "Samantha", "Mat"]);
+    }
+
+    #[test]
+    fn a_retry_builds_decode_hints_from_the_queued_title() {
+        // A retry gets the generated display title. Hints from it would
+        // differ from the first attempt's, and reject every finished span.
+        let config = Config::default();
+        let hints = |title| queued_meeting_decode_hints_for_event(title, None, None, &config, None);
+        let shown = Some("Roadmap review with Priya Raman");
+        assert_ne!(hints(None), hints(shown));
+
+        let untitled = BackgroundPipelineContext {
+            decode_title: Some(None),
+            ..BackgroundPipelineContext::default()
+        };
+        assert_eq!(decode_title(shown, &untitled), None);
+        let titled = BackgroundPipelineContext {
+            decode_title: Some(Some("Planning".into())),
+            ..BackgroundPipelineContext::default()
+        };
+        assert_eq!(decode_title(shown, &titled), Some("Planning"));
+        // Hosts that set no decode title keep using the title argument.
+        assert_eq!(
+            decode_title(shown, &BackgroundPipelineContext::default()),
+            shown
+        );
     }
 
     #[test]

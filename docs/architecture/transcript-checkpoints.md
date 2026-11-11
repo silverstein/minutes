@@ -9,10 +9,11 @@ a host supplies a checkpoint. Without one, processing is unchanged.
 - `transcript_checkpoint::transcribe_span(samples, start_sample, source, config, hints)`
   transcribes one span of a source: the microphone stem, the system stem, or a
   single-source meeting recording. `samples` are the source's canonical 16 kHz
-  mono samples from `start_sample`. It runs the same meeting VAD chunking, decoder
-  settings and per-source options as the final pass (independent stems keep the
-  shared clock and have no per-source word minimum). It returns the span's
-  `[m:ss]` lines on the source clock, before transcript cleanup.
+  mono samples from `start_sample`. It runs the same decode plan (meeting VAD
+  chunks packed into decode groups), decoder settings and per-source options as
+  the final pass (independent stems keep the shared clock and have no per-source
+  word minimum). It returns the span's `[m:ss]` lines on the source clock, before
+  transcript cleanup.
 - `transcript_checkpoint::decode_hints_for_queued_meeting(title, pre_context, config)`
   returns the decode hints a queued meeting job builds when no calendar event
   matches it.
@@ -22,7 +23,10 @@ a host supplies a checkpoint. Without one, processing is unchanged.
   a retry can use them. A checkpoint that cannot be written is dropped with a
   warning; the job still queues.
 
-Cut spans in a pause, so no word is split between two spans.
+Start and end a span only at a cut of the source's decode plan:
+`decode_groups::DecodePlan::for_growing_source(samples, target).cuts()`, where
+`samples` start at the source start or at an earlier cut. See
+[Decode groups](#decode-groups).
 
 ## Reusing a decoder during capture
 
@@ -48,9 +52,16 @@ a span only when all of these hold:
 - its settings fingerprint matches the final pass for that source: core version,
   effective engine, the transcription config, and the decode hints (a different
   title, vocabulary or calendar match changes the hints);
-- its SHA-256 over the canonical samples matches the same range of the final file.
+- its SHA-256 over the canonical samples matches the same range of the final file;
+- its decode groups are the final pass's groups for that range: no group crosses
+  either edge of the span.
 
-Ranges that no accepted span covers are VAD-chunked and transcribed as usual.
+The settings fingerprint also names the decode strategy: one call per chunk, or
+groups with their target, loop thresholds and retry policy. A span made with
+another strategy is rejected even when the core version, settings and audio match.
+
+The final pass plans the decode groups of the whole source once. Groups that no
+accepted span covers are transcribed as usual.
 Span lines and new lines are joined in source order, and the transcript cleanup
 pipeline (dedup, noise trimming) then runs once over the whole source, as it does
 without checkpoints. Rejected spans are logged with the reason.
@@ -71,11 +82,41 @@ whoever can write those can already change the meeting. Do not treat the hash as
 an integrity check on the text, and do not accept checkpoints from a less
 trusted writer than the job itself.
 
+## Decode groups
+
+Whisper encodes a 30 s window for every call, so one call per short VAD chunk
+spends most of its work on padding. The Whisper meeting path packs adjacent VAD
+chunks into decode groups (`decode_groups`), and decodes each group in one call.
+The same plan is used by the whole-file pass, checkpoint spans and the gaps
+between accepted spans.
+
+- Groups are packed greedily from the start of each source. A chunk joins the
+  open group while the group's chunk audio stays at most 30 s
+  (`WHISPER_GROUP_TARGET_SAMPLES`). Pauses between chunks do not count.
+- 30 s is a packing target, not a maximum. The VAD chunker splits speech without
+  a pause at 45 s, and such a chunk is a group of its own.
+- Whisper gets the chunks of a group back to back, without the pauses between
+  them: the same audio as one call per chunk. Each line is mapped back to the
+  source clock through the chunk that holds most of its segment.
+- A cut is the point after a group where the VAD chunker resets: 800 ms after the
+  group's last chunk, or at its end for a 45 s split. A span from one cut to
+  another gets the same chunks and groups as the whole source. During a
+  recording, a group whose end is not known yet, because the open chunk after it
+  could still join it, has no cut. Stop leaves it to the final pass.
+- Loop guard: when a line of a group with more than one chunk is a repetition
+  loop inside one segment (`whisper_guard::find_repetition_loop`: a phrase 4+
+  times back to back, 16+ words), the group is decoded again once, one call per
+  chunk. That output is kept, even if it loops again, because it is what one
+  call per chunk produced before groups. The retry happens in the same way in
+  all three paths.
+- Other engines keep one call per chunk: their plan has one chunk per group.
+
 ## Equivalence
 
-Chunks are decoded independently, so a span's lines are what the final pass would
-produce for the same chunks. VAD chunk boundaries next to a span cut can differ
-from a whole-file pass. On synthetic two-stem calls (Whisper `small`, 120 s spans
-cut at the quietest 100 ms of their last 15 s), the word error rate against the
-reference was 8.4% against 8.3% (20 minutes) and 8.3% against 8.3% (60 minutes),
-inside the run-to-run variation of Whisper on Metal.
+Groups are decoded independently, so a span's lines are what the final pass would
+produce for the same groups. Before decode groups, VAD chunk boundaries next to a
+span cut could differ from a whole-file pass. On synthetic two-stem calls
+(Whisper `small`, 120 s spans cut at the quietest 100 ms of their last 15 s), the
+word error rate against the reference was 8.4% against 8.3% (20 minutes) and 8.3%
+against 8.3% (60 minutes), inside the run-to-run variation of Whisper on Metal.
+Spans now end only at cuts, and the final pass rejects a span whose groups differ.

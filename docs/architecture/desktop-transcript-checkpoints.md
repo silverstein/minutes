@@ -29,6 +29,12 @@ longest pause after it. A span that reaches 180 seconds takes the latest cut in
 the span. Only with none at all does it fall back to the quietest 100 ms window.
 The final pass rejects such a span if its groups differ. The next span begins at
 that cut, on the same source clock.
+After Stop, the final pass adds the groups it finishes to the same job file
+(see [final-pass progress](transcript-checkpoints.md#final-pass-progress)). If
+the app quits or the worker crashes during processing, the next worker reuses the
+spans from the call and from the interrupted attempt, and transcribes only the
+rest.
+
 The canonical reader uses the final WAV decoder's sinc resampler, retaining its
 phase and lookahead across polls. It does not use the live sidecar's decimator.
 The final decoder can normalize quiet files by their whole-file peak. Until the

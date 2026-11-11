@@ -100,6 +100,9 @@ try {
   await page.waitForFunction(()=>fixture.snapshot('one').pty.cols===fixture.snapshot('one').terminal.cols && fixture.snapshot('one').terminal.cols<80);
   await page.getByRole('button',{name:'New Recall chat'}).click();
   assert.deepEqual(await page.evaluate(()=>fixture.opens.at(-1)),['assistant',null,{tabId:'one'}], 'new chat reuses known untouched shell');
+  await page.evaluate(()=>{for(const tab of fixture.tabs.values())tab.shell=false;fixture.newChat();});
+  assert.deepEqual(await page.evaluate(()=>fixture.opens.at(-1)),['assistant',null,{newTab:true}], 'direct agent processes are not assumed to be unused shells');
+  await page.evaluate(()=>{for(const tab of fixture.tabs.values())tab.shell=true;});
   await page.evaluate(()=>{for(const tab of fixture.tabs.values())tab.untouched=false;Object.assign(fixture.tabs.get('one'),{untouched:true,draft:'unsent shell input'});fixture.newChat();});
   assert.deepEqual(await page.evaluate(()=>fixture.opens.at(-1)),['assistant',null,{newTab:true}], 'a draft is never reused as an empty chat');
   await page.evaluate(()=>{for(const tab of fixture.tabs.values())tab.untouched=false;fixture.newChat();});

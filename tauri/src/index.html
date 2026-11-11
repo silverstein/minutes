@@ -17545,7 +17545,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           ? await invoke('cmd_recall_tabs')
           : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab, meetingTitle: options.meetingTitle || lastMeetingInventory.find(meeting => meeting.path === requestedMeeting)?.title || null, phase: options.phase || null });
         const target = recallStateFor(options.tabId || model.active);
-        if (options.newTab && !target.initialized) target.untouched = true;
+        if (options.newTab) target.untouched = true;
         await activateRecallTab(options.tabId || model.active, model);
       } catch (error) {
         recallLoading.classList.remove('active');
@@ -17623,7 +17623,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const state = recallTabStates.get(metadata.id);
         return !metadata.meeting_path && !metadata.live && !metadata.capture_session_id
           && !metadata.claude_session_id && !metadata.claude_active && metadata.status === 'done'
-          && state?.untouched && state.alive && !state.draft && state.reliable;
+          && state?.shell && state.untouched && state.alive && !state.draft && state.reliable;
       });
       return openRecall('assistant', null, empty ? { tabId: empty.id } : { newTab: true });
     }

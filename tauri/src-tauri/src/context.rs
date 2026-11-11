@@ -42,7 +42,7 @@ fn intent_label(kind: IntentKind) -> &'static str {
     }
 }
 
-/// Stable assistant workspace used by the singleton assistant session.
+/// Shared assistant asset root containing independent per-tab workspaces.
 pub fn workspace_dir() -> PathBuf {
     Config::minutes_dir().join("assistant")
 }
@@ -188,10 +188,14 @@ fn sync_assistant_skill_mirrors(workspace: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure the singleton assistant workspace exists and return its path.
+/// Ensure the shared assistant asset root exists and return its path.
 pub fn create_workspace(config: &Config) -> Result<PathBuf, String> {
-    let workspace = workspace_dir();
+    create_workspace_at(config, &workspace_dir())
+}
 
+/// Create an isolated assistant workspace without changing another tab.
+pub fn create_workspace_at(config: &Config, workspace: &Path) -> Result<PathBuf, String> {
+    let workspace = workspace.to_path_buf();
     fs::create_dir_all(&workspace).map_err(|e| format!("Failed to create workspace: {}", e))?;
 
     let meetings_link = workspace.join("meetings");
@@ -608,11 +612,17 @@ fn live_transcript_active() -> bool {
     minutes_core::live_transcript::session_status().active
 }
 
+#[cfg(test)]
 pub fn write_assistant_context(workspace: &Path, config: &Config) -> Result<(), String> {
     let claude_md_path = workspace.join("CLAUDE.md");
     let assistant_md = generate_assistant_context(config)?;
     let existing = std::fs::read_to_string(&claude_md_path).unwrap_or_default();
-    let content = merge_live_transcript_section(&assistant_md, &existing, live_transcript_active());
+    let content = merge_live_transcript_section(
+        &assistant_md,
+        &existing,
+        workspace.join(".live-tab").is_file()
+            || (!workspace_dir().join("recall-tabs.json").is_file() && live_transcript_active()),
+    );
 
     for file_name in ASSISTANT_INSTRUCTION_FILES {
         write_atomic(&workspace.join(file_name), &content)?;
@@ -652,7 +662,12 @@ Do not attribute a statement to a named person unless the meeting context verifi
 {ARTIFACT_INSTRUCTION}\n"
     );
     let existing = std::fs::read_to_string(workspace.join("CLAUDE.md")).unwrap_or_default();
-    let content = merge_live_transcript_section(&deferred, &existing, live_transcript_active());
+    let content = merge_live_transcript_section(
+        &deferred,
+        &existing,
+        workspace.join(".live-tab").is_file()
+            || (!workspace_dir().join("recall-tabs.json").is_file() && live_transcript_active()),
+    );
 
     for file_name in ASSISTANT_INSTRUCTION_FILES {
         write_atomic(&workspace.join(file_name), &content)?;

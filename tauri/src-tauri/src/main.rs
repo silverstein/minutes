@@ -31,6 +31,7 @@ mod dictation_field;
 mod palette_dispatch;
 mod parakeet_install_commands;
 mod pty;
+mod recall_tabs;
 mod recording_audio;
 mod secret_store;
 mod semantic_commands;
@@ -1837,6 +1838,9 @@ fn spawn_meetings_refresh_watcher(app: &tauri::AppHandle, output_dir: std::path:
 }
 
 fn main() {
+    if let Some(code) = recall_tabs::maybe_run_hook() {
+        std::process::exit(code);
+    }
     if let Some(code) = minutes_core::graph_worker::maybe_run_policy_projection_worker() {
         std::process::exit(code);
     }
@@ -2316,6 +2320,7 @@ fn main() {
             shortcut_manager::ShortcutManager::new(),
         )))
         .setup(move |app| {
+            recall_tabs::start_observer(app.handle().clone());
             customize_theme::apply_at_startup(app.handle());
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
@@ -3431,6 +3436,10 @@ fn main() {
             commands::cmd_recall_chat_readiness,
             commands::cmd_prepare_recall_terminal_meeting,
             commands::cmd_spawn_terminal,
+            recall_tabs::cmd_recall_tabs,
+            recall_tabs::cmd_recall_tab_open,
+            recall_tabs::cmd_recall_tab_select,
+            recall_tabs::cmd_recall_tab_close,
             commands::cmd_pty_input,
             commands::cmd_pty_resize,
             commands::cmd_pty_kill,

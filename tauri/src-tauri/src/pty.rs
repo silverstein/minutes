@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use tauri::Emitter;
 
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
-const MAX_SESSIONS: usize = 1;
+pub const MAX_SESSIONS: usize = 4;
 
 /// A signed app's assistant must use that same app's CLI, including when the
 /// regular app and Minutes Dev are installed at different versions.
@@ -150,13 +150,13 @@ pub struct SpawnConfig {
 #[derive(Default)]
 pub struct PtyManager {
     sessions: HashMap<String, PtySession>,
+    pub tabs: crate::recall_tabs::TabStore,
 }
 
 impl PtyManager {
     pub fn assistant_session_id(&self) -> Option<String> {
-        self.sessions
-            .contains_key(ASSISTANT_SESSION_ID)
-            .then(|| ASSISTANT_SESSION_ID.to_string())
+        let id = self.tabs.active.as_deref().unwrap_or(ASSISTANT_SESSION_ID);
+        self.sessions.contains_key(id).then(|| id.to_string())
     }
 
     pub fn session_title(&self, session_id: &str) -> Option<String> {
@@ -191,24 +191,11 @@ impl PtyManager {
             .map(|session| session.context_dir.clone())
     }
 
-    pub fn set_session_title(
-        &mut self,
-        session_id: &str,
-        title: impl Into<String>,
-    ) -> Result<(), String> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or("Session not found")?;
-        session.title = title.into();
-        Ok(())
-    }
-
     /// Spawn a new PTY session running the given command.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(&mut self, cfg: SpawnConfig, cols: u16, rows: u16) -> Result<(), String> {
         if self.sessions.len() >= MAX_SESSIONS {
-            return Err("Minutes only supports one assistant session at a time.".into());
+            return Err("Recall supports at most four tabs. Close a finished tab first.".into());
         }
 
         if self.sessions.contains_key(&cfg.session_id) {

@@ -47,14 +47,15 @@ claude mcp add minutes -- npx -y minutes-mcp
 minutes demo --full
 ```
 
-> What did we decide about monthly billing, and did it stick?
+> What did Da5id promise about the rendering pipeline, and did he deliver?
 
-The answer spans two meetings a month apart: launched on Feb 28, reversed on Mar 25.
+Da5id promised a fix by Friday in Metaverse Infrastructure Standup. In Intel
+Debrief, Hiro reported that the fix still hadn't landed.
 
 A direct MCP call uses the same local meeting files:
 
 ```text
-search_meetings({"query":"monthly billing decision"})
+search_meetings({"query":"rendering pipeline"})
 ```
 
 Record a real one with `minutes record`, then `minutes stop` to transcribe. `minutes demo --clean` removes the samples.

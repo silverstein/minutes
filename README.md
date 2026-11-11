@@ -22,13 +22,17 @@ Capture, transcription, and storage run locally. If you choose a cloud AI assist
 Choose the desktop app or one standalone CLI installation. The desktop app
 includes a CLI: use **About Minutes → Set up CLI** to add it to your PATH.
 
+**On Linux x86-64**, follow the [prebuilt CLI quickstart](docs/install.md#linux)
+for Ubuntu 24.04 or a compatible distribution. The same guide covers building
+from source on older distributions.
+
 ```bash
 brew install --cask silverstein/tap/minutes  # Desktop app, with bundled CLI
 brew install silverstein/tap/minutes         # Standalone CLI alternative
 cargo install minutes-cli                   # Standalone CLI via Cargo
 ```
 
-For an agent connection, add the MCP server separately with
+For an agent connection, we recommend Node.js 22. Add the MCP server with
 `claude mcp add minutes -- npx -y minutes-mcp` (or run `npx minutes-mcp`
 from another MCP client).
 
@@ -43,14 +47,15 @@ claude mcp add minutes -- npx -y minutes-mcp
 minutes demo --full
 ```
 
-> What did we decide about monthly billing, and did it stick?
+> What did Da5id promise about the rendering pipeline, and did he deliver?
 
-The answer spans two meetings a month apart: launched on Feb 28, reversed on Mar 25.
+Da5id promised a fix by Friday in Metaverse Infrastructure Standup. In Intel
+Debrief, Hiro reported that the fix still hadn't landed.
 
 A direct MCP call uses the same local meeting files:
 
 ```text
-search_meetings({"query":"monthly billing decision"})
+search_meetings({"query":"rendering pipeline"})
 ```
 
 Record a real one with `minutes record`, then `minutes stop` to transcribe. `minutes demo --clean` removes the samples.

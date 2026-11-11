@@ -1366,6 +1366,13 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             // fail and the app exits at startup (#1322).
             Some("CmdOrCtrl+Shift+N"),
         )?;
+        let close_item = MenuItem::with_id(
+            app,
+            "app-close-context",
+            tr("Close"),
+            true,
+            Some("CmdOrCtrl+W"),
+        )?;
         let list_item = MenuItem::with_id(
             app,
             "app-open-meetings-folder",
@@ -1382,7 +1389,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 .item(&note_item)
                 .item(&list_item)
                 .separator()
-                .close_window()
+                .item(&close_item)
                 .build()?
         }
 
@@ -1397,7 +1404,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                 .item(&note_item)
                 .item(&list_item)
                 .separator()
-                .close_window()
+                .item(&close_item)
                 .item(&quit_item)
                 .build()?
         }
@@ -1417,6 +1424,13 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let view_menu = SubmenuBuilder::new(app, tr("View")).fullscreen().build()?;
 
     let window_menu = {
+        let close_item = MenuItem::with_id(
+            app,
+            "app-close-window",
+            tr("Close Window"),
+            true,
+            None::<&str>,
+        )?;
         let bring_all_to_front = MenuItem::with_id(
             app,
             "window-bring-all-to-front",
@@ -1430,7 +1444,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             .maximize()
             .separator()
             .item(&bring_all_to_front)
-            .close_window()
+            .item(&close_item)
             .build()?
     };
 
@@ -2078,6 +2092,21 @@ fn main() {
             "app-add-note" => {
                 show_main_window(app);
                 show_note_window(app);
+            }
+            "app-close-context" | "app-close-window" => {
+                if let Some(window) = app
+                    .webview_windows()
+                    .values()
+                    .find(|window| window.is_focused().unwrap_or(false))
+                {
+                    if event.id().as_ref() == "app-close-context" && window.label() == "main" {
+                        // The native Cmd/Ctrl+W accelerator runs before DOM keydown.
+                        // Recall decides whether to close its tab or hide the main window.
+                        let _ = window.emit("minutes://close-context", ());
+                    } else {
+                        let _ = window.close();
+                    }
+                }
             }
             "app-open-meetings-folder" => {
                 let meetings_dir = minutes_core::config::Config::load().output_dir;
@@ -4563,5 +4592,25 @@ mod app_menu_accelerator_tests {
             !cross_platform.contains(bare_cmd),
             "a menu that also builds on Windows/Linux uses a bare Cmd accelerator; use CmdOrCtrl"
         );
+    }
+}
+
+#[cfg(test)]
+mod recall_menu_tests {
+    #[test]
+    fn close_shortcut_routes_through_recall_without_a_competing_predefined_accelerator() {
+        let source = include_str!("main.rs");
+        let menu = source
+            .split("fn build_app_menu(")
+            .nth(1)
+            .unwrap()
+            .split("fn notify_update_available(")
+            .next()
+            .unwrap();
+        assert!(menu.contains("CmdOrCtrl+W"));
+        assert!(!menu.contains(".close_window()"));
+        let panel = include_str!("../../src/index.html");
+        assert!(panel.contains("minutes://close-context"));
+        assert!(panel.contains("await closeRecallTab(SESSION_ID)"));
     }
 }

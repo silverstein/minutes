@@ -19210,6 +19210,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // only arms it; an idle session ends at once.
     let recallEndArmTimer = null;
     recallEndBtn.addEventListener('click', () => closeRecallTab(SESSION_ID));
+    currentWindow.listen('minutes://close-context', async () => {
+      if (recallExpanded && recallDevMode && recallTabsModel.tabs.some(tab => tab.id === SESSION_ID) && !isOverlayActive()) {
+        await closeRecallTab(SESSION_ID);
+      } else {
+        await currentWindow.hide();
+      }
+    });
 
     function resetRecallEndButton() {
       if (recallEndArmTimer) clearTimeout(recallEndArmTimer);

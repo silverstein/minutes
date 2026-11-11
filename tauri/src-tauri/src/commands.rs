@@ -2053,7 +2053,14 @@ fn is_assistant_instruction_file(path: &Path) -> bool {
             .and_then(|name| name.to_str())
             .map(|name| name.to_ascii_uppercase())
             .as_deref(),
-        Some("CLAUDE.MD" | "AGENTS.MD" | "MEMORY.MD")
+        Some(
+            "CLAUDE.MD"
+                | "AGENTS.MD"
+                | "MEMORY.MD"
+                | "CURRENT_MEETING.MD"
+                | "CURRENT_ARTIFACT.MD"
+                | "ASSISTANT_CONTEXT.MD"
+        )
     )
 }
 

@@ -62,7 +62,9 @@ A deleted meeting restores as chat with a visible note and cleared stored focus.
 
 ## UI and qualification
 
-Cmd+1–4, Ctrl+Tab, Cmd+T and Cmd+W operate within Recall; Windows/Linux use Ctrl
+The native File Close action routes Cmd/Ctrl+W to Recall before the OS can hide
+the window; the window close button keeps its existing behavior. Cmd+1–4,
+Ctrl+Tab, Cmd+T and Cmd+W operate within Recall; Windows/Linux use Ctrl
 for the Cmd shortcuts. Tab buttons also support arrows, Home and End. At the cap,
 an in-panel chooser offers finished, non-live tabs. Closing work or a live tab
 requires an in-panel confirmation. Background output changes no panel visibility

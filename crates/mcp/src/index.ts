@@ -103,6 +103,8 @@ import {
   type CaptureRelaySnapshot,
 } from "./captureRelay.js";
 import {
+  assertMeetingsRoot,
+  MeetingsRootError,
   withStableCorpusLease,
   type CorpusLeaseHooks,
   type StableCorpusSnapshot,
@@ -6106,6 +6108,7 @@ registerDocsAppTool(
   async ({ path: filePath, include_restricted }) => {
     try {
       const meetingsDir = await getEffectiveMeetingsDir();
+      await assertMeetingsRoot(meetingsDir);
       const { path: resolved, content: rawContent } = await readTextFileInDirectory(
         filePath,
         meetingsDir,
@@ -6204,9 +6207,14 @@ registerDocsAppTool(
         structuredContent: structuredOut,
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "detail", path: resolved },
       };
-    } catch {
+    } catch (error) {
       return {
-        content: [{ type: "text" as const, text: "Meeting could not be safely read." }],
+        content: [{
+          type: "text" as const,
+          text: error instanceof MeetingsRootError
+            ? error.message
+            : "Meeting could not be safely read.",
+        }],
         isError: true,
       };
     }

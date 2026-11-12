@@ -600,12 +600,36 @@ fn resolve_meeting_summary_config(
     resolved
 }
 
+/// The summarizer system prompt for `config`: the language-aware base prompt,
+/// the recorder's canonical name and configured aliases (so prose and owners
+/// use one spelling for the person recording), then any template additions.
+fn build_system_prompt_for_config(config: &Config, template: Option<&Template>) -> String {
+    build_system_prompt_with_recorder(
+        get_effective_summary_language(config),
+        template,
+        crate::self_reference::recorder_prompt_block(&config.identity).as_deref(),
+    )
+}
+
+#[cfg(test)]
 fn build_system_prompt(language: &str, template: Option<&Template>) -> String {
+    build_system_prompt_with_recorder(language, template, None)
+}
+
+fn build_system_prompt_with_recorder(
+    language: &str,
+    template: Option<&Template>,
+    recorder: Option<&str>,
+) -> String {
     let effective_language = template
         .and_then(|t| t.frontmatter.language.as_deref())
         .filter(|language| !language.eq_ignore_ascii_case("auto"))
         .unwrap_or(language);
-    let base = build_base_system_prompt(effective_language);
+    let mut base = build_base_system_prompt(effective_language);
+    if let Some(recorder) = recorder {
+        base.push_str("\n\n");
+        base.push_str(recorder);
+    }
     compose_additional_instructions(&base, template)
 }
 
@@ -2000,7 +2024,7 @@ fn summarize_with_agent_impl_timeout(
     agent_cmd: String,
     timeout: std::time::Duration,
 ) -> Result<AgentSummaryResult, Box<dyn std::error::Error>> {
-    let system = build_system_prompt(get_effective_summary_language(config), template);
+    let system = build_system_prompt_for_config(config, template);
     summarize_agent_with_runner(
         transcript,
         user_notes,
@@ -2539,7 +2563,7 @@ fn summarize_with_claude(
         let body = serde_json::json!({
             "model": CLAUDE_MODEL,
             "max_tokens": 1024,
-            "system": build_system_prompt(get_effective_summary_language(config), template),
+            "system": build_system_prompt_for_config(config, template),
             "messages": [{
                 "role": "user",
                 "content": content_blocks
@@ -2674,7 +2698,7 @@ fn summarize_with_openai(
         let body = serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
+                { "role": "system", "content": build_system_prompt_for_config(config, template) },
                 { "role": "user", "content": content_parts }
             ],
             "max_tokens": 1024,
@@ -2741,7 +2765,7 @@ fn summarize_with_mistral(
         let body = serde_json::json!({
             "model": model,
             "messages": [
-                { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
+                { "role": "system", "content": build_system_prompt_for_config(config, template) },
                 { "role": "user", "content": content_parts }
             ],
             "max_tokens": 1024,
@@ -2908,7 +2932,7 @@ fn openai_compatible_summary_body(
     Ok(serde_json::json!({
         "model": openai_compatible_model(config)?,
         "messages": [
-            { "role": "system", "content": build_system_prompt(get_effective_summary_language(config), template) },
+            { "role": "system", "content": build_system_prompt_for_config(config, template) },
             { "role": "user", "content": openai_compatible_summary_user_content(chunk, screen_content) }
         ],
         "max_tokens": 1024,
@@ -2966,7 +2990,7 @@ fn summarize_with_apple_fm(
         .chunk_max_tokens
         .min(crate::apple_fm::APPLE_FM_MAX_CHUNK_TOKENS);
     let chunks = build_prompt(transcript, chunk_tokens);
-    let system_prompt = build_system_prompt(get_effective_summary_language(config), template);
+    let system_prompt = build_system_prompt_for_config(config, template);
     let mut all_text = String::new();
 
     for chunk in &chunks {
@@ -2993,7 +3017,7 @@ fn summarize_with_ollama(
     for chunk in &chunks {
         let body = serde_json::json!({
             "model": &config.summarization.ollama_model,
-            "prompt": format!("{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>", build_system_prompt(get_effective_summary_language(config), template), chunk),
+            "prompt": format!("{}\n\nSummarize this transcript:\n\n<transcript>\n{}\n</transcript>", build_system_prompt_for_config(config, template), chunk),
             "stream": false,
         });
 
@@ -4143,6 +4167,21 @@ COMMITMENTS:
         let summary = parse_summary_response(response);
         assert!(summary.key_points.is_empty());
         assert_eq!(summary.text, response);
+    }
+
+    #[test]
+    fn system_prompt_names_recorder_and_configured_aliases() {
+        let mut config = Config::default();
+        assert!(!build_system_prompt_for_config(&config, None).contains("RECORDER:"));
+
+        config.identity.name = Some("Robin Example".into());
+        config.identity.aliases = vec!["Robyn".into()];
+        config.identity.emails = vec!["robin@example.com".into()];
+        let prompt = build_system_prompt_for_config(&config, None);
+        assert!(prompt.contains("RECORDER: This recording was made by Robin Example."));
+        assert!(prompt.contains("\"Robyn\""));
+        assert!(prompt.contains("write \"Robin\" instead"));
+        assert!(!prompt.contains("robin@example.com"));
     }
 
     #[test]

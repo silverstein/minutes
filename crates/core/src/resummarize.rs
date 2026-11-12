@@ -823,6 +823,19 @@ where
             reason: "unstructured_output".into(),
         });
     }
+    // One spelling for the recorder in the regenerated output. Carried-forward
+    // user state (an old assignee that wins a merge) is left as the user had it.
+    let mut summary = summary;
+    let self_references = crate::pipeline::self_reference_resolver(
+        &config.identity,
+        fm.r#type,
+        &fm.attendees,
+        &fm.normalized_attendees(),
+        &fm.speaker_map,
+    );
+    if let Some(resolver) = self_references.as_ref() {
+        resolver.canonicalize_summary(&mut summary);
+    }
     let new_actions_raw = crate::pipeline::extract_action_items(&summary);
     let new_decisions_raw = crate::pipeline::extract_decisions(&summary);
 
@@ -864,7 +877,7 @@ where
 
     // Derived frontmatter, recomputed from the merged state.
     let attendees = fm.normalized_attendees();
-    let entities = crate::pipeline::build_entity_links(
+    let mut entities = crate::pipeline::build_entity_links(
         &fm.title,
         fm.context.as_deref(),
         &attendees,
@@ -874,6 +887,9 @@ where
         &fm.tags,
         Some(&config.identity),
     );
+    if let Some(resolver) = self_references.as_ref() {
+        resolver.canonicalize_entities(&mut entities);
+    }
 
     let mut new_fm = fm.clone();
     new_fm.action_items = merged_actions;

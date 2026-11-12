@@ -7,6 +7,7 @@ use crate::markdown::{
 };
 use crate::notes;
 use crate::person_identity::{is_plausible_person_name, strip_contamination};
+use crate::self_reference::{SelfReferenceEvidence, SelfReferenceResolver};
 use crate::summarize;
 use chrono::{DateTime, Local};
 use sha2::{Digest, Sha256};
@@ -5809,8 +5810,15 @@ where
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
     let mut structured_intents =
         normalize_intents_with_speaker_map(structured_intents, &speaker_map);
-    let structured_decisions =
+    let mut structured_decisions =
         normalize_decisions_with_speaker_map(structured_decisions, &speaker_map);
+    let self_references = self_reference_resolver(
+        &config.identity,
+        artifact.frontmatter.r#type,
+        &artifact.frontmatter.attendees,
+        &attendees,
+        &speaker_map,
+    );
 
     // #392: if diarization collapsed this multi-party meeting to <= 1 rendered
     // speaker, withhold assignees rather than let the summarizer's guess invert
@@ -5831,9 +5839,17 @@ where
         raw_summary.as_ref(),
         summary_coverage.as_ref(),
     );
+    let summary = canonicalize_self_references(
+        self_references.as_ref(),
+        summary,
+        raw_summary.as_mut(),
+        &mut structured_actions,
+        &mut structured_intents,
+        &mut structured_decisions,
+    );
 
     let entities_started = std::time::Instant::now();
-    let entities = build_entity_links(
+    let mut entities = build_entity_links(
         &artifact.frontmatter.title,
         context.pre_context.as_deref(),
         &attendees,
@@ -5843,6 +5859,9 @@ where
         &artifact.frontmatter.tags,
         Some(&config.identity),
     );
+    if let Some(resolver) = self_references.as_ref() {
+        resolver.canonicalize_entities(&mut entities);
+    }
     log_structured_llm_step(
         "entity_extract",
         diagnostic_audio_path,
@@ -5873,7 +5892,7 @@ where
     // The calendar event matched in phase 1 travels on the artifact's
     // frontmatter, which is what lets the opt-in calendar title survive the
     // refine step on the desktop two-phase path.
-    let title_generation = title_generation_decision(
+    let mut title_generation = title_generation_decision(
         &artifact.frontmatter.title,
         context.requested_title.as_deref(),
         artifact.frontmatter.calendar_event.as_deref(),
@@ -5884,6 +5903,7 @@ where
         config,
         summarize::refine_title,
     );
+    canonicalize_refined_title(self_references.as_ref(), &mut title_generation);
 
     let mut frontmatter = artifact.frontmatter.clone();
     // write_transcript_artifact calls summarize unconditionally whenever
@@ -6535,8 +6555,15 @@ where
         normalize_action_items_with_speaker_map(structured_actions, &speaker_map);
     let mut structured_intents =
         normalize_intents_with_speaker_map(structured_intents, &speaker_map);
-    let structured_decisions =
+    let mut structured_decisions =
         normalize_decisions_with_speaker_map(structured_decisions, &speaker_map);
+    let self_references = self_reference_resolver(
+        &config.identity,
+        content_type,
+        &calendar_attendees,
+        &attendees,
+        &speaker_map,
+    );
 
     // #392: withhold assignees if diarization collapsed this multi-party meeting
     // to <= 1 rendered speaker (trusted attendees = calendar attendees). Runs
@@ -6556,6 +6583,14 @@ where
         raw_summary.as_ref(),
         summary_coverage.as_ref(),
     );
+    let summary = canonicalize_self_references(
+        self_references.as_ref(),
+        summary,
+        raw_summary.as_mut(),
+        &mut structured_actions,
+        &mut structured_intents,
+        &mut structured_decisions,
+    );
 
     // Step 5: Write markdown (always)
     let duration = format_duration_secs(filter_stats.audio_duration_secs);
@@ -6568,7 +6603,7 @@ where
         }
     });
     let entities_started = std::time::Instant::now();
-    let entities = build_entity_links(
+    let mut entities = build_entity_links(
         &auto_title,
         pre_context.as_deref(),
         &attendees,
@@ -6578,6 +6613,9 @@ where
         &[],
         Some(&config.identity),
     );
+    if let Some(resolver) = self_references.as_ref() {
+        resolver.canonicalize_entities(&mut entities);
+    }
     log_structured_llm_step(
         "entity_extract",
         diagnostic_audio_path,
@@ -6604,7 +6642,7 @@ where
         .iter()
         .map(|entity| entity.label.clone())
         .collect();
-    let title_generation = title_generation_decision(
+    let mut title_generation = title_generation_decision(
         &auto_title,
         title,
         calendar_event_title.as_deref(),
@@ -6615,6 +6653,7 @@ where
         config,
         summarize::refine_title,
     );
+    canonicalize_refined_title(self_references.as_ref(), &mut title_generation);
 
     // Determine source field: sidecar overrides default, normalize to "voice-memos" (plural)
     let source = if let Some(s) = sidecar.and_then(|s| s.source.clone()) {
@@ -8736,6 +8775,70 @@ fn infer_topic(text: &str) -> Option<String> {
 
     let candidate = phrase.join(" ");
     (!is_task_like_project_candidate(&candidate, Some(text))).then_some(candidate)
+}
+
+/// Resolver for references to the recorder in this recording's summary
+/// output. `trusted_attendees` are calendar attendees; `attendees` is the
+/// merged list (with summary participants). See [`crate::self_reference`] for
+/// the evidence and collision rules.
+pub(crate) fn self_reference_resolver(
+    identity: &IdentityConfig,
+    content_type: ContentType,
+    trusted_attendees: &[String],
+    attendees: &[String],
+    speaker_map: &[diarize::SpeakerAttribution],
+) -> Option<SelfReferenceResolver> {
+    let speaker_names: Vec<String> = speaker_map
+        .iter()
+        .map(|attribution| attribution.name.clone())
+        .collect();
+    SelfReferenceResolver::new(
+        identity,
+        SelfReferenceEvidence {
+            trusted_attendees,
+            known_names: attendees,
+            speaker_names: &speaker_names,
+            recorder_is_speaker: content_type != ContentType::Meeting,
+        },
+    )
+}
+
+/// Map every configured spelling of the recorder onto one canonical form in
+/// the structured fields, the raw summary (title refinement input) and the
+/// rendered summary text.
+fn canonicalize_self_references(
+    resolver: Option<&SelfReferenceResolver>,
+    summary: Option<String>,
+    raw_summary: Option<&mut summarize::Summary>,
+    action_items: &mut [markdown::ActionItem],
+    intents: &mut [markdown::Intent],
+    decisions: &mut [markdown::Decision],
+) -> Option<String> {
+    let Some(resolver) = resolver else {
+        return summary;
+    };
+    if let Some(raw_summary) = raw_summary {
+        resolver.canonicalize_summary(raw_summary);
+    }
+    resolver.canonicalize_action_items(action_items);
+    resolver.canonicalize_intents(intents);
+    resolver.canonicalize_decisions(decisions);
+    summary.map(|text| resolver.canonicalize_text(&text))
+}
+
+/// Canonicalize recorder spellings in an LLM-written title. Calendar and
+/// explicit titles are left exactly as given.
+fn canonicalize_refined_title(
+    resolver: Option<&SelfReferenceResolver>,
+    decision: &mut TitleGenerationDecision,
+) {
+    let Some(resolver) = resolver else {
+        return;
+    };
+    if let Some(refined) = decision.refined_title.as_mut() {
+        *refined = resolver.canonicalize_text(refined);
+        decision.final_title = refined.clone();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -12477,6 +12580,138 @@ mod tests {
         let slugs: Vec<&str> = entities.people.iter().map(|e| e.slug.as_str()).collect();
         assert!(!slugs.contains(&"mat"), "mat not invented: {:?}", slugs);
         assert_eq!(slugs.len(), 2);
+    }
+
+    #[test]
+    fn recorder_alias_spelling_resolves_to_one_canonical_self() {
+        // Synthetic shape of the bug: the calendar lists the recorder by email,
+        // the speaker map names them in full, and the summarizer copied an ASR
+        // spelling ("Robyn") into owners, participants and prose.
+        let identity = IdentityConfig {
+            name: Some("Robin Example".into()),
+            email: None,
+            emails: vec!["robin@example.com".into()],
+            aliases: vec!["Robbin".into(), "Robin".into(), "Robyn".into()],
+        };
+        let calendar_attendees: Vec<String> =
+            vec!["robin@example.com".into(), "Casey Other".into()];
+        let attendees: Vec<String> = vec![
+            "robin@example.com".into(),
+            "Casey Other".into(),
+            "Dana".into(),
+            "Robbin".into(),
+            "Robyn".into(),
+        ];
+        let speaker_map = vec![diarize::SpeakerAttribution {
+            speaker_label: "SPEAKER_0".into(),
+            name: "Robin Example".into(),
+            confidence: diarize::Confidence::Medium,
+            source: diarize::AttributionSource::Deterministic,
+        }];
+        let resolver = self_reference_resolver(
+            &identity,
+            ContentType::Meeting,
+            &calendar_attendees,
+            &attendees,
+            &speaker_map,
+        );
+
+        let mut actions = vec![
+            markdown::ActionItem {
+                assignee: "Robyn".into(),
+                task: "Send Casey the pricing link".into(),
+                due: None,
+                status: "open".into(),
+            },
+            markdown::ActionItem {
+                assignee: "Casey Other".into(),
+                task: "Send Robyn the deck for feedback".into(),
+                due: None,
+                status: "open".into(),
+            },
+        ];
+        let mut intents = vec![markdown::Intent {
+            kind: markdown::IntentKind::Commitment,
+            what: "Review the deck this week".into(),
+            who: Some("Robyn".into()),
+            status: "open".into(),
+            by_date: None,
+        }];
+        let mut decisions = vec![markdown::Decision {
+            id: None,
+            effective_date: None,
+            text: "Robyn owns the pilot".into(),
+            topic: None,
+            authority: None,
+            supersedes: None,
+        }];
+        let summary = canonicalize_self_references(
+            resolver.as_ref(),
+            Some("## Action Items\n\n- [ ] @Robyn: Send Casey the pricing link\n".into()),
+            None,
+            &mut actions,
+            &mut intents,
+            &mut decisions,
+        );
+        assert_eq!(
+            summary.as_deref(),
+            Some("## Action Items\n\n- [ ] @Robin: Send Casey the pricing link\n")
+        );
+        assert_eq!(actions[0].assignee, "Robin");
+        assert_eq!(actions[1].task, "Send Robin the deck for feedback");
+        assert_eq!(intents[0].who.as_deref(), Some("Robin"));
+        assert_eq!(decisions[0].text, "Robin owns the pilot");
+
+        let mut entities = build_entity_links(
+            "Pricing sync",
+            None,
+            &attendees,
+            &actions,
+            &decisions,
+            &intents,
+            &[],
+            Some(&identity),
+        );
+        resolver
+            .as_ref()
+            .unwrap()
+            .canonicalize_entities(&mut entities);
+        let slugs: Vec<&str> = entities.people.iter().map(|e| e.slug.as_str()).collect();
+        assert_eq!(slugs, vec!["casey-other", "dana", "robin-example"]);
+        let me = entities.people.last().unwrap();
+        assert_eq!(me.label, "Robin Example");
+        for alias in ["robin", "robbin", "robyn", "robin@example.com"] {
+            assert!(me.aliases.iter().any(|a| a == alias), "{alias}: {me:?}");
+        }
+
+        let mut title = TitleGenerationDecision {
+            final_title: "Casey and Robyn on Pricing".into(),
+            refined_title: Some("Casey and Robyn on Pricing".into()),
+            outcome: "llm",
+            model: None,
+            input_chars: 0,
+            detail: None,
+            llm_duration_ms: 0,
+        };
+        canonicalize_refined_title(resolver.as_ref(), &mut title);
+        assert_eq!(title.final_title, "Casey and Robin on Pricing");
+        assert_eq!(
+            title.refined_title.as_deref(),
+            Some("Casey and Robin on Pricing")
+        );
+
+        // Calendar and explicit titles are never rewritten.
+        let mut calendar = TitleGenerationDecision {
+            final_title: "Robyn / Casey".into(),
+            refined_title: None,
+            outcome: "calendar",
+            model: None,
+            input_chars: 0,
+            detail: None,
+            llm_duration_ms: 0,
+        };
+        canonicalize_refined_title(resolver.as_ref(), &mut calendar);
+        assert_eq!(calendar.final_title, "Robyn / Casey");
     }
 
     #[test]

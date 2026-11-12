@@ -2053,7 +2053,14 @@ fn is_assistant_instruction_file(path: &Path) -> bool {
             .and_then(|name| name.to_str())
             .map(|name| name.to_ascii_uppercase())
             .as_deref(),
-        Some("CLAUDE.MD" | "AGENTS.MD" | "MEMORY.MD")
+        Some(
+            "CLAUDE.MD"
+                | "AGENTS.MD"
+                | "MEMORY.MD"
+                | "CURRENT_MEETING.MD"
+                | "CURRENT_ARTIFACT.MD"
+                | "ASSISTANT_CONTEXT.MD"
+        )
     )
 }
 
@@ -2250,6 +2257,16 @@ fn list_documents_for_roots_with_recent_state_and_preps(
     }
 
     append_assistant_documents(&mut documents, &mut seen, assistant_dir);
+    if let Ok(entries) = std::fs::read_dir(assistant_dir.join("tabs")) {
+        for entry in entries.flatten() {
+            if entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            {
+                append_assistant_documents(&mut documents, &mut seen, &entry.path());
+            }
+        }
+    }
     append_prep_documents_from(&mut documents, &mut seen, preps_dir);
     documents.sort_by(|a, b| {
         b.mtime
@@ -3914,6 +3931,9 @@ fn start_native_call_recording(
         requested_title.clone(),
         recording_started_at,
     );
+    let recall_capture_id = context_session_id
+        .clone()
+        .or_else(crate::recall_tabs::recording_capture_id);
 
     starting.store(false, Ordering::Relaxed);
     recording.store(true, Ordering::Relaxed);
@@ -4228,6 +4248,12 @@ fn start_native_call_recording(
                     checkpoint.map(|worker| worker.finish()),
                 ) {
                     Ok(job) => {
+                        crate::recall_tabs::capture_finished(
+                            app_handle,
+                            recall_capture_id.clone(),
+                            Some(job.id.clone()),
+                            None,
+                        );
                         processing.store(true, Ordering::Relaxed);
                         set_processing_stage(processing_stage, job.stage.as_deref());
                         minutes_core::pid::set_processing_status(
@@ -4344,6 +4370,12 @@ fn start_native_call_recording(
 
         match queue_result {
             Ok(job) => {
+                crate::recall_tabs::capture_finished(
+                    app_handle,
+                    recall_capture_id.clone(),
+                    Some(job.id.clone()),
+                    None,
+                );
                 processing.store(true, Ordering::Relaxed);
                 set_processing_stage(processing_stage, job.stage.as_deref());
                 minutes_core::pid::set_processing_status(
@@ -4482,6 +4514,12 @@ fn start_native_call_recording(
         checkpoint,
     ) {
         Ok(job) => {
+            crate::recall_tabs::capture_finished(
+                app_handle,
+                recall_capture_id.clone(),
+                Some(job.id.clone()),
+                None,
+            );
             processing.store(true, Ordering::Relaxed);
             set_processing_stage(processing_stage, job.stage.as_deref());
             minutes_core::pid::set_processing_status(
@@ -7020,6 +7058,9 @@ pub fn start_recording(
         requested_title.clone(),
         recording_started_at,
     );
+    let recall_capture_id = context_session_id
+        .clone()
+        .or_else(crate::recall_tabs::recording_capture_id);
     minutes_core::pid::write_recording_metadata_with_context(mode, context_session_id.as_deref())
         .ok();
     crate::sync_tray_state(&app_handle);
@@ -7116,6 +7157,12 @@ pub fn start_recording(
                     None,
                 ) {
                     Ok(job) => {
+                        crate::recall_tabs::capture_finished(
+                            &app_handle,
+                            recall_capture_id.clone(),
+                            Some(job.id.clone()),
+                            None,
+                        );
                         processing.store(true, Ordering::Relaxed);
                         set_processing_stage(&processing_stage, job.stage.as_deref());
                         minutes_core::pid::set_processing_status(
@@ -7903,11 +7950,14 @@ pub fn cmd_sensitive_stop(
     ) {
         show_user_notification(&app, "Sensitive meeting saved", &error);
     } else if let Ok(mut manager) = state.pty_manager.lock() {
-        if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+        if let Some((id, command)) = manager
+            .assistant_session_id()
+            .and_then(|id| manager.session_command(&id).map(|command| (id, command)))
+        {
             if let Some(input) =
                 agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
             {
-                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+                let _ = manager.write_input(&id, input.as_bytes());
             }
         }
     }
@@ -7945,11 +7995,14 @@ pub fn cmd_run_meeting_debrief(
         None,
     )?;
     if let Ok(mut manager) = state.pty_manager.lock() {
-        if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+        if let Some((id, command)) = manager
+            .assistant_session_id()
+            .and_then(|id| manager.session_command(&id).map(|command| (id, command)))
+        {
             if let Some(input) =
                 agent_notice(&command, "Run /minutes-debrief for CURRENT_MEETING.md.")
             {
-                let _ = manager.write_input(crate::pty::ASSISTANT_SESSION_ID, input.as_bytes());
+                let _ = manager.write_input(&id, input.as_bytes());
             }
         }
     }
@@ -8978,6 +9031,33 @@ fn artifact_switch_prompt(command: &str, artifact_name: Option<&str>) -> Option<
     agent_notice(command, &artifact_switch_text(artifact_name))
 }
 
+fn active_recall_tab_id(state: &tauri::State<AppState>) -> Result<String, String> {
+    let manager = state
+        .pty_manager
+        .lock()
+        .map_err(|_| "PTY manager lock failed")?;
+    manager
+        .tabs
+        .active
+        .clone()
+        .or_else(|| manager.assistant_session_id())
+        .ok_or_else(|| "No Recall tab selected".into())
+}
+
+fn selected_recall_workspace(state: &tauri::State<AppState>) -> Result<PathBuf, String> {
+    match active_recall_tab_id(state) {
+        Ok(id) => crate::recall_tabs::workspace(&id),
+        Err(_)
+            if !crate::context::workspace_dir()
+                .join("recall-tabs.json")
+                .exists() =>
+        {
+            Ok(crate::context::workspace_dir())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn notify_assistant_artifact_focus(
     state: &tauri::State<AppState>,
     artifact_name: Option<&str>,
@@ -8986,20 +9066,23 @@ fn notify_assistant_artifact_focus(
         .pty_manager
         .lock()
         .map_err(|_| "PTY manager lock failed")?;
-    if manager.assistant_session_id().is_some() {
+    if let Some(id) = manager.assistant_session_id() {
         // An agent with the prompt hook gets the change with its next prompt;
         // typing it would submit a turn on the user's behalf.
-        if manager.session_focus_hook(crate::pty::ASSISTANT_SESSION_ID) {
-            if let Some(workspace) = manager.session_context_dir(crate::pty::ASSISTANT_SESSION_ID) {
+        if manager.session_focus_hook(&id) {
+            if let Some(workspace) = manager.session_context_dir(&id) {
                 crate::context::assistant_skills::queue_focus_notice(
                     &workspace,
                     crate::context::assistant_skills::FocusNotice::Artifact,
                     &artifact_switch_text(artifact_name),
                 )?;
             }
-        } else if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
+        } else if let Some((id, command)) = manager
+            .assistant_session_id()
+            .and_then(|id| manager.session_command(&id).map(|command| (id, command)))
+        {
             if let Some(prompt) = artifact_switch_prompt(&command, artifact_name) {
-                manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+                manager.write_input(&id, prompt.as_bytes())?;
             }
         }
     }
@@ -9147,10 +9230,22 @@ pub fn cmd_recall_context_items(
             .pty_manager
             .lock()
             .map_err(|_| "PTY manager lock failed")?;
-        match manager.session_command(crate::pty::ASSISTANT_SESSION_ID) {
-            Some(command) if !is_shell_command(&command) => manager
-                .session_context_dir(crate::pty::ASSISTANT_SESSION_ID)
-                .unwrap_or_else(crate::context::workspace_dir),
+        let Some(id) = manager.assistant_session_id() else {
+            return Ok(crate::context::LoadedContext::default());
+        };
+        match manager.session_command(&id) {
+            Some(command)
+                if !is_shell_command(&command)
+                    || manager
+                        .tabs
+                        .tabs
+                        .iter()
+                        .any(|tab| tab.id == id && tab.claude_active) =>
+            {
+                manager
+                    .session_context_dir(&id)
+                    .unwrap_or_else(crate::context::workspace_dir)
+            }
             _ => return Ok(crate::context::LoadedContext::default()),
         }
     };
@@ -9168,7 +9263,10 @@ pub fn cmd_recall_drop_context(
     item: String,
 ) -> Result<(), String> {
     use crate::context::assistant_skills::FocusNotice;
-    let workspace = crate::context::workspace_dir();
+    let workspace = selected_recall_workspace(&state)?;
+    if matches!(item.as_str(), "meeting" | "all_meetings") {
+        crate::recall_tabs::mark_context_ready(&workspace)?;
+    }
     let (kind, notice) = match item.as_str() {
         "meeting" => {
             crate::context::clear_active_meeting_context(&workspace)?;
@@ -9193,11 +9291,12 @@ pub fn cmd_recall_drop_context(
         }
         other => return Err(format!("Unknown context item: {other}")),
     };
+    let active_id = active_recall_tab_id(&state)?;
     let hooked = state
         .pty_manager
         .lock()
         .map_err(|_| "PTY manager lock failed")?
-        .session_focus_hook(crate::pty::ASSISTANT_SESSION_ID);
+        .session_focus_hook(&active_id);
     if hooked {
         crate::context::assistant_skills::queue_focus_notice(&workspace, kind, notice)?;
     }
@@ -9214,8 +9313,11 @@ pub fn cmd_set_open_artifact(
     let canonical = validate_text_file_path(Path::new(&path))?;
     record_recent_artifact_path(&canonical);
     let config = Config::load();
-    let workspace = crate::context::create_workspace(&config)?;
-    crate::context::write_assistant_context(&workspace, &config)?;
+    let Ok(selected) = selected_recall_workspace(&state) else {
+        return Ok(());
+    };
+    let workspace = crate::context::create_tab_workspace_at(&config, &selected)?;
+    crate::context::write_deferred_assistant_context(&workspace)?;
     crate::context::write_active_artifact_context(&workspace, &canonical)?;
     let artifact_name = canonical.file_name().and_then(|name| name.to_str());
     let result = notify_assistant_artifact_focus(&state, artifact_name);
@@ -9228,7 +9330,9 @@ pub fn cmd_clear_open_artifact(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
-    let workspace = crate::context::workspace_dir();
+    let Ok(workspace) = selected_recall_workspace(&state) else {
+        return Ok(());
+    };
     if workspace.exists() {
         crate::context::clear_active_artifact_context(&workspace)?;
     }
@@ -10643,6 +10747,7 @@ fn terminal_title_for_mode(mode: &str, meeting_path: Option<&str>) -> Result<Str
     }
 }
 
+#[cfg(test)]
 fn sync_workspace_for_mode(
     workspace: &Path,
     config: &Config,
@@ -10678,7 +10783,7 @@ fn sync_workspace_for_mode(
     }
 }
 
-fn is_shell_command(command: &str) -> bool {
+pub(crate) fn is_shell_command(command: &str) -> bool {
     matches!(
         Path::new(command)
             .file_name()
@@ -10711,6 +10816,7 @@ fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn context_switch_text(mode: &str, title: &str) -> String {
     match mode {
         "meeting" => format!(
@@ -10721,6 +10827,7 @@ fn context_switch_text(mode: &str, title: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn context_switch_prompt(command: &str, mode: &str, title: &str) -> Option<String> {
     agent_notice(command, &context_switch_text(mode, title))
 }
@@ -10732,7 +10839,7 @@ pub struct AgentResolveError {
 }
 
 impl AgentResolveError {
-    fn user_message(&self) -> String {
+    pub(crate) fn user_message(&self) -> String {
         let install_hint = if self.name == "claude" {
             " Reinstall Claude Code, or choose another assistant in Settings."
         } else {
@@ -10903,65 +11010,153 @@ fn spawn_grid(size: Option<(u16, u16)>) -> (u16, u16) {
 /// Returns (session_id, window_title) on success.
 pub fn spawn_terminal(
     app: &tauri::AppHandle,
-    pty_manager: &std::sync::Arc<Mutex<crate::pty::PtyManager>>,
+    pty_manager: &Arc<Mutex<crate::pty::PtyManager>>,
     mode: &str,
     meeting_path: Option<&str>,
     agent_override: Option<&str>,
     theme_dark: Option<bool>,
     size: Option<(u16, u16)>,
 ) -> Result<(String, String), String> {
-    let config = Config::load();
-    let title = terminal_title_for_mode(mode, meeting_path)?;
-    let workspace = crate::context::create_workspace(&config)?;
-    sync_workspace_for_mode(&workspace, &config, mode, meeting_path)?;
+    spawn_terminal_tab(
+        app,
+        pty_manager,
+        mode,
+        meeting_path,
+        agent_override,
+        theme_dark,
+        size,
+        None,
+        false,
+        false,
+    )
+}
 
-    let mut manager = pty_manager.lock().map_err(|_| "PTY manager lock failed")?;
-
-    if manager.assistant_session_id().is_some() {
-        manager.set_session_title(crate::pty::ASSISTANT_SESSION_ID, title.clone())?;
-        // Only send a context switch prompt when actively switching to a
-        // meeting (not when merely re-opening the panel in assistant mode,
-        // which would inject unwanted text into Claude Code's input).
-        if mode == "meeting" {
-            if manager.session_focus_hook(crate::pty::ASSISTANT_SESSION_ID) {
-                crate::context::assistant_skills::queue_focus_notice(
-                    &workspace,
-                    crate::context::assistant_skills::FocusNotice::Meeting,
-                    &context_switch_text(mode, &title),
-                )?;
-            } else if let Some(command) = manager.session_command(crate::pty::ASSISTANT_SESSION_ID)
-            {
-                if let Some(prompt) = context_switch_prompt(&command, mode, &title) {
-                    manager.write_input(crate::pty::ASSISTANT_SESSION_ID, prompt.as_bytes())?;
+fn recall_tab_claude_args(
+    args: Vec<String>,
+    workspace: &Path,
+    resume: Option<&str>,
+) -> Vec<String> {
+    let managed = crate::context::assistant_skills::claude_skill_directory(workspace)
+        .join("claude-focus-settings.json");
+    let mut result = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if matches!(arg.as_str(), "--resume" | "-r" | "--session-id") {
+            let _ = iter.next();
+            continue;
+        }
+        if matches!(arg.as_str(), "--continue" | "-c" | "--fork-session")
+            || arg.starts_with("--resume=")
+            || arg.starts_with("--session-id=")
+        {
+            continue;
+        }
+        if arg == "--settings" {
+            if let Some(value) = iter.next() {
+                if Path::new(&value) != managed {
+                    result.extend([arg, value]);
                 }
             }
+        } else if arg
+            .strip_prefix("--settings=")
+            .is_some_and(|value| Path::new(value) == managed)
+        {
+            continue;
+        } else {
+            result.push(arg);
         }
+    }
+    if let Some(resume) = resume.filter(|id| crate::recall_tabs::valid_id(id)) {
+        result.extend(["--resume".into(), resume.into()]);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_terminal_tab(
+    app: &tauri::AppHandle,
+    pty_manager: &Arc<Mutex<crate::pty::PtyManager>>,
+    mode: &str,
+    meeting_path: Option<&str>,
+    agent_override: Option<&str>,
+    theme_dark: Option<bool>,
+    size: Option<(u16, u16)>,
+    tab_id: Option<&str>,
+    new_tab: bool,
+    background: bool,
+) -> Result<(String, String), String> {
+    let config = Config::load_strict()?;
+    terminal_title_for_mode(mode, meeting_path)?;
+    let root = crate::context::workspace_dir();
+    let mut manager = pty_manager.lock().map_err(|_| "PTY manager lock failed")?;
+    manager.tabs.ensure(&root)?;
+    manager.tabs.refresh(&root)?;
+    let id = if let Some(id) = tab_id {
+        if !manager.tabs.tabs.iter().any(|t| t.id == id) {
+            return Err("Recall tab not found".into());
+        }
+        id.to_string()
     } else {
+        manager.tabs.open(&root, meeting_path, new_tab)?
+    };
+    if !background {
+        manager.tabs.active = Some(id.clone());
+    }
+    manager.tabs.save(&root)?;
+    let tab = manager
+        .tabs
+        .tabs
+        .iter()
+        .find(|t| t.id == id)
+        .cloned()
+        .ok_or("Recall tab not found")?;
+    let workspace =
+        crate::context::create_tab_workspace_at(&config, &crate::recall_tabs::workspace(&id)?)?;
+    let title = tab.title.clone();
+    if manager.session_command(&id).is_none() {
+        // Every session starts deferred; neither restoring nor selecting reads meeting history.
+        crate::context::write_deferred_assistant_context(&workspace)?;
+        crate::context::clear_active_meeting_context(&workspace)?;
+        crate::context::clear_general_assistant_context(&workspace)?;
         let agent_name = agent_override.unwrap_or(&config.assistant.agent);
         let agent_bin = resolve_agent_binary(agent_name).map_err(|err| err.user_message())?;
-
-        let agent_args = crate::context::assistant_skills::terminal_args(
+        let mut agent_args = crate::context::assistant_skills::terminal_args(
             agent_name,
             filtered_agent_args(agent_name, &config.assistant.agent_args),
             &workspace,
         );
-        let focus_hook = crate::context::assistant_skills::has_focus_hook(&agent_args, &workspace);
-        // A new session starts from CURRENT_MEETING.md and CURRENT_ARTIFACT.md;
-        // notices queued for a previous one are stale.
+        // Claude discovers these project-local hooks even when started manually
+        // inside a configured shell. Never modify ~/.claude or duplicate --settings hooks.
+        crate::recall_tabs::settings(&workspace)?;
+        crate::recall_tabs::set_focus_target(&workspace, tab.meeting_path.as_deref(), false)?;
+        let shell = is_shell_command(&agent_bin.to_string_lossy());
+        if let Some(metadata) = manager.tabs.tabs.iter_mut().find(|t| t.id == id) {
+            metadata.shell = shell;
+            metadata.claude_active = false;
+            metadata.process_exited = false;
+        }
+        if command_is_claude(agent_name) {
+            agent_args =
+                recall_tab_claude_args(agent_args, &workspace, tab.claude_session_id.as_deref());
+        }
+        let focus_hook = command_is_claude(agent_name) || shell;
         crate::context::assistant_skills::clear_focus_notices(&workspace);
-
-        // Spawn at the grid the panel will show. The shell draws its first
-        // prompt for this size, and zsh's PROMPT_SP padding drawn for a wider
-        // grid wraps into a stray % that a later resize cannot remove.
+        if let Some(note) = &tab.note {
+            crate::context::assistant_skills::queue_focus_notice(
+                &workspace,
+                crate::context::assistant_skills::FocusNotice::Meeting,
+                note,
+            )?;
+        }
         let (cols, rows) = spawn_grid(size);
         manager.spawn(
             crate::pty::SpawnConfig {
-                session_id: crate::pty::ASSISTANT_SESSION_ID.into(),
+                session_id: id.clone(),
                 app_handle: app.clone(),
-                command: agent_bin.to_str().unwrap_or(agent_name).to_string(),
+                command: agent_bin.to_string_lossy().into_owned(),
                 args: agent_args,
                 cwd: workspace.clone(),
-                context_dir: workspace.clone(),
+                context_dir: workspace,
                 title: title.clone(),
                 target_window: "main".into(),
                 theme_dark,
@@ -10971,24 +11166,20 @@ pub fn spawn_terminal(
             rows,
         )?;
     }
-
+    manager.tabs.save(&root)?;
+    let tabs = manager.tabs.clone();
     drop(manager);
-
-    // Emit recall:expand event to the main window instead of opening a
-    // separate terminal window. The JS in index.html handles the panel
-    // expand animation and xterm.js initialisation.
-    if app.get_webview_window("main").is_some() {
+    if !background && app.get_webview_window("main").is_some() {
         crate::show_main_window(app);
-        app.emit_to(
+        let _ = app.emit_to(
             "main",
             "recall:expand",
-            serde_json::json!({ "title": title, "mode": mode }),
-        )
-        .ok();
+            serde_json::json!({"title": title, "mode": mode, "tab_id": id}),
+        );
     }
-
+    let _ = app.emit_to("main", "recall:tabs-changed", tabs);
     emit_recall_context_changed(app);
-    Ok((crate::pty::ASSISTANT_SESSION_ID.into(), title))
+    Ok((id, title))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -11205,7 +11396,7 @@ fn claude_auth_status_is_logged_in(stdout: &[u8]) -> bool {
         == Some(true)
 }
 
-fn claude_terminal_is_authenticated(agent_bin: &str, cwd: Option<&Path>) -> bool {
+pub(crate) fn claude_terminal_is_authenticated(agent_bin: &str, cwd: Option<&Path>) -> bool {
     recall_agent_probe(agent_bin, &["auth", "status", "--json"], cwd).is_some_and(|output| {
         output.status.success() && claude_auth_status_is_logged_in(&output.stdout)
     })
@@ -13280,24 +13471,26 @@ pub fn cmd_recall_chat_clear(state: tauri::State<'_, AppState>) {
 fn prepare_recall_terminal_meeting(
     pty_manager: &Arc<Mutex<crate::pty::PtyManager>>,
     meeting_path: Option<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     let (agent_command, agent_cwd) = {
         let manager = pty_manager
             .lock()
             .map_err(|_| "Recall terminal state is unavailable.".to_string())?;
-        if manager.assistant_session_id().is_none() {
+        let id = session_id
+            .or_else(|| manager.assistant_session_id())
+            .ok_or("Recall tab not found")?;
+        if manager.session_command(&id).is_none() {
             return Err(
                 "Recall has not started an assistant yet. No meeting context was read.".into(),
             );
         }
-        let command = manager
-            .session_command(crate::pty::ASSISTANT_SESSION_ID)
-            .ok_or_else(|| {
-                "Recall could not verify the running assistant. No meeting context was read."
-                    .to_string()
-            })?;
+        let command = manager.session_command(&id).ok_or_else(|| {
+            "Recall could not verify the running assistant. No meeting context was read."
+                .to_string()
+        })?;
         let cwd = manager
-            .session_context_dir(crate::pty::ASSISTANT_SESSION_ID)
+            .session_context_dir(&id)
             .ok_or_else(|| {
                 "Recall could not verify the running assistant environment. No meeting context was read."
                     .to_string()
@@ -13305,6 +13498,9 @@ fn prepare_recall_terminal_meeting(
         (command, cwd)
     };
 
+    if is_shell_command(&agent_command) {
+        return Err("Shell tabs share meeting context only at Claude’s next prompt.".into());
+    }
     if command_is_claude(&agent_command)
         && !claude_terminal_is_authenticated(&agent_command, Some(&agent_cwd))
     {
@@ -13315,8 +13511,9 @@ fn prepare_recall_terminal_meeting(
     }
 
     let config = Config::load_strict()?;
-    let workspace = crate::context::workspace_dir();
-    materialize_recall_terminal_context(&workspace, &config, meeting_path.as_deref())
+    let workspace = agent_cwd;
+    materialize_recall_terminal_context(&workspace, &config, meeting_path.as_deref())?;
+    crate::recall_tabs::mark_context_ready(&workspace)
 }
 
 /// Write exactly one of the two Terminal context files and clear the other, so
@@ -13324,14 +13521,26 @@ fn prepare_recall_terminal_meeting(
 /// a selected meeting the session used to get nothing at all, and the
 /// instruction stub then had the assistant announce a missing
 /// `CURRENT_MEETING.md` on every general question.
-fn materialize_recall_terminal_context(
+pub(crate) fn materialize_recall_terminal_context(
     workspace: &Path,
     config: &Config,
     meeting_path: Option<&str>,
 ) -> Result<(), String> {
+    // A live capture has no saved meeting yet. Its bounded live reader is the
+    // only context source; a missing meeting must not become general history.
+    if meeting_path.is_none() && workspace.join(".live-tab").is_file() {
+        crate::context::clear_active_meeting_context(workspace)?;
+        return crate::context::clear_general_assistant_context(workspace);
+    }
     match meeting_path {
         Some(path) => {
             let meeting = PathBuf::from(path);
+            if workspace.join(".live-tab").is_file() && !meeting.exists() {
+                // A live call has no finalized Markdown yet. Its own bounded
+                // reader guidance is available; do not substitute stored history.
+                crate::context::clear_active_meeting_context(workspace)?;
+                return crate::context::clear_general_assistant_context(workspace);
+            }
             minutes_core::notes::validate_meeting_path(&meeting, &config.output_dir)?;
             crate::context::clear_general_assistant_context(workspace)?;
             crate::context::write_active_meeting_context(workspace, &meeting, config)
@@ -13348,10 +13557,11 @@ pub async fn cmd_prepare_recall_terminal_meeting(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     meeting_path: Option<String>,
+    session_id: Option<String>,
 ) -> Result<(), String> {
     let pty_manager = state.pty_manager.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        prepare_recall_terminal_meeting(&pty_manager, meeting_path)
+        prepare_recall_terminal_meeting(&pty_manager, meeting_path, session_id)
     })
     .await
     .map_err(|_| "Recall provider verification stopped unexpectedly.".to_string())?;
@@ -13370,8 +13580,11 @@ pub fn cmd_spawn_terminal(
     theme_dark: Option<bool>,
     cols: Option<u16>,
     rows: Option<u16>,
+    tab_id: Option<String>,
+    new_tab: Option<bool>,
+    background: Option<bool>,
 ) -> Result<String, String> {
-    let (session_id, _) = spawn_terminal(
+    let (session_id, _) = spawn_terminal_tab(
         &app,
         &state.pty_manager,
         &mode,
@@ -13379,6 +13592,9 @@ pub fn cmd_spawn_terminal(
         agent.as_deref(),
         theme_dark,
         cols.zip(rows),
+        tab_id.as_deref(),
+        new_tab.unwrap_or(false),
+        background.unwrap_or(false),
     )?;
     Ok(session_id)
 }
@@ -15376,19 +15592,16 @@ mod tests {
     #[test]
     fn recall_terminal_input_holds_only_known_empty_lines_before_meeting_context() {
         let html = include_str!("../../src/index.html");
-        assert!(html.contains("let recallTerminalInputReliable = true;"));
-        assert!(html.contains("recallTerminalInputReliable = false;"));
+        assert!(html.contains("reliable: true"));
+        assert!(html.contains("tab.reliable = false;"));
         // An edited line is sent (a leading "/" as an account command, else as
         // a question with context); only a line known to be empty is held.
-        assert!(html
-            .contains("recallTerminalContextPending && !question && recallTerminalInputReliable"));
-        assert!(html.contains(
-            "recallTerminalContextPending && !isAccountCommand && (question || !recallTerminalInputReliable)"
-        ));
+        assert!(html.contains("tab.pending && !question && tab.reliable"));
+        assert!(html.contains("tab.pending && !isAccountCommand && (question || !tab.reliable)"));
         // General mode has no meeting path but still owes its first question
         // the same provider-verified preparation before any context is written.
         assert!(
-            html.contains("await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath });")
+            html.contains("await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath, sessionId: tab.id });")
         );
         assert!(html.contains("No meeting context was read"));
     }
@@ -23153,6 +23366,12 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         update_assistant_live_context(&workspace, false);
     }
 
+    let recall_capture_id = live_context_session_id.clone().or_else(|| {
+        capture_relay
+            .as_ref()
+            .map(|relay| format!("relay:{}", relay.discovery().session_id))
+    });
+
     // End the capture-only consumers before advertising that a new Live
     // session can start. The durable processing worker never owns them.
     drop(capture_relay);
@@ -23241,6 +23460,15 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
                     }
                 }
             }
+
+            crate::recall_tabs::capture_finished(
+                &app,
+                recall_capture_id,
+                queued_job.as_ref().map(|job| job.id.clone()),
+                path.extension()
+                    .is_some_and(|ext| ext == "md")
+                    .then(|| path.display().to_string()),
+            );
 
             // The archive and durable queue record are safe. Clear Live before
             // the stopped event so the UI and shortcuts can start another
@@ -23910,7 +24138,7 @@ fn humanize_shortcut(shortcut: &str) -> String {
         .join("")
 }
 
-fn update_assistant_live_context_file(path: &std::path::Path, live_active: bool) {
+pub(crate) fn update_assistant_live_context_file(path: &std::path::Path, live_active: bool) {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let marker_start = "<!-- LIVE_TRANSCRIPT_START -->";
     let marker_end = "<!-- LIVE_TRANSCRIPT_END -->";
@@ -23947,6 +24175,9 @@ fn update_assistant_live_context_file(path: &std::path::Path, live_active: bool)
 }
 
 fn update_assistant_live_context(workspace: &std::path::Path, live_active: bool) {
+    if workspace.join("recall-tabs.json").is_file() {
+        return;
+    }
     for file_name in crate::context::ASSISTANT_INSTRUCTION_FILES {
         update_assistant_live_context_file(&workspace.join(file_name), live_active);
     }
@@ -26246,6 +26477,30 @@ mod external_stop_tests {
         assert_eq!(
             external_stop_decision(true, false),
             ExternalStopDecision::RefuseForeign
+        );
+    }
+}
+
+#[cfg(test)]
+mod recall_shell_launch_tests {
+    use super::*;
+    #[test]
+    fn direct_claude_keeps_user_settings_but_has_one_managed_hook_source() {
+        let workspace = Path::new("/tab");
+        let args = crate::context::assistant_skills::terminal_args(
+            "claude",
+            vec!["--settings".into(), "user.json".into(), "--continue".into()],
+            workspace,
+        );
+        let result = recall_tab_claude_args(args, workspace, Some("session-1"));
+        assert_eq!(result, ["--settings", "user.json", "--resume", "session-1"]);
+        let managed = crate::context::assistant_skills::claude_skill_directory(workspace)
+            .join("claude-focus-settings.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            recall_tab_claude_args(vec!["--settings".into(), managed], workspace, None),
+            Vec::<String>::new()
         );
     }
 }

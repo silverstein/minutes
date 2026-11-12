@@ -452,6 +452,32 @@
       transition: opacity 100ms ease-out 150ms;
     }
 
+    .recall-tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; }
+    .recall-tab { display: flex; min-width: 130px; max-width: 220px; flex: 1 0 130px; border: 1px solid var(--border-mid); border-radius: 6px; }
+    .recall-tab button { background: var(--bg-elevated); color: var(--text-secondary); border: none; padding: 8px; cursor: pointer; }
+    .recall-tab [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; text-align: left; }
+    .recall-tab [aria-selected="true"] { background: var(--bg-hover); color: var(--text); }
+    .recall-tab-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .recall-tab-close { flex-shrink: 0; }
+    .recall-tab-add { background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border-mid); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    .recall-tab-glyph { display: inline-block; width: 9px; height: 9px; border: 1.5px solid currentColor; border-radius: 50%; flex-shrink: 0; color: var(--text-secondary); margin-inline: 3px; }
+    .recall-tab-glyph.waiting { color: var(--accent); background: currentColor; }
+    .recall-tab-glyph.working { border-top-color: transparent; animation: recall-tab-spin 1s linear infinite; }
+    .recall-tab-glyph.live { color: var(--capture); }
+    .recall-tab-glyph.error { color: var(--red); }
+    .recall-tab-terminal { width: 100%; height: 100%; min-width: 0; min-height: 0; }
+    .recall-tab-terminal[hidden] { display: none; }
+    .recall-tab-prompt { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-mid); }
+    .recall-tab-prompt[hidden] { display: none; }
+    .recall-tab-prompt p { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--text); font-size: var(--text-body); }
+    .recall-tab-prompt-hint { color: var(--text-secondary); }
+    .recall-tab-prompt .btn { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: normal; }
+    .recall-tab.recall-tab-closable { border-color: var(--accent-border-strong); }
+    .recall-tab.recall-tab-closable .recall-tab-close { color: var(--accent); background: var(--accent-tint); }
+    .recall-tabs button:focus-visible, .recall-tab-prompt button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @keyframes recall-tab-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .recall-tab-glyph.working { animation: none; border-style: dotted; } }
+
     .recall-header {
       display: flex;
       align-items: center;
@@ -3312,6 +3338,9 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .meeting-title-row { display: flex; align-items: center; gap: 6px; }
+    .meeting-title-row > .meeting-title { flex: 1; min-width: 0; }
+    .meeting-title-row > [data-recall-meeting] { flex-shrink: 0; }
 
     .document-title {
       font-size: var(--text-sm);
@@ -6704,6 +6733,8 @@
 
   <!-- ── Recall panel (right side, embedded terminal) ── -->
   <div class="recall-panel" id="recall-panel" aria-hidden="true" inert>
+    <div class="recall-tabs" id="recall-tabs" role="tablist" aria-label="Recall conversations"></div>
+    <div class="recall-tab-prompt" id="recall-tab-prompt" role="region" aria-label="Recall tab action" hidden></div>
     <div class="recall-header" data-tauri-drag-region>
       <div class="recall-header-info" data-tauri-drag-region>
         <div class="recall-phase-dot" id="recall-dot" aria-label="Phase: Recall" data-tauri-drag-region></div>
@@ -6744,8 +6775,8 @@
       </div>
     </div>
     <div class="recall-exit-banner" id="recall-exit-banner">
-      Session ended.
-      <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Restart</button>
+      Conversation process ended.
+      <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Start conversation</button>
     </div>
   </div>
 
@@ -6808,6 +6839,7 @@
           <div class="detail-meta" id="detail-meta"></div>
         </div>
         <div class="detail-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-prep-ai">Prep</button>
           <button class="btn btn-secondary btn-sm" id="btn-discuss-ai">Discuss with Agent</button>
           <button class="btn btn-primary btn-sm" id="btn-create-artifact">Create Draft</button>
           <button class="detail-more-btn" id="btn-detail-more" type="button" aria-haspopup="menu" aria-label="More actions" title="More actions">
@@ -8249,6 +8281,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
   </style>
 
   <link rel="stylesheet" href="vendor/xterm/xterm.css">
+  <script src="scripts/recall-tabs.js"></script>
   <script src="vendor/xterm/xterm.js"></script>
   <script src="vendor/xterm/xterm-addon-fit.js"></script>
   <script src="vendor/xterm/minutes-theme.js"></script>
@@ -11256,6 +11289,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             text: menuLabel('Discuss with Agent'),
             action: action('Discuss with Agent', () => discussMeetingWithAgent(meeting.path, meeting.title)),
           },
+          { text: menuLabel('Prep'), action: action('Prep', async () => { await discussMeetingWithAgent(meeting.path, meeting.title, 'prep'); setRecallPhase('prep', meeting.title); }) },
           { item: 'Separator' },
         );
       } else {
@@ -12723,6 +12757,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const title = document.createElement('div');
       title.className = 'meeting-title';
       setHighlightedText(title, m.title || 'Untitled', activeSearchQuery);
+      const recallStatus = document.createElement('span');
+      recallStatus.dataset.recallMeeting = m.path;
+      const titleRow = document.createElement('div');
+      titleRow.className = 'meeting-title-row';
+      titleRow.append(title, recallStatus);
+      window.MinutesRecallTabs?.renderMeetingStatus(recallStatus, m.path);
 
       const meta = document.createElement('div');
       meta.className = 'meeting-meta';
@@ -12734,7 +12774,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const kindLabel = { memo: 'Memo', dictation: 'Dictation' }[m.content_type] || '';
       meta.textContent = kindLabel ? `${when} · ${kindLabel}` : when;
 
-      info.appendChild(title);
+      info.appendChild(titleRow);
       info.appendChild(meta);
 
       if (activeSearchQuery && m.snippet) {
@@ -12892,6 +12932,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         finishMeetingInventoryLoading();
         setSearchError(null);
         lastMeetingInventory = meetings;
+        syncRecallTabPresentation();
         renderMeetings(meetings);
       } catch (e) {
         if (generation !== meetingInventoryGeneration) return;
@@ -16226,44 +16267,51 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       navigator.platform.toLowerCase().startsWith('win');
     const MIN_RECALL_RATIO = 0.25;
     const MAX_RECALL_RATIO = 0.667;
-    const SESSION_ID = 'assistant';
+    let SESSION_ID = 'assistant';
+    const recallTabStates = new Map();
+    let recallTabsModel = { tabs: [], active: null };
+    function recallStateFor(id) {
+      if (!recallTabStates.has(id)) recallTabStates.set(id, { id, terminal: null, fit: null, alive: false, dark: null, initialized: false, resize: null, ptySize: null, resizeQueue: Promise.resolve(), untouched: false, themeHandler: null, themeObserver: null, pending: true, shell: false, claudeActive: false, resuming: false, draft: '', reliable: true, queue: Promise.resolve(), hasSignal: false, nextUser: false, meetingPath: null, listeners: [], container: null });
+      return recallTabStates.get(id);
+    }
+    function activeRecallState() { return recallStateFor(SESSION_ID); }
 
     let recallExpanded = false;
     let recallLastOutputAt = 0;
-    let recallTerminal = null;
-    let recallFitAddon = null;
-    let recallPtyAlive = false;
     // A terminal app picks its colors once, at startup (COLORFGBG). While
     // that session runs the palette stays on the theme it started with:
     // switching it underneath painted the app's text white-on-white after a
     // dark-to-light toggle (dark-on-dark the other way).
-    let recallTerminalSessionDark = null;
 
-    function applyRecallTerminalTheme() {
-      const dark = recallPtyAlive && recallTerminalSessionDark !== null
-        ? recallTerminalSessionDark
+    function applyRecallTerminalTheme(tab = activeRecallState()) {
+      const dark = tab.alive && tab.dark !== null
+        ? tab.dark
         : isEffectiveDarkTheme();
       const theme = window.getMinutesTheme(dark);
       // The container paints the padding around xterm's canvas.
-      recallTerminalContainer.style.backgroundColor = theme.background;
-      if (recallTerminal) recallTerminal.options.theme = theme;
+      if (tab.id === SESSION_ID) recallTerminalContainer.style.backgroundColor = theme.background;
+      if (tab.terminal) tab.terminal.options.theme = theme;
       return theme;
     }
 
-    function markRecallPtyAlive() {
-      recallPtyAlive = true;
+    function markRecallPtyAlive(tab = activeRecallState()) {
+      if (!tab.alive) tab.ptySize = null;
+      tab.alive = true; tab.exited = false;
+      if (tab.id === SESSION_ID) recallExitBanner.classList.remove('active');
+      requestAnimationFrame(() => fitRecallTerminal(tab));
       refreshRecallContextChips();
-      invoke('cmd_terminal_info', { sessionId: SESSION_ID })
-        .then((info) => { recallTerminalSessionDark = info?.theme_dark ?? null; })
-        .catch(() => { recallTerminalSessionDark = null; })
-        .finally(applyRecallTerminalTheme);
+      invoke('cmd_terminal_info', { sessionId: tab.id })
+        .then((info) => { tab.dark = info?.theme_dark ?? null; })
+        .catch(() => { tab.dark = null; })
+        .finally(() => applyRecallTerminalTheme(tab));
     }
 
-    function markRecallPtyEnded() {
-      recallPtyAlive = false;
-      recallTerminalSessionDark = null;
-      applyRecallTerminalTheme();
-      renderRecallContextChips(null);
+    function markRecallPtyEnded(tab = activeRecallState()) {
+      tab.alive = false; tab.exited = true;
+      tab.ptySize = null;
+      tab.dark = null;
+      applyRecallTerminalTheme(tab);
+      if (tab.id === SESSION_ID) renderRecallContextChips(null);
     }
 
     // ── What the agent is working from ──
@@ -16308,7 +16356,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const next = recallContextChips.querySelector(`[data-context-item="${focusedItem}"] button`)
           || recallContextChips.querySelector('button');
         if (next) next.focus();
-        else recallTerminal?.focus?.();
+        else activeRecallState().terminal?.focus?.();
       }
     }
 
@@ -16316,7 +16364,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const seq = ++recallContextRefreshSeq;
       // Private Chat mode does not use these files, and a plain shell or an
       // ended session reads nothing.
-      if (!recallDevMode || !recallPtyAlive) {
+      if (!recallDevMode || !activeRecallState().alive) {
         renderRecallContextChips(null);
         return;
       }
@@ -16339,10 +16387,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
     let recallPhase = 'recall';
     let userExplicitlyCollapsed = false;
-    let recallInitialized = false;
-    let recallResizeObserver = null;
-    let recallThemeHandler = null;
-    let recallThemeObserver = null;
 
     // The app theme can be forced via data-theme (settings/localStorage), in
     // which case the OS media query is the wrong authority. Used for the
@@ -16366,16 +16410,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const recallProviderNotice = document.getElementById('recall-provider-notice');
     let recallReadiness = null;
     let recallSelectedMeetingPath = null;
-    let pendingRecallTerminalMeetingPath = null;
     // True while a Terminal session still owes its first real question the
     // context it is allowed to see (the selected meeting, or the general
     // meeting directory when none was selected). Cleared once materialized.
-    let recallTerminalContextPending = false;
-    let recallTerminalInputDraft = '';
-    let recallTerminalInputReliable = true;
-    let recallTerminalInputQueue = Promise.resolve();
-    let recallTerminalHasUserInputSignal = false;
-    let recallTerminalNextDataIsUserInput = false;
 
     // An informational notice ("Codex is open in Terminal. Ask your question
     // here...") earns its space exactly once: it tells you what the panel is
@@ -16420,6 +16457,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallProviderNotice.dataset.tone = tone;
       recallProviderNotice.classList.toggle('active', Boolean(text) && !suppressed);
       recallProviderNotice.classList.toggle('error', tone === 'error');
+      requestAnimationFrame(() => fitRecallTerminal());
     }
 
     function dismissRecallProviderNotice() {
@@ -16431,6 +16469,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         try { localStorage.setItem(RECALL_READY_NOTICE_SEEN_KEY, '1'); } catch {}
       }
       recallProviderNotice.classList.remove('active');
+      requestAnimationFrame(() => fitRecallTerminal());
     }
 
     function syncRecallModeControls({ persist = true } = {}) {
@@ -16478,10 +16517,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallDevMode = nextDevMode;
       recallModePreferenceExplicit = true;
       localStorage.setItem('minutes.recallModePreferenceExplicit', 'true');
-      pendingRecallTerminalMeetingPath = recallDevMode ? recallSelectedMeetingPath : null;
-      recallTerminalContextPending = recallDevMode;
-      recallTerminalInputDraft = '';
-      recallTerminalInputReliable = true;
+      activeRecallState().meetingPath = recallDevMode ? recallSelectedMeetingPath : null;
+      activeRecallState().pending = recallDevMode;
+      activeRecallState().draft = '';
+      activeRecallState().reliable = true;
       syncRecallModeControls();
       setRecallProviderNotice(
         recallDevMode && readiness
@@ -16497,7 +16536,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (!readiness.terminalAvailable) {
         return `${assistant} could not be found. Install it or choose an installed assistant in Settings. No meeting was read.`;
       }
-      const meeting = pendingRecallTerminalMeetingPath ? 'the selected meeting' : 'meeting context';
+      const meeting = activeRecallState().meetingPath ? 'the selected meeting' : 'meeting context';
       if (!readiness.terminalAuthenticated) {
         return `${assistant} is open in Terminal. Sign in here first. Minutes will not read ${meeting} during sign-in.`;
       }
@@ -16525,10 +16564,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           'Minutes could not verify private Chat, so it opened your assistant in Terminal without reading the meeting.',
           'error'
         );
-        pendingRecallTerminalMeetingPath = mode === 'meeting' ? meetingPath : null;
-        recallTerminalContextPending = true;
-        recallTerminalInputDraft = '';
-        recallTerminalInputReliable = true;
         return { mode: 'deferred', meetingPath: null };
       }
 
@@ -16543,10 +16578,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       syncRecallModeControls({ persist: readiness.nativeAvailable });
 
       if (recallDevMode) {
-        pendingRecallTerminalMeetingPath = mode === 'meeting' ? meetingPath : null;
-        recallTerminalContextPending = true;
-        recallTerminalInputDraft = '';
-        recallTerminalInputReliable = true;
         setRecallProviderNotice(
           terminalNoticeForReadiness(readiness),
           readiness.terminalAvailable ? 'info' : 'error'
@@ -16554,8 +16585,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return { mode: 'deferred', meetingPath: null };
       }
 
-      pendingRecallTerminalMeetingPath = null;
-      recallTerminalContextPending = false;
       setRecallProviderNotice(readiness.message);
       return { mode, meetingPath };
     }
@@ -16778,7 +16807,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       document.body.style.userSelect = 'none';
       const move = (ev) => {
         onMove(ev);
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       };
       const up = () => {
         handle.classList.remove('dragging');
@@ -16787,7 +16816,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         document.removeEventListener('mousemove', move);
         document.removeEventListener('mouseup', up);
         onDone();
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       };
       document.addEventListener('mousemove', move);
       document.addEventListener('mouseup', up);
@@ -16806,7 +16835,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     docSplitHandle?.addEventListener('dblclick', () => {
       localStorage.removeItem('minutes.docRatio');
       applyDocRatio(DEFAULT_DOC_RATIO);
-      if (recallFitAddon) recallFitAddon.fit();
+      fitRecallTerminal();
     });
 
     splitHandle.addEventListener('mousedown', (e) => {
@@ -16833,7 +16862,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const rightPx = bodyW - ev.clientX;
         const ratio = clampRecallRatio(rightPx / bodyW);
         applyRecallRatio(ratio);
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       };
       const onUp = () => {
         splitHandle.classList.remove('dragging');
@@ -16846,7 +16875,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const ratio = clampRecallRatio(panelW / bodyW);
         localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
         persistRecallWorkspaceState({ recallRatio: ratio });
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
@@ -16856,14 +16885,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (document.body.classList.contains('doc-open')) {
         localStorage.removeItem('minutes.listRatioDocOpen');
         applyListRatioDocOpen(DEFAULT_LIST_RATIO_DOC_OPEN);
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
         return;
       }
       const ratio = clampRecallRatio(DEFAULT_RECALL_RATIO);
       localStorage.setItem('minutes.recallRatio', ratio.toFixed(3));
       applyRecallRatio(ratio);
       persistRecallWorkspaceState({ recallRatio: ratio });
-      if (recallFitAddon) recallFitAddon.fit();
+      fitRecallTerminal();
     });
 
     // ── Phase management ──
@@ -16930,25 +16959,48 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // narrower panel that wrapped and left a stray inverted % on its own line
     // that the later resize could not remove. Fit first and spawn at the real
     // grid; the backend falls back to 120x30 when this is empty.
+    function fitRecallTerminal(tab = activeRecallState()) {
+      if (!tab.fit || !tab.terminal || !recallExpanded || tab.id !== SESSION_ID
+        || tab.container?.hidden || !tab.container?.clientWidth || !tab.container?.clientHeight) return;
+      const buffer = tab.terminal.buffer.active;
+      const wasAtBottom = buffer.viewportY >= buffer.baseY;
+      tab.fit.fit();
+      // Explicitly repaint visible rows after a notice or tab switch restores
+      // geometry; fitting an unchanged grid alone does not invalidate them.
+      tab.terminal.refresh(0, tab.terminal.rows - 1);
+      if (wasAtBottom) tab.terminal.scrollToBottom();
+      const { cols, rows } = tab.terminal;
+      if (!tab.alive) return;
+      // Compare with the PTY's last acknowledged grid, not xterm's previous
+      // grid: a hidden tab may already have been fitted without notifying it.
+      // Serialize per tab so an older IPC cannot overwrite a newer size.
+      tab.resizeQueue = tab.resizeQueue.catch(() => {}).then(async () => {
+        if (!tab.alive || (tab.ptySize?.cols === cols && tab.ptySize?.rows === rows)) return;
+        await invoke('cmd_pty_resize', { sessionId: tab.id, cols, rows });
+        tab.ptySize = { cols, rows };
+      }).catch(() => {});
+      return tab.resizeQueue;
+    }
+
     function recallSpawnSize() {
       try {
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       } catch (_) { /* hidden or zero-size container: use the fallback */ }
-      const cols = recallTerminal?.cols;
-      const rows = recallTerminal?.rows;
+      const cols = activeRecallState().terminal?.cols;
+      const rows = activeRecallState().terminal?.rows;
       return cols > 1 && rows > 1 ? { cols, rows } : {};
     }
 
-    function initRecallTerminal() {
-      if (recallInitialized) return;
-      recallInitialized = true;
+    function initRecallTerminal(tab = activeRecallState()) {
+      if (tab.initialized) return;
+      tab.initialized = true;
 
       // The app theme can be forced via data-theme (settings/localStorage),
       // in which case the OS media query is the wrong authority — following
       // it painted a dark terminal slab into a light UI whenever the two
       // disagreed.
-      recallTerminal = new Terminal({
-        theme: applyRecallTerminalTheme(),
+      tab.terminal = new Terminal({
+        theme: applyRecallTerminalTheme(tab),
         fontFamily: "'Geist Mono', 'SF Mono', Menlo, monospace",
         fontSize: getTerminalFontSize(),
         lineHeight: 1.2,
@@ -16958,89 +17010,80 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         allowProposedApi: true,
       });
 
-      recallThemeHandler = () => {
-        applyRecallTerminalTheme();
-        if (recallPtyAlive && recallDevMode && recallTerminalSessionDark !== null
-          && recallTerminalSessionDark !== isEffectiveDarkTheme()) {
+      tab.themeHandler = () => {
+        applyRecallTerminalTheme(tab);
+        if (tab.alive && recallDevMode && tab.dark !== null
+          && tab.dark !== isEffectiveDarkTheme()) {
           const name = recallReadiness?.assistantName || 'The assistant';
-          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${recallTerminalSessionDark ? 'dark' : 'light'} colors until you end this session, so its text stays readable.`);
+          setRecallProviderNotice(`Theme changed. The terminal keeps ${name}'s ${tab.dark ? 'dark' : 'light'} colors until you end this session, so its text stays readable.`);
         }
       };
-      document.addEventListener('minutes-theme-changed', () => {
-        if (recallThemeHandler) recallThemeHandler();
-      });
+      document.addEventListener('minutes-theme-changed', tab.themeHandler);
       // Re-theme when the app's own override flips, not only when the OS does.
-      recallThemeObserver = new MutationObserver(recallThemeHandler);
-      recallThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      tab.themeObserver = new MutationObserver(tab.themeHandler);
+      tab.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-      recallFitAddon = new FitAddon.FitAddon();
-      recallTerminal.loadAddon(recallFitAddon);
-      recallTerminal.open(recallTerminalContainer);
+      tab.fit = new FitAddon.FitAddon();
+      tab.terminal.loadAddon(tab.fit);
+      tab.container = document.createElement('div');
+      tab.container.className = 'recall-tab-terminal';
+      tab.container.hidden = tab.id !== SESSION_ID;
+      tab.container.dataset.tabId = tab.id;
+      tab.container.id = `recall-terminal-${tab.id}`;
+      tab.container.setAttribute('role', 'tabpanel');
+      tab.container.setAttribute('aria-labelledby', `recall-tab-${tab.id}`);
+      recallTerminalContainer.appendChild(tab.container);
+      tab.terminal.open(tab.container);
+      // Suppress shortcut keydown/keypress/keyup at xterm's own input boundary.
+      // WebKit may deliver later key events to the newly focused tab even when
+      // the document's keydown handler already selected another tab.
+      tab.terminal.attachCustomKeyEventHandler(event => {
+        const shortcut = window.MinutesRecallTabs.shortcut(event, isMac);
+        if (recallExpanded && shortcut) { tab.nextUser = false; event.preventDefault(); return false; }
+        return true;
+      });
       // xterm's public onData event mixes real keyboard/paste input with
       // automatic terminal replies generated for cursor and capability
       // queries. Its internal user-input signal fires synchronously just
       // before onData for keyboard, paste, and mouse input, which lets us keep
       // those replies out of the privacy-sensitive shadow line. If a future
       // xterm removes the signal, retain the older fail-closed behavior.
-      const onRecallTerminalUserInput = recallTerminal?._core?.coreService?.onUserInput;
+      const onRecallTerminalUserInput = tab.terminal?._core?.coreService?.onUserInput;
       if (typeof onRecallTerminalUserInput === 'function') {
-        recallTerminalHasUserInputSignal = true;
+        tab.hasSignal = true;
         onRecallTerminalUserInput(() => {
-          recallTerminalNextDataIsUserInput = true;
+          tab.nextUser = true;
         });
       }
-      window.MINUTES_XTERM_THEME_QUERY.addEventListener('change', recallThemeHandler);
-      document.addEventListener('uizoomchange', () => {
-        recallTerminal.options.fontSize = getTerminalFontSize();
-        if (recallFitAddon) recallFitAddon.fit();
-      });
+      window.MINUTES_XTERM_THEME_QUERY.addEventListener('change', tab.themeHandler);
+      tab.zoomHandler = () => { tab.terminal.options.fontSize = getTerminalFontSize(); fitRecallTerminal(tab); };
+      document.addEventListener('uizoomchange', tab.zoomHandler);
 
       let fitTimeout;
-      recallResizeObserver = new ResizeObserver(() => {
-        if (!recallExpanded) return;
+      tab.resize = new ResizeObserver(() => {
+        if (!recallExpanded || tab.id !== SESSION_ID) return;
         clearTimeout(fitTimeout);
         fitTimeout = setTimeout(() => {
-          if (!recallFitAddon || !recallTerminal) return;
-          // Resizing reflows the buffer, and a TUI answering the SIGWINCH
-          // redraws from scratch — both of which used to leave the viewport
-          // parked at the top of scrollback. Every window drag, pane open,
-          // or list collapse threw the reader back up to the beginning of a
-          // long answer. Remember whether they were following the tail and
-          // put them back there.
-          const buf = recallTerminal.buffer.active;
-          const wasAtBottom = buf.viewportY >= buf.baseY;
-          const prevCols = recallTerminal.cols;
-          const prevRows = recallTerminal.rows;
-          recallFitAddon.fit();
-          if (wasAtBottom) recallTerminal.scrollToBottom();
-          // Only tell the child when the grid actually changed. A width jitter
-          // that rounds to the same cell grid still fired SIGWINCH and forced a
-          // full TUI redraw for nothing.
-          const gridChanged = recallTerminal.cols !== prevCols || recallTerminal.rows !== prevRows;
-          if (recallPtyAlive && gridChanged) {
-            invoke('cmd_pty_resize', {
-              sessionId: SESSION_ID,
-              cols: recallTerminal.cols,
-              rows: recallTerminal.rows,
-            }).catch(() => { });
-          }
+          if (!tab.fit || !tab.terminal) return;
+          fitRecallTerminal(tab);
         }, 100);
       });
-      recallResizeObserver.observe(recallTerminalContainer);
+      tab.resize.observe(recallTerminalContainer);
+      tab.resize.observe(tab.container);
 
-      recallTerminal.onData((data) => {
-        if (!recallPtyAlive) return;
-        const isUserInput = !recallTerminalHasUserInputSignal || recallTerminalNextDataIsUserInput;
-        recallTerminalNextDataIsUserInput = false;
+      tab.terminal.onData((data) => {
+        if (!tab.alive) return;
+        const isUserInput = !tab.hasSignal || tab.nextUser;
+        tab.nextUser = false;
         // Typing into the terminal is the moment the "ask your question here"
         // notice stops being useful. Automatic terminal replies are invisible
         // plumbing and should not dismiss it.
-        if (isUserInput) dismissRecallProviderNotice();
+        if (isUserInput) { tab.untouched = false; dismissRecallProviderNotice(); }
         // Serialize PTY writes so the context-preparation command completes
         // before the Enter that submits the first real question. Normal typing
         // still follows the same one-invoke-per-input path as before.
-        recallTerminalInputQueue = recallTerminalInputQueue
-          .then(() => forwardRecallTerminalData(data, isUserInput))
+        tab.queue = tab.queue
+          .then(() => forwardRecallTerminalData(data, isUserInput, tab))
           .catch((error) => {
             console.error('Recall terminal input:', error);
             setRecallProviderNotice(String(error), 'error');
@@ -17066,7 +17109,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function recallTerminalDropRect() {
-      if (!recallTerminal || !recallPtyAlive) return null;
+      if (!activeRecallState().terminal || !activeRecallState().alive) return null;
       if (recallTerminalContainer.classList.contains('hidden')) return null;
       const rect = recallTerminalContainer.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 ? rect : null;
@@ -17098,23 +17141,23 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (type !== 'drop') return;
         draggingFiles = false;
         if (!over || !paths?.length) return;
-        recallTerminal.focus();
+        activeRecallState().terminal.focus();
         // paste() routes through onData as user input, so the PTY write queue
         // and shadow line see it like any other paste, and bracketed paste is
         // applied when the TUI asked for it.
-        recallTerminal.paste(paths.map(shellEscapeDroppedPath).join(' ') + ' ');
+        activeRecallState().terminal.paste(paths.map(shellEscapeDroppedPath).join(' ') + ' ');
       });
     }
 
-    async function forwardRecallTerminalData(data, isUserInput) {
+    async function forwardRecallTerminalData(data, isUserInput, tab = activeRecallState()) {
       if (!isUserInput) {
-        await invoke('cmd_pty_input', { sessionId: SESSION_ID, data });
+        await invoke('cmd_pty_input', { sessionId: tab.id, data });
         return;
       }
-      await forwardRecallTerminalInput(data);
+      await forwardRecallTerminalInput(data, tab);
     }
 
-    function updateRecallTerminalInputDraft(data) {
+    function updateRecallTerminalInputDraft(data, tab = activeRecallState()) {
       // Strip bracketed-paste and cursor-control CSI sequences from the local
       // shadow copy; the PTY still receives the original bytes unchanged.
       // Cursor movement or other terminal editing means we can no longer prove
@@ -17132,38 +17175,38 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         .replace(/\x1b\[<(\d+);\d+;\d+[Mm]/g, (_report, code) => {
           const button = Number(code);
           const motionOrWheel = (button & 32) !== 0 || (button & 64) !== 0;
-          if (!motionOrWheel && recallTerminalInputDraft !== '') {
-            recallTerminalInputReliable = false;
+          if (!motionOrWheel && tab.draft !== '') {
+            tab.reliable = false;
           }
           return '';
         });
       const csiSequences = data.match(/\x1b\[[0-9;?]*[ -/]*[@-~]/g) || [];
       if (csiSequences.some((sequence) => sequence !== '\x1b[200~' && sequence !== '\x1b[201~')) {
-        recallTerminalInputReliable = false;
+        tab.reliable = false;
       }
       const plain = data.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
       for (const char of plain) {
         if (char === '\x7f' || char === '\b') {
-          recallTerminalInputDraft = recallTerminalInputDraft.slice(0, -1);
+          tab.draft = tab.draft.slice(0, -1);
         } else if (char === '\x03' || char === '\x15') {
           // Ctrl-C and Ctrl-U both restore a known-empty interactive line.
-          recallTerminalInputDraft = '';
-          recallTerminalInputReliable = true;
+          tab.draft = '';
+          tab.reliable = true;
         } else if (char === '\x17') {
           // Ctrl-W removes the word immediately before the cursor. This is
           // exact while the shadow line is still known to be linear.
-          if (recallTerminalInputReliable) {
-            recallTerminalInputDraft = recallTerminalInputDraft.replace(/\s*\S+\s*$/, '');
+          if (tab.reliable) {
+            tab.draft = tab.draft.replace(/\s*\S+\s*$/, '');
           }
         } else if (char < ' ' && char !== '\n') {
-          recallTerminalInputReliable = false;
+          tab.reliable = false;
         } else if (char >= ' ' && char !== '\x7f') {
-          recallTerminalInputDraft += char;
+          tab.draft += char;
         }
       }
     }
 
-    async function forwardRecallTerminalInput(data) {
+    async function forwardRecallTerminalInput(data, tab = activeRecallState()) {
       let cursor = 0;
       for (let index = 0; index < data.length; index += 1) {
         const char = data[index];
@@ -17173,11 +17216,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
         const beforeEnter = data.slice(cursor, index);
         if (beforeEnter) {
-          updateRecallTerminalInputDraft(beforeEnter);
-          await invoke('cmd_pty_input', { sessionId: SESSION_ID, data: beforeEnter });
+          updateRecallTerminalInputDraft(beforeEnter, tab);
+          await invoke('cmd_pty_input', { sessionId: tab.id, data: beforeEnter });
         }
 
-        const question = recallTerminalInputDraft.trim();
+        const question = tab.draft.trim();
         // The shadow line only decides one thing: whether this Enter submits
         // the first real question, which needs the session's meeting context,
         // or an account command like /login, which must reach the agent before
@@ -17191,7 +17234,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // So an edited line is classified by what the shadow still knows: a
         // leading "/" means an account command, anything else is a question.
         // Only a line known to be empty is held back.
-        if (recallTerminalContextPending && !question && recallTerminalInputReliable) {
+        if (!tab.shell && tab.pending && !question && tab.reliable) {
           setRecallProviderNotice(
             'Not sent. Minutes did not see a question on the line. Type your question, then press Return. No meeting context was read.',
             'error'
@@ -17199,14 +17242,14 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           return;
         }
         const isAccountCommand = question.startsWith('/');
-        if (recallTerminalContextPending && !isAccountCommand && (question || !recallTerminalInputReliable)) {
+        if (!tab.shell && tab.pending && !isAccountCommand && (question || !tab.reliable)) {
           // null means "no meeting selected": the backend writes the general
           // meeting-directory context instead, under the same auth gate.
-          const meetingPath = pendingRecallTerminalMeetingPath;
+          const meetingPath = tab.meetingPath;
           try {
-            await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath });
-            pendingRecallTerminalMeetingPath = null;
-            recallTerminalContextPending = false;
+            await invoke('cmd_prepare_recall_terminal_meeting', { meetingPath, sessionId: tab.id });
+            tab.meetingPath = null;
+            tab.pending = false;
             setRecallProviderNotice(
               meetingPath
                 ? 'The selected meeting is ready for this question. Terminal chat remains under your agent subscription.'
@@ -17220,55 +17263,39 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           }
         }
 
-        await invoke('cmd_pty_input', { sessionId: SESSION_ID, data: char });
-        recallTerminalInputDraft = '';
-        recallTerminalInputReliable = true;
+        await invoke('cmd_pty_input', { sessionId: tab.id, data: char });
+        tab.draft = '';
+        tab.reliable = true;
         cursor = index + 1;
       }
 
       const remainder = data.slice(cursor);
       if (remainder) {
-        updateRecallTerminalInputDraft(remainder);
-        await invoke('cmd_pty_input', { sessionId: SESSION_ID, data: remainder });
+        updateRecallTerminalInputDraft(remainder, tab);
+        await invoke('cmd_pty_input', { sessionId: tab.id, data: remainder });
       }
     }
 
     // ── PTY event listeners (registered once) ──
-    let ptyListenersRegistered = false;
-    async function registerPtyListeners() {
-      if (ptyListenersRegistered) return;
-      ptyListenersRegistered = true;
-
-      await currentWindow.listen('pty:data:' + SESSION_ID, (event) => {
-        recallLastOutputAt = Date.now();
-        if (!recallTerminal) return;
+    async function registerPtyListeners(tab = activeRecallState()) {
+      if (tab.listening) return;
+      tab.listening = true;
+      tab.listeners.push(await currentWindow.listen('pty:data:' + tab.id, (event) => {
         const raw = atob(event.payload);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) {
-          bytes[i] = raw.charCodeAt(i);
-        }
-        recallTerminal.write(bytes);
-        // The PTY session keeps running in the background after switching to
-        // chat mode (so its context survives a later switch back), so it can
-        // keep emitting data while chat is the active view. Only reveal the
-        // terminal container for that data if terminal mode is actually the
-        // current view — otherwise this unconditionally re-showed the
-        // terminal on top of/alongside the chat panel ("split view").
-        if (!recallDevMode) return;
-        const wasHidden = recallTerminalContainer.classList.contains('hidden');
+        tab.terminal?.write(Uint8Array.from(raw, c => c.charCodeAt(0)));
+        if (tab.id !== SESSION_ID || !recallDevMode) return;
+        recallLastOutputAt = Date.now();
         recallLoading.classList.remove('active');
+        const wasHidden = recallTerminalContainer.classList.contains('hidden');
         recallTerminalContainer.classList.remove('hidden');
-        // Re-fit after first reveal so xterm measures the real container width
-        if (wasHidden && recallFitAddon) {
-          requestAnimationFrame(() => recallFitAddon.fit());
-        }
-      });
-
-      await currentWindow.listen('pty:exit:' + SESSION_ID, () => {
-        markRecallPtyEnded();
+        if (wasHidden) requestAnimationFrame(() => fitRecallTerminal(tab));
+      }));
+      tab.listeners.push(await currentWindow.listen('pty:exit:' + tab.id, () => {
+        markRecallPtyEnded(tab);
+        if (tab.id !== SESSION_ID) return;
         recallExitBanner.classList.add('active');
         recallEndBtn.classList.remove('active');
-      });
+      }));
     }
 
     // ── Recall native chat (dev-mode OFF) ──
@@ -17306,14 +17333,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // away to chat, so re-entering terminal mode just re-reveals it.
         if (recallChatPanel) recallChatPanel.style.display = 'none';
         recallTerminalContainer.classList.remove('hidden');
+        if (!recallTabsModel.active) { recallLoading.classList.remove('active'); return; }
         initRecallTerminal();
         await registerPtyListeners();
         try {
           // Always re-apply deferred mode, even to an existing PTY. This
           // clears any stale CURRENT_MEETING.md before a new question while
           // the backend keeps the already-running terminal session intact.
-          await invoke('cmd_spawn_terminal', { mode: 'deferred', themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() });
-          recallTerminalContextPending = true;
+          if (!recallTabsModel.active) return;
+          await invoke('cmd_spawn_terminal', { mode: 'deferred', tabId: SESSION_ID, themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() });
           markRecallPtyAlive();
           recallEndBtn.classList.add('active');
         } catch (e) {
@@ -17329,8 +17357,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // Re-fit once the container is actually visible so xterm measures the
         // real width; focus for immediate typing.
         setTimeout(() => {
-          if (recallFitAddon) recallFitAddon.fit();
-          if (recallTerminal) recallTerminal.focus();
+          fitRecallTerminal();
+          if (activeRecallState().terminal) activeRecallState().terminal.focus();
         }, 60);
       } else {
         // Chat (native) mode. Leave any PTY session running in the background
@@ -17430,8 +17458,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         initRecallTerminal();
         await registerPtyListeners();
         setTimeout(() => {
-          if (recallFitAddon) recallFitAddon.fit();
-          if (recallTerminal) recallTerminal.focus();
+          fitRecallTerminal();
+          if (activeRecallState().terminal) activeRecallState().terminal.focus();
         }, 260);
       } else {
         applyRecallMode();
@@ -17473,8 +17501,21 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     // ── Open Recall (spawn PTY if needed, then expand) ──
-    async function openRecall(mode, meetingPath) {
-      const experience = await chooseRecallExperience(mode, meetingPath);
+    let recallOpenQueue = Promise.resolve();
+    // True means the requested conversation was admitted/selected. A rejected
+    // open must not apply meeting actions to the conversation still on screen.
+    function openRecall(mode, meetingPath, options = {}) {
+      const operation = recallOpenQueue.then(() => openRecallImpl(mode, meetingPath, options));
+      recallOpenQueue = operation.catch(() => {});
+      return operation;
+    }
+    async function openRecallImpl(mode, meetingPath, options = {}) {
+      const requestedMode = mode;
+      const requestedMeeting = meetingPath || null;
+      const experience = options.tabId || options.newTab || options.captureId
+        ? { mode: 'deferred', meetingPath: null }
+        : await chooseRecallExperience(mode, meetingPath);
+      if (options.tabId || options.newTab || options.captureId || requestedMeeting) { recallDevMode = true; syncRecallModeControls(); }
       mode = experience.mode;
       meetingPath = experience.meetingPath;
       recallLoading.classList.add('active');
@@ -17509,7 +17550,29 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
         applyRecallMode();
         await registerChatListeners();
-        return;
+        return true;
+      }
+
+      try {
+        const model = options.tabId
+          ? await invoke('cmd_recall_tabs')
+          : await invoke('cmd_recall_tab_open', { meetingPath: requestedMeeting, newTab: !!options.newTab, captureId: options.captureId || null, meetingTitle: options.meetingTitle || lastMeetingInventory.find(meeting => meeting.path === requestedMeeting)?.title || null, phase: options.phase || null });
+        const target = recallStateFor(options.tabId || model.active);
+        if (options.newTab) target.untouched = true;
+        await activateRecallTab(options.tabId || model.active, model);
+        if (!options.restart && target.exited) return true;
+      } catch (error) {
+        recallLoading.classList.remove('active');
+        // A rejected open leaves the current PTY selected. Restore its surface
+        // before showing the chooser; an idle shell may emit no more output.
+        if (recallExpanded && recallDevMode && activeRecallState()?.alive) {
+          recallTerminalContainer.classList.remove('hidden');
+          requestAnimationFrame(() => fitRecallTerminal());
+        }
+        // Terminal readiness deliberately defers meeting materialization. The
+        // continuation still needs the original meeting, title and phase.
+        if (String(error).includes('RECALL_TAB_LIMIT')) { showRecallTabLimit(requestedMode, requestedMeeting, options); return false; }
+        setRecallProviderNotice(String(error), 'error'); return false;
       }
 
       // Terminal mode, using the original PTY path.
@@ -17519,12 +17582,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       await registerPtyListeners();
 
       try {
-        const opts = { mode, themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() };
+        const opts = { mode, tabId: SESSION_ID, themeDark: isEffectiveDarkTheme(), ...recallSpawnSize() };
         if (meetingPath) opts.meetingPath = meetingPath;
         await invoke('cmd_spawn_terminal', opts);
         markRecallPtyAlive();
         recallEndBtn.classList.add('active');
-        if (mode === 'assistant' && !meetingPath) {
+        if (mode === 'assistant' && !meetingPath && !options.tabId) {
           try {
             const bundle = await invoke('cmd_proactive_context_bundle');
             recallContextLabel.textContent = bundle.summary ? `\u2014 ${bundle.summary}` : '';
@@ -17539,19 +17602,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallLoading.classList.remove('active');
           recallTerminalContainer.classList.remove('hidden');
           recallEndBtn.classList.add('active');
-          // Re-fit after reveal so xterm uses the full panel width
-          if (recallFitAddon) {
-            requestAnimationFrame(() => {
-              recallFitAddon.fit();
-              if (recallPtyAlive && recallTerminal) {
-                invoke('cmd_pty_resize', {
-                  sessionId: SESSION_ID,
-                  cols: recallTerminal.cols,
-                  rows: recallTerminal.rows,
-                }).catch(() => { });
-              }
-            });
-          }
+          requestAnimationFrame(() => fitRecallTerminal());
         } else if (/not found on PATH|not found in PATH|not found in common install/i.test(msg)) {
           // The assistant needs an external agent CLI (Claude Code by
           // default). It's OPTIONAL — the rest of the app works without it —
@@ -17565,7 +17616,175 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
         }
       }
+      return true;
     }
+
+    const recallTabsController = window.MinutesRecallTabs.create({
+      strip: document.getElementById('recall-tabs'), prompt: document.getElementById('recall-tab-prompt'),
+      invoke, isRecording: () => isRecording,
+      select: id => openRecall('assistant', null, { tabId: id }),
+      create: openNewRecallChat,
+      close: closeRecallTab, resume: resumeRecallTab,
+    });
+    function withRecallMeetingTitles(model) {
+      return { ...model, tabs: model.tabs.map(tab => {
+        const meeting = lastMeetingInventory.find(meeting => meeting.path === tab.meeting_path);
+        return meeting?.title ? { ...tab, title: meeting.title } : tab;
+      }) };
+    }
+    function renderRecallTabHeader(tab) {
+      if (!tab) return;
+      setRecallPhase(tab.live ? 'listening' : tab.phase || (tab.meeting_path ? 'debrief' : 'recall'), tab.meeting_path ? tab.title : null);
+    }
+    function syncRecallTabPresentation() {
+      recallTabsModel = withRecallMeetingTitles(recallTabsModel);
+      recallTabsController.update(recallTabsModel);
+      if (recallPhase !== 'weekly') renderRecallTabHeader(recallTabsModel.tabs.find(tab => tab.id === SESSION_ID));
+    }
+    function openNewRecallChat() {
+      const empty = recallTabsModel.tabs.find(metadata => {
+        const state = recallTabStates.get(metadata.id);
+        return !metadata.meeting_path && !metadata.live && !metadata.capture_session_id
+          && !metadata.claude_session_id && !metadata.claude_active && metadata.status === 'done'
+          && state?.shell && state.untouched && state.alive && !state.draft && state.reliable;
+      });
+      return openRecall('assistant', null, empty ? { tabId: empty.id } : { newTab: true });
+    }
+    async function activateRecallTab(id, model) {
+      if (!id) return;
+      model = withRecallMeetingTitles(model);
+      recallTabsModel = model; SESSION_ID = id;
+      const metadata = model.tabs.find(t => t.id === id);
+      const tab = activeRecallState();
+      tab.shell = !!metadata?.shell; tab.claudeActive = !!metadata?.claude_active;
+      if (!tab.initialized) { tab.meetingPath = metadata?.meeting_path || null; tab.pending = true; }
+      recallSelectedMeetingPath = metadata?.meeting_path || null;
+      await invoke('cmd_recall_tab_select', { tabId: id, meetingTitle: metadata?.meeting_path ? metadata.title : null, phase: metadata?.phase || null });
+      initRecallTerminal(); await registerPtyListeners();
+      for (const state of recallTabStates.values()) if (state.container) state.container.hidden = state.id !== id;
+      // Switching to an idle PTY may produce no output event to reveal it.
+      // Restore visibility before fitting rather than waiting for child output.
+      if (recallExpanded && recallDevMode) {
+        recallTerminalContainer.classList.remove('hidden');
+        recallLoading.classList.remove('active');
+      }
+      recallTabsController.update({ ...model, active: id });
+      setRecallProviderNotice(metadata?.note || '');
+      renderRecallTabHeader(metadata);
+      if (metadata?.process_exited) markRecallPtyEnded(tab);
+      recallExitBanner.classList.toggle('active', !!tab.exited);
+      recallEndBtn.classList.toggle('active', !!tab.alive);
+      requestAnimationFrame(() => {
+        fitRecallTerminal(tab);
+        if (tab.id === SESSION_ID && document.getElementById('recall-tab-prompt').hidden) tab.terminal?.focus();
+      });
+      refreshRecallContextChips();
+    }
+    async function resumeRecallTab(id) {
+      const tab = recallStateFor(id);
+      if (tab.resuming) return;
+      tab.resuming = true;
+      // Serialize with human input; never overwrite a pending or uncertain line.
+      tab.queue = tab.queue.catch(() => {}).then(async () => {
+        if (!tab.shell || tab.claudeActive || tab.draft || !tab.reliable) {
+          setRecallProviderNotice('Return to an empty shell prompt before resuming the previous conversation.', 'error');
+          return;
+        }
+        try {
+          await invoke('cmd_recall_tab_resume', { tabId: id });
+          setRecallProviderNotice('');
+          tab.terminal?.focus();
+        } catch (error) { setRecallProviderNotice(String(error), 'error'); }
+      }).finally(() => { tab.resuming = false; });
+      await tab.queue;
+    }
+    async function closeRecallTab(id, confirmed = false, afterClose = null) {
+      try {
+        const model = await invoke('cmd_recall_tab_close', { tabId: id, confirmed });
+        const previous = SESSION_ID;
+        SESSION_ID = id; disposeRecallTerminal(); SESSION_ID = previous;
+        recallTabsModel = model; recallTabsController.update(model);
+        if (model.active) await openRecall('assistant', null, { tabId: model.active });
+        else { markRecallPtyEnded(); recallExitBanner.classList.add('active'); }
+        if (afterClose) await afterClose();
+        return true;
+      } catch (error) {
+        if (String(error).includes('RECALL_CLOSE_CONFIRM')) recallTabsController.confirmClose(id, () => closeRecallTab(id, true, afterClose));
+        else setRecallProviderNotice(String(error), 'error');
+        return false;
+      }
+    }
+    function showRecallTabLimit(mode, path, options) {
+      recallTabsController.chooseFinished(id => closeRecallTab(id, false, () => openRecall(mode, path, options)));
+    }
+    function applyRecallTabsModel(model) {
+      model = withRecallMeetingTitles(model);
+      recallTabsModel = model;
+      for (const metadata of model.tabs) {
+        const state = recallTabStates.get(metadata.id);
+        if (state) { state.shell = !!metadata.shell; state.claudeActive = !!metadata.claude_active; }
+        if (state && metadata.process_exited) {
+          markRecallPtyEnded(state);
+          if (state.id === SESSION_ID) { recallExitBanner.classList.add('active'); recallEndBtn.classList.remove('active'); }
+        }
+        if (state && state.meetingPath !== metadata.meeting_path) { state.meetingPath = metadata.meeting_path; state.pending = true; }
+      }
+      recallTabsController.update({ ...model, active: SESSION_ID });
+      refreshRecallContextChips();
+      if (recallPhase !== 'weekly') renderRecallTabHeader(model.tabs.find(tab => tab.id === SESSION_ID));
+      recallTabsController.syncPendingLive(model.pending_live_id, id => closeRecallTab(id, false, () => openRecall('assistant', null, { captureId: model.pending_live_id })));
+      // Metadata/phase changes can alter the available height without PTY
+      // output. Reveal and repaint the selected idle terminal after layout.
+      if (recallExpanded && recallDevMode && recallPhase !== 'weekly' && activeRecallState().alive) {
+        recallTerminalContainer.classList.remove('hidden');
+        requestAnimationFrame(() => fitRecallTerminal());
+      }
+    }
+    function refreshRecallAfterCapture() {
+      const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+      if (recallDevMode && tab && recallPhase !== 'weekly') {
+        renderRecallTabHeader({ ...tab, live: false });
+        if (recallExpanded && activeRecallState().alive) {
+          recallTerminalContainer.classList.remove('hidden');
+          requestAnimationFrame(() => fitRecallTerminal());
+        }
+      }
+      scheduleMeetingsRefresh(0);
+    }
+    currentWindow.listen('recall:tabs-changed', () => {
+      // Events and command replies can interleave. Fetch current state inside
+      // the operation queue rather than reapplying an old cap/order snapshot.
+      recallOpenQueue = recallOpenQueue.then(async () => {
+        const model = await invoke('cmd_recall_tabs');
+        applyRecallTabsModel(model);
+        await ensureRecallTabProcesses(model);
+      }).catch(error => console.error('Recall background tab:', error));
+    });
+    // Start background PTYs without selecting them or moving keyboard focus.
+    async function ensureRecallTabProcesses(model) {
+      for (const metadata of model.tabs) {
+        const tab = recallStateFor(metadata.id);
+        if (tab.initialized) continue;
+        tab.meetingPath = metadata.meeting_path || null; tab.pending = true;
+        tab.shell = !!metadata.shell; tab.claudeActive = !!metadata.claude_active;
+        initRecallTerminal(tab); await registerPtyListeners(tab);
+        try {
+          await invoke('cmd_spawn_terminal', { mode: 'deferred', tabId: tab.id, background: true, themeDark: isEffectiveDarkTheme() });
+          markRecallPtyAlive(tab);
+        } catch (error) { console.error('Recall tab restore:', tab.id, error); }
+      }
+    }
+    async function restoreRecallTabs() {
+      const model = await invoke('cmd_recall_tabs');
+      recallTabsModel = model; recallTabsController.update(model);
+      await ensureRecallTabProcesses(model);
+      // Spawn discovers the configured shell. Never reapply the pre-spawn
+      // snapshot: it can turn the shell's first command into a context-gated question.
+      const restored = await invoke('cmd_recall_tabs');
+      recallTabsModel = restored; recallTabsController.update(restored);
+      if (restored.active) await activateRecallTab(restored.active, restored);
+    }
+    recallOpenQueue = restoreRecallTabs().catch(error => console.error('Recall restore:', error));
 
     // ── Auto-expand triggers ──
     function autoExpandRecall(mode, context) {
@@ -18949,6 +19168,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       hideLiveCallWarning();
       liveBar.classList.remove('active');
       setFooterCaptureMode(false);
+      refreshRecallAfterCapture();
       const processing = !!event.payload?.processing;
       if (processing) {
         statusPill.className = 'status-pill processing';
@@ -19063,9 +19283,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     currentWindow.listen('recall:expand', (event) => {
-      const { title, mode } = event.payload;
+      const { title, mode, tab_id: tabId } = event.payload;
+      if (tabId && tabId !== SESSION_ID) return;
       const context = (title || '').replace('Minutes Assistant', '').replace('Discussing: ', '').trim();
-      if (mode === 'meeting') {
+      const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+      if (tab) {
+        renderRecallTabHeader(tab);
+      } else if (mode === 'meeting') {
         setRecallPhase('debrief', context);
       } else {
         setRecallPhase('recall', context || null);
@@ -19087,7 +19311,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const fs = await currentWindow.isFullscreen().catch(() => false);
       if (wasFullscreen && !fs && recallExpanded) {
         await ensureRecallWindowRoom().catch(() => { });
-        if (recallFitAddon) recallFitAddon.fit();
+        fitRecallTerminal();
       }
       wasFullscreen = fs;
     });
@@ -19112,21 +19336,12 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // the button sits beside Weekly. While output is arriving, the first click
     // only arms it; an idle session ends at once.
     let recallEndArmTimer = null;
-    recallEndBtn.addEventListener('click', async () => {
-      const busy = recallPtyAlive && Date.now() - recallLastOutputAt < 3000;
-      if (busy && !recallEndArmTimer) {
-        recallEndBtn.style.minWidth = `${recallEndBtn.offsetWidth}px`;
-        recallEndBtn.textContent = 'End now?';
-        recallEndArmTimer = setTimeout(resetRecallEndButton, 4000);
-        return;
-      }
-      resetRecallEndButton();
-      try {
-        await invoke('cmd_pty_kill', { sessionId: SESSION_ID });
-        markRecallPtyEnded();
-      } catch (e) {
-        console.error('End session:', e);
-        showActionToast(`Could not end the session: ${e?.message || e}`, { tone: 'error' });
+    recallEndBtn.addEventListener('click', () => closeRecallTab(SESSION_ID));
+    currentWindow.listen('minutes://close-context', async () => {
+      if (recallExpanded && recallDevMode && recallTabsModel.tabs.some(tab => tab.id === SESSION_ID) && !isOverlayActive()) {
+        await closeRecallTab(SESSION_ID);
+      } else {
+        await currentWindow.hide();
       }
     });
 
@@ -19137,38 +19352,25 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallEndBtn.style.minWidth = '';
     }
 
-    function disposeRecallTerminal() {
-      if (recallResizeObserver) {
-        recallResizeObserver.disconnect();
-        recallResizeObserver = null;
+    function disposeRecallTerminal(tab = activeRecallState()) {
+      tab.resize?.disconnect(); tab.themeObserver?.disconnect();
+      if (tab.themeHandler) {
+        window.MINUTES_XTERM_THEME_QUERY.removeEventListener('change', tab.themeHandler);
+        document.removeEventListener('minutes-theme-changed', tab.themeHandler);
       }
-      if (recallThemeHandler) {
-        window.MINUTES_XTERM_THEME_QUERY.removeEventListener('change', recallThemeHandler);
-        recallThemeHandler = null;
-        if (recallThemeObserver) {
-          recallThemeObserver.disconnect();
-          recallThemeObserver = null;
-        }
-      }
-      if (recallTerminal) {
-        try { recallTerminal.dispose(); } catch (_) { }
-        recallTerminal = null;
-        recallFitAddon = null;
-      }
-      recallInitialized = false;
-      while (recallTerminalContainer.firstChild) {
-        recallTerminalContainer.removeChild(recallTerminalContainer.firstChild);
-      }
+      if (tab.zoomHandler) document.removeEventListener('uizoomchange', tab.zoomHandler);
+      for (const unlisten of tab.listeners) unlisten();
+      tab.terminal?.dispose(); tab.container?.remove();
+      recallTabStates.delete(tab.id);
     }
 
-    document.getElementById('btn-recall-restart').addEventListener('click', async () => {
+    async function restartRecallTab(id = SESSION_ID) {
       recallExitBanner.classList.remove('active');
-      // Kill any zombie backend session left after natural PTY exit
-      try { await invoke('cmd_pty_kill', { sessionId: SESSION_ID }); } catch (_) { }
-      disposeRecallTerminal();
-      initRecallTerminal();
-      await openRecall('assistant');
-    });
+      try { await invoke('cmd_pty_kill', { sessionId: id }); } catch (_) { }
+      disposeRecallTerminal(recallStateFor(id));
+      await openRecall('assistant', null, { tabId: id, restart: true });
+    }
+    document.getElementById('btn-recall-restart').addEventListener('click', () => restartRecallTab());
 
     // Quick note inside recall panel
     async function saveRecallNote() {
@@ -19189,6 +19391,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     });
 
     // ── Discuss with Agent (from meeting detail) ──
+    document.getElementById('btn-prep-ai').addEventListener('click', async () => {
+      if (!currentMeetingPath) return;
+      const path = currentMeetingPath;
+      const title = currentMeetingDetail ? currentMeetingDetail.title : 'Meeting';
+      closeDetailView();
+      await discussMeetingWithAgent(path, title, 'prep');
+    });
     document.getElementById('btn-discuss-ai').addEventListener('click', async () => {
       if (!currentMeetingPath) return;
       const path = currentMeetingPath;
@@ -19204,18 +19413,22 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // meeting at the prompt instead, without submitting it. The click visibly
     // lands, the person can add a question or just press Return, and the
     // context gate still holds: Minutes reads the meeting only on submit.
-    async function discussMeetingWithAgent(path, title) {
+    async function discussMeetingWithAgent(path, title, intent = 'discuss') {
       const name = title || 'Meeting';
-      await openRecall('meeting', path);
-      setRecallPhase('debrief', name);
-      if (!recallDevMode || !recallTerminal || !recallPtyAlive) return;
-      recallTerminal.focus();
+      const opened = await openRecall('meeting', path, { meetingTitle: name, phase: intent === 'prep' ? 'prep' : 'debrief' });
+      // A rejected open leaves another conversation selected. Keep its header
+      // and prompt intact while the chooser is open, including after Cancel.
+      if (!opened) return;
+      setRecallPhase(intent === 'prep' ? 'prep' : 'debrief', name);
+      if (!recallDevMode || !activeRecallState().terminal || !activeRecallState().alive) return;
+      activeRecallState().terminal.focus();
       // Never type over something the person already started.
-      if (recallTerminalInputDraft || !recallTerminalInputReliable) return;
+      if (activeRecallState().shell && !activeRecallState().claudeActive) return;
+      if (activeRecallState().draft || !activeRecallState().reliable) return;
       // Name the file, not just the meeting: Minutes writes the selected
       // meeting (summary and full transcript) to CURRENT_MEETING.md on submit,
       // and a title alone sent the agent searching the corpus with shell tools.
-      recallTerminal.paste(`Discuss the meeting in CURRENT_MEETING.md (“${name}”): `);
+      activeRecallState().terminal.paste(`${intent === 'prep' ? 'Prepare for' : 'Discuss'} the meeting in CURRENT_MEETING.md (“${name}”): `);
     }
 
     // ── Recording-aware phase transitions ──
@@ -19227,22 +19440,24 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
       if (recallExpanded) {
         if (isRecording && !prevRecording) {
-          setRecallPhase('listening', null);
+          if (recallDevMode) renderRecallTabHeader(recallTabsModel.tabs.find(tab => tab.id === SESSION_ID));
+          else setRecallPhase('listening', null);
           quickNote.classList.remove('active');
         } else if (!isRecording && prevRecording) {
           // Stop recording → leave the "Listening" pulse immediately. The agent
           // can already discuss what was said from the in-memory transcript while
           // the summary finishes; staying on 'listening' through the entire
           // processing window misrepresents what's happening.
-          setRecallPhase('debrief', null);
+          if (!recallDevMode) setRecallPhase('debrief', null);
         } else if (!isRecording && !isProcessing && recallPhase === 'listening') {
           setRecallPhase('recall', null);
         }
       }
 
       if (!isRecording && prevRecording) {
+        refreshRecallAfterCapture();
         if (!recallExpanded) {
-          autoExpandRecall('debrief', null);
+          autoExpandRecall(recallDevMode ? 'assistant' : 'debrief', null);
         }
       }
 
@@ -20610,9 +20825,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (assistantAvailable && recallWorkspaceState.recallExpanded) {
         setTimeout(async () => {
           await openRecall('assistant');
-          if (recallWorkspaceState.recallPhase) {
-            setRecallPhase(recallWorkspaceState.recallPhase, null);
-          }
+          const tab = recallTabsModel.tabs.find(tab => tab.id === SESSION_ID);
+          if (tab) renderRecallTabHeader(tab);
+          else if (recallWorkspaceState.recallPhase) setRecallPhase(recallWorkspaceState.recallPhase, null);
         }, 500);
       }
 

@@ -181,6 +181,7 @@ fn write_focus_settings(workspace: &Path) -> Result<PathBuf, String> {
 }
 
 /// Whether these spawn arguments wire Minutes' focus hook into Claude.
+#[cfg(test)]
 pub(crate) fn has_focus_hook(args: &[String], workspace: &Path) -> bool {
     let path = focus_settings_path(workspace)
         .to_string_lossy()
@@ -212,6 +213,24 @@ pub(crate) fn queue_focus_notice(
             .map_err(|e| e.to_string())?;
     }
     fs::rename(&staging, &target).map_err(|e| e.to_string())
+}
+
+/// Consume focus context once for a tab's next real prompt, on every platform.
+pub(crate) fn take_focus_notices(workspace: &Path) -> Result<String, String> {
+    let dir = focus_dir(workspace);
+    let mut result = String::new();
+    for kind in FocusNotice::ALL {
+        let path = dir.join(kind.file_name());
+        let claimed = dir.join(format!(".{}.{}", kind.file_name(), std::process::id()));
+        if fs::rename(&path, &claimed).is_ok() {
+            if let Ok(text) = fs::read_to_string(&claimed) {
+                result.push_str(&text);
+                result.push('\n');
+            }
+            let _ = fs::remove_file(claimed);
+        }
+    }
+    Ok(result)
 }
 
 /// Drop queued notices, so a new session never receives a previous

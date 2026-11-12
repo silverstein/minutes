@@ -216,7 +216,7 @@ minutes/
 │   └── mcp/                   # MCP server — 35 tools + 8 resources + MCP App dashboard
 │       └── ui/                # Interactive dashboard (vanilla TS, builds to single-file HTML)
 ├── site/                      # Landing page (Next.js + Remotion demo player)
-├── tauri/                     # Tauri v2 menu bar app + singleton AI Assistant
+├── tauri/                     # Tauri v2 menu bar app + Recall session tabs
 ├── .claude/plugins/minutes/   # Claude Code plugin — 23 skills + 1 agent + 2 hooks
 ├── .agents/skills/minutes/    # Portable skills mirror (Codex, Gemini, other AGENTS-aware agents)
 ├── .opencode/skills/          # OpenCode-native flattened skills mirror + runtime helpers
@@ -312,7 +312,7 @@ work" more than once. Grep before you design.
 - Claude summarizes via MCP when the user asks (no API key needed)
 - Optional automated summarization fully on-device via Apple Foundation Models (macOS 26+, `engine = "apple"`; preferred by `"auto"` when available — see docs/architecture/apple-foundation-models.md), via Ollama (local), Mistral, or cloud LLMs
 - Config at `~/.config/minutes/config.toml` (optional, compiled defaults work)
-- Tauri assistant uses a singleton workspace at `~/.minutes/assistant/`
+- Recall stores metadata at `~/.minutes/assistant/recall-tabs.json` and isolated workspaces at `~/.minutes/assistant/tabs/<id>/`
 - `CLAUDE.md` and `AGENTS.md` hold matching general assistant instructions; `CURRENT_MEETING.md` is the active meeting focus for "Discuss with AI"
 - Meetings: `~/meetings/` | Voice memos: `~/meetings/memos/`
 - `0600` permissions on all output (sensitive content)
@@ -343,8 +343,8 @@ work" more than once. Grep before you design.
 - **Auto-tagging + alerts**: PostToolUse hook tags meetings with git repo, checks for decision conflicts, surfaces overdue action items, nudges `/minutes-debrief` + `/minutes-tag`
 - **Proactive reminders**: SessionStart hook checks calendar for upcoming meetings and recommends `/minutes-brief` (fast) or `/minutes-prep` (goal-setting) based on time-to-meeting
 - **Portable skills**: `.agents/skills/minutes/` mirrors all 23 skills for Codex, Gemini, and other AGENTS-aware agents, while `.opencode/skills/` + `.opencode/commands/` gives OpenCode native skill discovery and `/minutes-*` slash commands. Both use `$MINUTES_SKILLS_ROOT` instead of `${CLAUDE_PLUGIN_ROOT}` and keep CLI-only speaker confirmation (no desktop app references). Runtime helpers at `_runtime/hooks/lib/` must stay in sync with `.claude/plugins/minutes/hooks/lib/`.
-- **Desktop assistant**: Tauri AI Assistant is a singleton session that can switch focus into a selected meeting without spawning parallel assistant workspaces
-- **Live coaching**: Tauri Live Mode toggle starts real-time transcription; the assistant workspace `CLAUDE.md` and `AGENTS.md` auto-update so the connected Recall session, Claude Desktop/Code, or any other agent can read the live JSONL file and coach mid-meeting. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.
+- **Desktop assistant**: Recall supports up to four independent terminal sessions, each with its own meeting focus, Claude resume ID and hook-driven status
+- **Live coaching**: Tauri Live Mode toggle starts real-time transcription; only the live meeting tab's `CLAUDE.md` and `AGENTS.md` receive bounded live-reader guidance; prep tabs keep their own context. There is no dedicated transcript/coaching panel in Tauri v1; the coaching happens through the assistant chat surface.
 
 ## Proven Decisions (do not re-litigate)
 

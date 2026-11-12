@@ -896,7 +896,10 @@ jobs:
         # separate signed-desktop acceptance gate.
         env:
           MINUTES_DESKTOP_SCREENSHOT: target/desktop-contracts/recall.png
-        run: node scripts/desktop/recall-rendered.test.mjs
+        run: |
+          node --test scripts/recall-tabs.test.mjs scripts/check_recall_terminal_input_contract.test.mjs
+          node scripts/desktop/recall-rendered.test.mjs
+          node scripts/desktop/recall-tabs-rendered.test.mjs
         timeout-minutes: 5
 
       - name: Upload rendered Recall evidence

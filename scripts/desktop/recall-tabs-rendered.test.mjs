@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, extname } from 'node:path';
 import { gridFixture } from './recall-tabs-grid-fixture.mjs';
+import { testMeetingOpen } from './recall-tabs-meeting-open.test.mjs';
 const require = createRequire(import.meta.url);
 const modules = process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES || resolve('target/recall-browser/node_modules');
 const { chromium } = require(require.resolve(resolve(modules, 'playwright')));
@@ -27,7 +28,7 @@ const server = createServer((request, response) => {
     response.end(readFileSync(file)); return;
   }
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
-  response.end(path === '/grid' ? gridFixture(source, css, controller) : html);
+  response.end(path === '/meeting-open' ? gridFixture(source, css, controller, { meetingOpen: true }) : path === '/grid' ? gridFixture(source, css, controller) : html);
 });
 await new Promise(resolve => server.listen(Number(process.env.MINUTES_RECALL_TAB_PREVIEW) || 0, '127.0.0.1', resolve));
 if (process.env.MINUTES_RECALL_TAB_PREVIEW) {
@@ -241,6 +242,7 @@ try {
   await page.waitForFunction(()=>document.querySelector('#recall-terminal-one .xterm-rows').textContent.includes('GRID-CANARY'));
   assert.equal(await page.locator('#fixture-meetings .meeting-item').isVisible(),true);
   assert.deepEqual(await page.evaluate(()=>fixture.refreshes),[0],'Stop schedules the list refresh while processing continues');
+  await testMeetingOpen(page, `http://127.0.0.1:${server.address().port}/meeting-open`);
   const macPage = await browser.newPage();
   await macPage.addInitScript(()=>Object.defineProperty(navigator,'platform',{value:'MacIntel'}));
   await macPage.goto(`http://127.0.0.1:${server.address().port}/grid`);

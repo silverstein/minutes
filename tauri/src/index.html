@@ -17501,12 +17501,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     // ── Open Recall (spawn PTY if needed, then expand) ──
     let recallOpenQueue = Promise.resolve();
+    // True means the requested conversation was admitted/selected. A rejected
+    // open must not apply meeting actions to the conversation still on screen.
     function openRecall(mode, meetingPath, options = {}) {
       const operation = recallOpenQueue.then(() => openRecallImpl(mode, meetingPath, options));
       recallOpenQueue = operation.catch(() => {});
       return operation;
     }
     async function openRecallImpl(mode, meetingPath, options = {}) {
+      const requestedMode = mode;
       const requestedMeeting = meetingPath || null;
       const experience = options.tabId || options.newTab || options.captureId
         ? { mode: 'deferred', meetingPath: null }
@@ -17546,7 +17549,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
         applyRecallMode();
         await registerChatListeners();
-        return;
+        return true;
       }
 
       try {
@@ -17564,8 +17567,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallTerminalContainer.classList.remove('hidden');
           requestAnimationFrame(() => fitRecallTerminal());
         }
-        if (String(error).includes('RECALL_TAB_LIMIT')) { showRecallTabLimit(mode, meetingPath, options); return; }
-        setRecallProviderNotice(String(error), 'error'); return;
+        // Terminal readiness deliberately defers meeting materialization. The
+        // continuation still needs the original meeting, title and phase.
+        if (String(error).includes('RECALL_TAB_LIMIT')) { showRecallTabLimit(requestedMode, requestedMeeting, options); return false; }
+        setRecallProviderNotice(String(error), 'error'); return false;
       }
 
       // Terminal mode, using the original PTY path.
@@ -17609,6 +17614,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           recallLoading.querySelector('span').textContent = 'Could not start: ' + msg;
         }
       }
+      return true;
     }
 
     const recallTabsController = window.MinutesRecallTabs.create({
@@ -19402,7 +19408,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // context gate still holds: Minutes reads the meeting only on submit.
     async function discussMeetingWithAgent(path, title, intent = 'discuss') {
       const name = title || 'Meeting';
-      await openRecall('meeting', path, { meetingTitle: name, phase: intent === 'prep' ? 'prep' : 'debrief' });
+      const opened = await openRecall('meeting', path, { meetingTitle: name, phase: intent === 'prep' ? 'prep' : 'debrief' });
+      // A rejected open leaves another conversation selected. Keep its header
+      // and prompt intact while the chooser is open, including after Cancel.
+      if (!opened) return;
       setRecallPhase(intent === 'prep' ? 'prep' : 'debrief', name);
       if (!recallDevMode || !activeRecallState().terminal || !activeRecallState().alive) return;
       activeRecallState().terminal.focus();

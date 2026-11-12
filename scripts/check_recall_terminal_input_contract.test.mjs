@@ -328,7 +328,7 @@ test("Discuss never pastes natural language into an idle shell", async () => {
   const pastes = [];
   const tab = { shell: true, claudeActive: false, alive: true, draft: '', reliable: true, terminal: { focus() {}, paste: text => pastes.push(text) } };
   const discuss = vm.runInNewContext(`(${extractFunction('discussMeetingWithAgent')})`, {
-    openRecall: async () => {}, setRecallPhase() {}, recallDevMode: true, activeRecallState: () => tab,
+    openRecall: async () => true, setRecallPhase() {}, recallDevMode: true, activeRecallState: () => tab,
   });
   await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 0);
   tab.claudeActive = true;

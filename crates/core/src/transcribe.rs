@@ -62,6 +62,8 @@ pub struct FilterStats {
     pub rescued_no_speech: usize,
     /// Final word count
     pub final_words: usize,
+    /// Microphone lines removed as high-confidence echoes of system speech.
+    pub cross_source_echo_suppressed: usize,
 }
 
 impl FilterStats {
@@ -69,6 +71,12 @@ impl FilterStats {
     pub fn diagnosis(&self) -> String {
         let mut parts = Vec::new();
         parts.push(format!("audio: {:.1}s", self.audio_duration_secs));
+        if self.cross_source_echo_suppressed > 0 {
+            parts.push(format!(
+                "cross_source_echo_suppressed: {}",
+                self.cross_source_echo_suppressed
+            ));
+        }
         if self.samples_after_silence_strip == 0 {
             parts.push("silence strip removed ALL audio".into());
             return parts.join(", ");
@@ -6041,6 +6049,7 @@ Hello there.
             after_trailing_trim: 1,
             rescued_no_speech: 1,
             final_words: 5,
+            cross_source_echo_suppressed: 0,
         };
         let d = stats.diagnosis();
         assert!(
@@ -6075,6 +6084,7 @@ Hello there.
             after_trailing_trim: 45,
             rescued_no_speech: 0,
             final_words: 500,
+            cross_source_echo_suppressed: 0,
         };
         let d = stats.diagnosis();
         assert!(

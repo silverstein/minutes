@@ -1,6 +1,6 @@
-//! Final ASR for independently captured sources. Never deduplicate across
-//! sources: an echo and two people saying the same words are not distinguishable
-//! from text alone. Source provenance is not a person's identity.
+//! Final ASR for independently captured sources. Conservatively suppress long,
+//! near-verbatim microphone echoes contained in contemporaneous system speech.
+//! Short or uncertain matches stay. Source provenance is not a person's identity.
 
 use crate::diarize::{CaptureSource, DiarizationResult};
 use crate::transcribe::{FilterStats, TranscribeResult};
@@ -94,15 +94,123 @@ fn source_lines(source: CaptureSource, result: &TranscribeResult) -> Vec<SourceL
     lines
 }
 
+fn normalized_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+#[derive(Clone, Copy, Default)]
+struct EchoMatch {
+    words: usize,
+    start: f64,
+    end: f64,
+}
+
+/// Word LCS with the span of the system lines that actually contributed words.
+/// Keep only two rows: long utterances must not allocate a quadratic matrix.
+fn echo_match(microphone: &[String], system: &[(&str, &SourceLine)]) -> EchoMatch {
+    let mut previous = vec![EchoMatch::default(); system.len() + 1];
+    let mut current = previous.clone();
+    for word in microphone {
+        for (index, (system_word, line)) in system.iter().enumerate() {
+            current[index + 1] = if word == system_word {
+                let diagonal = previous[index];
+                EchoMatch {
+                    words: diagonal.words + 1,
+                    start: if diagonal.words == 0 {
+                        line.start
+                    } else {
+                        diagonal.start.min(line.start)
+                    },
+                    end: diagonal.end.max(line.end),
+                }
+            } else if previous[index + 1].words >= current[index].words {
+                previous[index + 1]
+            } else {
+                current[index]
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[system.len()]
+}
+
+fn suppress_cross_source_echo(lines: &mut Vec<SourceLine>) -> usize {
+    const SLACK_SECS: f64 = 1.5;
+    // The input is time-sorted. Untimed/invalid spans cannot establish echo.
+    let system: Vec<_> = lines
+        .iter()
+        .filter(|line| {
+            line.source == CaptureSource::System
+                && line.timestamp.is_some()
+                && line.start.is_finite()
+                && line.end.is_finite()
+                && line.end > line.start
+        })
+        .map(|line| (line, normalized_words(&line.text)))
+        .collect();
+    let mut remove = vec![false; lines.len()];
+    for (index, line) in lines.iter().enumerate() {
+        if line.source != CaptureSource::Voice
+            || line.timestamp.is_none()
+            || !line.start.is_finite()
+            || !line.end.is_finite()
+            || line.end <= line.start
+        {
+            continue;
+        }
+        let microphone = normalized_words(&line.text);
+        if microphone.len() < 4 {
+            continue;
+        }
+        let first = system.partition_point(|(system, _)| system.start < line.start - SLACK_SECS);
+        let window: Vec<_> = system[first..]
+            .iter()
+            .take_while(|(system, _)| system.start <= line.end + SLACK_SECS)
+            .flat_map(|(system, words)| words.iter().map(|word| (word.as_str(), *system)))
+            .collect();
+        let matched = echo_match(&microphone, &window);
+        // Use only matched lines for containment; unrelated nearby system
+        // speech must not extend the span to swallow a later read-back.
+        remove[index] = matched.words as f64 / microphone.len() as f64 >= 0.85
+            && microphone.len() - matched.words <= 2
+            && line.start >= matched.start - SLACK_SECS
+            && line.end <= matched.end + SLACK_SECS;
+    }
+    let suppressed = remove.iter().filter(|&&remove| remove).count();
+    let mut remove = remove.into_iter();
+    lines.retain(|_| !remove.next().unwrap());
+    suppressed
+}
+
 pub(crate) fn merge_sources(
     voice: TranscribeResult,
     system: TranscribeResult,
+    cross_source_echo_suppression: bool,
 ) -> (TranscribeResult, SourceTranscript) {
     let mut lines = source_lines(CaptureSource::Voice, &voice);
     lines.extend(source_lines(CaptureSource::System, &system));
     // Stable sort retains both utterances at equal starts, and subsecond
-    // timings where available. No flattening or cross-source text cleanup.
+    // timings where available. Never flatten overlapping source utterances.
     lines.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let cross_source_echo_suppressed = if cross_source_echo_suppression {
+        suppress_cross_source_echo(&mut lines)
+    } else {
+        0
+    };
+    let final_words = if cross_source_echo_suppressed == 0 {
+        voice.stats.final_words + system.stats.final_words
+    } else {
+        lines
+            .iter()
+            .map(|line| line.text.split_whitespace().count())
+            .sum()
+    };
     let sources = SourceTranscript { lines };
     let text = sources.render();
     let a = voice.stats;
@@ -119,7 +227,8 @@ pub(crate) fn merge_sources(
         after_noise_markers: a.after_noise_markers + b.after_noise_markers,
         after_trailing_trim: a.after_trailing_trim + b.after_trailing_trim,
         rescued_no_speech: a.rescued_no_speech + b.rescued_no_speech,
-        final_words: a.final_words + b.final_words,
+        final_words,
+        cross_source_echo_suppressed,
     };
     let detected_language = match (voice.detected_language, system.detected_language) {
         (Some(a), Some(b)) if a == b => Some(a),
@@ -227,6 +336,19 @@ mod tests {
     use super::*;
     use crate::diarize::SpeakerSegment;
     use crate::transcribe::TranscriptSegment;
+
+    // Exercise the compiled default while leaving the original merge regressions
+    // (including the simultaneous short "yes" case) unchanged.
+    fn merge_sources(
+        voice: TranscribeResult,
+        system: TranscribeResult,
+    ) -> (TranscribeResult, SourceTranscript) {
+        super::merge_sources(
+            voice,
+            system,
+            crate::config::TranscriptionConfig::default().cross_source_echo_suppression,
+        )
+    }
 
     fn result(text: &str, duration: f64) -> TranscribeResult {
         TranscribeResult {
@@ -375,5 +497,208 @@ mod tests {
         let mut system = result("[0:00] bonjour", 4.0);
         system.detected_language = Some("fr".into());
         assert_eq!(merge_sources(voice, system).0.detected_language, None);
+    }
+
+    fn timed(utterances: &[(f64, f64, &str)]) -> TranscribeResult {
+        let text: String = utterances
+            .iter()
+            .map(|(start, _, text)| format!("[0:{start:04.1}] {text}\n"))
+            .collect();
+        let mut result = result(
+            &text,
+            utterances
+                .iter()
+                .map(|(_, end, _)| *end)
+                .fold(0.0, f64::max),
+        );
+        result.stats.final_words = utterances
+            .iter()
+            .map(|(_, _, text)| text.split_whitespace().count())
+            .sum();
+        result.segments = utterances
+            .iter()
+            .map(|(start, end, text)| TranscriptSegment {
+                start: *start,
+                end: *end,
+                text: (*text).into(),
+            })
+            .collect();
+        result
+    }
+
+    #[test]
+    fn drops_exact_microphone_echo_and_reports_removal() {
+        let (merged, sources) = merge_sources(
+            timed(&[(1.5, 4.0, "please send the revised proposal")]),
+            timed(&[(1.0, 4.0, "please send the revised proposal")]),
+        );
+        assert_eq!(
+            merged.text,
+            "[SYSTEM 0:01.0] please send the revised proposal\n"
+        );
+        assert_eq!(sources.lines.len(), 1);
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 1);
+        assert_eq!(merged.stats.final_words, 5);
+        assert!(merged
+            .stats
+            .diagnosis()
+            .contains("cross_source_echo_suppressed: 1"));
+    }
+
+    #[test]
+    fn keeps_short_identical_replies() {
+        for reply in ["yes", "yes please", "yes please do"] {
+            let (merged, _) =
+                merge_sources(timed(&[(1.0, 2.0, reply)]), timed(&[(1.0, 2.0, reply)]));
+            assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+            assert_eq!(merged.text.lines().count(), 2);
+        }
+    }
+
+    #[test]
+    fn keeps_read_back_five_seconds_later() {
+        let (merged, _) = merge_sources(
+            timed(&[(6.0, 8.0, "please send the revised proposal")]),
+            timed(&[(1.0, 3.0, "please send the revised proposal")]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+        assert_eq!(merged.text.lines().count(), 2);
+    }
+
+    #[test]
+    fn keeps_talk_over_with_three_extra_words_even_above_ratio_threshold() {
+        let remote = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
+        let local = format!("{remote} but I disagree");
+        let (merged, _) = merge_sources(timed(&[(1.0, 4.0, &local)]), timed(&[(1.0, 4.0, remote)]));
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+        assert!(merged.text.contains(&local));
+    }
+
+    #[test]
+    fn matches_split_system_lines_case_and_surrounding_punctuation() {
+        let (merged, _) = merge_sources(
+            timed(&[(1.0, 5.0, "Please, SEND the revised proposal!")]),
+            timed(&[
+                (1.0, 3.0, "please send"),
+                (3.0, 5.0, "the revised proposal."),
+            ]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 1);
+        assert_eq!(merged.text.lines().count(), 2);
+        assert!(merged.text.lines().all(|line| line.starts_with("[SYSTEM ")));
+    }
+
+    #[test]
+    fn never_drops_system_lines_even_when_microphone_is_the_longer_source() {
+        let system = timed(&[(1.0, 3.0, "please send the revised proposal")]);
+        let expected = source_lines(CaptureSource::System, &system);
+        let (merged, sources) = merge_sources(
+            timed(&[(1.0, 8.0, "please send the revised proposal")]),
+            system,
+        );
+        let retained: Vec<_> = sources
+            .lines
+            .iter()
+            .filter(|line| line.source == CaptureSource::System)
+            .collect();
+        assert_eq!(retained.len(), expected.len());
+        assert_eq!(retained[0].text, expected[0].text);
+        assert_eq!(retained[0].end, expected[0].end);
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+    }
+
+    #[test]
+    fn speaker_alignment_survives_microphone_echo_removal() {
+        let (merged, sources) = merge_sources(
+            timed(&[
+                (1.0, 2.0, "please send the revised proposal"),
+                (3.0, 4.0, "my distinct answer"),
+            ]),
+            timed(&[(1.0, 2.0, "please send the revised proposal")]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 1);
+        assert_eq!(sources.apply_speakers(&merged.text, &source_diarization()),
+            "[SPEAKER_2 0:01.0] [SYSTEM] please send the revised proposal\n[SPEAKER_0 0:03.0] [MICROPHONE] my distinct answer\n");
+    }
+
+    #[test]
+    fn switch_off_retains_identical_source_output() {
+        let (merged, sources) = super::merge_sources(
+            timed(&[(1.0, 3.0, "please send the revised proposal")]),
+            timed(&[(1.0, 3.0, "please send the revised proposal")]),
+            false,
+        );
+        assert_eq!(merged.text,
+            "[MICROPHONE 0:01.0] please send the revised proposal\n[SYSTEM 0:01.0] please send the revised proposal\n");
+        assert_eq!(sources.lines.len(), 2);
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+        assert_eq!(merged.stats.final_words, 10);
+    }
+
+    #[test]
+    fn tolerates_one_asr_word_difference_but_keeps_three() {
+        let remote = "please send the revised proposal to me";
+        for (local, suppressed) in [
+            ("please send a revised proposal to me", 1),
+            ("please send a different document to me", 0),
+        ] {
+            let (merged, _) =
+                merge_sources(timed(&[(1.0, 3.0, local)]), timed(&[(1.0, 3.0, remote)]));
+            assert_eq!(
+                merged.stats.cross_source_echo_suppressed, suppressed,
+                "{local}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_read_back_when_only_unrelated_system_speech_extends_the_window() {
+        let (merged, _) = merge_sources(
+            timed(&[(2.5, 5.0, "please send the revised proposal")]),
+            timed(&[
+                (1.0, 2.0, "please send the revised proposal"),
+                (4.0, 10.0, "an unrelated follow up"),
+            ]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+    }
+
+    #[test]
+    fn requires_timing_and_respects_start_slack_and_lcs_ratio() {
+        for (system_start, suppressed) in [(8.5, 1), (8.49, 0)] {
+            let (merged, _) = merge_sources(
+                timed(&[(10.0, 12.0, "please send the revised proposal")]),
+                timed(&[(system_start, 12.0, "please send the revised proposal")]),
+            );
+            assert_eq!(merged.stats.cross_source_echo_suppressed, suppressed);
+        }
+        let (merged, _) = merge_sources(
+            result("please send the revised proposal", 3.0),
+            timed(&[(0.0, 3.0, "please send the revised proposal")]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+        for (local, suppressed) in [
+            (
+                "one two three four five six seven eight nine ten eleven twelve extra words",
+                1,
+            ),
+            (
+                "one two three four five six seven eight nine ten eleven extra words",
+                0,
+            ),
+        ] {
+            let (merged, _) = merge_sources(
+                timed(&[(1.0, 3.0, local)]),
+                timed(&[(
+                    1.0,
+                    3.0,
+                    "one two three four five six seven eight nine ten eleven twelve",
+                )]),
+            );
+            assert_eq!(
+                merged.stats.cross_source_echo_suppressed, suppressed,
+                "{local}"
+            );
+        }
     }
 }

@@ -35,11 +35,23 @@ speaker labels only when an utterance has unambiguous coverage in the matching
 source; otherwise the source label remains. Several voices inside the system
 stream remain a diarization/recognition problem within that stream.
 
-Cross-source text is never deduplicated. Echo and two people independently
-saying "yes" cannot safely be distinguished using identical text alone.
-Open-speaker recordings can therefore retain acoustic echo twice. This change
-does not perform acoustic echo cancellation or separate voices already mixed
-within one source, and cannot recover audio that was never recorded.
+Final merging conservatively suppresses high-confidence microphone echoes of
+system speech by default. A normalized microphone line must have at least four
+words. System lines starting within that microphone span plus or minus 1.5 seconds
+are concatenated in time order; their word-level longest common subsequence must
+cover at least 85% of the microphone words with at most two unmatched words.
+The microphone span must also fit inside the span of the system lines that
+actually matched, plus or minus 1.5 seconds. Only microphone lines are removed;
+system lines, short replies such as "yes", untimed lines and uncertain matches
+remain. Comparisons lowercase words and trim surrounding punctuation. Whole-second
+chunk timestamps and inferred ends limit precision; this is a text heuristic,
+not proof of acoustic echo. Simultaneous near-verbatim speech can still match.
+
+Set `transcription.cross_source_echo_suppression = false` to retain all source
+lines, including echo duplicates. The `cross_source_echo_suppressed` counter and
+per-source diagnoses are logged during final merging. This does not perform
+acoustic echo cancellation or separate voices already mixed within one source,
+and cannot recover audio that was never recorded.
 
 Single surviving stems retain the existing explicit recording-health warning.
 If neither source track is usable but the original meeting WAV has a valid

@@ -131,12 +131,60 @@ fn persisted_window_state_flags() -> tauri_plugin_window_state::StateFlags {
 /// elsewhere) to avoid the C++ static-destructor crash. So the file was
 /// never refreshed after the first save, and every launch restored that old
 /// size. We save after resizes settle and once more before exiting.
+///
+/// Call this only on the event-loop thread; use
+/// [`persist_window_state_on_event_loop`] from anywhere else.
+/// `save_window_state` holds the plugin's cache lock while it reads each
+/// window's geometry. Off the event-loop thread every one of those reads is a
+/// blocking round trip to the event loop, and the plugin's own move, resize
+/// and close handlers take the same lock on that thread. A window event
+/// arriving mid-save therefore deadlocks the app (#1358).
 fn persist_window_state(app: &tauri::AppHandle) {
     use tauri_plugin_window_state::AppHandleExt;
     if let Err(error) = app.save_window_state(persisted_window_state_flags()) {
         eprintln!("[window-state] save failed: {error}");
     }
 }
+
+/// The thread running the Tauri event loop, recorded in `setup`.
+static EVENT_LOOP_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+fn on_event_loop_thread() -> bool {
+    EVENT_LOOP_THREAD
+        .get()
+        .is_some_and(|id| *id == std::thread::current().id())
+}
+
+/// Save window state on the event-loop thread, from any thread.
+///
+/// On the event-loop thread this saves directly. Elsewhere it queues the save
+/// there; with `wait` it then waits up to that long (exit paths), and gives up
+/// rather than hang if the event loop is busy or gone.
+fn persist_window_state_on_event_loop(app: &tauri::AppHandle, wait: Option<std::time::Duration>) {
+    if on_event_loop_thread() {
+        persist_window_state(app);
+        return;
+    }
+    let (done, finished) = std::sync::mpsc::sync_channel::<()>(1);
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        persist_window_state(&handle);
+        let _ = done.send(());
+    }) {
+        eprintln!("[window-state] could not reach the event loop to save: {error}");
+        return;
+    }
+    if let Some(timeout) = wait {
+        if finished.recv_timeout(timeout).is_err() {
+            eprintln!(
+                "[window-state] save did not finish within {timeout:?}; continuing without it"
+            );
+        }
+    }
+}
+
+/// How long an exit path off the event loop waits for the final save.
+const WINDOW_STATE_EXIT_SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 static WINDOW_STATE_LAST_CHANGE_MS: AtomicU64 = AtomicU64::new(0);
 static WINDOW_STATE_SAVE_PENDING: AtomicBool = AtomicBool::new(false);
@@ -162,14 +210,14 @@ fn schedule_window_state_save(app: &tauri::AppHandle) {
         let last = WINDOW_STATE_LAST_CHANGE_MS.load(Ordering::Relaxed);
         if window_state_now_ms().saturating_sub(last) >= WINDOW_STATE_SETTLE_MS {
             WINDOW_STATE_SAVE_PENDING.store(false, Ordering::Release);
-            persist_window_state(&app);
+            persist_window_state_on_event_loop(&app, None);
             break;
         }
     });
 }
 
 fn cleanup_before_process_exit(app: &tauri::AppHandle) {
-    persist_window_state(app);
+    persist_window_state_on_event_loop(app, Some(WINDOW_STATE_EXIT_SAVE_WAIT));
     if let Some(state) = app.try_state::<commands::AppState>() {
         if state.copilot_active.load(Ordering::Relaxed) {
             state.copilot_stop_flag.store(true, Ordering::Release);
@@ -1848,6 +1896,8 @@ fn main() {
     if let Some(code) = minutes_core::audio_decode_worker::maybe_run_audio_decode_worker() {
         std::process::exit(code);
     }
+    // Tauri runs its event loop on the thread that calls `run`: this one.
+    let _ = EVENT_LOOP_THREAD.set(std::thread::current().id());
     let app_context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     #[cfg(target_os = "macos")]
     if std::env::args_os().any(|arg| arg == "--capture-recovery-test-root") {
@@ -4477,6 +4527,61 @@ mod tray_activity_tests {
             TrayAppearance::from_theme(tauri::Theme::Dark),
             TrayAppearance::Dark
         );
+    }
+}
+
+#[cfg(test)]
+mod window_state_save_tests {
+    use super::{on_event_loop_thread, EVENT_LOOP_THREAD};
+
+    /// #1358: a background thread called `save_window_state`, which holds the
+    /// plugin's cache lock while it waits on the event loop for window
+    /// geometry, while the event loop waited on that lock in the plugin's
+    /// close/move handler. Every save must go through the event-loop helper.
+    #[test]
+    fn window_state_is_only_saved_through_the_event_loop_helper() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod ")
+            .expect("tests follow production code")
+            .0;
+        let helper = production
+            .split_once("fn persist_window_state_on_event_loop(")
+            .expect("event-loop save helper exists")
+            .1
+            .split_once("\n}\n")
+            .expect("helper body ends")
+            .0;
+        let direct_calls = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| {
+                line.contains("persist_window_state(") && !line.contains("fn persist_window_state(")
+            })
+            .count();
+        let helper_calls = helper.matches("persist_window_state(").count();
+        assert_eq!(
+            direct_calls, helper_calls,
+            "persist_window_state may only be called inside persist_window_state_on_event_loop"
+        );
+        assert_eq!(helper_calls, 2, "direct path and queued path");
+        assert_eq!(
+            production.matches("save_window_state(").count(),
+            1,
+            "only persist_window_state may call the plugin's save_window_state"
+        );
+    }
+
+    #[test]
+    fn only_the_recorded_event_loop_thread_counts() {
+        let _ = EVENT_LOOP_THREAD.set(std::thread::current().id());
+        let recorded = *EVENT_LOOP_THREAD.get().unwrap();
+        assert_eq!(
+            on_event_loop_thread(),
+            recorded == std::thread::current().id()
+        );
+        let other = std::thread::spawn(on_event_loop_thread).join().unwrap();
+        assert!(!other, "a spawned thread is never the event loop");
     }
 }
 

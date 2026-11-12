@@ -822,6 +822,23 @@ fn whisper_model_readiness(
 }
 
 fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
+    if minutes_core::transcribe::effective_transcription_engine(config) == "openai-compatible" {
+        let status = minutes_core::transcribe::remote_transcription_status(config);
+        return SurfaceReadinessView {
+            configured_backend: config.transcription.engine.clone(),
+            resolved_backend: "openai-compatible".into(),
+            ready: status.is_ok(),
+            model_name: config.transcription.openai_compatible_model.clone(),
+            detail: minutes_core::transcribe::remote_transcription_notice(config),
+            next_action: if status.is_ok() {
+                "none"
+            } else {
+                "configure-remote-transcription"
+            }
+            .into(),
+            fallback_order: vec!["openai-compatible".into()],
+        };
+    }
     let (ready, model_name, model_file) =
         whisper_model_readiness(config, &config.transcription.model);
     if config.transcription.engine == "parakeet" {
@@ -4940,12 +4957,21 @@ fn desktop_recording_consent_required(
         return None;
     }
 
-    let disclosure = config.consent.disclosure_script.trim();
-    if disclosure.is_empty() {
-        Some(Config::default().consent.disclosure_script)
-    } else {
-        Some(disclosure.to_string())
+    let mut disclosure_config = config.clone();
+    if disclosure_config
+        .consent
+        .disclosure_script
+        .trim()
+        .is_empty()
+    {
+        disclosure_config.consent.disclosure_script = Config::default().consent.disclosure_script;
     }
+    disclosure_config.consent.disclosure_script = disclosure_config
+        .consent
+        .disclosure_script
+        .trim()
+        .to_owned();
+    Some(disclosure_config.recording_disclosure())
 }
 
 fn show_user_notification_nonmodal(app_handle: &tauri::AppHandle, title: &str, body: &str) {
@@ -4996,7 +5022,8 @@ fn maybe_save_and_show_recording_consent(
     }
 
     let basis = desktop_recording_consent_basis(config);
-    let disclosure = config.consent.disclosure_script.trim();
+    let disclosure_text = config.recording_disclosure();
+    let disclosure = disclosure_text.trim();
     let notice = if config.consent.mode == ConsentMode::Off {
         None
     } else {
@@ -5011,10 +5038,17 @@ fn maybe_save_and_show_recording_consent(
     match config.consent.mode {
         ConsentMode::Off => {}
         ConsentMode::Remind => {
-            let mut body =
-                "Recording + transcribing locally - audio stays on your device.".to_string();
+            let mut body = if minutes_core::transcribe::effective_transcription_engine(config)
+                == "openai-compatible"
+            {
+                String::new()
+            } else {
+                "Recording + transcribing locally - audio stays on your device.".to_string()
+            };
             if let Some(disclosure) = notice {
-                body.push('\n');
+                if !body.is_empty() {
+                    body.push('\n');
+                }
                 body.push_str(disclosure);
             }
             eprintln!("[minutes] {}", body.replace('\n', " "));
@@ -5022,10 +5056,7 @@ fn maybe_save_and_show_recording_consent(
         }
         ConsentMode::Require => {
             if let Some(disclosure) = notice {
-                eprintln!(
-                    "[minutes] Recording + transcribing locally - audio stays on your device. {}",
-                    disclosure
-                );
+                eprintln!("[minutes] {}", disclosure);
             }
         }
     }
@@ -14006,6 +14037,11 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "transcription": {
             "engine": config.transcription.engine,
+            "remote_notice": minutes_core::transcribe::remote_transcription_notice(&config),
+            "openai_compatible_base_url": config.transcription.openai_compatible_base_url,
+            "openai_compatible_model": config.transcription.openai_compatible_model,
+            "openai_compatible_api_key_env": config.transcription.openai_compatible_api_key_env,
+            "openai_compatible_max_upload_bytes": config.transcription.openai_compatible_max_upload_bytes,
             "resolved_engine": batch_readiness.resolved_backend,
             "auto_engine_reason": auto_engine.reason,
             "sherpa_selectable": sherpa_selectable,
@@ -14377,9 +14413,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             reject_unselectable_apple_speech(&value, "transcription engine")?;
             // Settings offers Auto and Parakeet v3 (sherpa); this list predated
             // them, so choosing either failed and Whisper could not be left.
-            if !["auto", "whisper", "sherpa", "parakeet"].contains(&value.as_str()) {
+            if !["auto", "whisper", "sherpa", "parakeet", "openai-compatible"]
+                .contains(&value.as_str())
+            {
                 return Err(format!(
-                    "unknown transcription engine '{}'. Valid: auto, whisper, sherpa, parakeet",
+                    "unknown transcription engine '{}'. Valid: auto, whisper, sherpa, parakeet, openai-compatible",
                     value
                 ));
             }
@@ -14393,6 +14431,28 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                 .into());
             }
             config.transcription.engine = value.clone();
+        }
+        ("transcription", "openai_compatible_base_url") => {
+            config.transcription.openai_compatible_base_url = value.clone();
+            minutes_core::transcribe::remote_transcription_host(&config)?;
+        }
+        ("transcription", "openai_compatible_model") => {
+            config.transcription.openai_compatible_model = value.clone()
+        }
+        ("transcription", "openai_compatible_api_key_env") => {
+            if !value
+                .bytes()
+                .enumerate()
+                .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+            {
+                return Err("Enter an environment variable name, never an API key".into());
+            }
+            config.transcription.openai_compatible_api_key_env = value.clone();
+        }
+        ("transcription", "openai_compatible_max_upload_bytes") => {
+            config.transcription.openai_compatible_max_upload_bytes = value
+                .parse()
+                .map_err(|_| "Enter an upload limit in bytes")?;
         }
         ("transcription", "model") => config.transcription.model = value.clone(),
         ("transcription", "parakeet_model") => {
@@ -26247,5 +26307,28 @@ mod external_stop_tests {
             external_stop_decision(true, false),
             ExternalStopDecision::RefuseForeign
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_transcription_tests {
+    use super::*;
+
+    #[test]
+    fn remote_batch_readiness_and_consent_name_host_without_whisper_fallback() {
+        let mut config = Config::default();
+        config.transcription.engine = "openai-compatible".into();
+        config.transcription.openai_compatible_base_url = "http://localhost:8000/v1".into();
+        config.consent.mode = ConsentMode::Require;
+        let readiness = batch_transcription_readiness_view(&config);
+        assert!(readiness.ready);
+        assert_eq!(readiness.resolved_backend, "openai-compatible");
+        assert_eq!(readiness.fallback_order, vec!["openai-compatible"]);
+        assert!(readiness.detail.contains("localhost"));
+        let disclosure =
+            desktop_recording_consent_required(CaptureMode::Meeting, &config, false).unwrap();
+        assert!(disclosure.contains("localhost"));
+        assert!(disclosure.contains("remote"));
+        assert!(!disclosure.contains("locally on my device"));
     }
 }

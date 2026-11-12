@@ -2467,11 +2467,16 @@ fn transcribe_prepared_input_with_hints(
     checkpoint: Option<&crate::transcript_checkpoint::TranscriptCheckpoint>,
 ) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
     use crate::transcript_checkpoint::{self as checkpoints, CheckpointSource};
+    let decode_hints = decode_hints.with_remote_policy(original, config)?;
     // Host checkpoints apply to ambient meeting sources only; an authorized
     // capability is always transcribed in full.
     let spans_for = |source| {
         checkpoint
-            .filter(|_| input_authority.is_none() && content_type == ContentType::Meeting)
+            .filter(|_| {
+                input_authority.is_none()
+                    && content_type == ContentType::Meeting
+                    && crate::transcribe::effective_batch_engine(config) != "openai-compatible"
+            })
             .map(|checkpoint| checkpoint.spans_for(source))
             .unwrap_or_default()
     };

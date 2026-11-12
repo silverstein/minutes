@@ -1687,6 +1687,13 @@ fn process_pending_jobs_with_transcriber(
     while let Some(job) = next_pending_job() {
         let owner_pid = std::process::id();
         let Some(mut job) = update_job_state(&job.id, |job| {
+            // A remote worker may die after sending a chunk. Exhaust the
+            // crash-recovery budget BEFORE dispatch so recovery fails closed
+            // instead of repeating an uncertain upload. Manual requeue still
+            // resets the budget and is the user's explicit retry.
+            if crate::transcribe::effective_batch_engine(config) == "openai-compatible" {
+                job.retry_count = MAX_AUTO_RETRIES;
+            }
             job.state = JobState::Transcribing;
             job.stage = JobState::Transcribing.default_stage();
             job.owner_pid = Some(owner_pid);

@@ -50,6 +50,9 @@ try {
   }
   await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true, bubbles: true })));
   assert.equal(await page.getByRole('tab', { selected: true }).innerText(), 'Board prep');
+  await page.locator('#recall-tab-prep').focus();
+  await page.evaluate(() => fixture.controls.update(structuredClone(fixture.model)));
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'recall-tab-prep', 'a metadata update keeps keyboard focus on the focused tab button, not its wrapper');
   await page.getByRole('button', { name: 'Close Live call', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Close conversation', exact: true }).count(), 1);
   assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).evaluate(node => node === document.activeElement), true);
@@ -91,6 +94,11 @@ try {
   assert.equal(await page.getByRole('button',{name:'Close Chat 1 and continue',exact:true}).count(),1,'the suggestion skips the active tab');
   assert.equal(await page.locator('.recall-tab.recall-tab-closable').count(),4);
   assert.match(await page.locator('#recall-tab-prompt p').innerText(),/Or close another highlighted tab\./);
+  await page.evaluate(()=>{ fixture.model.active='live'; fixture.controls.update(structuredClone(fixture.model)); });
+  assert.equal(await page.getByRole('button',{name:'Close Chat 1 and continue',exact:true}).count(),0,'switching onto the suggested tab withdraws it, with the tabs unchanged');
+  assert.equal(await page.getByRole('button',{name:'Close Chat 2 and continue',exact:true}).count(),1);
+  await page.evaluate(()=>{ fixture.model.active='prep'; fixture.controls.update(structuredClone(fixture.model)); });
+  assert.equal(await page.getByRole('button',{name:'Close Chat 1 and continue',exact:true}).count(),1);
   await page.evaluate(()=>{
     fixture.controls.dismiss();
     fixture.controls.syncPendingLive('capture-a',id=>fixture.actions.push(['admit-live',id]));

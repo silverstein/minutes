@@ -36,6 +36,8 @@
     const closable = tab => tab.status === 'done' && !tab.live;
     // The part of a meeting title before its subtitle, for a compact button.
     const shortTitle = tab => String(tab.title || '').split(' — ')[0];
+    // The suggestion depends on which tab is on screen, not only on the tabs.
+    const chooserSignature = () => JSON.stringify({ active: model.active, tabs: model.tabs });
     function markStrip() {
       for (const wrapper of strip.querySelectorAll('.recall-tab')) {
         const tab = model.tabs.find(item => item.id === wrapper.dataset.tabId);
@@ -70,7 +72,7 @@
       } else {
         show(liveId ? 'Recording. The live meeting needs a tab, and all four are busy.' : 'All four tabs are busy.', [], 'Close one with its × to continue; it asks first.');
       }
-      chooser = { action, liveId, signature: JSON.stringify(model.tabs) };
+      chooser = { action, liveId, signature: chooserSignature() };
       markStrip();
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
@@ -120,9 +122,9 @@
         resumeButton.onclick = () => resume?.(model.active);
       }
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
-      if (focus) strip.querySelector(`[data-tab-id="${focus}"]`)?.focus();
+      if (focus) strip.querySelector(`[role="tab"][data-tab-id="${focus}"]`)?.focus();
       strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
-      if (chooser && chooser.signature !== JSON.stringify(model.tabs)) chooseFinished(chooser.action, chooser.liveId);
+      if (chooser && chooser.signature !== chooserSignature()) chooseFinished(chooser.action, chooser.liveId);
       markStrip();
 
     }

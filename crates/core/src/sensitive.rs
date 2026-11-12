@@ -110,6 +110,35 @@ pub fn lock_path() -> PathBuf {
     Config::minutes_dir().join(SENSITIVE_LOCK_FILE)
 }
 
+/// Policy known before transcription, captured with recording metadata.
+/// Both fields are required when present; missing/invalid policy is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingPolicy {
+    pub sensitivity: Sensitivity,
+    pub capture_enabled: bool,
+}
+
+/// Read the same sensitive-session source used by recording exclusivity.
+/// Unlike the UI's best-effort reader, unreadable/malformed state stays unknown.
+/// Never discard a restriction merely because its owner has exited.
+pub(crate) fn recording_policy() -> Option<RecordingPolicy> {
+    let path = session_path();
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(RecordingPolicy {
+            sensitivity: Sensitivity::Normal,
+            capture_enabled: true,
+        }),
+        Ok(metadata) if metadata.is_file() => fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SensitiveSession>(&bytes).ok())
+            .map(|_| RecordingPolicy {
+                sensitivity: Sensitivity::Restricted,
+                capture_enabled: false,
+            }),
+        _ => None,
+    }
+}
+
 /// Return true when a sensitive session file is active.
 pub fn is_active() -> bool {
     active_session().is_some()

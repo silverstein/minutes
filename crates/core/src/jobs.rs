@@ -70,6 +70,9 @@ impl JobState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessingJob {
+    /// Capture-time egress policy. Legacy/imported jobs remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_policy: Option<crate::sensitive::RecordingPolicy>,
     pub id: String,
     pub mode: CaptureMode,
     pub content_type: ContentType,
@@ -262,6 +265,20 @@ pub fn queue_live_capture_with_transcript_checkpoint(
         .unwrap_or_else(|| audio_path.clone());
     let new_screen_dir = crate::screen::screens_dir_for(&new_screen_anchor);
     let job = ProcessingJob {
+        recording_policy: pid::read_recording_metadata()
+            .filter(|metadata| {
+                metadata.mode == mode
+                    && metadata.context_session_id == context_session_id
+                    && metadata
+                        .policy_recorded_at
+                        .zip(recording_started_at)
+                        .is_some_and(|(policy_at, started)| {
+                            policy_at >= started
+                                && recording_finished_at
+                                    .is_some_and(|finished| policy_at <= finished)
+                        })
+            })
+            .and_then(|metadata| metadata.recording_policy),
         id: job_id,
         mode,
         content_type: mode.content_type(),
@@ -737,6 +754,7 @@ fn enqueue_capture_job_with_id(
     template_slug: Option<String>,
 ) -> std::io::Result<ProcessingJob> {
     let job = ProcessingJob {
+        recording_policy: None,
         id: job_id,
         mode,
         content_type: mode.content_type(),
@@ -2635,6 +2653,7 @@ mod tests {
             fs::write(&output_path, "# final").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-preserve".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2695,6 +2714,7 @@ mod tests {
             fs::write(&output_path, "# native final").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-preserve-native".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2760,6 +2780,7 @@ mod tests {
                 fs::write(&output_path, "# out").unwrap();
 
                 let job = ProcessingJob {
+                    recording_policy: None,
                     id: job_id.into(),
                     mode: CaptureMode::Meeting,
                     content_type: ContentType::Meeting,
@@ -2867,6 +2888,7 @@ mod tests {
     fn list_jobs_recovers_stale_worker_claims() {
         with_temp_home(|_| {
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-stale".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2908,6 +2930,7 @@ mod tests {
 
     fn crash_test_job(id: &str, state: JobState) -> ProcessingJob {
         ProcessingJob {
+            recording_policy: None,
             id: id.into(),
             mode: CaptureMode::Meeting,
             content_type: ContentType::Meeting,
@@ -2983,6 +3006,7 @@ mod tests {
             // that's exactly the "loop forever on a deterministic crash"
             // case from issue #229.
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-burned".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3040,6 +3064,7 @@ mod tests {
         with_temp_home(|dir| {
             let audio_path = dir.path().join("fake.wav");
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-retry-reset".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3083,6 +3108,7 @@ mod tests {
             let audio_path = dir.path().join("fake.wav");
             let output_path = dir.path().join("existing.md").display().to_string();
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-failed".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3130,6 +3156,7 @@ mod tests {
             fs::write(&audio_path, b"fake-wav").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-dismissed".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3177,6 +3204,7 @@ mod tests {
             fs::write(&audio_path, b"fake-wav").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-complete".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3221,6 +3249,7 @@ mod tests {
     fn processing_summary_prefers_active_work_over_newer_queued_jobs() {
         with_temp_home(|_| {
             let active = ProcessingJob {
+                recording_policy: None,
                 id: "job-active".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3250,6 +3279,7 @@ mod tests {
                 crashed_while_transcribing: false,
             };
             let queued = ProcessingJob {
+                recording_policy: None,
                 id: "job-queued".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3294,6 +3324,7 @@ mod tests {
     /// suite avoids drift while not refactoring the existing fixtures.
     fn make_test_job(id: &str, state: JobState) -> ProcessingJob {
         ProcessingJob {
+            recording_policy: None,
             id: id.into(),
             mode: CaptureMode::Meeting,
             content_type: ContentType::Meeting,

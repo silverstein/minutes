@@ -248,7 +248,7 @@ pub struct DecodeHints {
     // Independent capture sources must share their original clock. Removing
     // quiet intervals from just one source would make timestamp merging wrong.
     preserve_source_timeline: bool,
-    // Set only from the normal-only live policy reader, never from job JSON.
+    // Validated from capture-time job metadata or a normal-only corpus snapshot.
     remote_policy: Option<std::sync::Arc<openai_compatible::AudioPolicy>>,
 }
 

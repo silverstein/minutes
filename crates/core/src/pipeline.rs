@@ -2480,30 +2480,34 @@ fn transcribe_prepared_input_with_hints(
             // Sequential calls bound model memory; this is final processing,
             // never the live capture/optional-consumer path. A short response
             // on one track must not fail the whole meeting's word threshold.
-            return transcribe_independent_stems(stems, |path| {
-                let source = if path == stems.voice {
-                    CheckpointSource::Voice
-                } else {
-                    CheckpointSource::System
-                };
-                let (source_config, source_hints) =
-                    checkpoints::source_inputs(source, config, &decode_hints);
-                let spans = spans_for(source);
-                if !spans.is_empty() {
-                    return checkpoints::transcribe_meeting_with_spans(
+            return transcribe_independent_stems(
+                stems,
+                config.transcription.cross_source_echo_suppression,
+                |path| {
+                    let source = if path == stems.voice {
+                        CheckpointSource::Voice
+                    } else {
+                        CheckpointSource::System
+                    };
+                    let (source_config, source_hints) =
+                        checkpoints::source_inputs(source, config, &decode_hints);
+                    let spans = spans_for(source);
+                    if !spans.is_empty() {
+                        return checkpoints::transcribe_meeting_with_spans(
+                            path,
+                            &source_config,
+                            &source_hints,
+                            &spans,
+                        );
+                    }
+                    crate::transcription_coordinator::transcribe_path_for_content_with_hints(
                         path,
+                        content_type,
                         &source_config,
-                        &source_hints,
-                        &spans,
-                    );
-                }
-                crate::transcription_coordinator::transcribe_path_for_content_with_hints(
-                    path,
-                    content_type,
-                    &source_config,
-                    source_hints,
-                )
-            });
+                        source_hints,
+                    )
+                },
+            );
         }
         if let PreparedTranscriptionInput::Original = prepared {
             let spans = spans_for(CheckpointSource::Recording);
@@ -2545,6 +2549,7 @@ fn transcribe_prepared_input_with_hints(
 
 fn transcribe_independent_stems(
     stems: &diarize::StemPaths,
+    cross_source_echo_suppression: bool,
     mut transcribe: impl FnMut(
         &Path,
     ) -> Result<
@@ -2570,7 +2575,18 @@ fn transcribe_independent_stems(
     };
     let voice = run(&stems.voice)?;
     let system = run(&stems.system)?;
-    let (transcription, sources) = crate::source_transcript::merge_sources(voice, system);
+    tracing::info!(
+        microphone_diagnosis = voice.stats.diagnosis(),
+        system_diagnosis = system.stats.diagnosis(),
+        "independent source transcription diagnostics"
+    );
+    let (transcription, sources) =
+        crate::source_transcript::merge_sources(voice, system, cross_source_echo_suppression);
+    tracing::info!(
+        cross_source_echo_suppression,
+        cross_source_echo_suppressed = transcription.stats.cross_source_echo_suppressed,
+        "independent source echo suppression"
+    );
     Ok(PreparedTranscriptionResult {
         transcription,
         sources: Some(sources),
@@ -14036,7 +14052,7 @@ mod prepare_transcription_input_tests {
             panic!("both native meeting stems must reach independent ASR");
         };
         let mut paths = Vec::new();
-        let result = transcribe_independent_stems(&stems, |path| {
+        let result = transcribe_independent_stems(&stems, true, |path| {
             paths.push(path.to_path_buf());
             let text = if path == stems.voice {
                 "[0:00] quieter microphone words"
@@ -14251,6 +14267,37 @@ mod prepare_transcription_input_tests {
     }
 
     #[test]
+    fn independent_source_echo_switch_reaches_final_merge() {
+        let (_dir, mov) = fake_native_call_capture("source-echo-switch");
+        let PreparedTranscriptionInput::IndependentStems(stems) =
+            prepare_transcription_input_for_content(&mov, None, ContentType::Meeting).unwrap()
+        else {
+            panic!("independent stems required");
+        };
+        for enabled in [false, true] {
+            let result = transcribe_independent_stems(&stems, enabled, |_| {
+                Ok(crate::transcribe::TranscribeResult {
+                    text: "[0:00] please send the revised proposal".into(),
+                    stats: crate::transcribe::FilterStats {
+                        audio_duration_secs: 3.0,
+                        final_words: 5,
+                        ..Default::default()
+                    },
+                    segments: vec![],
+                    detected_language: None,
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                result.transcription.stats.cross_source_echo_suppressed,
+                usize::from(enabled)
+            );
+            assert_eq!(result.transcription.text.contains("[MICROPHONE "), !enabled);
+            assert!(result.transcription.text.contains("[SYSTEM "));
+        }
+    }
+
+    #[test]
     fn independent_source_decoder_failure_never_falls_back_to_a_mixed_success() {
         let (_dir, mov) = fake_native_call_capture("source-failure");
         let PreparedTranscriptionInput::IndependentStems(stems) =
@@ -14259,7 +14306,7 @@ mod prepare_transcription_input_tests {
             panic!("independent stems required");
         };
         let mut calls = 0;
-        let result = transcribe_independent_stems(&stems, |_| {
+        let result = transcribe_independent_stems(&stems, true, |_| {
             calls += 1;
             Err(crate::error::TranscribeError::TranscriptionFailed(
                 "synthetic decoder failure".into(),
@@ -14278,7 +14325,7 @@ mod prepare_transcription_input_tests {
         else {
             panic!("independent stems required");
         };
-        let result = transcribe_independent_stems(&stems, |path| {
+        let result = transcribe_independent_stems(&stems, true, |path| {
             if path == stems.voice {
                 return Err(crate::error::TranscribeError::EmptyTranscript(0));
             }

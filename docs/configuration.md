@@ -32,6 +32,7 @@ alternatives.
 # call = "auto"          # Core Audio Process Tap, or auto-detect a CPAL loopback
 
 [transcription]
+# cross_source_echo_suppression = true # Conservative mic echo cleanup for calls; false keeps all source lines.
 engine = "auto"           # Apple Silicon release builds use Parakeet v3 when installed, otherwise Whisper
 # engine = "whisper"      # Keep Whisper explicitly on every platform
 # engine = "sherpa"       # Select the in-process Parakeet v3 engine explicitly

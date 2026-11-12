@@ -46,7 +46,12 @@ describe("helper runtime preflight at all three call sites", () => {
   it("preflights corpus workers before any corpus authorization and preserves the specific error", async () => {
     resolveRuntime.mockRejectedValue(new NodeHelperRuntimeError());
     const operation = vi.fn();
-    await expect(withStableCorpusLease("/never-read", operation)).rejects.toThrow(NodeHelperRuntimeError);
+    const directory = mkdtempSync(join(tmpdir(), "minutes-runtime-corpus-"));
+    try {
+      await expect(withStableCorpusLease(directory, operation)).rejects.toThrow(NodeHelperRuntimeError);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
     expect(operation).not.toHaveBeenCalled();
     expect(resolveRuntime).toHaveBeenCalledOnce();
   });

@@ -288,6 +288,73 @@ type SentinelCapacityReservation = {
 class CorpusLeaseChangedError extends Error {}
 class CorpusLeaseBudgetError extends Error {}
 
+const CORPUS_DENIAL_REASONS = new Set([
+  "root_missing", "root_not_directory", "budget_exceeded", "corpus_changed",
+  "sentinel_not_private", "internal",
+]);
+const CORPUS_FS_ERROR_CODES = new Set([
+  "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EISDIR", "ELOOP", "EIO",
+  "EMFILE", "ENFILE", "ENOSPC", "EROFS", "EBUSY", "EINVAL", "ENOSYS",
+  "ENOTSUP", "EEXIST", "ENOTEMPTY", "ETIMEDOUT", "ESTALE", "EBADF",
+]);
+
+/** Treat worker diagnostics as untrusted: accept only bounded fixed categories. */
+export function validateCorpusDenialReason(reason: unknown): string {
+  if (typeof reason !== "string" || reason.length > 64) return "internal";
+  if (CORPUS_DENIAL_REASONS.has(reason)) return reason;
+  if (reason.startsWith("fs_error:") && CORPUS_FS_ERROR_CODES.has(reason.slice(9))) {
+    return reason;
+  }
+  return "internal";
+}
+
+/** Path-free guidance for an absent or invalid configured meetings root. */
+export class MeetingsRootError extends Error {
+  constructor(readonly reason: "root_missing" | "root_not_directory") {
+    super(
+      "Minutes can't find your meetings folder. " +
+      "Check the Meetings Directory setting for the Minutes extension in Claude Desktop " +
+      "(default: ~/meetings), or record a meeting first."
+    );
+    this.name = "MeetingsRootError";
+  }
+}
+
+class CorpusLeaseDenialError extends Error {
+  constructor(readonly reason: string) {
+    super("Access denied: stable meeting corpus authorization failed");
+  }
+}
+
+/** Reduce an error immediately; never retain path-bearing filesystem errors. */
+export function corpusDenialReason(error: unknown): string {
+  if (error instanceof MeetingsRootError || error instanceof CorpusLeaseDenialError) {
+    return validateCorpusDenialReason(error.reason);
+  }
+  if (error instanceof CorpusLeaseBudgetError) return "budget_exceeded";
+  if (error instanceof CorpusLeaseChangedError) {
+    return error.message === "meeting corpus sentinel namespace is not private"
+      ? "sentinel_not_private" : "corpus_changed";
+  }
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? validateCorpusDenialReason(`fs_error:${code}`) : "internal";
+}
+
+/** Metadata preflight only; it never authorizes a read or creates a directory. */
+export async function assertMeetingsRoot(root: string): Promise<void> {
+  try {
+    if (!(await stat(root)).isDirectory()) {
+      throw new MeetingsRootError("root_not_directory");
+    }
+  } catch (error) {
+    if (error instanceof MeetingsRootError) throw error;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new MeetingsRootError("root_missing");
+    if (code === "ENOTDIR") throw new MeetingsRootError("root_not_directory");
+    throw new CorpusLeaseDenialError(corpusDenialReason(error));
+  }
+}
+
 type CorpusMemoryReservation = {
   bytes: number;
   released: boolean;
@@ -1493,11 +1560,13 @@ async function withStableCorpusLeaseInProcess<T>(
   ) => T | Promise<T>,
   hooks: CorpusLeaseHooks = {}
 ): Promise<T> {
+  await assertMeetingsRoot(root);
   const budgets = resolveCorpusReadBudgets(hooks.budgets);
   const { deadline } = authorizationWindow(hooks.timeoutMs);
   const fenceTimeoutMs = resolveFenceTimeout(hooks.timeoutMs);
   const memoryReservation = reserveCorpusMemory(budgets);
 
+  let denialReason = "internal";
   try {
     for (let attempt = 1; attempt <= MAX_AUTHORIZATION_ATTEMPTS; attempt += 1) {
       let lease: WatchedCorpusAttempt | undefined;
@@ -1621,9 +1690,9 @@ async function withStableCorpusLeaseInProcess<T>(
       await lease.close();
       lease = undefined;
       return result;
-      } catch {
-        // Retry without retaining path-bearing filesystem errors. The public
-        // failure below is deliberately privacy-safe.
+      } catch (error) {
+        denialReason = corpusDenialReason(error);
+        // Retry retaining only a bounded category, never the original error.
       } finally {
         // Body failures are retried behind the one path-free public error. A
         // cleanup failure on the successful path is handled above and therefore
@@ -1632,7 +1701,7 @@ async function withStableCorpusLeaseInProcess<T>(
       }
     }
 
-    throw new Error("Access denied: stable meeting corpus authorization failed");
+    throw new CorpusLeaseDenialError(denialReason);
   } finally {
     releaseCorpusMemory(memoryReservation);
   }
@@ -1924,8 +1993,9 @@ function parentControls(
 /**
  * Authorize a stable corpus read, presenting one error for one condition.
  *
- * Every way the lease can refuse is a refusal, and callers get the same
- * sentence for all of them. Without this, which sentence you saw depended on
+ * A missing or invalid configured root gets path-free setup guidance before
+ * authorization. Every authorization refusal still gets the same sentence.
+ * Without this, which sentence you saw depended on
  * where the failure landed: `fail()` wraps refusals raised once the worker is
  * running, but a `CorpusLeaseChangedError` thrown before that, such as the
  * deadline guard at the top of the dispatch below, escaped raw.
@@ -1950,6 +2020,7 @@ export async function withStableCorpusLease<T>(
 ): Promise<T> {
   const authorizationStarted = process.hrtime.bigint();
   try {
+    await assertMeetingsRoot(root);
     const result = await dispatchStableCorpusLease(root, operation, hooks);
     const durationMs = Number(
       (process.hrtime.bigint() - authorizationStarted + 999_999n) / 1_000_000n
@@ -1963,6 +2034,10 @@ export async function withStableCorpusLease<T>(
     });
     return result;
   } catch (error) {
+    if (error instanceof MeetingsRootError || error instanceof CorpusLeaseDenialError) {
+      const reason = corpusDenialReason(error);
+      setImmediate(() => writeOperatorDiagnostic(`[corpus-lease] denied: ${reason}\n`));
+    }
     if (error instanceof CorpusLeaseChangedError) {
       throw new Error(
         "Access denied: stable meeting corpus authorization failed"
@@ -2080,7 +2155,7 @@ async function dispatchStableCorpusLease<T>(
 
   try {
     const result = await new Promise<T>((resolve, reject) => {
-      const fail = (message: string): void => {
+      const fail = (message: string, reason = "internal"): void => {
         if (settled) return;
         settled = true;
         // Sampled before the teardown below so the number reflects the moment
@@ -2089,7 +2164,9 @@ async function dispatchStableCorpusLease<T>(
 
         operationAbort.abort(new CorpusLeaseChangedError(message));
         killCorpusWorker(child);
-        reject(new Error("Access denied: stable meeting corpus authorization failed"));
+        reject(reason === "root_missing" || reason === "root_not_directory"
+          ? new MeetingsRootError(reason)
+          : new Error("Access denied: stable meeting corpus authorization failed"));
 
         // Diagnostics run last and cannot affect the lease. `settled` is already
         // true, so anything thrown here would strand the promise forever: no
@@ -2188,6 +2265,11 @@ async function dispatchStableCorpusLease<T>(
           message = JSON.parse(line);
         } catch {
           fail("meeting corpus worker protocol was invalid");
+          return;
+        }
+        if (message?.type === "denied") {
+          const reason = validateCorpusDenialReason(message.reason);
+          fail(`worker refusal: ${reason}`, reason);
           return;
         }
         if (message?.type === "phase") {

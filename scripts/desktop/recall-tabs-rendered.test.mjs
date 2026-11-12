@@ -59,6 +59,7 @@ try {
   assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).evaluate(node => node === document.activeElement), true);
   await page.keyboard.press('Enter');
   assert.equal(await page.getByRole('button', { name: 'Close conversation', exact: true }).count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Close Live call', 'cancelling a close confirmation returns focus to the control that opened it');
   assert.equal(await page.evaluate(() => fixture.actions.some(action => action[0] === 'close' && action[2])), false, 'Return cancels rather than destroying the conversation');
   await page.getByRole('button', { name: 'Close Live call', exact: true }).click();
   await page.getByRole('button', { name: 'Close conversation', exact: true }).click();
@@ -188,6 +189,7 @@ try {
     else await page.keyboard.press(cancelKey);
     assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false);
     assert.equal(await page.locator('#recall-terminal-container').isVisible(),true,'cancelling a rejected open preserves the selected PTY');
+    assert.equal(await page.evaluate(()=>document.getElementById('recall-terminal-one').contains(document.activeElement)),true,`cancelling with ${cancelKey} returns the keyboard to the selected terminal`);
     await page.waitForFunction(()=>{
       const {terminal,pty}=fixture.snapshot('one');
       return terminal.cols>40 && terminal.rows>10 && terminal.cols===pty.cols && terminal.rows===pty.rows;
@@ -200,7 +202,7 @@ try {
     // Require the visible text too, without racing that asynchronous repaint.
     await page.waitForFunction(()=>document.querySelector('#recall-terminal-one .xterm-rows').textContent.includes('GRID-CANARY'));
   }
-  await page.evaluate(()=>fixture.tabs.get('one').terminal.focus());
+  // No explicit focus here: typing right after Cancel must reach the terminal.
   await page.keyboard.type('pwd');
   await page.evaluate(()=>fixture.tabs.get('one').queue);
   assert.equal(await page.evaluate(()=>fixture.tabs.get('one').draft),'pwd','the cancelled tab still accepts terminal input');

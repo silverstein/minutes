@@ -30,8 +30,19 @@
     let model = snapshot;
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
-    let chooser = null, pendingLive = null;
-    function dismiss() { chooser = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
+    let chooser = null, pendingLive = null, returnFocus = null;
+    function dismiss() { chooser = null; returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
+    // Cancel puts the keyboard back where the person was typing: the element
+    // focused before the prompt opened, else the visible tab's terminal, else
+    // the selected tab. Without this, focus falls to the page and keys vanish.
+    function cancelPrompt() {
+      const target = returnFocus;
+      dismiss();
+      // A rejected open hides the terminal first, so its opener is often <body>.
+      const usable = node => node?.isConnected && node !== document.body && !prompt.contains(node) && node.getClientRects().length > 0;
+      const terminal = document.getElementById(`recall-terminal-${model.active}`)?.querySelector('textarea');
+      [target, terminal, strip.querySelector('[aria-selected="true"]')].find(usable)?.focus();
+    }
     // Tabs that may be closed to make room: finished, never the live meeting.
     const closable = tab => tab.status === 'done' && !tab.live;
     // The part of a meeting title before its subtitle, for a compact button.
@@ -45,7 +56,9 @@
       }
     }
     function show(text, actions, hint = '') {
-      dismiss(); prompt.hidden = false;
+      // A refresh of an open prompt keeps the focus target from when it opened.
+      const opener = prompt.hidden ? document.activeElement : returnFocus;
+      dismiss(); prompt.hidden = false; returnFocus = opener;
       const description = document.createElement('p'); description.textContent = text;
       if (hint) { const extra = document.createElement('span'); extra.className = 'recall-tab-prompt-hint'; extra.textContent = ` ${hint}`; description.append(extra); }
       prompt.append(description);
@@ -56,7 +69,7 @@
         button.addEventListener('click', () => { dismiss(); action(); }); prompt.append(button);
       }
       const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn btn-ghost btn-sm';
-      cancel.textContent = 'Cancel'; cancel.addEventListener('click', dismiss); prompt.append(cancel);
+      cancel.textContent = 'Cancel'; cancel.addEventListener('click', cancelPrompt); prompt.append(cancel);
       cancel.focus();
     }
     // At the cap, offer one finished tab (an inactive one first, so the
@@ -75,7 +88,7 @@
       chooser = { action, liveId, signature: chooserSignature() };
       markStrip();
     }
-    prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
+    prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); cancelPrompt(); } });
     function update(next) {
       snapshot = model = next;
       const focus = strip.contains(document.activeElement) ? document.activeElement?.dataset?.tabId : null;

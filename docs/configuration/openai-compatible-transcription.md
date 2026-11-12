@@ -30,22 +30,34 @@ source offset. The provider must return timestamped `segments`.
 
 ## Conversation policy before upload
 
-Remote transcription reuses the active-corpus policy reader and exact-byte
-reauthorization used at existing egress boundaries. Before processing, the
-recording must have a matching Markdown policy record: for `recording.wav`
-or `recording.mov`, this is `recording.md` beside the audio, inside the
-configured output directory. That record must pass the existing normal-only
-policy gate. `sensitivity: restricted`, malformed or unknown policy,
-`capture: none`, unreadable records, and files outside the active corpus are
-refused. Missing sensitivity on an otherwise valid record retains the
-existing legacy-normal meaning.
+New desktop and CLI recordings carry an explicit capture-time policy from
+`recording-meta.json` into their processing job. The queue checks that the
+metadata matches the capture mode, context session, and recording interval,
+so stale metadata cannot authorize a different recording. The policy uses the
+same `sensitive-session.json` state that prevents recording during a no-capture
+sensitive meeting: no session means normal sensitivity with capture enabled;
+a valid sensitive session means restricted sensitivity with capture disabled.
+Unreadable or malformed state means unknown. Missing policy on a legacy or
+imported job also means unknown, never permission to upload. Calendar events
+currently carry no restriction flags and do not grant upload permission.
 
-**New recordings without a policy record are refused before upload.** Minutes
-does not infer permission from audio, calendar titles, a future transcript,
-or the engine setting. Use local transcription until policy is established;
-this engine does not add a new classification or consent workflow. All stems
-inherit the original recording's policy, which is revalidated immediately
-before every chunk upload. Changing the policy between chunks stops the job.
+Before transcription, the engine requires the exact job's saved policy to
+say normal sensitivity and capture enabled. Restricted, capture-disabled,
+unknown, malformed, or missing job policy is refused before connecting. The
+original job policy is carried through prepared audio and both named stems,
+and its exact bytes are revalidated immediately before every chunk upload.
+A changed or removed job record stops further uploads and preserves audio.
+If the job already has a saved meeting artifact, its live normal-only corpus
+policy must also authorize every upload; a later restriction takes precedence.
+
+For reprocessing existing recordings outside the job directory, the existing
+normal-only active-corpus Markdown policy reader and exact-byte
+reauthorization still apply. A matching active record beside the original
+audio is required; restricted records, `capture: none`, unreadable or malformed
+policy, and files outside the active corpus are refused. Missing sensitivity
+on an otherwise valid legacy Markdown record retains its existing normal
+meaning. No policy is inferred from audio, calendar titles, a future
+transcript, or selecting the remote engine.
 
 ## Failure and disclosure
 

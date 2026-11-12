@@ -434,3 +434,215 @@ fn config_round_trips_opt_in_settings_and_defaults_stay_local() {
         12_000_000
     );
 }
+
+// Same metadata writer and queue entry used by desktop/CLI capture. No
+// Markdown exists under jobs/, including for the independently moved stems.
+fn desktop_job(root: &Path, seconds: usize) -> (Config, crate::jobs::ProcessingJob) {
+    desktop_job_with_metadata_edit(root, seconds, |_| {})
+}
+
+fn desktop_job_with_metadata_edit(
+    root: &Path,
+    seconds: usize,
+    edit: impl FnOnce(&Path),
+) -> (Config, crate::jobs::ProcessingJob) {
+    let (config, audio) = fixture(root, seconds);
+    let current = crate::pid::current_wav_path();
+    std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+    std::fs::rename(&audio, &current).unwrap();
+    std::fs::remove_file(audio.with_extension("md")).unwrap();
+    let bytes = std::fs::read(&current).unwrap();
+    for role in ["voice.wav", "system.wav"] {
+        std::fs::write(current.with_extension(role), &bytes).unwrap();
+    }
+    let started = chrono::Local::now();
+    crate::pid::write_recording_metadata(crate::CaptureMode::Meeting).unwrap();
+    edit(&crate::pid::recording_meta_path());
+    let job = crate::jobs::queue_live_capture(
+        crate::CaptureMode::Meeting,
+        None,
+        &current,
+        None,
+        None,
+        Some(started),
+        Some(chrono::Local::now()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(!Path::new(&job.audio_path).with_extension("md").exists());
+    (config, job)
+}
+
+#[test]
+fn desktop_job_with_stems_uploads_and_writes_source_offsets_without_markdown() {
+    crate::test_support::with_temp_home(|root| {
+        let (mut config, job) = desktop_job(root, 2);
+        assert_eq!(
+            job.recording_policy.unwrap().sensitivity,
+            crate::markdown::Sensitivity::Normal
+        );
+        let (prefix, suffix, _) = multipart_parts(&config).unwrap();
+        config.transcription.openai_compatible_max_upload_bytes =
+            prefix.len() + suffix.len() + 44 + 32000;
+        let (base, handle) = server(vec![(200, OK); 4], |_| {});
+        config.transcription.openai_compatible_base_url = base;
+        config.summarization.engine = "none".into();
+        config.diarization.engine = "none".into();
+        crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+        let completed = crate::jobs::load_job(&job.id).unwrap();
+        assert_eq!(
+            completed.state,
+            crate::jobs::JobState::Complete,
+            "{:?}",
+            completed.error
+        );
+        let transcript = std::fs::read_to_string(completed.output_path.unwrap()).unwrap();
+        for source in ["MICROPHONE", "SYSTEM"] {
+            for offset in ["0:00", "0:01"] {
+                assert!(
+                    transcript.contains(&format!("[{source} {offset}] hello from server")),
+                    "{}",
+                    transcript
+                );
+            }
+        }
+        let requests = handle.join().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests
+            .iter()
+            .all(|(_, body)| body.windows(4).any(|w| w == b"RIFF")));
+    });
+}
+
+#[test]
+fn desktop_restricted_disabled_and_unknown_jobs_send_zero_requests() {
+    crate::test_support::with_temp_home(|root| {
+        for case in [
+            "sensitive",
+            "restricted",
+            "disabled",
+            "missing",
+            "malformed",
+            "unreadable",
+            "saved_restricted",
+            "saved_disabled",
+        ] {
+            if case == "sensitive" {
+                crate::sensitive::start(Some("Synthetic restricted session")).unwrap();
+            } else if case == "malformed" {
+                std::fs::write(crate::sensitive::session_path(), "invalid JSON").unwrap();
+            } else if case == "unreadable" {
+                std::fs::create_dir_all(crate::sensitive::session_path()).unwrap();
+            }
+            let (mut config, mut job) = desktop_job(root, 1);
+            match case {
+                "restricted" => {
+                    job.recording_policy.as_mut().unwrap().sensitivity =
+                        crate::markdown::Sensitivity::Restricted
+                }
+                "disabled" => job.recording_policy.as_mut().unwrap().capture_enabled = false,
+                "missing" => job.recording_policy = None,
+                "sensitive" => assert!(!job.recording_policy.unwrap().capture_enabled),
+                "saved_restricted" | "saved_disabled" => {
+                    let path = config.output_dir.join("saved.md");
+                    let policy = if case == "saved_restricted" {
+                        "sensitivity: restricted"
+                    } else {
+                        "capture: none"
+                    };
+                    std::fs::write(&path, format!("---\ntitle: Synthetic saved recording\ntype: meeting\ndate: 2026-01-01T12:00:00Z\n{policy}\n---\n")).unwrap();
+                    job.output_path = Some(path.display().to_string());
+                }
+                _ => assert!(job.recording_policy.is_none()),
+            }
+            crate::jobs::write_job(&job).unwrap();
+            // Restriction persists even after the sensitive session has ended.
+            if case == "unreadable" {
+                std::fs::remove_dir(crate::sensitive::session_path()).unwrap();
+            } else {
+                let _ = std::fs::remove_file(crate::sensitive::session_path());
+            }
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            config.transcription.openai_compatible_base_url =
+                format!("http://{}/v1", listener.local_addr().unwrap());
+            crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+            let failed = crate::jobs::load_job(&job.id).unwrap();
+            assert_eq!(failed.state, crate::jobs::JobState::Failed, "{case}");
+            assert!(
+                failed.error.unwrap().contains("egress policy refused"),
+                "{case}"
+            );
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+                "{case}"
+            );
+            for extension in ["wav", "voice.wav", "system.wav"] {
+                assert!(Path::new(&job.audio_path)
+                    .with_extension(extension)
+                    .exists());
+            }
+        }
+    });
+}
+
+#[test]
+fn desktop_job_policy_is_rechecked_before_next_chunk_and_stem() {
+    crate::test_support::with_temp_home(|root| {
+        for seconds in [1, 2] {
+            let (mut config, job) = desktop_job(root, seconds);
+            let (prefix, suffix, _) = multipart_parts(&config).unwrap();
+            config.transcription.openai_compatible_max_upload_bytes =
+                prefix.len() + suffix.len() + 44 + 32000;
+            let id = job.id.clone();
+            let (base, handle) = server(vec![(200, OK)], move |_| {
+                let mut job = crate::jobs::load_job(&id).unwrap();
+                job.recording_policy.as_mut().unwrap().sensitivity =
+                    crate::markdown::Sensitivity::Restricted;
+                crate::jobs::write_job(&job).unwrap();
+            });
+            config.transcription.openai_compatible_base_url = base;
+            crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+            let failed = crate::jobs::load_job(&job.id).unwrap();
+            assert_eq!(failed.state, crate::jobs::JobState::Failed);
+            assert!(failed.error.unwrap().contains("egress policy changed"));
+            assert_eq!(handle.join().unwrap().len(), 1);
+        }
+    });
+}
+
+#[test]
+fn desktop_stale_missing_or_mismatched_capture_metadata_is_unknown() {
+    crate::test_support::with_temp_home(|root| {
+        for case in ["stale", "missing", "mode", "context", "malformed"] {
+            let (mut config, job) = desktop_job_with_metadata_edit(root, 1, |path| {
+                let mut metadata: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                match case {
+                    "stale" => metadata["policy_recorded_at"] = "2000-01-01T00:00:00Z".into(),
+                    "missing" => {
+                        metadata.as_object_mut().unwrap().remove("recording_policy");
+                    }
+                    "mode" => metadata["mode"] = "quick-thought".into(),
+                    "context" => metadata["context_session_id"] = "another-capture".into(),
+                    _ => metadata["recording_policy"]["sensitivity"] = "unknown".into(),
+                }
+                std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+            });
+            assert!(job.recording_policy.is_none(), "{case}");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            config.transcription.openai_compatible_base_url =
+                format!("http://{}/v1", listener.local_addr().unwrap());
+            crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+            let failed = crate::jobs::load_job(&job.id).unwrap();
+            assert_eq!(failed.state, crate::jobs::JobState::Failed);
+            assert!(failed.error.unwrap().contains("restriction is unknown"));
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        }
+    });
+}

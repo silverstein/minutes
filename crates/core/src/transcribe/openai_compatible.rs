@@ -99,32 +99,147 @@ pub fn remote_transcription_notice(config: &Config) -> String {
     format!("Batch transcription is remote: audio is sent to {host}. Live transcript and dictation stay local. Unclassified or restricted recordings cannot be uploaded.")
 }
 
-/// Exact policy bytes travel with prepared stems, never as caller-supplied
-/// booleans. Equality preserves DecodeHints' existing comparison contract.
+/// Policy from the original recording travels with every prepared stem.
 #[derive(Debug, Clone)]
-pub(super) struct AudioPolicy(AuthorizedMeetingSnapshot);
+pub(super) enum AudioPolicy {
+    Meeting(Box<AuthorizedMeetingSnapshot>),
+    Job {
+        path: std::path::PathBuf,
+        content: Vec<u8>,
+        meeting: Option<Box<AuthorizedMeetingSnapshot>>,
+    },
+}
 
 impl PartialEq for AudioPolicy {
     fn eq(&self, other: &Self) -> bool {
-        self.0.path == other.0.path && self.0.content == other.0.content
+        match (self, other) {
+            (Self::Meeting(a), Self::Meeting(b)) => a.path == b.path && a.content == b.content,
+            (
+                Self::Job {
+                    path: a,
+                    content: ac,
+                    meeting: am,
+                },
+                Self::Job {
+                    path: b,
+                    content: bc,
+                    meeting: bm,
+                },
+            ) => {
+                a == b
+                    && ac == bc
+                    && am.as_ref().map(|s| (&s.path, &s.content))
+                        == bm.as_ref().map(|s| (&s.path, &s.content))
+            }
+            _ => false,
+        }
     }
 }
 impl Eq for AudioPolicy {}
+
+impl AudioPolicy {
+    fn reauthorize(&self, config: &Config) -> Result<(), TranscribeError> {
+        let valid = match self {
+            Self::Meeting(snapshot) => snapshot.reauthorize_exact(config, false).is_ok(),
+            Self::Job {
+                path,
+                content,
+                meeting,
+            } => {
+                std::fs::read(path).is_ok_and(|bytes| bytes == *content)
+                    && meeting
+                        .as_ref()
+                        .is_none_or(|policy| policy.reauthorize_exact(config, false).is_ok())
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(failed("egress policy changed or became unavailable"))
+        }
+    }
+}
 
 pub(super) fn authorize_audio(
     audio: &Path,
     config: &Config,
 ) -> Result<AudioPolicy, TranscribeError> {
-    // The companion must be an active corpus member. Raw audio is not proof
-    // of normal sensitivity. Never invent metadata from a future transcript.
-    let snapshot = read_authorized_meeting(&audio.with_extension("md"), config, false)
-        .map_err(|_| failed("egress policy refused: a matching active, normal-sensitivity Markdown record is required before transcription"))?;
+    // Only exact job audio (including its named stems) can use a job policy.
+    // Unknown job metadata must never fall through to a nearby Markdown file.
+    let jobs_dir = crate::jobs::jobs_dir();
+    let in_jobs = audio.parent().is_some_and(|parent| {
+        parent == jobs_dir
+            || parent
+                .canonicalize()
+                .ok()
+                .zip(jobs_dir.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b)
+    });
+    if in_jobs {
+        let stem = audio.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let id = stem
+            .strip_suffix(".voice")
+            .or_else(|| stem.strip_suffix(".system"))
+            .unwrap_or(stem);
+        let path = crate::jobs::job_path(id);
+        let content = std::fs::read(&path)
+            .map_err(|_| failed("egress policy refused: job policy is unavailable"))?;
+        let job: crate::jobs::ProcessingJob = serde_json::from_slice(&content)
+            .map_err(|_| failed("egress policy refused: job policy is malformed"))?;
+        let original = Path::new(&job.audio_path);
+        let matches_audio = [
+            original.to_path_buf(),
+            original.with_extension("voice.wav"),
+            original.with_extension("system.wav"),
+        ]
+        .iter()
+        .any(|p| p == audio);
+        if job.id != id || !matches_audio {
+            return Err(failed(
+                "egress policy refused: job audio binding does not match",
+            ));
+        }
+        let policy = job
+            .recording_policy
+            .ok_or_else(|| failed("egress policy refused: capture-time restriction is unknown"))?;
+        if !policy.capture_enabled {
+            return Err(failed(
+                "egress policy refused: conversation has capture disabled",
+            ));
+        }
+        if policy.sensitivity != crate::markdown::Sensitivity::Normal {
+            return Err(failed("egress policy refused: restricted recording"));
+        }
+        // A saved artifact may have been restricted since capture. Its live
+        // policy is an additional veto, never a way to authorize an unknown job.
+        let meeting = job
+            .output_path
+            .as_deref()
+            .map(|path| read_meeting_policy(Path::new(path), config).map(Box::new))
+            .transpose()?;
+        return Ok(AudioPolicy::Job {
+            path,
+            content,
+            meeting,
+        });
+    }
+    // Existing recordings still use the normal-only active-corpus gate.
+    read_meeting_policy(&audio.with_extension("md"), config)
+        .map(|snapshot| AudioPolicy::Meeting(Box::new(snapshot)))
+}
+
+fn read_meeting_policy(
+    path: &Path,
+    config: &Config,
+) -> Result<AuthorizedMeetingSnapshot, TranscribeError> {
+    let snapshot = read_authorized_meeting(path, config, false)
+        .map_err(|_| failed("egress policy refused: normal-sensitivity recording policy is required before transcription"))?;
     if snapshot.frontmatter.capture == Some(crate::markdown::CapturePolicy::None) {
         return Err(failed(
             "egress policy refused: conversation has capture disabled",
         ));
     }
-    Ok(AudioPolicy(snapshot))
+    Ok(snapshot)
 }
 
 const BOUNDARY: &str = "minutes-audio-transcription-boundary";
@@ -185,10 +300,7 @@ pub(super) fn transcribe(
     } else {
         std::sync::Arc::new(authorize_audio(audio, config)?)
     };
-    policy
-        .0
-        .reauthorize_exact(config, false)
-        .map_err(|_| failed("egress policy changed or became unavailable"))?;
+    policy.reauthorize(config)?;
     let samples =
         super::load_audio_samples_with_format(audio, hints.audio_format_extension(), config)?;
     if samples.is_empty() {
@@ -221,10 +333,7 @@ pub(super) fn transcribe(
             request = request.header("Authorization", header);
         }
         // Final live check for EVERY upload, including the second stem/chunk.
-        policy
-            .0
-            .reauthorize_exact(config, false)
-            .map_err(|_| failed("egress policy changed or became unavailable"))?;
+        policy.reauthorize(config)?;
         let mut response = request
             .send(body.as_slice())
             .map_err(|_| failed("request failed (check endpoint and network)"))?;

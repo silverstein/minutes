@@ -19614,6 +19614,7 @@ mod tests {
     #[test]
     fn processing_job_view_includes_user_facing_stage_label() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-summary".into(),
             title: Some("Design review".into()),
             mode: CaptureMode::Meeting,
@@ -20653,6 +20654,7 @@ mod tests {
     #[test]
     fn needs_review_jobs_surface_as_preserved_capture_notices() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-review".into(),
             title: Some("Interview".into()),
             mode: CaptureMode::Meeting,
@@ -20695,6 +20697,7 @@ mod tests {
             minutes_core::diarize::CaptureSource::System,
         );
         let mut job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-recovered-system".into(),
             title: Some("Recovered call".into()),
             mode: CaptureMode::Meeting,
@@ -20739,6 +20742,7 @@ mod tests {
     #[test]
     fn startup_retryable_notices_do_not_surface_stale_failure_details() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-failed".into(),
             title: Some("Legacy Method Agent Capacity".into()),
             mode: CaptureMode::Meeting,
@@ -20788,6 +20792,7 @@ mod tests {
         with_temp_home(|_| {
             let now = chrono::Local::now();
             let dismissed_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-dismissed".into(),
                 title: Some("Already handled".into()),
                 mode: CaptureMode::Meeting,
@@ -20833,6 +20838,7 @@ mod tests {
             let older_wav = dir.join("old-visible.wav");
             std::fs::write(&older_wav, b"riff").unwrap();
             let dismissed_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-new-dismissed".into(),
                 title: Some("New dismissed".into()),
                 mode: CaptureMode::Meeting,
@@ -20863,6 +20869,7 @@ mod tests {
                 recording_health: None,
             };
             let older_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-old-visible".into(),
                 title: Some("Still retryable".into()),
                 mode: CaptureMode::Meeting,
@@ -20908,6 +20915,7 @@ mod tests {
             let now = chrono::Local::now();
             let missing_wav = dir.join("vanished.wav");
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-capture-gone".into(),
                 title: Some("consent-e2e-check".into()),
                 mode: CaptureMode::Meeting,
@@ -20951,6 +20959,7 @@ mod tests {
         with_temp_home(|_| {
             let old = chrono::Local::now() - chrono::Duration::days(10);
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-old-undismissed".into(),
                 title: Some("Old undismissed".into()),
                 mode: CaptureMode::Meeting,
@@ -20996,6 +21005,7 @@ mod tests {
             let audio_path = dir.join("job-path-fallback.wav");
             fs::write(&audio_path, b"fake-wav").unwrap();
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-path-fallback".into(),
                 title: Some("Path fallback".into()),
                 mode: CaptureMode::Meeting,
@@ -21057,6 +21067,7 @@ mod tests {
             let audio_path = dir.join("job-retry-ordering.wav");
             fs::write(&audio_path, b"fake-wav").unwrap();
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-retry-ordering".into(),
                 title: Some("Retry ordering".into()),
                 mode: CaptureMode::Meeting,

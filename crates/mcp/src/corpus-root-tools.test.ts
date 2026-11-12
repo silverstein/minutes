@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 // Drive the built registration wrappers and exact-file handler over real stdio.
+// Requires npm run build; CI builds the server before this suite.
 // A disposable profile prevents CLI readiness checks from touching user data.
 describe("connector meetings root guidance", () => {
   it.each(["missing", "file"])("explains a %s configured folder on every read surface", async (kind) => {
@@ -31,6 +32,12 @@ describe("connector meetings root guidance", () => {
       },
       stderr: "pipe",
     });
+    // Drain the pipe so even verbose startup failures cannot stall the child.
+    // Keep only a bounded tail, and redact local roots before reporting it.
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-8_192);
+    });
     try {
       await client.connect(transport);
       for (const [name, args] of [
@@ -47,6 +54,13 @@ describe("connector meetings root guidance", () => {
         expect(text, name).not.toContain(profile);
         expect(text, name).not.toContain("PRIVATE");
       }
+    } catch (error) {
+      const diagnostic = stderr
+        .replaceAll(profile, "<test-profile>")
+        .replaceAll(resolve("../.."), "<repository>")
+        .replaceAll(homedir(), "<home>");
+      console.error(`Root-guidance server stderr (bounded, paths redacted):\n${diagnostic || "(no stderr received)"}`);
+      throw error;
     } finally {
       await client.close();
       rmSync(profile, { recursive: true, force: true });

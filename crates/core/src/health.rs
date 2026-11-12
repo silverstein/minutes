@@ -303,6 +303,21 @@ pub fn append_native_call_invalid_stem_warning(
 /// Apple Speech's authenticated transport is live/dictation-only; health must
 /// describe that configured/resolved split while checking the model runtime.
 pub fn model_status(config: &Config) -> HealthItem {
+    if crate::transcribe::effective_batch_engine(config) == "openai-compatible" {
+        let status = crate::transcribe::remote_transcription_status(config);
+        return HealthItem {
+            label: "Remote batch transcription".into(),
+            state: if status.is_ok() { "ready" } else { "attention" }.into(),
+            detail: format!(
+                "{} {}",
+                crate::transcribe::remote_transcription_notice(config),
+                status
+                    .err()
+                    .unwrap_or_else(|| "Configuration ready; endpoint not probed.".into())
+            ),
+            optional: false,
+        };
+    }
     let requested = config.transcription.engine.as_str();
     let sherpa_plugin_required = cfg!(feature = "engine-sherpa")
         && (requested.eq_ignore_ascii_case("sherpa")

@@ -255,13 +255,13 @@ fn prepare_recording_consent(
         ConsentMode::Remind => Ok(RecordingConsent {
             basis: resolved_basis.unwrap_or(ConsentBasis::Unattested),
             notice: explicit_notice,
-            reminder: Some(config.consent.disclosure_script.clone()),
+            reminder: Some(config.recording_disclosure()),
             warning: None,
         }),
         ConsentMode::Require if !stdin_is_tty => Ok(RecordingConsent {
             basis: resolved_basis.unwrap_or(ConsentBasis::Unattested),
             notice: explicit_notice,
-            reminder: Some(config.consent.disclosure_script.clone()),
+            reminder: Some(config.recording_disclosure()),
             warning: Some(
                 "consent gate skipped: non-interactive session; recording as unattested".into(),
             ),
@@ -3437,8 +3437,16 @@ fn cmd_record(
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;
 
+    if minutes_core::transcribe::effective_transcription_engine(config) == "openai-compatible" {
+        eprintln!(
+            "[minutes] {}",
+            minutes_core::transcribe::remote_transcription_notice(config)
+        );
+    }
     let recording_consent = if capture_mode == CaptureMode::Meeting {
-        eprintln!("Recording + transcribing locally — audio stays on your device.");
+        if minutes_core::transcribe::effective_transcription_engine(config) != "openai-compatible" {
+            eprintln!("Recording + transcribing locally — audio stays on your device.");
+        }
         let resolved = prepare_recording_consent(
             config,
             consent,

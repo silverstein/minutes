@@ -35,6 +35,13 @@ not the original shell. Unix foreground checks are required for this action;
 other platforms can run the command manually. Nothing is typed on restore or tab
 selection, and a Discuss/Prep starter is never pasted into an idle shell.
 
+A SessionStart ID alone is not resumable. Before direct restore or explicit shell
+resume, Minutes checks that the matching transcript file exists and is nonempty.
+The hook-reported transcript path is retained for custom Claude directories;
+legacy singleton IDs also check the parent workspace's project directory. Only
+file metadata is inspected. Missing or empty history clears the unusable ID, so
+a never-used tab starts fresh rather than failing with “No conversation found.”
+
 ## Hooks and status
 
 Managed Claude settings install SessionStart, UserPromptSubmit, PreToolUse,
@@ -63,6 +70,12 @@ are waiting; Stop is done; StopFailure is error. A dedicated optional worker
 polls these tiny files every 750 ms and emits a metadata snapshot only on change.
 No terminal screen parsing determines status. On relaunch stale process status
 and live markers are cleared; conversation IDs survive.
+
+The observer also nonblockingly reaps exited PTY children and releases their
+handles. An ended process overrides stale hook status. Its tab shows an ended
+notice with an explicit Start conversation action; selecting it does not
+silently restart it. The action starts that same tab again and retains any valid
+saved history. Process-exit flags are transient and reset on app relaunch.
 
 The native hook consumes each per-tab focus notice once on UserPromptSubmit,
 preserving #1308: opening a document, dropping context or moving into debrief
@@ -116,6 +129,9 @@ Meeting labels use the app's existing metadata inventory, and the selected title
 and prep/debrief phase are persisted with the tab. Restore and generic spawn
 events keep that focus in the header. Resolving the label reads no new meeting
 body and does not bypass deferred context materialization.
+
+The strip observes its own size and reveals the selected tab after the viewer or
+window narrows it, without moving keyboard focus.
 
 Each terminal tracks the grid last acknowledged by its own PTY. Activation,
 reveal, zoom and container resizing fit xterm and synchronize that grid, even if

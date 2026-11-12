@@ -28,6 +28,10 @@ pub struct Tab {
     pub meeting_path: Option<String>,
     pub claude_session_id: Option<String>,
     #[serde(default)]
+    pub claude_transcript_path: Option<PathBuf>,
+    #[serde(default, skip_deserializing)]
+    pub process_exited: bool,
+    #[serde(default)]
     pub shell: bool,
     #[serde(default)]
     pub claude_active: bool,
@@ -176,6 +180,8 @@ impl TabStore {
                             .map(str::to_string)
                     }),
                     claude_session_id: legacy,
+                    claude_transcript_path: None,
+                    process_exited: false,
                     shell: false,
                     claude_active: false,
                     capture_session_id: None,
@@ -349,6 +355,8 @@ impl TabStore {
             phase: None,
             meeting_path: meeting.map(str::to_string),
             claude_session_id: None,
+            claude_transcript_path: None,
+            process_exited: false,
             shell: false,
             claude_active: false,
             capture_session_id: None,
@@ -369,18 +377,78 @@ impl TabStore {
                 if let Ok(state) = serde_json::from_slice::<HookState>(&raw) {
                     tab.status = state.status;
                     tab.claude_active = state.claude_active;
-                    if state.session_id.as_deref().is_some_and(valid_id) {
-                        tab.claude_session_id = state.session_id;
+                    if let Some(id) = state.session_id.filter(|id| valid_id(id)) {
+                        // SessionStart precedes the first persisted turn. Only
+                        // promote an ID once Claude has actually saved its file.
+                        if transcript_available(
+                            root,
+                            &tab.id,
+                            &id,
+                            state.transcript_path.as_deref(),
+                        ) {
+                            tab.claude_session_id = Some(id);
+                            tab.claude_transcript_path = state.transcript_path;
+                        }
                     }
                 }
+            }
+            if tab.claude_session_id.as_deref().is_some_and(|id| {
+                !transcript_available(root, &tab.id, id, tab.claude_transcript_path.as_deref())
+            }) {
+                tab.claude_session_id = None;
+                tab.claude_transcript_path = None;
+            }
+            if tab.process_exited {
+                tab.claude_active = false;
+                tab.status = Status::Error;
             }
         }
         Ok(())
     }
 }
 
+fn transcript_file_exists(path: &Path, id: &str) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == format!("{id}.jsonl").as_str())
+        && path.metadata().is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+
+// Metadata only: never open or parse Claude's conversation contents. The hook's
+// reported path also supports custom Claude config directories. Legacy singleton
+// conversations still live under the parent workspace's project key.
+fn transcript_available(root: &Path, tab_id: &str, id: &str, reported: Option<&Path>) -> bool {
+    if !valid_id(id) {
+        return false;
+    }
+    if reported.is_some_and(|path| transcript_file_exists(path, id)) {
+        return true;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    [workspace_at(root, tab_id).ok(), Some(root.to_path_buf())]
+        .into_iter()
+        .flatten()
+        .any(|dir| {
+            let key: String = dir
+                .to_string_lossy()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            transcript_file_exists(
+                &home
+                    .join(".claude/projects")
+                    .join(key)
+                    .join(format!("{id}.jsonl")),
+                id,
+            )
+        })
+}
+
 #[derive(Serialize, Deserialize)]
 struct HookState {
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
     #[serde(default)]
     claude_active: bool,
     status: Status,
@@ -433,6 +501,7 @@ pub fn maybe_run_hook() -> Option<i32> {
         let input: serde_json::Value = serde_json::from_str(&input).map_err(|e| e.to_string())?;
         if let Some(status) = status_for_event(event, &input) {
             let state = HookState {
+                transcript_path: input["transcript_path"].as_str().map(PathBuf::from),
                 claude_active: event != "SessionEnd",
                 status,
                 session_id: input["session_id"]
@@ -905,7 +974,16 @@ pub fn start_observer(app: tauri::AppHandle) {
         }
         let root = crate::context::workspace_dir();
         let before = serde_json::to_vec(&manager.tabs).ok();
+        let exited = manager.reap_exited();
+        for id in &exited {
+            if let Some(tab) = manager.tabs.tabs.iter_mut().find(|tab| &tab.id == id) {
+                tab.process_exited = true;
+            }
+        }
         let _ = manager.tabs.refresh(&root);
+        for id in exited {
+            let _ = app.emit_to("main", &format!("pty:exit:{id}"), ());
+        }
         // Read live state on this worker, never from capture or Stop.
         let live = minutes_core::live_transcript::session_status();
         let recording = minutes_core::pid::status();
@@ -958,7 +1036,10 @@ mod tests {
             store.open(root, None, true).unwrap_err(),
             "RECALL_TAB_LIMIT"
         );
+        let transcript = temp.path().join("session-a.jsonl");
+        fs::write(&transcript, b"synthetic turn\n").unwrap();
         let hook = HookState {
+            transcript_path: Some(transcript),
             claude_active: true,
             status: Status::Waiting,
             session_id: Some("session-a".into()),
@@ -976,6 +1057,78 @@ mod tests {
         assert!(restored.tabs[0].note.as_ref().unwrap().contains("deleted"));
         assert!(workspace_at(root, "../other").is_err());
     }
+    #[test]
+    fn empty_session_start_never_becomes_a_resume_target_and_deleted_history_is_cleared() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut store = TabStore::default();
+        let id = store.open(root, None, true).unwrap();
+        let dir = workspace_at(root, &id).unwrap();
+        let transcript = root.join("unused-session.jsonl");
+        let hook = HookState {
+            transcript_path: Some(transcript.clone()),
+            claude_active: true,
+            status: Status::Done,
+            session_id: Some("unused-session".into()),
+        };
+        private_write(&dir.join(STATE), &serde_json::to_vec(&hook).unwrap()).unwrap();
+        // An old build may already have persisted SessionStart's unusable ID.
+        store.tabs[0].claude_session_id = Some("unused-session".into());
+        store.refresh(root).unwrap();
+        assert!(store.tabs[0].claude_session_id.is_none());
+        fs::write(&transcript, b"").unwrap();
+        store.refresh(root).unwrap();
+        assert!(store.tabs[0].claude_session_id.is_none());
+        fs::write(&transcript, b"synthetic saved turn\n").unwrap();
+        store.refresh(root).unwrap();
+        assert_eq!(
+            store.tabs[0].claude_session_id.as_deref(),
+            Some("unused-session")
+        );
+        store.tabs[0].shell = true;
+        store.tabs[0].claude_active = false;
+        assert!(shell_resume_command(&store.tabs[0])
+            .unwrap()
+            .contains("unused-session"));
+        store.save(root).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(root).unwrap();
+        assert_eq!(
+            restored.tabs[0].claude_session_id.as_deref(),
+            Some("unused-session")
+        );
+        fs::remove_file(transcript).unwrap();
+        restored.refresh(root).unwrap();
+        assert!(restored.tabs[0].claude_session_id.is_none());
+        assert!(shell_resume_command(&restored.tabs[0]).is_err());
+    }
+
+    #[test]
+    fn exited_process_state_overrides_stale_hooks_but_does_not_survive_app_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        let id = store.open(temp.path(), None, true).unwrap();
+        let hook = HookState {
+            transcript_path: None,
+            claude_active: true,
+            status: Status::Working,
+            session_id: None,
+        };
+        private_write(
+            &workspace_at(temp.path(), &id).unwrap().join(STATE),
+            &serde_json::to_vec(&hook).unwrap(),
+        )
+        .unwrap();
+        store.tabs[0].process_exited = true;
+        store.refresh(temp.path()).unwrap();
+        assert!(!store.tabs[0].claude_active);
+        assert_eq!(store.tabs[0].status, Status::Error);
+        store.save(temp.path()).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(temp.path()).unwrap();
+        assert!(!restored.tabs[0].process_exited);
+    }
+
     #[test]
     fn status_comes_only_from_hook_events() {
         assert_eq!(
@@ -1038,11 +1191,15 @@ pub fn cmd_recall_tab_select(
 /// Called only by the explicit in-panel action, never restoration or focus.
 #[tauri::command]
 pub fn cmd_recall_tab_resume(
+    app: tauri::AppHandle,
     state: tauri::State<crate::commands::AppState>,
     tab_id: String,
 ) -> Result<(), String> {
     let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
-    manager.tabs.refresh(&crate::context::workspace_dir())?;
+    let root = crate::context::workspace_dir();
+    manager.tabs.refresh(&root)?;
+    manager.tabs.save(&root)?;
+    let _ = app.emit_to("main", "recall:tabs-changed", &manager.tabs);
     let tab = manager
         .tabs
         .tabs
@@ -1453,10 +1610,13 @@ mod shell_tests {
         let mut store = TabStore::default();
         let id = store.open(temp.path(), None, true).unwrap();
         let dir = workspace_at(temp.path(), &id).unwrap();
+        let transcript = temp.path().join("manual-session.jsonl");
+        fs::write(&transcript, b"synthetic turn\n").unwrap();
         for active in [true, false] {
             private_write(
                 &dir.join(STATE),
                 &serde_json::to_vec(&HookState {
+                    transcript_path: Some(transcript.clone()),
                     status: Status::Done,
                     session_id: Some("manual-session".into()),
                     claude_active: active,

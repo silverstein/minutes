@@ -77,3 +77,53 @@ export async function testMeetingOpen(page, url) {
   assert.equal(await page.locator('#recall-tab-prompt').isVisible(), false);
   assert.deepEqual(errors, [], 'the full meeting-open lifecycle has no browser errors');
 }
+
+
+export async function testProcessExit(page, url) {
+  await page.goto(url);
+  await page.waitForFunction(() => fixture.ready);
+  await page.evaluate(async () => {
+    await fixture.activate('two');
+    const model = structuredClone(fixture.model);
+    Object.assign(model.tabs[1], { process_exited: true, claude_active: false, status: 'error' });
+    fixture.applyModel(model);
+    fixture.calls.length = 0;
+    fixture.tabs.get('two').terminal.paste('must not enter a dead process\r');
+  });
+  assert.equal(await page.locator('#fixture-exit').evaluate(node => node.classList.contains('active')), true);
+  assert.deepEqual(await page.evaluate(() => ({ alive: fixture.tabs.get('two').alive, draft: fixture.tabs.get('two').draft, input: fixture.calls.filter(call => call.command === 'cmd_pty_input') })), { alive: false, draft: '', input: [] });
+  await page.evaluate(() => fixture.open('assistant', null, { tabId: 'two' }));
+  assert.equal(await page.evaluate(() => fixture.calls.filter(call => call.command === 'cmd_spawn_terminal').length), 0, 'selecting an ended conversation does not silently start a new process');
+  assert.equal(await page.locator('#fixture-exit').evaluate(node => node.classList.contains('active')), true);
+  await page.evaluate(() => fixture.restart('two'));
+  assert.equal(await page.evaluate(() => fixture.calls.filter(call => call.command === 'cmd_spawn_terminal').length), 1, 'the explicit action starts the same tab again');
+  assert.equal(await page.evaluate(() => fixture.calls.find(call => call.command === 'cmd_spawn_terminal').args.tabId), 'two');
+  assert.equal(await page.evaluate(() => fixture.tabs.get('two').alive), true);
+  assert.equal(await page.locator('#fixture-exit').evaluate(node => node.classList.contains('active')), false);
+  // A native exit event can arrive before the observer's metadata snapshot.
+  await page.evaluate(() => { fixture.end('two'); fixture.calls.length = 0; });
+  await page.evaluate(() => fixture.open('assistant', null, { tabId: 'two' }));
+  assert.equal(await page.evaluate(() => fixture.calls.filter(call => call.command === 'cmd_spawn_terminal').length), 0, 'an early exit event also requires the explicit restart action');
+  assert.equal(await page.locator('#fixture-exit').evaluate(node => node.classList.contains('active')), true);
+}
+
+export async function testStripResize(page, url) {
+  await page.goto(url);
+  await page.waitForFunction(() => fixture.ready);
+  await page.evaluate(async () => {
+    const model = structuredClone(fixture.model);
+    model.tabs.forEach((tab, index) => { tab.title = 'Conversation ' + (index + 1) + ' with a longer title'; });
+    fixture.applyModel(model);
+    await fixture.activate('three');
+    fixture.tabs.get('three').terminal.focus();
+    window.resizeFocus = document.activeElement;
+    document.getElementById('recall-panel').style.width = '280px';
+  });
+  await page.waitForFunction(() => {
+    const strip = document.getElementById('recall-tabs').getBoundingClientRect();
+    const active = document.querySelector('#recall-tabs [aria-selected="true"]').getBoundingClientRect();
+    return active.left >= strip.left - 1 && active.right <= strip.right + 1;
+  }, null, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => document.getElementById('recall-tabs').scrollLeft > 0), true, 'resize reveals the selected rightmost tab without a metadata update');
+  assert.equal(await page.evaluate(() => document.activeElement === resizeFocus), true, 'revealing a tab does not move keyboard focus');
+}

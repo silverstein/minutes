@@ -31,6 +31,10 @@
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
     let chooser = null, pendingLive = null, returnFocus = null;
+    function revealActiveTab() {
+      if (!strip.hidden && strip.clientWidth) strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+    }
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(revealActiveTab).observe(strip);
     function dismiss() { chooser = null; returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
     // Cancel puts the keyboard back where the person was typing: the element
     // focused before the prompt opened, else the visible tab's terminal, else
@@ -136,7 +140,7 @@
       }
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
       if (focus) strip.querySelector(`[role="tab"][data-tab-id="${focus}"]`)?.focus();
-      strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      revealActiveTab();
       if (chooser && chooser.signature !== chooserSignature()) chooseFinished(chooser.action, chooser.liveId);
       markStrip();
 

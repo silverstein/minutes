@@ -11090,6 +11090,7 @@ fn spawn_terminal_tab(
     let root = crate::context::workspace_dir();
     let mut manager = pty_manager.lock().map_err(|_| "PTY manager lock failed")?;
     manager.tabs.ensure(&root)?;
+    manager.tabs.refresh(&root)?;
     let id = if let Some(id) = tab_id {
         if !manager.tabs.tabs.iter().any(|t| t.id == id) {
             return Err("Recall tab not found".into());
@@ -11132,6 +11133,7 @@ fn spawn_terminal_tab(
         if let Some(metadata) = manager.tabs.tabs.iter_mut().find(|t| t.id == id) {
             metadata.shell = shell;
             metadata.claude_active = false;
+            metadata.process_exited = false;
         }
         if command_is_claude(agent_name) {
             agent_args =

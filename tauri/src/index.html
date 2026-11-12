@@ -6775,8 +6775,8 @@
       </div>
     </div>
     <div class="recall-exit-banner" id="recall-exit-banner">
-      Session ended.
-      <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Restart</button>
+      Conversation process ended.
+      <button class="btn btn-secondary btn-sm" id="btn-recall-restart">Start conversation</button>
     </div>
   </div>
 
@@ -16296,7 +16296,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     function markRecallPtyAlive(tab = activeRecallState()) {
       if (!tab.alive) tab.ptySize = null;
-      tab.alive = true;
+      tab.alive = true; tab.exited = false;
+      if (tab.id === SESSION_ID) recallExitBanner.classList.remove('active');
       requestAnimationFrame(() => fitRecallTerminal(tab));
       refreshRecallContextChips();
       invoke('cmd_terminal_info', { sessionId: tab.id })
@@ -16306,7 +16307,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     }
 
     function markRecallPtyEnded(tab = activeRecallState()) {
-      tab.alive = false;
+      tab.alive = false; tab.exited = true;
       tab.ptySize = null;
       tab.dark = null;
       applyRecallTerminalTheme(tab);
@@ -17559,6 +17560,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const target = recallStateFor(options.tabId || model.active);
         if (options.newTab) target.untouched = true;
         await activateRecallTab(options.tabId || model.active, model);
+        if (!options.restart && target.exited) return true;
       } catch (error) {
         recallLoading.classList.remove('active');
         // A rejected open leaves the current PTY selected. Restore its surface
@@ -17669,6 +17671,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabsController.update({ ...model, active: id });
       setRecallProviderNotice(metadata?.note || '');
       renderRecallTabHeader(metadata);
+      if (metadata?.process_exited) markRecallPtyEnded(tab);
+      recallExitBanner.classList.toggle('active', !!tab.exited);
+      recallEndBtn.classList.toggle('active', !!tab.alive);
       requestAnimationFrame(() => {
         fitRecallTerminal(tab);
         if (tab.id === SESSION_ID && document.getElementById('recall-tab-prompt').hidden) tab.terminal?.focus();
@@ -17718,6 +17723,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       for (const metadata of model.tabs) {
         const state = recallTabStates.get(metadata.id);
         if (state) { state.shell = !!metadata.shell; state.claudeActive = !!metadata.claude_active; }
+        if (state && metadata.process_exited) {
+          markRecallPtyEnded(state);
+          if (state.id === SESSION_ID) { recallExitBanner.classList.add('active'); recallEndBtn.classList.remove('active'); }
+        }
         if (state && state.meetingPath !== metadata.meeting_path) { state.meetingPath = metadata.meeting_path; state.pending = true; }
       }
       recallTabsController.update({ ...model, active: SESSION_ID });
@@ -19343,8 +19352,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallEndBtn.style.minWidth = '';
     }
 
-    function disposeRecallTerminal() {
-      const tab = activeRecallState();
+    function disposeRecallTerminal(tab = activeRecallState()) {
       tab.resize?.disconnect(); tab.themeObserver?.disconnect();
       if (tab.themeHandler) {
         window.MINUTES_XTERM_THEME_QUERY.removeEventListener('change', tab.themeHandler);
@@ -19356,14 +19364,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabStates.delete(tab.id);
     }
 
-    document.getElementById('btn-recall-restart').addEventListener('click', async () => {
+    async function restartRecallTab(id = SESSION_ID) {
       recallExitBanner.classList.remove('active');
-      // Kill any zombie backend session left after natural PTY exit
-      try { await invoke('cmd_pty_kill', { sessionId: SESSION_ID }); } catch (_) { }
-      disposeRecallTerminal();
-      initRecallTerminal();
-      await openRecall('assistant');
-    });
+      try { await invoke('cmd_pty_kill', { sessionId: id }); } catch (_) { }
+      disposeRecallTerminal(recallStateFor(id));
+      await openRecall('assistant', null, { tabId: id, restart: true });
+    }
+    document.getElementById('btn-recall-restart').addEventListener('click', () => restartRecallTab());
 
     // Quick note inside recall panel
     async function saveRecallNote() {

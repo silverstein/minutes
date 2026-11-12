@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, extname } from 'node:path';
 import { gridFixture } from './recall-tabs-grid-fixture.mjs';
-import { testMeetingOpen } from './recall-tabs-meeting-open.test.mjs';
+import { testMeetingOpen, testProcessExit, testStripResize } from './recall-tabs-meeting-open.test.mjs';
 const require = createRequire(import.meta.url);
 const modules = process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES || resolve('target/recall-browser/node_modules');
 const { chromium } = require(require.resolve(resolve(modules, 'playwright')));
@@ -245,6 +245,8 @@ try {
   assert.equal(await page.locator('#fixture-meetings .meeting-item').isVisible(),true);
   assert.deepEqual(await page.evaluate(()=>fixture.refreshes),[0],'Stop schedules the list refresh while processing continues');
   await testMeetingOpen(page, `http://127.0.0.1:${server.address().port}/meeting-open`);
+  await testProcessExit(page, `http://127.0.0.1:${server.address().port}/meeting-open`);
+  await testStripResize(page, `http://127.0.0.1:${server.address().port}/grid`);
   const macPage = await browser.newPage();
   await macPage.addInitScript(()=>Object.defineProperty(navigator,'platform',{value:'MacIntel'}));
   await macPage.goto(`http://127.0.0.1:${server.address().port}/grid`);

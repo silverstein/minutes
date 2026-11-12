@@ -31,22 +31,47 @@
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
     let chooser = null, pendingLive = null;
-    function dismiss() { chooser = null; prompt.replaceChildren(); prompt.hidden = true; }
-    function show(text, actions) {
+    function dismiss() { chooser = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
+    // Tabs that may be closed to make room: finished, never the live meeting.
+    const closable = tab => tab.status === 'done' && !tab.live;
+    // The part of a meeting title before its subtitle, for a compact button.
+    const shortTitle = tab => String(tab.title || '').split(' — ')[0];
+    function markStrip() {
+      for (const wrapper of strip.querySelectorAll('.recall-tab')) {
+        const tab = model.tabs.find(item => item.id === wrapper.dataset.tabId);
+        wrapper.classList.toggle('recall-tab-closable', !!(chooser && tab && closable(tab)));
+      }
+    }
+    function show(text, actions, hint = '') {
       dismiss(); prompt.hidden = false;
-      const description = document.createElement('p'); description.textContent = text; prompt.append(description);
-      for (const [label, action] of actions) {
+      const description = document.createElement('p'); description.textContent = text;
+      if (hint) { const extra = document.createElement('span'); extra.className = 'recall-tab-prompt-hint'; extra.textContent = ` ${hint}`; description.append(extra); }
+      prompt.append(description);
+      for (const [label, action, accessibleName] of actions) {
         const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-secondary btn-sm';
-        button.textContent = label; button.addEventListener('click', () => { dismiss(); action(); }); prompt.append(button);
+        button.textContent = label; button.title = label;
+        if (accessibleName) button.setAttribute('aria-label', accessibleName);
+        button.addEventListener('click', () => { dismiss(); action(); }); prompt.append(button);
       }
       const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn btn-ghost btn-sm';
       cancel.textContent = 'Cancel'; cancel.addEventListener('click', dismiss); prompt.append(cancel);
       cancel.focus();
     }
+    // At the cap, offer one finished tab (an inactive one first, so the
+    // conversation on screen stays put) and let the strip's highlighted ×
+    // buttons pick any other. Closing through the strip continues the open.
     function chooseFinished(action, liveId = null) {
-      const finished = model.tabs.filter(tab => tab.status === 'done' && !tab.live);
-      show(finished.length ? 'Four conversations are open. Close a finished one to continue.' : 'Four conversations are open. Wait for one to finish, or close a tab first.', finished.map(tab => [`Close ${tab.title} (${keyHint(model.tabs.findIndex(item => item.id === tab.id))})`, () => action(tab.id)]));
+      const finished = model.tabs.filter(closable);
+      const suggestion = finished.find(tab => tab.id !== model.active) || finished[0];
+      const lead = liveId ? 'Recording. The live meeting needs a tab, and all four are in use.' : 'All four tabs are in use.';
+      if (suggestion) {
+        const label = `Close ${shortTitle(suggestion)}`;
+        show(lead, [[label, () => action(suggestion.id), `${label} and continue`]], finished.length > 1 ? 'Or close another highlighted tab.' : '');
+      } else {
+        show(liveId ? 'Recording. The live meeting needs a tab, and all four are busy.' : 'All four tabs are busy.', [], 'Close one with its × to continue; it asks first.');
+      }
       chooser = { action, liveId, signature: JSON.stringify(model.tabs) };
+      markStrip();
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); strip.querySelector('[aria-selected="true"]')?.focus(); } });
     function update(next) {
@@ -55,7 +80,7 @@
       strip.replaceChildren();
       strip.hidden = false;
       for (const [index, tab] of model.tabs.entries()) {
-        const wrapper = document.createElement('div'); wrapper.className = 'recall-tab';
+        const wrapper = document.createElement('div'); wrapper.className = 'recall-tab'; wrapper.dataset.tabId = tab.id;
         const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'tab');
         button.id = `recall-tab-${tab.id}`; button.dataset.tabId = tab.id;
         button.setAttribute('aria-selected', String(tab.id === model.active)); button.tabIndex = tab.id === model.active ? 0 : -1;
@@ -72,7 +97,12 @@
           select(model.tabs[target].id);
         });
         const end = document.createElement('button'); end.type = 'button'; end.className = 'recall-tab-close'; end.textContent = '×';
-        end.setAttribute('aria-label', `Close ${tab.title}`); end.addEventListener('click', () => close(tab.id));
+        end.setAttribute('aria-label', `Close ${tab.title}`);
+        end.addEventListener('click', () => {
+          // While the cap chooser waits, closing a tab here continues the open it blocked.
+          const pending = chooser;
+          if (pending && !tab.live) { dismiss(); pending.action(tab.id); } else close(tab.id);
+        });
         wrapper.append(button, end); strip.append(wrapper);
       }
       const add = document.createElement('button'); add.type = 'button'; add.className = 'recall-tab-add'; add.textContent = '+';
@@ -93,6 +123,7 @@
       if (focus) strip.querySelector(`[data-tab-id="${focus}"]`)?.focus();
       strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
       if (chooser && chooser.signature !== JSON.stringify(model.tabs)) chooseFinished(chooser.action, chooser.liveId);
+      markStrip();
 
     }
     document.addEventListener('keydown', event => {

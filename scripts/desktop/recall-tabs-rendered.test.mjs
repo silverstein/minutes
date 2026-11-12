@@ -61,8 +61,15 @@ try {
   assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['close', 'live', true]);
   await page.evaluate(() => fixture.controls.chooseFinished(id => fixture.actions.push(['replace', id])));
   assert.equal(await page.getByRole('button', { name: 'Close Chat', exact: true }).count(), 1); // strip
-  assert.equal(await page.getByRole('button', { name: 'Close Chat (Ctrl+3)', exact: true }).count(), 1); // chooser
+  assert.equal(await page.getByRole('button', { name: 'Close Chat and continue', exact: true }).count(), 1, 'one suggested close, the first inactive finished tab');
+  assert.equal(await page.locator('#recall-tab-prompt .btn').count(), 2, 'the chooser is one suggestion plus Cancel, never a button per tab');
   assert.equal(await page.getByRole('button', { name: 'Close Board prep', exact: true }).count(), 1); // waiting excluded
+  assert.deepEqual(await page.locator('.recall-tab.recall-tab-closable').evaluateAll(nodes => nodes.map(node => node.dataset.tabId)), ['chat', 'other'], 'finished tabs are highlighted in the strip; live and waiting are not');
+  assert.equal(await page.locator('#recall-tab-prompt .btn').first().evaluate(node => getComputedStyle(node).textTransform), 'none', 'meeting names are not shouted');
+  await page.getByRole('button', { name: 'Close Other', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['replace', 'other'], 'closing a highlighted tab from the strip continues the blocked open');
+  assert.equal(await page.locator('#recall-tab-prompt').isVisible(), false);
+  assert.equal(await page.locator('.recall-tab.recall-tab-closable').count(), 0, 'dismissal clears the strip highlight');
   await page.evaluate(() => { Object.assign(fixture.model.tabs[1], { shell: true, claude_session_id: 'saved-1', claude_active: false }); fixture.controls.update(structuredClone(fixture.model)); });
   assert.equal(await page.getByRole('button', { name: 'Resume previous conversation' }).count(), 1);
   assert.equal(await page.evaluate(() => fixture.actions.some(action => action[0] === 'resume')), false);
@@ -81,9 +88,9 @@ try {
     fixture.controls.update(structuredClone(fixture.model));
     fixture.controls.chooseFinished(()=>{});
   });
-  for (let index=1;index<=4;index++) {
-    assert.equal(await page.getByRole('button',{name:`Close Chat ${index} (Ctrl+${index})`,exact:true}).count(),1);
-  }
+  assert.equal(await page.getByRole('button',{name:'Close Chat 1 and continue',exact:true}).count(),1,'the suggestion skips the active tab');
+  assert.equal(await page.locator('.recall-tab.recall-tab-closable').count(),4);
+  assert.match(await page.locator('#recall-tab-prompt p').innerText(),/Or close another highlighted tab\./);
   await page.evaluate(()=>{
     fixture.controls.dismiss();
     fixture.controls.syncPendingLive('capture-a',id=>fixture.actions.push(['admit-live',id]));
@@ -91,8 +98,10 @@ try {
     fixture.model.tabs.unshift(fixture.model.tabs.pop());
     fixture.controls.update(structuredClone(fixture.model));
   });
-  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 4 (Ctrl+1)',exact:true}).count(),0,'live tabs never appear in an updated chooser');
-  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 1 (Ctrl+2)',exact:true}).count(),1,'chooser positions follow current strip order');
+  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 4 and continue',exact:true}).count(),0,'live tabs are never suggested in an updated chooser');
+  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button',{name:'Close Chat 1 and continue',exact:true}).count(),1);
+  assert.equal(await page.locator('.recall-tab-closable[data-tab-id="other"]').count(),0,'the live tab is not highlighted for closing');
+  assert.match(await page.locator('#recall-tab-prompt p').innerText(),/^Recording\./);
   await page.evaluate(()=>fixture.controls.syncPendingLive(null,()=>{}));
   assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false,'admitting live dismisses its old cap chooser');
   await page.evaluate(()=>fixture.controls.syncPendingLive('capture-b',()=>{}));
@@ -102,6 +111,14 @@ try {
     fixture.controls.syncPendingLive('capture-b',()=>{});
   });
   assert.equal(await page.locator('#recall-tab-prompt').isVisible(),false,'metadata updates do not reopen a cancelled chooser for the same capture');
+  await page.evaluate(()=>{
+    fixture.model.tabs.forEach(tab=>{tab.status='working';});
+    fixture.controls.update(structuredClone(fixture.model));
+    fixture.controls.chooseFinished(()=>{});
+  });
+  assert.equal(await page.locator('#recall-tab-prompt .btn').count(),1,'with every tab busy only Cancel is offered');
+  assert.match(await page.locator('#recall-tab-prompt p').innerText(),/it asks first/);
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.goto(`http://127.0.0.1:${server.address().port}/grid`);
   await page.waitForFunction(() => fixture.ready);
   for (const id of ['one', 'two', 'three', 'one']) {

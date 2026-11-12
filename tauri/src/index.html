@@ -467,9 +467,13 @@
     .recall-tab-glyph.error { color: var(--red); }
     .recall-tab-terminal { width: 100%; height: 100%; min-width: 0; min-height: 0; }
     .recall-tab-terminal[hidden] { display: none; }
-    .recall-tab-prompt { padding: 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-mid); }
-    .recall-tab-prompt p { color: var(--text); margin-bottom: 8px; }
-    .recall-tab-prompt .btn { margin: 3px; }
+    .recall-tab-prompt { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-mid); }
+    .recall-tab-prompt[hidden] { display: none; }
+    .recall-tab-prompt p { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--text); font-size: var(--text-body); }
+    .recall-tab-prompt-hint { color: var(--text-secondary); }
+    .recall-tab-prompt .btn { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: normal; }
+    .recall-tab.recall-tab-closable { border-color: var(--accent-border-strong); }
+    .recall-tab.recall-tab-closable .recall-tab-close { color: var(--accent); background: var(--accent-tint); }
     .recall-tabs button:focus-visible, .recall-tab-prompt button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     @keyframes recall-tab-spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .recall-tab-glyph.working { animation: none; border-style: dotted; } }

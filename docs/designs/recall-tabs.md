@@ -101,9 +101,12 @@ A deleted meeting restores as chat with a visible note and cleared stored focus.
 ## UI and qualification
 
 Free chats have stable numbered names, including an upgrade of existing generic
-Chat labels. The cap chooser uses the same name and current shortcut position,
-refreshes its choices on metadata changes, excludes live tabs, and dismisses
-when its pending live capture is admitted. Admission by capture ID is idempotent
+Chat labels. At the cap, a one-line notice offers a single suggested close (the
+first finished tab that is not on screen, named without its subtitle) plus
+Cancel, and highlights every finished tab in the strip; closing any highlighted
+tab with its × continues the blocked open. It refreshes on metadata changes,
+never suggests or highlights the live tab, and dismisses when its pending live
+capture is admitted. Admission by capture ID is idempotent
 if closing a tab races the observer; it never opens a guessed meeting path.
 New Chat reuses a new, known-untouched shell tab in the current app session; any
 human input, saved Claude session, live binding, draft or uncertain line excludes
@@ -128,8 +131,7 @@ PTY doubles and checks their grids after each selection.
 The native File Close action routes Cmd/Ctrl+W to Recall before the OS can hide
 the window; the window close button keeps its existing behavior. Cmd+1–4,
 Ctrl+Tab, Cmd+T and Cmd+W operate within Recall; Windows/Linux use Ctrl
-for the Cmd shortcuts. Tab buttons also support arrows, Home and End. At the cap,
-an in-panel chooser offers finished, non-live tabs. Closing work, a live tab, an
+for the Cmd shortcuts. Tab buttons also support arrows, Home and End. Closing work, a live tab, an
 active Claude process or any tab with a saved conversation ID requires an
 in-panel confirmation. Closing the active tab selects its neighbour.
 Background output changes no panel visibility

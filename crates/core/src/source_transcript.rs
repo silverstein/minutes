@@ -107,6 +107,8 @@ fn normalized_words(text: &str) -> Vec<String> {
 #[derive(Clone, Copy, Default)]
 struct EchoMatch {
     words: usize,
+    first_window_index: usize,
+    last_window_index: usize,
     start: f64,
     end: f64,
 }
@@ -122,6 +124,12 @@ fn echo_match(microphone: &[String], system: &[(&str, &SourceLine)]) -> EchoMatc
                 let diagonal = previous[index];
                 EchoMatch {
                     words: diagonal.words + 1,
+                    first_window_index: if diagonal.words == 0 {
+                        index
+                    } else {
+                        diagonal.first_window_index
+                    },
+                    last_window_index: index,
                     start: if diagonal.words == 0 {
                         line.start
                     } else {
@@ -175,10 +183,15 @@ fn suppress_cross_source_echo(lines: &mut Vec<SourceLine>) -> usize {
             .flat_map(|(system, words)| words.iter().map(|word| (word.as_str(), *system)))
             .collect();
         let matched = echo_match(&microphone, &window);
+        let matched_window_words = matched.last_window_index - matched.first_window_index + 1;
         // Use only matched lines for containment; unrelated nearby system
         // speech must not extend the span to swallow a later read-back.
         remove[index] = matched.words as f64 / microphone.len() as f64 >= 0.85
             && microphone.len() - matched.words <= 2
+            // An LCS scattered through a longer sentence is not near-verbatim
+            // echo. The matched system span can be at most two words longer
+            // than the microphone line.
+            && matched_window_words <= microphone.len() + 2
             && line.start >= matched.start - SLACK_SECS
             && line.end <= matched.end + SLACK_SECS;
     }
@@ -649,6 +662,32 @@ mod tests {
                 "{local}"
             );
         }
+    }
+
+    #[test]
+    fn keeps_talk_over_when_matching_system_words_are_scattered() {
+        let (merged, _) = merge_sources(
+            timed(&[(1.0, 3.0, "I think we should")]),
+            timed(&[(1.0, 3.0, "I think that maybe we really should wait")]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 0);
+        assert_eq!(merged.text.lines().count(), 2);
+        assert!(merged
+            .text
+            .contains("[MICROPHONE 0:01.0] I think we should\n"));
+    }
+
+    #[test]
+    fn drops_echo_with_one_inserted_system_asr_filler_word() {
+        let (merged, _) = merge_sources(
+            timed(&[(1.0, 3.0, "please send the revised proposal")]),
+            timed(&[(1.0, 3.0, "please send um the revised proposal")]),
+        );
+        assert_eq!(merged.stats.cross_source_echo_suppressed, 1);
+        assert_eq!(
+            merged.text,
+            "[SYSTEM 0:01.0] please send um the revised proposal\n"
+        );
     }
 
     #[test]

@@ -40,6 +40,9 @@ system speech by default. A normalized microphone line must have at least four
 words. System lines starting within that microphone span plus or minus 1.5 seconds
 are concatenated in time order; their word-level longest common subsequence must
 cover at least 85% of the microphone words with at most two unmatched words.
+The first-to-last matched system-word span must contain no more than the
+microphone word count plus two words, so scattered shared words do not count
+as near-verbatim echo while small ASR insertions can still match.
 The microphone span must also fit inside the span of the system lines that
 actually matched, plus or minus 1.5 seconds. Only microphone lines are removed;
 system lines, short replies such as "yes", untimed lines and uncertain matches

@@ -250,7 +250,7 @@ export function HomeHero() {
         className="inline-flex items-center gap-2 rounded-full border border-[color:var(--border-mid)] px-3 py-1 text-[13px] text-[var(--text-secondary)] hover:text-[var(--text)]"
       >
         <span className="font-mono text-[12px] text-[var(--accent)]">v{MINUTES_RELEASE_VERSION}</span>
-        <span className="hidden sm:inline">Less waiting after dictation. Easier Claude Desktop setup.</span>
+        <span className="hidden sm:inline">Mac hang fixed. Fewer transcript echoes. Clearer Claude Desktop errors. Meet /meet/ links.</span>
         <span className="sm:hidden">What&apos;s new</span>
         <span aria-hidden="true">→</span>
       </a>

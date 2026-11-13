@@ -1117,6 +1117,15 @@ fn run_with_partials_internal(
         }
     };
 
+    // Keep sensitive sessions and Live mutually exclusive before opening audio.
+    // The PID is already held, and this gate shares sensitive start's lock, so
+    // concurrent starts cannot both pass their checks.
+    if let Err(error) = crate::sensitive::ensure_inactive_for_recording() {
+        let error: MinutesError = LiveTranscriptError::PermissionBlocked(error.to_string()).into();
+        mark_precreated_session_failed(&error);
+        return Err(error);
+    }
+
     // Guard holds the flock — dropped when this function returns, cleaning up the PID file
     write_live_status_transition(LiveStatusState::Starting, None);
     let context_session_id = if let Some(session_id) = existing_context_session_id {

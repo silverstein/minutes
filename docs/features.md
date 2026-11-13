@@ -45,7 +45,8 @@ consent_notice: Heads up: I'm using Minutes to transcribe this conversation loca
 ### Sensitive meetings
 
 Use a sensitive meeting when you want timed typed markers and a saved meeting
-artifact, but no audio capture.
+artifact, but no audio capture. Stop recording or Live Transcript before starting
+sensitive mode; sensitive mode also blocks starting Live Transcript.
 
 ```bash
 minutes sensitive start --title "Board prep"
@@ -103,7 +104,9 @@ durable authority. `--include-current` and MCP
 Drafts expire after three seconds and never enter files, event history, or logs.
 
 `[live_transcript] promote_on_stop = "process"` preserves WAV and JSONL sources,
-then creates a meeting. Use `"preserve"` to keep only those timestamped sources.
+then creates a meeting. When remote batch transcription is selected, CLI stop-time
+promotion uses local Whisper with the Live model; the saved batch setting is
+unchanged. Use `"preserve"` to keep only those timestamped sources.
 Use `"off"` for the legacy fixed slot. Live drafts use sealed local Whisper.
 Apple Speech and Parakeet preferences currently resolve to Whisper without
 writing named plaintext audio. See [Apple Speech](architecture/apple-speech.md)

@@ -62,8 +62,8 @@ pub struct SensitiveDebrief {
 /// Error returned by sensitive meeting session operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SensitiveError {
-    /// A normal recording is already active.
-    #[error("recording in progress - stop it before starting a sensitive meeting")]
+    /// Audio capture is already active.
+    #[error("audio capture in progress - stop recording or Live Transcript before starting a sensitive meeting")]
     RecordingActive,
     /// A sensitive session is already active.
     #[error("sensitive meeting already active: {title}")]
@@ -250,12 +250,16 @@ pub fn stop(
 
 /// Return an error if a sensitive session is active.
 pub fn ensure_inactive_for_recording() -> Result<(), SensitiveError> {
-    if let Some(existing) = active_session() {
-        return Err(SensitiveError::AlreadyActive {
-            title: existing.title,
-        });
-    }
-    Ok(())
+    // Capture callers publish their PID before this check. Serialize with
+    // sensitive start so neither transition can pass while the other starts.
+    with_lock(|| {
+        if let Some(existing) = active_session() {
+            return Err(SensitiveError::AlreadyActive {
+                title: existing.title,
+            });
+        }
+        Ok(())
+    })
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T, SensitiveError>) -> Result<T, SensitiveError> {
@@ -304,7 +308,9 @@ fn remove_session_file() -> Result<(), SensitiveError> {
 }
 
 fn ensure_recording_inactive() -> Result<(), SensitiveError> {
-    if pid::inspect_pid_file(&pid::pid_path()).is_active() {
+    if pid::inspect_pid_file(&pid::pid_path()).is_active()
+        || pid::inspect_pid_file(&pid::live_transcript_pid_path()).is_active()
+    {
         return Err(SensitiveError::RecordingActive);
     }
     Ok(())
@@ -511,6 +517,21 @@ mod tests {
             let error = start(Some("Board sync")).unwrap_err();
             assert!(matches!(error, SensitiveError::RecordingActive));
             pid::remove().ok();
+        });
+    }
+
+    #[test]
+    fn sensitive_start_rejects_active_live_transcript() {
+        with_temp_home(|_| {
+            let live_guard = pid::create_pid_guard(&pid::live_transcript_pid_path()).unwrap();
+            let result = start(Some("Private discussion"));
+            assert!(
+                matches!(result, Err(SensitiveError::RecordingActive)),
+                "sensitive mode must not start while Live captures audio: {result:?}"
+            );
+            assert!(!session_path().exists());
+            drop(live_guard);
+            assert!(start(Some("Private discussion")).is_ok());
         });
     }
 

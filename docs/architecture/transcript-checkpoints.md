@@ -22,9 +22,10 @@ with or without checkpoints.
   matches it.
 - `jobs::queue_live_capture_with_transcript_checkpoint(.., checkpoint)` queues the
   capture with the spans. They are written beside the job (`<job>.checkpoint.json`,
-  owner-only on Unix, see [Persistence](#persistence)), kept after a failure so a
-  retry can use them, and removed when the job completes. A checkpoint that
-  cannot be written is dropped with a warning; the job still queues.
+  owner-only on Unix, see [Persistence](#persistence)), kept after a failure or
+  a "needs review" result so a retry can use them, and removed when the job
+  completes. A checkpoint that cannot be written is dropped with a warning; the
+  job still queues.
 
 Start and end a span only at a cut of the source's decode plan:
 `decode_groups::DecodePlan::for_growing_source(samples, target).cuts()`, where
@@ -99,10 +100,13 @@ earlier attempts.
 - `crashed_while_transcribing` only switches a Sherpa retry to Whisper. It does
   not decide whether spans are reused. The engine is part of the settings
   fingerprint, so Sherpa spans do not match a Whisper retry.
-- A failed save is logged, and the transcription goes on. The logs
-  `transcript_checkpoint_saved` (per source: spans saved and failed, seconds
-  saved) and `transcript_checkpoint_reuse` (offered, accepted, rejected) show
-  what happened.
+- A failed save is logged, and the transcription goes on. Each successful save
+  logs `transcript_checkpoint_span_saved` after the file is replaced, with the
+  source and the sample bounds of the span and without transcript text. So a
+  worker that is killed inside a source leaves a receipt for each span that is
+  on disk. The logs `transcript_checkpoint_saved` (per source, when the source
+  returns: spans saved and failed, seconds saved) and
+  `transcript_checkpoint_reuse` (offered, accepted, rejected) show the rest.
 
 The decode hints use the job's title, and saving the first transcript artifact
 replaces `job.title` with the generated display title. The job therefore keeps
@@ -126,9 +130,21 @@ Unix, `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows, as config saves
 use). If a step fails, the previous file stays valid, and a reader never sees a
 partial file. A missing, unreadable, corrupt or other-version file loads as no
 checkpoint, and the job transcribes in full. Removal also deletes temporary files
-that a crash left beside the checkpoint. The checkpoint is removed when the job
-completes, or when it ends as "needs review", and is kept through failure and
-retry.
+that a crash left beside the checkpoint.
+
+Retention: the checkpoint file holds transcript text. It stays as long as the
+job can be retried: through a failure, through a "needs review" result (which
+permits a manual requeue) and through each retry. There is no separate expiry,
+so retry progress is never thrown away while the failed job and its audio are
+kept. The file is removed when the job completes, and when the job's artifacts
+are deleted (`jobs::remove_capture_artifacts`), together with leftover temporary
+files.
+
+Durability: the contract is process death. A worker that is killed, or that
+crashes, leaves either the previous checkpoint or the new one, and both are
+valid. Power loss and system crash are out of scope: the directory is not
+synced after the rename, and no extra write-through flags are set on Windows.
+A stronger guarantee needs its own change.
 
 ## Trust
 

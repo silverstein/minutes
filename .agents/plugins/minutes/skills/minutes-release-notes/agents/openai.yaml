@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Release Notes"
+  short_description: "Turn a version's commit range into polished, release-ready Minutes notes."
+  default_prompt: "Draft release notes for the requested Minutes version from the real commit range and current release conventions."

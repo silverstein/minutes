@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes MCP Recall"
+  short_description: "Route meeting-recall questions to the right Minutes MCP tool."
+  default_prompt: "Use Minutes MCP Recall to choose the smallest read-only Minutes MCP tool for this question."

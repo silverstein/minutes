@@ -1,6 +1,7 @@
 //! Best-effort native-call spans. Capture never sends audio to this consumer:
 //! an independent reader tails the stems and uses nonblocking bounded channels.
 use crate::config::Config;
+use crate::decode_groups::DecodePlan;
 use crate::stem_tail::StemTail;
 use crate::transcript_checkpoint::{self, CheckpointSource, CheckpointSpan, TranscriptCheckpoint};
 use std::path::{Path, PathBuf};
@@ -12,12 +13,10 @@ const RATE: usize = 16_000;
 const SPAN: usize = 120 * RATE;
 const POLL: Duration = Duration::from_millis(100);
 // The final pass's chunker measures 100 ms windows from the start of the
-// stem. It closes a chunk, and resets its state, after 800 ms of silence. A
-// span that starts at that point, on that grid, gets the same chunks as the
-// whole-stem pass, so whisper gets the same audio. Chunks are at most 45 s.
-const WINDOW: usize = RATE / 10;
-const MIN_PAUSE: usize = 8 * WINDOW;
-const MAX_CHUNK: usize = 45 * RATE;
+// stem. Spans end only at a cut of the decode plan: after a decode group,
+// where the chunker resets. A span that starts there gets the same chunks and
+// groups as the whole-stem pass, so whisper gets the same audio.
+const WINDOW: usize = crate::transcribe::VAD_WINDOW_SAMPLES;
 const SEARCH_BEFORE_TARGET: usize = 15 * RATE;
 // Two sources share one decoder, so a total RTF above 0.5 cannot keep up.
 // A single span may be slow (whisper temperature fallback on a hard chunk).
@@ -74,10 +73,12 @@ impl CaptureCheckpoint {
         let title = title.map(str::to_owned);
         let context = context.map(str::to_owned);
         let config = config.clone();
+        let group_target = crate::transcribe::meeting_group_target(&config);
         let mut decoder = None;
         Self::spawn(
             anchor,
             SPAN,
+            group_target,
             move |work| {
                 let decoder = decoder.get_or_insert_with(|| {
                     let hints = transcript_checkpoint::decode_hints_for_queued_meeting_at(
@@ -96,7 +97,13 @@ impl CaptureCheckpoint {
         )
     }
 
-    fn spawn<F>(anchor: &Path, span_samples: usize, decode: F, exclusive: bool) -> Option<Self>
+    fn spawn<F>(
+        anchor: &Path,
+        span_samples: usize,
+        group_target: usize,
+        decode: F,
+        exclusive: bool,
+    ) -> Option<Self>
     where
         F: FnMut(&Work) -> Result<CheckpointSpan, String> + Send + 'static,
     {
@@ -148,7 +155,14 @@ impl CaptureCheckpoint {
             .name("call-checkpoint-stems".into())
             .spawn(move || {
                 low_priority();
-                feed(paths, span_samples, send, feeder_stop, feeder_counts);
+                feed(
+                    paths,
+                    span_samples,
+                    group_target,
+                    send,
+                    feeder_stop,
+                    feeder_counts,
+                );
             })
             .is_err()
         {
@@ -312,6 +326,7 @@ struct Source {
 fn feed(
     paths: [PathBuf; 2],
     span: usize,
+    group_target: usize,
     send: mpsc::SyncSender<Work>,
     stop: Arc<AtomicBool>,
     counts: Arc<Counts>,
@@ -357,7 +372,7 @@ fn feed(
                     break;
                 }
                 source.checked_len = source.pending.len();
-                let Some(cut) = span_cut(&source.pending, span) else {
+                let Some(cut) = span_cut(&source.pending, span, group_target) else {
                     break;
                 };
                 source.checked_len = 0;
@@ -399,60 +414,71 @@ fn feed(
 /// must start where the final pass's chunker is in its reset state, on its
 /// 100 ms grid: at the stem start, or at an earlier cut from this function.
 ///
-/// The cut is a point where the chunker resets, so the next span starts in
-/// the state that the whole-stem pass has there, and gets the same chunks.
-/// The first choice, at or after 15 s before the target length, is the end of
-/// the longest pause, where the chunker closes a chunk after 800 ms of
-/// silence. In speech without such a pause, the chunker splits at 45 s and
-/// resets too. At 1.5x the target, take the latest reset point anywhere in the
-/// span. Only with none at all, fall back to the quietest 100 ms window.
-fn span_cut(pending: &[f32], span: usize) -> Option<usize> {
+/// The cut is a cut of the decode plan for `pending`: the point after a
+/// finished decode group where the chunker resets. The next span then starts
+/// in the state that the whole-stem pass has there, and gets the same chunks
+/// and groups. A group whose end is not known yet, because the chunk after it
+/// is still open and could join it, has no cut: it waits, and at Stop it is
+/// left to the final pass. The first choice, at or after 15 s before the
+/// target length, is the cut with the longest pause after it. At 1.5x the
+/// target, take the latest cut anywhere in the span. Only with none at all,
+/// fall back to the quietest 100 ms window. The final pass checks every span
+/// against its own plan and decodes again what does not match.
+fn span_cut(pending: &[f32], span: usize, group_target: usize) -> Option<usize> {
     if pending.len() < span {
         return None;
     }
     let max = span + span / 2;
     let view = &pending[..pending.len().min(max)];
     let earliest = span.saturating_sub(SEARCH_BEFORE_TARGET);
-    let chunks = crate::transcribe::detect_meeting_vad_chunks(view);
-    if chunks.is_empty() {
+    let plan = DecodePlan::for_growing_source(view, group_target);
+    if plan.groups().is_empty() {
         // No speech at all: any point on the grid is a pause.
         return Some(span - span % WINDOW);
     }
-    let next_starts = chunks
+    // (cut, pause after the group). Every finished group has a next group.
+    let cuts: Vec<(usize, usize)> = plan
+        .cuts()
         .iter()
-        .skip(1)
-        .map(|&(start, _)| start)
-        .chain([view.len()]);
-    // (cut, pause length). A chunk shorter than 1 s does not close, and a
-    // 45 s chunk closes without a pause.
-    let pauses: Vec<(usize, usize)> = chunks
-        .iter()
-        .zip(next_starts)
-        .filter(|&(&(start, end), next)| {
-            (RATE..MAX_CHUNK).contains(&(end - start)) && next >= end + MIN_PAUSE
-        })
-        .map(|(&(_, end), next)| (end + MIN_PAUSE, next - end))
+        .zip(plan.finished_groups().iter().zip(&plan.groups()[1..]))
+        .map(|(&cut, (group, next))| (cut, next.start() - group.end()))
+        .filter(|&(cut, _)| cut > 0 && cut <= view.len())
         .collect();
-    let splits = chunks
-        .iter()
-        .filter(|&&(start, end)| end - start >= MAX_CHUNK)
-        .map(|&(_, end)| end);
-    let preferred = pauses
+    let preferred = cuts
         .iter()
         .filter(|&&(cut, _)| cut >= earliest)
         .max_by_key(|&&(cut, pause)| (pause, std::cmp::Reverse(cut)))
-        .map(|&(cut, _)| cut)
-        .or_else(|| splits.clone().find(|&end| end >= earliest));
+        .map(|&(cut, _)| cut);
     if preferred.is_some() || view.len() < max {
         return preferred;
     }
-    pauses
-        .iter()
+    cuts.iter()
         .map(|&(cut, _)| cut)
-        .chain(splits)
-        .filter(|&cut| cut > 0 && cut <= view.len())
         .max()
         .or_else(|| Some(quiet_cut(view) / WINDOW * WINDOW))
+}
+
+/// Cut `samples` the way `feed` does, and return each span's range.
+#[cfg(test)]
+pub(crate) fn cut_like_feed(
+    samples: &[f32],
+    span: usize,
+    group_target: usize,
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    let mut len = span;
+    while start + len <= samples.len() {
+        match span_cut(&samples[start..start + len], span, group_target) {
+            Some(cut) => {
+                spans.push((start, start + cut));
+                start += cut;
+                len = span;
+            }
+            None => len += RATE,
+        }
+    }
+    spans
 }
 
 fn quiet_cut(samples: &[f32]) -> usize {
@@ -492,6 +518,7 @@ fn low_priority() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode_groups::WHISPER_GROUP_TARGET_SAMPLES as GROUP;
     use crate::test_support::with_temp_home;
 
     fn write_stem(path: &Path, seconds: u32, rate: u32) {
@@ -565,6 +592,7 @@ mod tests {
             let worker = CaptureCheckpoint::spawn(
                 &anchor,
                 4 * RATE,
+                GROUP,
                 move |work| {
                     entered.send(()).unwrap();
                     blocked.recv().unwrap();
@@ -620,6 +648,7 @@ mod tests {
             let worker = CaptureCheckpoint::spawn(
                 &anchor,
                 3 * RATE,
+                GROUP,
                 |_| panic!("injected optional decoder panic"),
                 false,
             )
@@ -715,7 +744,7 @@ mod tests {
     #[test]
     fn cuts_in_the_middle_of_a_real_pause_near_the_target() {
         let samples = speech_with_pauses(125, &[(110.0, 111.5)]);
-        let cut = span_cut(&samples, SPAN).expect("a pause after 105 s");
+        let cut = span_cut(&samples, SPAN, GROUP).expect("a pause after 105 s");
         assert!(
             (110 * RATE..=111 * RATE + RATE / 2).contains(&cut),
             "cut {cut} is outside the pause"
@@ -727,20 +756,33 @@ mod tests {
         // Only a 100 ms dip, which is a gap between words, not a pause. The
         // chunker splits this speech at 45 s and 90 s, before the window.
         let samples = speech_with_pauses(120, &[(112.0, 112.1)]);
-        assert_eq!(span_cut(&samples, SPAN), None);
-        // The span grows until a pause comes.
+        assert_eq!(span_cut(&samples, SPAN, GROUP), None);
+        // The span grows until a pause comes. The 30 s of speech after it
+        // cannot join the group before it, so that group has a known end.
+        let samples = speech_with_pauses(172, &[(140.0, 141.5)]);
+        let cut = span_cut(&samples, SPAN, GROUP).expect("a pause at 140 s");
+        assert!((140 * RATE..=141 * RATE + RATE / 2).contains(&cut), "{cut}");
+    }
+
+    #[test]
+    fn a_pause_inside_a_decode_group_is_not_a_cut() {
+        // The pause at 140 s closes a 5 s chunk, but the 8.5 s chunk after it
+        // joins the same group, and that group is still open. The 45 s split
+        // before it is the latest point where a group ends.
         let samples = speech_with_pauses(150, &[(140.0, 141.5)]);
-        let cut = span_cut(&samples, SPAN).expect("a pause at 140 s");
-        assert!((140 * RATE..=141 * RATE + RATE / 2).contains(&cut));
+        assert_eq!(span_cut(&samples, SPAN, GROUP), Some(135 * RATE));
+        // With one call per chunk, the pause is a cut.
+        let cut = span_cut(&samples, SPAN, 0).expect("a pause at 140 s");
+        assert!((140 * RATE..=141 * RATE + RATE / 2).contains(&cut), "{cut}");
     }
 
     #[test]
     fn speech_without_a_pause_is_cut_where_the_chunker_splits_at_45_s() {
         let samples = speech_with_pauses(150, &[(112.0, 112.1)]);
-        assert_eq!(span_cut(&samples, SPAN), Some(135 * RATE));
+        assert_eq!(span_cut(&samples, SPAN, GROUP), Some(135 * RATE));
         // A pause before the window does not count, but it moves the splits.
         let samples = speech_with_pauses(150, &[(60.0, 62.0)]);
-        let cut = span_cut(&samples, SPAN).unwrap();
+        let cut = span_cut(&samples, SPAN, GROUP).unwrap();
         assert!(
             cut >= SPAN - 15 * RATE && cut.is_multiple_of(WINDOW),
             "cut {cut}"
@@ -756,31 +798,24 @@ mod tests {
             *sample = 0.2 * (n as f32 * 0.031).sin();
         }
         // The quietest window is in the last 15 s of the 180 s span.
-        let cut = span_cut(&samples, SPAN).unwrap();
+        let cut = span_cut(&samples, SPAN, GROUP).unwrap();
         assert!(cut >= 164 * RATE && cut.is_multiple_of(WINDOW), "cut {cut}");
     }
 
-    /// Cut `samples` the way `feed` does, and return each span's range.
-    fn cut_like_feed(samples: &[f32], span: usize) -> Vec<(usize, usize)> {
-        let mut spans = Vec::new();
-        let mut start = 0;
-        let mut len = span;
-        while start + len <= samples.len() {
-            match span_cut(&samples[start..start + len], span) {
-                Some(cut) => {
-                    spans.push((start, start + cut));
-                    start += cut;
-                    len = span;
-                }
-                None => len += RATE,
+    fn assert_spans_chunk_like_the_whole_stem(samples: &[f32]) {
+        for target in [GROUP, 0] {
+            let plan = DecodePlan::for_source(samples, target);
+            for (start, end) in cut_like_feed(samples, SPAN, target) {
+                assert!(
+                    plan.matches_span(&samples[start..end], start, target),
+                    "span {:.1}..{:.1} s has other groups than the whole stem (target {target})",
+                    start as f64 / RATE as f64,
+                    end as f64 / RATE as f64
+                );
             }
         }
-        spans
-    }
-
-    fn assert_spans_chunk_like_the_whole_stem(samples: &[f32]) {
         let whole = crate::transcribe::detect_meeting_vad_chunks(samples);
-        let spans = cut_like_feed(samples, SPAN);
+        let spans = cut_like_feed(samples, SPAN, GROUP);
         assert!(spans.len() >= 2, "too few spans to compare");
         let covered = spans.last().unwrap().1;
         let per_span: Vec<_> = spans
@@ -856,13 +891,17 @@ mod tests {
         {
             *sample = 0.2 * (n as f32 * 0.031).sin();
         }
-        let cut = span_cut(&samples, SPAN).unwrap();
+        // With one call per chunk, the chunk before the pause has a known end.
+        let cut = span_cut(&samples, SPAN, 0).unwrap();
         assert!((60 * RATE..62 * RATE).contains(&cut), "cut {cut}");
+        // A group can still take the short sound, so its end is not known.
+        // The 45 s split before it is the latest cut.
+        assert_eq!(span_cut(&samples, SPAN, GROUP), Some(45 * RATE));
     }
 
     #[test]
     fn silence_is_cut_at_the_target() {
-        assert_eq!(span_cut(&vec![0.0; SPAN + RATE], SPAN), Some(SPAN));
+        assert_eq!(span_cut(&vec![0.0; SPAN + RATE], SPAN, GROUP), Some(SPAN));
     }
 
     #[test]

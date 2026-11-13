@@ -19,14 +19,16 @@ the capture writer never feeds them or waits for them. The reader reuses
 It retains one open span per source, sends at most two queued audio spans with
 `try_send`, and keeps at most 256 completed results. A full queue drops that span and stops cutting new spans for the call.
 
-Each cut is a point where the final pass's VAD chunker resets, on its 100 ms
-grid. A span that starts there gets the same chunks as the whole-stem pass, so
-Whisper decodes the same audio and the text is the same. The first choice, from
-105 seconds on, is the end of the longest pause: the chunker closes a chunk after
-800 ms of silence. In speech without such a pause, the chunker splits at 45
-seconds and resets too. A span that reaches 180 seconds takes the latest reset
-point in the span. Only with none at all does it fall back to the quietest
-100 ms window. The next span begins at that cut, on the same source clock.
+Each cut is a cut of the decode plan: the point after a decode group where the
+final pass's VAD chunker resets, on its 100 ms grid (see
+[decode groups](transcript-checkpoints.md#decode-groups)). A span that starts
+there gets the same chunks and groups as the whole-stem pass, so Whisper decodes
+the same audio and the text is the same. A group whose end is not known yet has
+no cut and waits. The first choice, from 105 seconds on, is the cut with the
+longest pause after it. A span that reaches 180 seconds takes the latest cut in
+the span. Only with none at all does it fall back to the quietest 100 ms window.
+The final pass rejects such a span if its groups differ. The next span begins at
+that cut, on the same source clock.
 The canonical reader uses the final WAV decoder's sinc resampler, retaining its
 phase and lookahead across polls. It does not use the live sidecar's decimator.
 The final decoder can normalize quiet files by their whole-file peak. Until the

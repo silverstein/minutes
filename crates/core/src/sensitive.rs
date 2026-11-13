@@ -121,7 +121,10 @@ pub struct RecordingPolicy {
 /// Read the same sensitive-session source used by recording exclusivity.
 /// Unlike the UI's best-effort reader, unreadable/malformed state stays unknown.
 /// Never discard a restriction merely because its owner has exited.
-pub(crate) fn recording_policy() -> Option<RecordingPolicy> {
+/// First-party capture callers must snapshot this before starting capture
+/// and carry it to the queue. Reading it at promotion time would lose the
+/// original restriction when a sensitive session has ended.
+pub fn recording_policy() -> Option<RecordingPolicy> {
     let path = session_path();
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(RecordingPolicy {

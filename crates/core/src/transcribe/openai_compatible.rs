@@ -381,7 +381,12 @@ pub(super) fn transcribe(
         .map(|s| s.text.split_whitespace().count())
         .sum::<usize>();
     if words == 0 || words < config.transcription.min_words {
-        return Err(failed("transcription produced insufficient text"));
+        // A valid no-speech response is an empty source, not a provider
+        // failure. Independent call stems can retain speech from the other
+        // source; transport, timestamp and policy errors remain fatal.
+        return Err(TranscribeError::EmptyTranscript(
+            config.transcription.min_words,
+        ));
     }
     let text = segments
         .iter()

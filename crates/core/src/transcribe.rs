@@ -167,16 +167,106 @@ pub struct TranscribeResult {
     pub detected_language: Option<String>,
 }
 
-#[cfg(any(feature = "whisper", test))]
+#[cfg(test)]
 fn prepare_whisper_samples(
     samples: Vec<f32>,
     integrated_vad: bool,
     hints: &DecodeHints,
 ) -> Vec<f32> {
+    prepare_whisper_samples_with_map(samples, integrated_vad, hints).0
+}
+
+/// [`prepare_whisper_samples`], and the map of the kept samples when silence
+/// was stripped. Stripped audio has a shorter clock than `samples`.
+#[cfg(any(feature = "whisper", test))]
+fn prepare_whisper_samples_with_map(
+    samples: Vec<f32>,
+    integrated_vad: bool,
+    hints: &DecodeHints,
+) -> (Vec<f32>, Option<Vec<whisper_guard::audio::KeptRun>>) {
     if integrated_vad || hints.preserve_source_timeline {
-        samples
+        (samples, None)
     } else {
-        strip_silence(&samples, 16000)
+        let (stripped, runs) = whisper_guard::audio::strip_silence_with_map(&samples, 16000);
+        (stripped, Some(runs))
+    }
+}
+
+/// The text of a `[m:ss] text` line, or of any line that starts with a
+/// bracketed label.
+#[cfg(any(feature = "whisper", test))]
+fn labelled_text(line: &str) -> Option<&str> {
+    let (_, text) = line.trim().strip_prefix('[')?.split_once(']')?;
+    Some(text.trim())
+}
+
+/// The whole seconds of the `[m:ss]` label of a line.
+#[cfg(any(feature = "whisper", test))]
+fn label_secs(line: &str) -> Option<u64> {
+    let (label, _) = line.trim().strip_prefix('[')?.split_once(']')?;
+    let (mins, secs) = label.split_once(':')?;
+    Some(mins.parse::<u64>().ok()? * 60 + secs.parse::<u64>().ok()?)
+}
+
+/// Each line of `result.text` with the index of its segment, if it has one.
+///
+/// Cleanup removes lines, changes lines and adds annotation lines.
+/// `result.segments` holds the lines that cleanup left as they were, in
+/// order. So a line is the next segment when it has the text of that segment.
+/// A changed line or an annotation has no segment and does not use one up:
+/// the lines after it keep their exact times.
+#[cfg(any(feature = "whisper", test))]
+fn line_segments(result: &TranscribeResult) -> Vec<(&str, Option<usize>)> {
+    let mut next = 0usize;
+    result
+        .text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let segment = result
+                .segments
+                .get(next)
+                .filter(|segment| labelled_text(line) == Some(segment.text.as_str()))
+                .map(|_| next);
+            if segment.is_some() {
+                next += 1;
+            }
+            (line, segment)
+        })
+        .collect()
+}
+
+/// Put the times of `result` back on the clock of the audio before silence
+/// was stripped. `runs` is the map from
+/// [`whisper_guard::audio::strip_silence_with_map`].
+#[cfg(any(feature = "whisper", test))]
+fn restore_stripped_clock(result: &mut TranscribeResult, runs: &[whisper_guard::audio::KeptRun]) {
+    let input_secs =
+        |secs: f64| whisper_guard::audio::input_position(runs, secs * 16_000.0) / 16_000.0;
+    let label = |secs: f64, text: &str| {
+        let secs = secs.max(0.0).floor() as u64;
+        format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+    };
+    let lines: Vec<String> = line_segments(result)
+        .into_iter()
+        .map(|(line, segment)| match segment {
+            Some(index) => {
+                let segment = &result.segments[index];
+                label(input_secs(segment.start), &segment.text)
+            }
+            // A changed line has only its label. An annotation has no time.
+            None => match (label_secs(line), labelled_text(line)) {
+                (Some(secs), Some(text)) => label(input_secs(secs as f64), text),
+                _ => line.to_owned(),
+            },
+        })
+        .collect();
+    for segment in &mut result.segments {
+        segment.start = input_secs(segment.start);
+        segment.end = input_secs(segment.end);
+    }
+    if !lines.is_empty() {
+        result.text = format!("{}\n", lines.join("\n"));
     }
 }
 
@@ -491,7 +581,8 @@ pub(crate) fn transcribe_authorized_with_hints(
     }
 }
 
-fn transcribe_dispatch(
+/// One whole-file call through the batch dispatcher.
+pub(crate) fn transcribe_dispatch(
     audio_path: &Path,
     config: &Config,
     hints: &DecodeHints,
@@ -795,6 +886,7 @@ fn parakeet_chunk_ranges(
     Some(fixed_length_chunks(total_samples, 16000 * chunk_secs))
 }
 
+#[cfg(feature = "parakeet")]
 fn transcribe_chunk_ranges(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
@@ -826,58 +918,103 @@ impl ChunkLines {
     }
 }
 
-pub(crate) fn transcribe_chunk_lines(
+/// [`transcribe_chunk_lines_reporting`] without the report.
+#[cfg(feature = "parakeet")]
+fn transcribe_chunk_lines(
     samples: &[f32],
     chunk_ranges: &[(usize, usize)],
     clock_offset: usize,
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<ChunkLines, TranscribeError> {
-    #[cfg(feature = "whisper")]
-    if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext {
-        return transcribe_whisper_chunk_lines(samples, chunk_ranges, clock_offset, config, hints);
-    }
+    transcribe_chunk_lines_reporting(
+        samples,
+        chunk_ranges,
+        clock_offset,
+        config,
+        hints,
+        &mut |_, _| {},
+    )
+}
 
+/// One call per chunk through the batch dispatcher, for engines other than
+/// in-process Whisper. Whisper decodes groups of chunks: see
+/// [`MeetingGroupDecoder`]. After each chunk, also a chunk with no speech,
+/// `finished(index, lines)` gets that chunk's lines. `index` is the chunk's
+/// place in `chunk_ranges`.
+fn transcribe_chunk_lines_reporting(
+    samples: &[f32],
+    chunk_ranges: &[(usize, usize)],
+    clock_offset: usize,
+    config: &Config,
+    hints: &DecodeHints,
+    finished: &mut dyn FnMut(usize, &ChunkLines),
+) -> Result<ChunkLines, TranscribeError> {
     let mut session = BatchTranscriptionSession::new(config);
     let mut out = ChunkLines {
         lines: Vec::new(),
         stats: FilterStats::default(),
     };
 
-    for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
-        let chunk_samples = &samples[*start_sample..*end_sample];
-        if chunk_samples.is_empty() {
-            continue;
-        }
-
-        let mut tmp_wav =
-            crate::pipeline::PrivateAudioTempFile::new("minutes-meeting-chunk-", ".wav")
-                .map_err(TranscribeError::Io)?;
-        write_wav_16k_mono_to_writer(tmp_wav.prepare_for_write()?, chunk_samples)?;
-        tmp_wav.finish_write().map_err(TranscribeError::Io)?;
-        let processing_path = tmp_wav.processing_path();
-        let chunk_hints = hints.clone().with_audio_format_extension("wav");
-
-        let chunk_result = match session.transcribe(&processing_path, &chunk_hints) {
-            Ok(result) => result,
-            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
-                tracing::debug!(
-                    chunk_index,
-                    start_sample,
-                    end_sample,
-                    "skipping empty VAD chunk"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
-        let offset_lines =
-            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-        out.add_stats(&chunk_result.stats);
-        out.lines.extend(offset_lines);
+    for (chunk_index, &(start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
+        let lines = transcribe_one_chunk(
+            &mut session,
+            samples,
+            chunk_index,
+            (start_sample, end_sample),
+            clock_offset,
+            hints,
+        )?;
+        finished(chunk_index, &lines);
+        out.add_stats(&lines.stats);
+        out.lines.extend(lines.lines);
     }
 
+    Ok(out)
+}
+
+/// The lines of one chunk through the batch dispatcher. No lines for an
+/// empty chunk or a chunk without speech.
+fn transcribe_one_chunk(
+    session: &mut BatchTranscriptionSession<'_>,
+    samples: &[f32],
+    chunk_index: usize,
+    (start_sample, end_sample): (usize, usize),
+    clock_offset: usize,
+    hints: &DecodeHints,
+) -> Result<ChunkLines, TranscribeError> {
+    let mut out = ChunkLines {
+        lines: Vec::new(),
+        stats: FilterStats::default(),
+    };
+    let chunk_samples = &samples[start_sample..end_sample];
+    if chunk_samples.is_empty() {
+        return Ok(out);
+    }
+
+    let mut tmp_wav = crate::pipeline::PrivateAudioTempFile::new("minutes-meeting-chunk-", ".wav")
+        .map_err(TranscribeError::Io)?;
+    write_wav_16k_mono_to_writer(tmp_wav.prepare_for_write()?, chunk_samples)?;
+    tmp_wav.finish_write().map_err(TranscribeError::Io)?;
+    let processing_path = tmp_wav.processing_path();
+    let chunk_hints = hints.clone().with_audio_format_extension("wav");
+
+    let chunk_result = match session.transcribe(&processing_path, &chunk_hints) {
+        Ok(result) => result,
+        Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
+            tracing::debug!(
+                chunk_index,
+                start_sample,
+                end_sample,
+                "skipping empty VAD chunk"
+            );
+            return Ok(out);
+        }
+        Err(error) => return Err(error),
+    };
+    let chunk_offset_secs = (clock_offset + start_sample) as f64 / 16000.0;
+    out.stats = chunk_result.stats;
+    out.lines = offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
     Ok(out)
 }
 
@@ -938,113 +1075,177 @@ pub(crate) fn should_bypass_meeting_chunk_rotation(
         && chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::DispatchPerChunk
 }
 
-#[cfg(feature = "whisper")]
-fn transcribe_whisper_chunk_lines(
-    samples: &[f32],
-    chunk_ranges: &[(usize, usize)],
-    clock_offset: usize,
-    config: &Config,
-    hints: &DecodeHints,
-) -> Result<ChunkLines, TranscribeError> {
-    let ctx = load_whisper_context(config)?;
-    transcribe_whisper_chunk_lines_with_context(
-        &ctx,
-        samples,
-        chunk_ranges,
-        clock_offset,
-        config,
-        hints,
-    )
-}
-
-#[cfg(feature = "whisper")]
-fn transcribe_whisper_chunk_lines_with_context(
-    ctx: &whisper_rs::WhisperContext,
-    samples: &[f32],
-    chunk_ranges: &[(usize, usize)],
-    clock_offset: usize,
-    config: &Config,
-    hints: &DecodeHints,
-) -> Result<ChunkLines, TranscribeError> {
-    let mut out = ChunkLines {
-        lines: Vec::new(),
-        stats: FilterStats::default(),
-    };
-
-    for (chunk_index, (start_sample, end_sample)) in chunk_ranges.iter().enumerate() {
-        let chunk_samples = &samples[*start_sample..*end_sample];
-        if chunk_samples.is_empty() {
-            continue;
+/// The VAD group target for meeting transcription with `config`: Whisper
+/// packs chunks into groups, other engines keep one call per chunk (0).
+pub(crate) fn meeting_group_target(config: &Config) -> usize {
+    match chunk_transcription_strategy(config) {
+        ChunkTranscriptionStrategy::SharedWhisperContext => {
+            crate::decode_groups::whisper_group_target_samples()
         }
-
-        let chunk_result = match transcribe_whisper_samples(
-            ctx,
-            chunk_samples,
-            Path::new("<vad-chunk>"),
-            config,
-            hints,
-        ) {
-            Ok(result) => result,
-            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => {
-                tracing::debug!(
-                    chunk_index,
-                    start_sample,
-                    end_sample,
-                    "skipping empty VAD chunk"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let chunk_offset_secs = (clock_offset + *start_sample) as f64 / 16000.0;
-        let offset_lines =
-            offset_timestamped_lines(chunk_result.text.lines(), chunk_offset_secs, chunk_index);
-        out.add_stats(&chunk_result.stats);
-        out.lines.extend(offset_lines);
+        ChunkTranscriptionStrategy::DispatchPerChunk => 0,
     }
-
-    Ok(out)
 }
 
-/// A decoder owned by one checkpoint session. Config is frozen by the caller.
+/// One Whisper call through the batch path, with its per-call settings and
+/// cleanup. Times are relative to the start of `audio`.
+#[cfg(feature = "whisper")]
+struct WhisperCall<'a> {
+    ctx: &'a whisper_rs::WhisperContext,
+    config: &'a Config,
+    hints: &'a DecodeHints,
+}
+
+#[cfg(feature = "whisper")]
+impl crate::decode_groups::AudioDecoder for WhisperCall<'_> {
+    fn decode(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<Option<crate::decode_groups::DecodedAudio>, TranscribeError> {
+        // The group decoder maps each line back to the source through the
+        // clock of `audio`. Energy stripping must not change that clock.
+        match transcribe_whisper_samples_on_clock(
+            self.ctx,
+            audio,
+            Path::new("<decode-group>"),
+            self.config,
+            self.hints,
+            true,
+        ) {
+            Ok(result) => Ok(Some(crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: result.stats,
+            })),
+            Err(TranscribeError::EmptyAudio) | Err(TranscribeError::EmptyTranscript(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The lines of one call with their times. A line that is a segment has the
+/// exact times of that segment ([`line_segments`]). A line that cleanup
+/// changed has only its `[m:ss]` label: it starts somewhere in that second.
+/// Lines without a time label, such as cleanup annotations, are dropped, as
+/// they were in the per-chunk path.
+#[cfg(any(feature = "whisper", test))]
+fn timed_lines(result: &TranscribeResult) -> Vec<crate::decode_groups::TimedText> {
+    use crate::decode_groups::TimedText;
+    line_segments(result)
+        .into_iter()
+        .filter_map(|(line, segment)| match segment {
+            Some(index) => {
+                let segment = &result.segments[index];
+                Some(TimedText {
+                    start: segment.start,
+                    end: segment.end,
+                    text: segment.text.clone(),
+                })
+            }
+            None => {
+                let start = label_secs(line)? as f64;
+                Some(TimedText {
+                    start,
+                    end: start + 1.0,
+                    text: labelled_text(line)?.to_owned(),
+                })
+            }
+        })
+        .collect()
+}
+
+/// The meeting decoder shared by the whole-file pass, checkpoint spans and
+/// gap fills, so that all three decode a group the same way. Whisper decodes
+/// each group in one call with the loop guard, and loads its model once per
+/// decoder. Other engines decode one chunk per call. Config is frozen by the
+/// caller.
 #[derive(Default)]
-pub(crate) struct CheckpointChunkDecoder {
+pub(crate) struct MeetingGroupDecoder {
     #[cfg(feature = "whisper")]
     whisper: Option<whisper_rs::WhisperContext>,
 }
 
-impl CheckpointChunkDecoder {
+impl MeetingGroupDecoder {
+    /// Whether this decoder holds a loaded model.
+    pub(crate) fn model_loaded(&self) -> bool {
+        #[cfg(feature = "whisper")]
+        return self.whisper.is_some();
+        #[cfg(not(feature = "whisper"))]
+        false
+    }
+
+    /// Lines for `groups` of `samples`, on the source clock. `offset` is the
+    /// source sample at which `samples` starts.
     pub(crate) fn transcribe(
         &mut self,
         samples: &[f32],
-        chunks: &[(usize, usize)],
+        groups: &[crate::decode_groups::DecodeGroup],
         offset: usize,
         config: &Config,
         hints: &DecodeHints,
+    ) -> Result<ChunkLines, TranscribeError> {
+        self.transcribe_reporting(samples, groups, offset, config, hints, &mut |_, _| {})
+    }
+
+    /// [`transcribe`](Self::transcribe), and `finished(index, lines)` after
+    /// each group, before the next group starts. `index` is the group's place
+    /// in `groups`.
+    pub(crate) fn transcribe_reporting(
+        &mut self,
+        samples: &[f32],
+        groups: &[crate::decode_groups::DecodeGroup],
+        offset: usize,
+        config: &Config,
+        hints: &DecodeHints,
+        finished: &mut dyn FnMut(usize, &ChunkLines),
     ) -> Result<ChunkLines, TranscribeError> {
         #[cfg(feature = "whisper")]
         if chunk_transcription_strategy(config) == ChunkTranscriptionStrategy::SharedWhisperContext
         {
             if self.whisper.is_none() {
                 self.whisper = Some(load_whisper_context(config)?);
-                tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
-                crate::logging::log_step(
-                    "capture_checkpoint_model_load",
-                    "",
-                    0,
-                    serde_json::json!({"engine":"whisper"}),
-                );
             }
-            return transcribe_whisper_chunk_lines_with_context(
-                self.whisper.as_ref().expect("context loaded above"),
-                samples,
-                chunks,
-                offset,
+            let mut call = WhisperCall {
+                ctx: self.whisper.as_ref().expect("context loaded above"),
                 config,
                 hints,
+            };
+            return crate::decode_groups::decode_groups_reporting(
+                &mut call, samples, groups, offset, finished,
             );
         }
-        transcribe_chunk_lines(samples, chunks, offset, config, hints)
+        // One call per chunk, in one batch session. A group is finished
+        // when its last chunk is.
+        let mut chunks = Vec::new();
+        let mut last_chunk_of = Vec::new();
+        for (index, group) in groups.iter().enumerate() {
+            chunks.extend(group.chunks.iter().copied());
+            last_chunk_of.push((chunks.len() - 1, index));
+        }
+        let mut group_lines = ChunkLines {
+            lines: Vec::new(),
+            stats: FilterStats::default(),
+        };
+        let mut ends = last_chunk_of.into_iter().peekable();
+        transcribe_chunk_lines_reporting(
+            samples,
+            &chunks,
+            offset,
+            config,
+            hints,
+            &mut |chunk, lines| {
+                group_lines.add_stats(&lines.stats);
+                group_lines.lines.extend(lines.lines.iter().cloned());
+                if let Some(&(last, group)) = ends.peek() {
+                    if last == chunk {
+                        ends.next();
+                        finished(group, &group_lines);
+                        group_lines = ChunkLines {
+                            lines: Vec::new(),
+                            stats: FilterStats::default(),
+                        };
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -1076,6 +1277,10 @@ fn transcribe_meeting_with_hints_inner(
     transcribe_meeting_samples(audio_path, &samples, config, hints)
 }
 
+/// With fewer VAD chunks, the meeting path transcribes the whole file in one
+/// call.
+pub(crate) const MIN_MEETING_CHUNKS: usize = 2;
+
 /// The meeting path after decode. `samples` are `audio_path`'s canonical
 /// 16 kHz mono samples; the whole-file fallbacks still read `audio_path`.
 pub(crate) fn transcribe_meeting_samples(
@@ -1084,12 +1289,10 @@ pub(crate) fn transcribe_meeting_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
-    const MIN_MEETING_CHUNKS: usize = 2;
-
     let audio_duration_secs = samples.len() as f64 / 16000.0;
-    let vad_chunks = detect_meeting_vad_chunks(samples);
+    let plan = crate::decode_groups::DecodePlan::for_source(samples, meeting_group_target(config));
 
-    if vad_chunks.len() < MIN_MEETING_CHUNKS {
+    if plan.chunk_count() < MIN_MEETING_CHUNKS {
         return transcribe_dispatch(audio_path, config, hints);
     }
 
@@ -1109,14 +1312,16 @@ pub(crate) fn transcribe_meeting_samples(
     }
 
     tracing::info!(
-        chunks = vad_chunks.len(),
+        chunks = plan.chunk_count(),
+        groups = plan.groups().len(),
         audio_secs = format!("{:.1}", audio_duration_secs),
         "meeting transcription using VAD-driven chunk rotation"
     );
 
-    if let Some(result) =
-        transcribe_chunk_ranges(samples, &vad_chunks, audio_duration_secs, config, hints)?
-    {
+    let mut lines =
+        MeetingGroupDecoder::default().transcribe(samples, plan.groups(), 0, config, hints)?;
+    lines.stats.audio_duration_secs = audio_duration_secs;
+    if let Some(result) = finish_chunk_lines(lines) {
         return Ok(result);
     }
 
@@ -1450,9 +1655,13 @@ fn correlate_sherpa_segments(
 
 /// Correlate cleanup-surviving whisper lines back to raw segment timing data.
 ///
-/// `cleanup_lines` is a subsequence of `all_lines` (same order, some removed).
 /// `seg_data` is parallel to `all_lines`: `(start_secs, end_secs, clean_text)`.
-#[cfg(feature = "whisper")]
+/// The lines of `cleanup_lines` that cleanup left as they were are a
+/// subsequence of `all_lines`. Cleanup also adds annotation lines and changes
+/// lines. Such a line matches no raw line. It gets no segment, and the search
+/// for the next line continues from the same place, so the lines after it
+/// keep their timing.
+#[cfg(any(feature = "whisper", test))]
 fn correlate_whisper_segments(
     cleanup_lines: &[String],
     all_lines: &[String],
@@ -1461,19 +1670,16 @@ fn correlate_whisper_segments(
     let mut si = 0usize;
     let mut result = Vec::new();
     for cleaned in cleanup_lines {
-        while si < all_lines.len() {
-            if &all_lines[si] == cleaned {
-                let (start, end, text) = &seg_data[si];
-                result.push(TranscriptSegment {
-                    start: *start,
-                    end: *end,
-                    text: text.clone(),
-                });
-                si += 1;
-                break;
-            }
-            si += 1;
-        }
+        let Some(found) = all_lines[si..].iter().position(|line| line == cleaned) else {
+            continue;
+        };
+        let (start, end, text) = &seg_data[si + found];
+        result.push(TranscriptSegment {
+            start: *start,
+            end: *end,
+            text: text.clone(),
+        });
+        si += found + 1;
     }
     result
 }
@@ -1542,6 +1748,22 @@ fn transcribe_whisper_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
+    transcribe_whisper_samples_on_clock(ctx, samples, audio_path, config, hints, false)
+}
+
+/// [`transcribe_whisper_samples`]. With `keep_input_clock`, the times of the
+/// result are on the clock of `samples` also when energy stripping removed
+/// silence before the decode. Without it they are on the stripped clock, as
+/// they always were for a whole file.
+#[cfg(feature = "whisper")]
+fn transcribe_whisper_samples_on_clock(
+    ctx: &whisper_rs::WhisperContext,
+    samples: &[f32],
+    audio_path: &Path,
+    config: &Config,
+    hints: &DecodeHints,
+    keep_input_clock: bool,
+) -> Result<TranscribeResult, TranscribeError> {
     let mut stats = FilterStats {
         audio_duration_secs: samples.len() as f64 / 16000.0,
         ..Default::default()
@@ -1568,7 +1790,8 @@ fn transcribe_whisper_samples(
 
     let prefix_samples = source_clock_prefix_samples(&samples, hints);
     let samples = samples[prefix_samples..].to_vec();
-    let samples = prepare_whisper_samples(samples, use_integrated_vad, hints);
+    let (samples, mut stripped) =
+        prepare_whisper_samples_with_map(samples, use_integrated_vad, hints);
     stats.samples_after_silence_strip = samples.len();
 
     if samples.is_empty() {
@@ -1605,19 +1828,25 @@ fn transcribe_whisper_samples(
             audio_duration_secs: result.stats.audio_duration_secs,
             ..Default::default()
         };
-        let stripped = prepare_whisper_samples(samples.clone(), false, hints);
-        retry_stats.samples_after_silence_strip = stripped.len();
-        if !stripped.is_empty() {
+        let (retry_samples, retry_stripped) =
+            prepare_whisper_samples_with_map(samples.clone(), false, hints);
+        retry_stats.samples_after_silence_strip = retry_samples.len();
+        if !retry_samples.is_empty() {
             result = transcribe_with_whisper(
                 ctx,
-                &stripped,
+                &retry_samples,
                 audio_path,
                 config,
                 retry_stats,
                 true,
                 hints,
             )?;
+            stripped = retry_stripped;
         }
+    }
+
+    if let (true, Some(runs)) = (keep_input_clock, &stripped) {
+        restore_stripped_clock(&mut result, runs);
     }
 
     restore_source_clock(&mut result, prefix_samples as f64 / 16_000.0);
@@ -2453,16 +2682,26 @@ fn decode_with_ffmpeg_binary(
 // resample() and normalize_audio() are provided by whisper_guard::audio
 // and re-exported at the top of this file.
 
+/// The meeting VAD chunker's analysis window, 100 ms.
+pub(crate) const VAD_WINDOW_SAMPLES: usize = 1_600;
+/// The silence after a chunk at which the chunker closes it and resets.
+pub(crate) const VAD_CLOSE_PAUSE_SAMPLES: usize = 8 * VAD_WINDOW_SAMPLES;
+/// The chunker keeps a chunk open this long after its last loud window, so a
+/// chunk that it closes at a pause ends with this much quiet audio.
+pub(crate) const VAD_HANGOVER_SAMPLES: usize = 5 * VAD_WINDOW_SAMPLES;
+/// The chunker splits speech without such a pause at this length.
+pub(crate) const VAD_MAX_CHUNK_SAMPLES: usize = 45 * 16_000;
+
 pub(crate) fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
     const SAMPLE_RATE: usize = 16_000;
-    const WINDOW_SAMPLES: usize = 1_600; // 100ms
-    const ROTATE_SILENCE_MS: u64 = 800;
+    const WINDOW_SAMPLES: usize = VAD_WINDOW_SAMPLES; // 100ms
+    const ROTATE_SILENCE_MS: u64 = (VAD_CLOSE_PAUSE_SAMPLES / (SAMPLE_RATE / 1000)) as u64;
     const MIN_CHUNK_SAMPLES: usize = SAMPLE_RATE; // 1s
-    const MAX_CHUNK_SAMPLES: usize = SAMPLE_RATE * 45;
+    const MAX_CHUNK_SAMPLES: usize = VAD_MAX_CHUNK_SAMPLES;
     const NOISE_FLOOR_MIN: f32 = 0.0001;
     const NOISE_FLOOR_MAX: f32 = 0.02;
     const NOISE_MULTIPLIER: f32 = 4.0;
-    const HANGOVER_CHUNKS: u32 = 5;
+    const HANGOVER_CHUNKS: u32 = (VAD_HANGOVER_SAMPLES / VAD_WINDOW_SAMPLES) as u32;
     const ADAPT_RATE: f32 = 0.02;
 
     if samples.is_empty() {
@@ -5241,6 +5480,226 @@ mod tests {
         assert_eq!(result.text, "[0:05] yes\n");
         assert_eq!(result.segments[0].start, 5.25);
         assert_eq!(result.segments[0].end, 6.0);
+    }
+
+    /// A result as `transcribe_with_whisper` makes it from raw segments
+    /// `(start, end, text)`: the real cleanup, then the real correlation.
+    fn cleaned_result(raw: &[(f64, f64, &str)]) -> TranscribeResult {
+        let lines: Vec<String> = raw
+            .iter()
+            .map(|(start, _, text)| {
+                let secs = *start as u64;
+                format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+            })
+            .collect();
+        let seg_data: Vec<(f64, f64, String)> = raw
+            .iter()
+            .map(|(start, end, text)| (*start, *end, text.to_string()))
+            .collect();
+        let cleanup = run_transcript_cleanup_pipeline(lines.clone());
+        let segments = correlate_whisper_segments(&cleanup.lines, &lines, &seg_data);
+        TranscribeResult {
+            text: format!("{}\n", cleanup.lines.join("\n")),
+            stats: FilterStats::default(),
+            segments,
+            detected_language: None,
+        }
+    }
+
+    #[test]
+    fn a_cleanup_annotation_does_not_take_the_exact_times_of_later_lines() {
+        // Three identical segments, then the segment of the second chunk.
+        // Cleanup keeps the first, adds an annotation line, and keeps the
+        // last. So the text has three lines and the result two segments.
+        let result = cleaned_result(&[
+            (1.0, 3.0, "We agreed on the budget for March."),
+            (3.0, 5.0, "We agreed on the budget for March."),
+            (5.0, 7.0, "We agreed on the budget for March."),
+            (9.8, 15.4, "Then let us look at the hiring plan."),
+        ]);
+        let lines: Vec<&str> = result.text.lines().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[1].contains("identical segments collapsed"),
+            "{lines:?}"
+        );
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(
+            line_segments(&result)
+                .iter()
+                .map(|(_, segment)| *segment)
+                .collect::<Vec<_>>(),
+            vec![Some(0), None, Some(1)]
+        );
+
+        // Each surviving segment keeps its exact times. The annotation has
+        // no time and is dropped.
+        let timed = timed_lines(&result);
+        assert_eq!(timed.len(), 2);
+        assert_eq!((timed[0].start, timed[0].end), (1.0, 3.0));
+        assert_eq!((timed[1].start, timed[1].end), (9.8, 15.4));
+
+        // Source chunks at 100 s and 160 s. The last segment starts in the
+        // quiet end of the first chunk. With its exact times it belongs to
+        // the second chunk, 160 s. With the rounded label 0:09 and no end, it
+        // would be in the first chunk, 109 s.
+        const S: usize = 16_000;
+        let group = crate::decode_groups::DecodeGroup {
+            chunks: vec![(100 * S, 110 * S), (160 * S, 165 * S)],
+        };
+        let samples = vec![0.1f32; 165 * S];
+        let mut decoder = |_: &[f32]| {
+            Ok(Some(crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: FilterStats::default(),
+            }))
+        };
+        let out = crate::decode_groups::decode_groups(&mut decoder, &samples, &[group], 0).unwrap();
+        assert_eq!(
+            out.lines,
+            vec![
+                "[1:41] We agreed on the budget for March.",
+                "[2:40] Then let us look at the hiring plan.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_that_cleanup_changed_keeps_its_label_and_the_next_line_its_segment() {
+        let result = TranscribeResult {
+            text: "[0:02] first\n[0:05] changed by cleanup\n[0:09] last\n".into(),
+            stats: FilterStats::default(),
+            segments: vec![
+                TranscriptSegment {
+                    start: 2.4,
+                    end: 4.0,
+                    text: "first".into(),
+                },
+                TranscriptSegment {
+                    start: 9.7,
+                    end: 12.0,
+                    text: "last".into(),
+                },
+            ],
+            detected_language: None,
+        };
+        let timed = timed_lines(&result);
+        assert_eq!(timed.len(), 3);
+        assert_eq!((timed[0].start, timed[0].end), (2.4, 4.0));
+        // Only the label is known: the line starts somewhere in that second.
+        assert_eq!((timed[1].start, timed[1].end), (5.0, 6.0));
+        assert_eq!(timed[1].text, "changed by cleanup");
+        assert_eq!((timed[2].start, timed[2].end), (9.7, 12.0));
+    }
+
+    #[test]
+    fn energy_stripping_does_not_change_the_clock_of_a_decode_group() {
+        const S: usize = 16_000;
+        // 86 s: a 0.2 s burst at 0 s and at 19 s, and 5 s of speech at 80 s.
+        // The chunker cannot close a chunk shorter than 1 s, so the first
+        // chunk runs from the first burst to the end of the second.
+        let tone = |n: usize| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * n as f32 / 16000.0).sin();
+        let mut samples = vec![0.0f32; 86 * S];
+        for (start, len) in [(0, S / 5), (19 * S, S / 5), (80 * S, 5 * S)] {
+            for n in 0..len {
+                samples[start + n] = tone(n);
+            }
+        }
+        let plan = crate::decode_groups::DecodePlan::for_source(&samples, 30 * S);
+        assert_eq!(plan.groups().len(), 1);
+        let chunks = &plan.groups()[0].chunks;
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!((chunks[0].0, chunks[1].0), (0, 80 * S));
+        assert!(chunks[0].1 > 19 * S, "{chunks:?}");
+
+        // What the Whisper call does without a Silero model and without the
+        // source-timeline hint: strip silence, decode, clean up. The stand-in
+        // decoder reports one segment for the 5 s of speech, with the times
+        // that it has in the audio it got.
+        let speech_in = |audio: &[f32]| {
+            let mut run = 0;
+            for (n, sample) in audio.iter().enumerate() {
+                run = if *sample != 0.0 { run + 1 } else { 0 };
+                if run == 2 * S {
+                    return (n + 1 - run) as f64 / S as f64;
+                }
+            }
+            panic!("no speech in the decoder audio");
+        };
+        let decode = |audio: &[f32], keep_input_clock: bool| {
+            let (stripped, runs) =
+                prepare_whisper_samples_with_map(audio.to_vec(), false, &DecodeHints::default());
+            let runs = runs.expect("energy stripping ran");
+            assert!(stripped.len() < audio.len() / 2, "silence was stripped");
+            let start = speech_in(&stripped);
+            let mut result = cleaned_result(&[(start, start + 5.0, "The speech at eighty.")]);
+            if keep_input_clock {
+                restore_stripped_clock(&mut result, &runs);
+            }
+            crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: FilterStats::default(),
+            }
+        };
+
+        let mut kept = |audio: &[f32]| Ok(Some(decode(audio, true)));
+        let out =
+            crate::decode_groups::decode_groups(&mut kept, &samples, plan.groups(), 0).unwrap();
+        assert_eq!(out.lines, vec!["[1:20] The speech at eighty."]);
+
+        // On the stripped clock, the same segment is inside the first chunk.
+        let mut lost = |audio: &[f32]| Ok(Some(decode(audio, false)));
+        let out =
+            crate::decode_groups::decode_groups(&mut lost, &samples, plan.groups(), 0).unwrap();
+        assert_ne!(out.lines, vec!["[1:20] The speech at eighty."]);
+    }
+
+    #[test]
+    fn the_stripped_clock_is_restored_in_segments_and_labels() {
+        // 1 s kept, a pad, then input 61 s onward at output 1.3 s.
+        let runs = [
+            whisper_guard::audio::KeptRun {
+                output_start: 0,
+                input_start: 0,
+                len: 16_000,
+            },
+            whisper_guard::audio::KeptRun {
+                output_start: 20_800,
+                input_start: 61 * 16_000,
+                len: 5 * 16_000,
+            },
+        ];
+        let mut result = TranscribeResult {
+            text: "[0:00] one\n[...] [repeated audio removed - 2 identical segments collapsed]\n[0:02] changed\n[0:03] two\n".into(),
+            stats: FilterStats::default(),
+            segments: vec![
+                TranscriptSegment {
+                    start: 0.25,
+                    end: 0.9,
+                    text: "one".into(),
+                },
+                TranscriptSegment {
+                    start: 3.8,
+                    end: 5.3,
+                    text: "two".into(),
+                },
+            ],
+            detected_language: None,
+        };
+        restore_stripped_clock(&mut result, &runs);
+        assert_eq!(
+            result.text,
+            "[0:00] one\n[...] [repeated audio removed - 2 identical segments collapsed]\n\
+             [1:01] changed\n[1:03] two\n"
+        );
+        assert_eq!(
+            (result.segments[0].start, result.segments[0].end),
+            (0.25, 0.9)
+        );
+        assert_eq!(
+            (result.segments[1].start, result.segments[1].end),
+            (63.5, 65.0)
+        );
     }
 
     #[test]

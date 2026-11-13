@@ -136,6 +136,8 @@ pub mod context_store;
 pub mod copilot;
 pub mod customize;
 pub mod daily_notes;
+/// Decode groups shared by the whole-file pass, checkpoint spans and gap fills.
+pub mod decode_groups;
 pub mod derived;
 pub mod desktop_context;
 pub mod desktop_control;

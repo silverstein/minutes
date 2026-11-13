@@ -1,28 +1,36 @@
 # Transcript checkpoints
 
 A host that transcribes a meeting while it records can hand that work to the
-queued job, so final processing transcribes only what is left. It is off unless
-a host supplies a checkpoint. Without one, processing is unchanged.
+queued job, so final processing transcribes only what is left. The final pass of
+a queued job also saves the work it finishes in the same file, so a retry after a
+crash or a forced quit transcribes only what is left (see
+[Final-pass progress](#final-pass-progress)). A finished transcript is the same
+with or without checkpoints.
 
 ## API
 
 - `transcript_checkpoint::transcribe_span(samples, start_sample, source, config, hints)`
   transcribes one span of a source: the microphone stem, the system stem, or a
   single-source meeting recording. `samples` are the source's canonical 16 kHz
-  mono samples from `start_sample`. It runs the same meeting VAD chunking, decoder
-  settings and per-source options as the final pass (independent stems keep the
-  shared clock and have no per-source word minimum). It returns the span's
-  `[m:ss]` lines on the source clock, before transcript cleanup.
+  mono samples from `start_sample`. It runs the same decode plan (meeting VAD
+  chunks packed into decode groups), decoder settings and per-source options as
+  the final pass (independent stems keep the shared clock and have no per-source
+  word minimum). It returns the span's `[m:ss]` lines on the source clock, before
+  transcript cleanup.
 - `transcript_checkpoint::decode_hints_for_queued_meeting(title, pre_context, config)`
   returns the decode hints a queued meeting job builds when no calendar event
   matches it.
 - `jobs::queue_live_capture_with_transcript_checkpoint(.., checkpoint)` queues the
   capture with the spans. They are written beside the job (`<job>.checkpoint.json`,
-  owner-only on Unix), removed when the job finishes, and kept after a failure so
-  a retry can use them. A checkpoint that cannot be written is dropped with a
-  warning; the job still queues.
+  owner-only on Unix, see [Persistence](#persistence)), kept after a failure or
+  a "needs review" result so a retry can use them, and removed when the job
+  completes. A checkpoint that cannot be written is dropped with a warning; the
+  job still queues.
 
-Cut spans in a pause, so no word is split between two spans.
+Start and end a span only at a cut of the source's decode plan:
+`decode_groups::DecodePlan::for_growing_source(samples, target).cuts()`, where
+`samples` start at the source start or at an earlier cut. See
+[Decode groups](#decode-groups).
 
 ## Reusing a decoder during capture
 
@@ -48,9 +56,16 @@ a span only when all of these hold:
 - its settings fingerprint matches the final pass for that source: core version,
   effective engine, the transcription config, and the decode hints (a different
   title, vocabulary or calendar match changes the hints);
-- its SHA-256 over the canonical samples matches the same range of the final file.
+- its SHA-256 over the canonical samples matches the same range of the final file;
+- its decode groups are the final pass's groups for that range: no group crosses
+  either edge of the span.
 
-Ranges that no accepted span covers are VAD-chunked and transcribed as usual.
+The settings fingerprint also names the decode strategy: one call per chunk, or
+groups with their version, target, kept pause, loop thresholds and retry policy. A span made with
+another strategy is rejected even when the core version, settings and audio match.
+
+The final pass plans the decode groups of the whole source once. Groups that no
+accepted span covers are transcribed as usual.
 Span lines and new lines are joined in source order, and the transcript cleanup
 pipeline (dedup, noise trimming) then runs once over the whole source, as it does
 without checkpoints. Rejected spans are logged with the reason.
@@ -58,6 +73,78 @@ without checkpoints. Rejected spans are logged with the reason.
 Checkpoints are not used for authorized private-audio inputs, for a single
 surviving stem, for non-meeting content, or where meeting chunk rotation is
 bypassed. Those inputs are transcribed in full.
+
+## Final-pass progress
+
+The queue worker gives the final pass the path of the job's checkpoint file
+(`BackgroundPipelineContext::checkpoint_path`). The final pass then reads its
+offered spans from that file, and adds the decode groups it finishes, as spans of
+the same kind. One file holds both: spans from the recording and spans from
+earlier attempts.
+
+- A span is saved when a group ends and the span holds about two minutes of
+  audio, and when the last group before an accepted span or at the end of the
+  source is done. So each source is saved whole before the next source starts,
+  and both sources before diarization. A group that was interrupted is not saved.
+- A span runs from the cut before its first group to the cut after its last
+  group, so a retry plans the same groups for it. It never reaches into an
+  accepted span. Its lines are kept before transcript cleanup, which runs once
+  over the assembled source.
+- Spans are added per source, on that source's clock. A new span replaces the
+  spans of the same source that it overlaps. Those spans were rejected, because
+  the final pass decodes only audio that no accepted span covers.
+- A retry accepts the saved spans by the rules in
+  [What the final pass accepts](#what-the-final-pass-accepts), and decodes only
+  the rest. After a crash in `Diarizing`, both sources are saved whole: the retry
+  decodes nothing and runs diarization again. No speaker results are saved.
+- `crashed_while_transcribing` only switches a Sherpa retry to Whisper. It does
+  not decide whether spans are reused. The engine is part of the settings
+  fingerprint, so Sherpa spans do not match a Whisper retry.
+- A failed save is logged, and the transcription goes on. Each successful save
+  logs `transcript_checkpoint_span_saved` after the file is replaced, with the
+  source and the sample bounds of the span and without transcript text. So a
+  worker that is killed inside a source leaves a receipt for each span that is
+  on disk. The logs `transcript_checkpoint_saved` (per source, when the source
+  returns: spans saved and failed, seconds saved) and
+  `transcript_checkpoint_reuse` (offered, accepted, rejected) show the rest.
+
+The decode hints use the job's title, and saving the first transcript artifact
+replaces `job.title` with the generated display title. The job therefore keeps
+the title it was queued with in `decode_inputs.title`, also when it was none, and
+a retry builds its hints and calendar match from that title. Settings,
+vocabulary and the calendar are read again on each attempt. A real change there
+still rejects the old spans, and their text is never given the new fingerprint.
+Job files from before this field load as before and use `job.title`.
+
+Final-pass spans are saved only where the meeting path decodes groups. Private
+audio, a single surviving stem, non-meeting content and whole-file dispatch are
+not saved, as they are not reused.
+
+## Persistence
+
+`transcript_checkpoint::save_checkpoint_file` writes the whole checkpoint to a
+temporary file beside it (`<job>.checkpoint.json.<random>.tmp`). The file is
+created owner-only (`O_EXCL`, mode 0600 on Unix), written and synced, then renamed
+over the checkpoint in one step (`tempfile::NamedTempFile::persist`: `rename` on
+Unix, `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows, as config saves
+use). If a step fails, the previous file stays valid, and a reader never sees a
+partial file. A missing, unreadable, corrupt or other-version file loads as no
+checkpoint, and the job transcribes in full. Removal also deletes temporary files
+that a crash left beside the checkpoint.
+
+Retention: the checkpoint file holds transcript text. It stays as long as the
+job can be retried: through a failure, through a "needs review" result (which
+permits a manual requeue) and through each retry. There is no separate expiry,
+so retry progress is never thrown away while the failed job and its audio are
+kept. The file is removed when the job completes, and when the job's artifacts
+are deleted (`jobs::remove_capture_artifacts`), together with leftover temporary
+files.
+
+Durability: the contract is process death. A worker that is killed, or that
+crashes, leaves either the previous checkpoint or the new one, and both are
+valid. Power loss and system crash are out of scope: the directory is not
+synced after the rename, and no extra write-through flags are set on Windows.
+A stronger guarantee needs its own change.
 
 ## Trust
 
@@ -71,11 +158,58 @@ whoever can write those can already change the meeting. Do not treat the hash as
 an integrity check on the text, and do not accept checkpoints from a less
 trusted writer than the job itself.
 
+## Decode groups
+
+Whisper encodes a 30 s window for every call, so one call per short VAD chunk
+spends most of its work on padding. The Whisper meeting path packs adjacent VAD
+chunks into decode groups (`decode_groups`), and decodes each group in one call.
+The same plan is used by the whole-file pass, checkpoint spans and the gaps
+between accepted spans.
+
+- Groups are packed greedily from the start of each source. A chunk joins the
+  open group while the audio that Whisper gets for the group stays at most 30 s
+  (`WHISPER_GROUP_TARGET_SAMPLES`). That audio is the chunks and the kept pauses
+  between them.
+- 30 s is a packing target, not a maximum. The VAD chunker splits speech without
+  a pause at 45 s, and such a chunk is a group of its own.
+- Whisper gets the chunks of a group with the pauses between them. A pause of
+  up to 1 s (`GROUP_PAUSE_SAMPLES`) is kept whole. A longer pause is cut to 1 s:
+  0.5 s after the chunk before and 0.5 s before the chunk after. Without pauses,
+  Whisper `medium` dropped a one-word answer and timed short answers early in a
+  test with 60 s and 45 s pauses. A stem of a call is quiet while the other side
+  speaks, so whole pauses would use up the 30 s window.
+- Each line is mapped back to the source clock, sample for sample. Whisper
+  starts a segment where the segment before it ended, which is often in a pause
+  or in the quiet end of the speech before. A VAD chunk is not one stretch of
+  speech: it ends with 0.5 s of quiet, and a one-word answer shorter than 1 s
+  stays in one chunk with the sentence after a long silence. So the group
+  decoder finds the stretches of speech inside each chunk. A line starts in the
+  first stretch that its segment holds at least 0.3 s of. A line that starts
+  before that stretch gets the start of the stretch. A line that starts inside
+  it keeps its exact time.
+- The clock of the call does not change when Silero is not installed and energy
+  stripping removes silence before the decode. The stripped times are mapped
+  back (`whisper_guard::strip_silence_with_map`). A cleanup annotation in the
+  output of a call does not change the exact times of the other lines.
+- A cut is the point after a group where the VAD chunker resets: 800 ms after the
+  group's last chunk, or at its end for a 45 s split. A span from one cut to
+  another gets the same chunks and groups as the whole source. During a
+  recording, a group whose end is not known yet, because the open chunk after it
+  could still join it, has no cut. Stop leaves it to the final pass.
+- Loop guard: when a line of a group with more than one chunk is a repetition
+  loop inside one segment (`whisper_guard::find_repetition_loop`: a phrase 4+
+  times back to back, 16+ words), the group is decoded again once, one call per
+  chunk. That output is kept, even if it loops again, because it is what one
+  call per chunk produced before groups. The retry happens in the same way in
+  all three paths.
+- Other engines keep one call per chunk: their plan has one chunk per group.
+
 ## Equivalence
 
-Chunks are decoded independently, so a span's lines are what the final pass would
-produce for the same chunks. VAD chunk boundaries next to a span cut can differ
-from a whole-file pass. On synthetic two-stem calls (Whisper `small`, 120 s spans
-cut at the quietest 100 ms of their last 15 s), the word error rate against the
-reference was 8.4% against 8.3% (20 minutes) and 8.3% against 8.3% (60 minutes),
-inside the run-to-run variation of Whisper on Metal.
+Groups are decoded independently, so a span's lines are what the final pass would
+produce for the same groups. Before decode groups, VAD chunk boundaries next to a
+span cut could differ from a whole-file pass. On synthetic two-stem calls
+(Whisper `small`, 120 s spans cut at the quietest 100 ms of their last 15 s), the
+word error rate against the reference was 8.4% against 8.3% (20 minutes) and 8.3%
+against 8.3% (60 minutes), inside the run-to-run variation of Whisper on Metal.
+Spans now end only at cuts, and the final pass rejects a span whose groups differ.

@@ -664,6 +664,7 @@ pub fn enqueue_capture_job(
         context_session_id,
         calendar_event,
         template_slug,
+        None,
     )
 }
 
@@ -676,6 +677,9 @@ pub fn enqueue_capture_job(
 /// dismantle the recovery pair on success. Give the job its own hard link
 /// (copy fallback) instead; the archived source remains durable through
 /// success, failure, retry, and worker crashes.
+/// `recording_policy` must be the snapshot from before capture started, never
+/// inferred from the current session or configuration when promotion runs.
+/// Unknown captures/imports pass `None` and cannot authorize remote uploads.
 #[allow(clippy::too_many_arguments)]
 pub fn enqueue_preserved_capture_job(
     mode: CaptureMode,
@@ -688,6 +692,7 @@ pub fn enqueue_preserved_capture_job(
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
+    recording_policy: Option<crate::sensitive::RecordingPolicy>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
     let audio_path = link_preserved_capture_into_job(&job_id, preserved_audio_path)?;
@@ -703,6 +708,7 @@ pub fn enqueue_preserved_capture_job(
         context_session_id,
         calendar_event,
         template_slug,
+        recording_policy,
     );
     if result.is_err() {
         fs::remove_file(audio_path).ok();
@@ -752,9 +758,10 @@ fn enqueue_capture_job_with_id(
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
+    recording_policy: Option<crate::sensitive::RecordingPolicy>,
 ) -> std::io::Result<ProcessingJob> {
     let job = ProcessingJob {
-        recording_policy: None,
+        recording_policy,
         id: job_id,
         mode,
         content_type: mode.content_type(),
@@ -2229,6 +2236,7 @@ mod tests {
                 None,
                 None,
                 Some(Local::now()),
+                None,
                 None,
                 None,
                 None,

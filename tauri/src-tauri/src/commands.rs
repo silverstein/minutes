@@ -17552,6 +17552,57 @@ mod tests {
         });
     }
 
+    #[test]
+    fn remote_transcription_settings_round_trip_and_switch_back() {
+        with_temp_home(|_| {
+            let original = Config::load();
+            cmd_set_setting(
+                "transcription".into(),
+                "engine".into(),
+                "openai-compatible".into(),
+            )
+            .unwrap();
+            for (key, value) in [
+                ("openai_compatible_base_url", "http://127.0.0.1:9876/v1"),
+                ("openai_compatible_model", "synthetic-model"),
+                (
+                    "openai_compatible_api_key_env",
+                    "SYNTHETIC_TRANSCRIPTION_KEY",
+                ),
+                ("openai_compatible_max_upload_bytes", "1234567"),
+            ] {
+                cmd_set_setting("transcription".into(), key.into(), value.into()).unwrap();
+            }
+            let loaded = Config::load();
+            assert_eq!(loaded.transcription.engine, "openai-compatible");
+            assert_eq!(
+                loaded.transcription.openai_compatible_base_url,
+                "http://127.0.0.1:9876/v1"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_model,
+                "synthetic-model"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_api_key_env,
+                "SYNTHETIC_TRANSCRIPTION_KEY"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_max_upload_bytes,
+                1234567
+            );
+            assert_eq!(loaded.transcription.model, original.transcription.model);
+            assert_eq!(loaded.live_transcript.model, original.live_transcript.model);
+            cmd_set_setting("transcription".into(), "engine".into(), "whisper".into()).unwrap();
+            let local = Config::load();
+            assert_eq!(local.transcription.engine, "whisper");
+            assert_eq!(
+                local.transcription.openai_compatible_base_url,
+                loaded.transcription.openai_compatible_base_url
+            );
+        });
+    }
+
     /// Ban the `.ok()`/`let _ =` swallow on `cmd_set_setting`. A discarded
     /// Result hides an "Unknown setting" error and silently drops the write —
     /// the exact failure mode behind the palette/live regressions. Require `?`
@@ -23121,6 +23172,9 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         app: app.clone(),
     };
 
+    // Keep the capture-time restriction even if sensitive-session state
+    // changes before the saved WAV is promoted on stop.
+    let recording_policy = minutes_core::sensitive::recording_policy();
     let mut config = Config::load();
     // Re-validate the pinned input device for mid-session disconnects
     // (#189). In-memory only; startup-side persistence is in main.rs.
@@ -23246,6 +23300,7 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
                     live_context_session_id.clone(),
                     None,
                     None,
+                    recording_policy,
                 ) {
                     Ok(job) => {
                         let jsonl_path = path.with_extension("jsonl");

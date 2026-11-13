@@ -7237,7 +7237,7 @@
             <input id="settings-transcription-key-env" class="settings-field" spellcheck="false">
             <label for="settings-transcription-upload-limit">Upload limit in bytes (default 25000000)</label>
             <input id="settings-transcription-upload-limit" class="settings-field" type="number" min="1024" max="100000000">
-            <div class="about-controls-meta">Requires a matching normal-sensitivity Markdown record in your meetings folder before upload. Unclassified recordings are refused. Audio and stems remain on disk if a request fails.</div>
+            <div class="about-controls-meta">Requires a normal-sensitivity capture policy or a matching Markdown record in your meetings folder before upload. Unclassified recordings are refused. Audio and stems remain on disk if a request fails.</div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -14191,9 +14191,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         // Whisper stays visible under Parakeet: it still takes over when
         // Parakeet fails, so its model has to be chosen and downloaded.
         const batchUsesWhisper = resolvedBatchEngine === 'whisper';
-        document.getElementById('settings-whisper-model-label').textContent = remoteTranscription
-          ? 'Local Whisper model (live transcript only)'
-          : (batchUsesWhisper ? 'Whisper model' : 'Whisper model (used if Parakeet fails)');
+        // This preference selects only the batch model. Live inference has
+        // its own model resolution; do not advertise this as a live selector.
+        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', remoteTranscription);
+        document.getElementById('settings-whisper-model-label').textContent = batchUsesWhisper
+          ? 'Whisper model' : 'Whisper model (used if Parakeet fails)';
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
         renderParakeetSettingsStatus(parakeetStatus, parakeetSelectable, parakeetUnavailableReason);
@@ -14918,13 +14920,20 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         button.disabled = false;
       }
     });
-    for (const [id, key] of [
-      ['settings-transcription-base-url', 'openai_compatible_base_url'],
-      ['settings-transcription-remote-model', 'openai_compatible_model'],
-      ['settings-transcription-key-env', 'openai_compatible_api_key_env'],
-      ['settings-transcription-upload-limit', 'openai_compatible_max_upload_bytes'],
-    ]) document.getElementById(id).addEventListener('change', async (e) => {
-      await invoke('cmd_set_setting', { section: 'transcription', key, value: e.target.value });
+    document.getElementById('settings-transcription-base-url').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_base_url', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-remote-model').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_model', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-key-env').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_api_key_env', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-upload-limit').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_max_upload_bytes', value: e.target.value });
       await loadSettings();
     });
     document.getElementById('settings-transcription-engine').addEventListener('change', async (e) => {

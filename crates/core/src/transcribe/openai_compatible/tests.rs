@@ -11,6 +11,9 @@ const OK: &str =
     r#"{"language":"en","segments":[{"start":0.125,"end":0.75,"text":"hello from server"}]}"#;
 
 fn read_request(stream: &mut TcpStream) -> CapturedRequest {
+    // Accepted sockets can inherit the listener's nonblocking mode on
+    // macOS/Windows. SO_RCVTIMEO does not make a nonblocking read wait.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -86,6 +89,27 @@ fn fixture(root: &Path, seconds: usize) -> (Config, PathBuf) {
     .unwrap();
     std::fs::write(audio.with_extension("md"), "---\ntitle: Test recording\ntype: meeting\ndate: 2026-01-01T12:00:00Z\nsensitivity: normal\n---\n").unwrap();
     (config, audio)
+}
+
+#[test]
+fn request_reader_waits_for_delayed_body_on_nonblocking_accepted_socket() {
+    // Reproduce the accepted-socket mode inherited on macOS/Windows on Linux too.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n")
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        client.write_all(b"body").unwrap();
+    });
+    let (headers, body) = read_request(&mut stream);
+    writer.join().unwrap();
+    assert!(headers.starts_with("POST / HTTP/1.1"));
+    assert_eq!(body, b"body");
 }
 
 #[test]
@@ -643,6 +667,140 @@ fn desktop_stale_missing_or_mismatched_capture_metadata_is_unknown() {
             assert!(
                 matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
             );
+        }
+    });
+}
+
+#[test]
+fn no_speech_is_an_empty_source_and_other_stem_completes() {
+    crate::test_support::with_temp_home(|root| {
+        let (mut config, audio) = fixture(root, 1);
+        let (base, handle) = server(vec![(200, r#"{"segments":[]}"#)], |_| {});
+        config.transcription.openai_compatible_base_url = base;
+        assert!(matches!(
+            super::super::transcribe(&audio, &config),
+            Err(TranscribeError::EmptyTranscript(_))
+        ));
+        assert_eq!(handle.join().unwrap().len(), 1);
+
+        let (mut config, job) = desktop_job(root, 1);
+        config.summarization.engine = "none".into();
+        config.diarization.engine = "none".into();
+        let (base, handle) = server(vec![(200, r#"{"segments":[]}"#), (200, OK)], |_| {});
+        config.transcription.openai_compatible_base_url = base;
+        crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+        let completed = crate::jobs::load_job(&job.id).unwrap();
+        assert_eq!(
+            completed.state,
+            crate::jobs::JobState::Complete,
+            "{:?}",
+            completed.error
+        );
+        let transcript = std::fs::read_to_string(completed.output_path.unwrap()).unwrap();
+        assert!(transcript.contains("[SYSTEM 0:00] hello from server"));
+        assert!(!transcript.contains("[MICROPHONE"));
+        assert_eq!(handle.join().unwrap().len(), 2);
+    });
+}
+
+#[test]
+fn standalone_live_promotion_carries_capture_policy() {
+    crate::test_support::with_temp_home(|root| {
+        let (mut config, audio) = fixture(root, 1);
+        std::fs::remove_file(audio.with_extension("md")).unwrap();
+        let capture_policy = crate::sensitive::recording_policy();
+        let job = crate::jobs::enqueue_preserved_capture_job(
+            crate::CaptureMode::LiveTranscript,
+            None,
+            &audio,
+            None,
+            None,
+            Some(chrono::Local::now()),
+            Some(chrono::Local::now()),
+            None,
+            None,
+            None,
+            capture_policy,
+        )
+        .unwrap();
+        assert!(job.recording_policy.is_some());
+        assert_eq!(
+            crate::jobs::load_job(&job.id).unwrap().recording_policy,
+            job.recording_policy
+        );
+        config.summarization.engine = "none".into();
+        config.diarization.engine = "none".into();
+        let (base, handle) = server(vec![(200, OK)], |_| {});
+        config.transcription.openai_compatible_base_url = base;
+        crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+        let completed = crate::jobs::load_job(&job.id).unwrap();
+        assert_eq!(
+            completed.state,
+            crate::jobs::JobState::Complete,
+            "{:?}",
+            completed.error
+        );
+        assert!(std::fs::read_to_string(completed.output_path.unwrap())
+            .unwrap()
+            .contains("hello from server"));
+        assert!(audio.exists(), "live archive must survive promotion");
+        assert_eq!(handle.join().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn standalone_live_promotion_keeps_restricted_and_unknown_capture_policy() {
+    crate::test_support::with_temp_home(|root| {
+        for case in ["restricted", "malformed", "unreadable"] {
+            let (mut config, audio) = fixture(root, 1);
+            std::fs::remove_file(audio.with_extension("md")).unwrap();
+            match case {
+                "restricted" => {
+                    crate::sensitive::start(Some("Synthetic live session")).unwrap();
+                }
+                "malformed" => {
+                    std::fs::write(crate::sensitive::session_path(), "invalid JSON").unwrap()
+                }
+                _ => std::fs::create_dir_all(crate::sensitive::session_path()).unwrap(),
+            }
+            let capture_policy = crate::sensitive::recording_policy();
+            // Ending the session must not reclassify the already captured audio.
+            if case == "unreadable" {
+                std::fs::remove_dir(crate::sensitive::session_path()).unwrap();
+            } else {
+                std::fs::remove_file(crate::sensitive::session_path()).unwrap();
+            }
+            let job = crate::jobs::enqueue_preserved_capture_job(
+                crate::CaptureMode::LiveTranscript,
+                None,
+                &audio,
+                None,
+                None,
+                Some(chrono::Local::now()),
+                Some(chrono::Local::now()),
+                None,
+                None,
+                None,
+                capture_policy,
+            )
+            .unwrap();
+            assert_eq!(job.recording_policy, capture_policy, "{case}");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            config.transcription.openai_compatible_base_url =
+                format!("http://{}/v1", listener.local_addr().unwrap());
+            crate::jobs::process_pending_jobs(&config, |_| {}).unwrap();
+            let failed = crate::jobs::load_job(&job.id).unwrap();
+            assert_eq!(failed.state, crate::jobs::JobState::Failed, "{case}");
+            assert!(
+                failed.error.unwrap().contains("egress policy refused"),
+                "{case}"
+            );
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            assert!(audio.exists());
+            assert!(Path::new(&job.audio_path).exists());
         }
     });
 }

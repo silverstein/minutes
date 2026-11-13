@@ -24,7 +24,84 @@ assert(html.slice(settings, html.indexOf('</select>', settings)).includes('value
 assert.match(html, /id="settings-remote-transcription" hidden/);
 assert.match(html, /#settings-remote-transcription\[hidden\] \{ display: none; \}/);
 assert(html.includes('API key environment variable name (never the key)'));
-assert(html.includes('Local Whisper model (live transcript only)'));
+assert(!html.includes('Local Whisper model (live transcript only)'));
 const beforeSettings = html.slice(0, settings);
 assert(!beforeSettings.includes('<option value="openai-compatible">OpenAI-compatible — remote, batch only'));
 console.log('Remote transcription settings: JavaScript parses; host disclosure, local live wording, hidden controls, and opt-in option pass.');
+
+// Execute shipped rendering and handlers with deterministic DOM/IPC doubles.
+const elements = new Map();
+const document = {
+  getElementById(id) {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, {
+        value: '', hidden: false, textContent: '', handlers: {},
+        classList: {
+          toggle(name, on) { if (on) classes.add(name); else classes.delete(name); },
+          contains(name) { return classes.has(name); },
+        },
+        addEventListener(type, handler) { this.handlers[type] = handler; },
+      });
+    }
+    return elements.get(id);
+  },
+};
+const fields = [
+  ['settings-transcription-base-url', 'openai_compatible_base_url', 'http://127.0.0.1:9876/v1'],
+  ['settings-transcription-remote-model', 'openai_compatible_model', 'synthetic-model'],
+  ['settings-transcription-key-env', 'openai_compatible_api_key_env', 'SYNTHETIC_TRANSCRIPTION_KEY'],
+  ['settings-transcription-upload-limit', 'openai_compatible_max_upload_bytes', '1234567'],
+];
+const state = { transcription: { engine: 'whisper', resolved_engine: 'whisper', model: 'small' } };
+const renderBegin = html.indexOf('        const remoteTranscription =');
+const renderEnd = html.indexOf('        refreshParakeetInstall();', renderBegin);
+const modelBegin = html.indexOf('        const batchUsesWhisper =', renderEnd);
+const modelEnd = html.indexOf("        document.getElementById('settings-parakeet-section')", modelBegin);
+assert(renderBegin > 0 && renderEnd > renderBegin && modelEnd > modelBegin);
+const render = new Function('s', 'document', `
+  const resolvedBatchEngine = s.transcription.resolved_engine;
+  const engineDetail = {};
+  ${html.slice(renderBegin, renderEnd)}
+  ${html.slice(modelBegin, modelEnd)}
+`);
+const renderSettings = async () => render(state, document);
+const calls = [];
+const invoke = async (command, args) => {
+  assert.equal(command, 'cmd_set_setting');
+  calls.push(args);
+  assert.equal(args.section, 'transcription');
+  state.transcription[args.key] = args.value;
+  if (args.key === 'engine') state.transcription.resolved_engine = args.value;
+};
+const handlerBegin = html.indexOf("    document.getElementById('settings-transcription-base-url').addEventListener", html.indexOf('    // Settings change handlers'));
+const handlerEnd = html.indexOf("    document.getElementById('settings-parakeet-model').addEventListener", handlerBegin);
+assert(handlerBegin > 0 && handlerEnd > handlerBegin);
+new Function('document', 'invoke', 'loadSettings', 'checkSetup', html.slice(handlerBegin, handlerEnd))(
+  document, invoke, renderSettings, async () => {},
+);
+const change = async (id, value) => {
+  const element = document.getElementById(id);
+  element.value = value;
+  await element.handlers.change({ target: element });
+};
+await renderSettings();
+assert.equal(document.getElementById('settings-remote-transcription').hidden, true);
+await change('settings-transcription-engine', 'openai-compatible');
+assert.equal(document.getElementById('settings-remote-transcription').hidden, false);
+assert(document.getElementById('settings-whisper-section').classList.contains('is-hidden'),
+  'Remote mode must hide the batch-only model selector, whose preference does not select the live model');
+for (const [id, key, value] of fields) {
+  await change(id, value);
+  assert.equal(state.transcription[key], value);
+  document.getElementById(id).value = '';
+  await renderSettings();
+  assert.equal(document.getElementById(id).value, value);
+  assert(calls.some(call => call.key === key && call.value === value));
+}
+await change('settings-transcription-engine', 'whisper');
+assert.equal(document.getElementById('settings-remote-transcription').hidden, true);
+assert.equal(document.getElementById('settings-whisper-section').classList.contains('is-hidden'), false);
+assert.equal(document.getElementById('settings-whisper-model-label').textContent, 'Whisper model');
+for (const [id, key, value] of fields) assert.equal(state.transcription[key], value);
+console.log('Remote Settings behavior: engine switching, all four setter calls, reload persistence, batch-model visibility, and switching back pass (mock IPC).');

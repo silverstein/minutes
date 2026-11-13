@@ -1824,7 +1824,9 @@ fn process_pending_jobs_with_transcriber(
                 &artifact.write_result,
                 &recording_duration(&review_job),
             ));
-            remove_transcript_checkpoint(&review_job.id);
+            // "Needs review" permits a manual requeue, as a failure does.
+            // The checkpoint stays for that retry. It goes when the job
+            // completes or its artifacts are deleted.
             maybe_mark_context_session_complete(&review_job, artifact.write_result.content_type);
             // Graph answers are disposable, policy-fresh projections of the
             // current Markdown corpus; there is no durable index to refresh.
@@ -2260,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_transcript_checkpoint_reaches_the_transcriber_and_is_removed_after() {
+    fn queued_transcript_checkpoint_reaches_the_transcriber_and_stays_for_a_requeue() {
         use crate::transcript_checkpoint::{
             CheckpointSource, CheckpointSpan, TranscriptCheckpoint,
         };
@@ -2283,9 +2285,9 @@ mod tests {
                 ..Default::default()
             };
 
-            for (outcome, keeps_checkpoint) in [
-                (FakeProcessingOutcome::FailedTranscription, true),
-                (FakeProcessingOutcome::NoSpeech, false),
+            for (outcome, ended_as) in [
+                (FakeProcessingOutcome::FailedTranscription, JobState::Failed),
+                (FakeProcessingOutcome::NoSpeech, JobState::NeedsReview),
             ] {
                 let current_wav = dir.path().join(format!("current-{outcome:?}.wav"));
                 create_sample_bearing_wav(&current_wav);
@@ -2335,8 +2337,40 @@ mod tests {
                     .unwrap();
 
                 assert_eq!(seen.as_ref(), Some(&checkpoint), "outcome {outcome:?}");
-                // A failed job keeps its spans for a retry; a finished one drops them.
-                assert_eq!(saved.exists(), keeps_checkpoint, "outcome {outcome:?}");
+                // Both end states permit a manual requeue, so both keep the
+                // spans.
+                assert_eq!(load_job(&queued.id).unwrap().state, ended_as);
+                assert!(saved.exists(), "outcome {outcome:?}");
+
+                // The manual requeue gives the spans to the next attempt.
+                let requeued = requeue_job(&queued.id).unwrap().unwrap();
+                assert_eq!(requeued.state, JobState::Queued);
+                let mut seen_again = None;
+                let mut transcribe_again =
+                    |_: &Path,
+                     _: ContentType,
+                     _: Option<&str>,
+                     _: &Config,
+                     context: &BackgroundPipelineContext,
+                     _: Option<&Path>| {
+                        seen_again = context.transcript_checkpoint.as_deref().cloned();
+                        Err(TranscribeError::TranscriptionFailed("stop here".into()).into())
+                    };
+                process_pending_jobs_with_transcriber(
+                    &config,
+                    &mut |_: &ProcessingJob| {},
+                    &mut transcribe_again,
+                )
+                .unwrap();
+                assert_eq!(
+                    seen_again.as_ref(),
+                    Some(&checkpoint),
+                    "outcome {outcome:?}"
+                );
+
+                // Deleting the job's artifacts deletes the spans with them.
+                remove_capture_artifacts(&load_job(&queued.id).unwrap());
+                assert!(!saved.exists(), "outcome {outcome:?}");
             }
         });
     }

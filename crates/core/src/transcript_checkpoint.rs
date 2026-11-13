@@ -519,6 +519,18 @@ impl<'a> SourcePass<'a> {
                     Ok(()) => {
                         saved += 1;
                         saved_samples += range.len();
+                        // One receipt per replaced file, without transcript
+                        // text. A worker that dies inside a source leaves no
+                        // summary, and these show what was durable.
+                        crate::logging::log_step(
+                            "transcript_checkpoint_span_saved",
+                            "",
+                            0,
+                            serde_json::json!({
+                                "source": self.source,
+                                "start_sample": range.start, "end_sample": range.end,
+                            }),
+                        );
                     }
                     Err(error) => {
                         failed += 1;

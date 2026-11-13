@@ -210,6 +210,17 @@ let normalized = normalize_audio(&resampled);
 let speech_only = strip_silence(&normalized, 16_000);
 ```
 
+Stripped audio has a shorter clock than the input. To put transcript times back
+on the input clock, use `strip_silence_with_map` and `input_position`:
+
+```rust
+use whisper_guard::{input_position, strip_silence_with_map};
+
+let (speech_only, kept) = strip_silence_with_map(&normalized, 16_000);
+// A segment that starts 2.5 s into `speech_only`:
+let input_secs = input_position(&kept, 2.5 * 16_000.0) / 16_000.0;
+```
+
 ### Whisper parameter presets (optional)
 
 Behind the `whisper` feature, `params` exposes preconfigured `FullParams` builders

@@ -80,7 +80,9 @@ pub mod segments;
 pub mod params;
 
 // Re-export the most common entry points
-pub use audio::{normalize_audio, resample, strip_silence};
+pub use audio::{
+    input_position, normalize_audio, resample, strip_silence, strip_silence_with_map, KeptRun,
+};
 pub use segments::{
     clean_segments, clean_segments_with_options, clean_transcript, find_repetition_loop,
     strip_trailing_commands, CleanOptions, CleanStats, RepetitionLoop,

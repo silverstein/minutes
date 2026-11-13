@@ -18,8 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers at least 16 words (`LOOP_MIN_REPEATS`, `LOOP_MIN_WORDS`). Words use the
   same key as `dedup_segments`, so a repeat with another name, number or a
   negation is not a loop.
+- **`strip_silence_with_map(&[f32], u32) -> (Vec<f32>, Vec<KeptRun>)`** and
+  **`input_position(&[KeptRun], f64) -> f64`** - `strip_silence` with a map of
+  the kept samples. Stripped audio has a shorter clock than the input. A caller
+  that decodes the stripped audio can now put each transcript time back on the
+  input clock. `strip_silence` returns the same samples as before.
 
-No changes to existing functions.
+No changes to the results of existing functions.
 
 ## [0.3.2] - 2026-10-18
 

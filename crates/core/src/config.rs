@@ -236,10 +236,18 @@ impl Default for VoiceConfig {
 #[serde(default)]
 pub struct TranscriptionConfig {
     /// Transcription engine preference: "auto" (default), "whisper", "sherpa",
-    /// "parakeet", or "apple-speech". Auto selects sherpa Parakeet v3 only on
+    /// "parakeet", "apple-speech", or "openai-compatible" (remote batch only).
+    /// Auto selects sherpa Parakeet v3 only on
     /// Apple Silicon when the engine is compiled and the model is installed;
     /// otherwise it resolves to Whisper.
     pub engine: String,
+    /// Explicit batch-only remote endpoint. No provider is contacted by auto.
+    pub openai_compatible_base_url: String,
+    pub openai_compatible_model: String,
+    /// Environment variable NAME only; never store the credential here.
+    pub openai_compatible_api_key_env: String,
+    /// Maximum complete multipart upload size in bytes (default: 25 MB).
+    pub openai_compatible_max_upload_bytes: usize,
     pub model: String,
     pub model_path: PathBuf,
     pub min_words: usize,
@@ -1781,6 +1789,10 @@ impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
             engine: "auto".into(),
+            openai_compatible_base_url: "http://localhost:8000/v1".into(),
+            openai_compatible_model: "whisper-1".into(),
+            openai_compatible_api_key_env: String::new(),
+            openai_compatible_max_upload_bytes: 25_000_000,
             model: "small".into(),
             model_path: minutes_dir().join("models"),
             min_words: 3,
@@ -1912,11 +1924,23 @@ impl Default for WatchConfig {
 // ── Loading ──────────────────────────────────────────────────
 
 impl Config {
+    /// Disclosure shown at recording start, including the selected upload host.
+    pub fn recording_disclosure(&self) -> String {
+        if crate::transcribe::effective_transcription_engine(self) == "openai-compatible" {
+            let notice = crate::transcribe::remote_transcription_notice(self);
+            if self.consent.disclosure_script == ConsentConfig::default().disclosure_script {
+                return format!("Heads up: I'm using Minutes for my notes. {notice} Let me know if you'd prefer I didn't.");
+            }
+            return format!("{notice} {}", self.consent.disclosure_script);
+        }
+        self.consent.disclosure_script.clone()
+    }
+
     /// Effective backend for the standalone live transcript path.
     ///
     /// `live_transcript.backend = "inherit"` follows an explicit
-    /// `transcription.engine`, except that the batch-only `"auto"` setting
-    /// resolves to Whisper for live transcription. The legacy
+    /// `transcription.engine`, except that the batch-only `"auto"` and
+    /// `"openai-compatible"` settings resolve to Whisper for live transcription. The legacy
     /// `transcription.engine = "apple-speech"` case is retained here because
     /// older configs used it to express the standalone-live-only experiment.
     pub fn effective_live_transcript_backend(&self) -> &str {
@@ -1931,7 +1955,12 @@ impl Config {
                 .eq_ignore_ascii_case("apple-speech")
             {
                 "apple-speech"
-            } else if self.transcription.engine.eq_ignore_ascii_case("auto") {
+            } else if self.transcription.engine.eq_ignore_ascii_case("auto")
+                || self
+                    .transcription
+                    .engine
+                    .eq_ignore_ascii_case("openai-compatible")
+            {
                 "whisper"
             } else {
                 &self.transcription.engine

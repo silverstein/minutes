@@ -1086,6 +1086,9 @@ jobs:
       - name: Test stored update offer restoration
         run: node scripts/test_update_offer.mjs
 
+      - name: Test remote transcription Settings
+        run: node scripts/test_remote_transcription_settings.mjs
+
       - name: Test shipped dictation controllers
         run: |
           node scripts/test_dictation_readiness.mjs

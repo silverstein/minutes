@@ -62,8 +62,8 @@ pub struct SensitiveDebrief {
 /// Error returned by sensitive meeting session operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SensitiveError {
-    /// A normal recording is already active.
-    #[error("recording in progress - stop it before starting a sensitive meeting")]
+    /// Audio capture is already active.
+    #[error("audio capture in progress - stop recording or Live Transcript before starting a sensitive meeting")]
     RecordingActive,
     /// A sensitive session is already active.
     #[error("sensitive meeting already active: {title}")]
@@ -108,6 +108,38 @@ pub fn session_path() -> PathBuf {
 /// Path to the sensitive-session mutation lock file.
 pub fn lock_path() -> PathBuf {
     Config::minutes_dir().join(SENSITIVE_LOCK_FILE)
+}
+
+/// Policy known before transcription, captured with recording metadata.
+/// Both fields are required when present; missing/invalid policy is unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingPolicy {
+    pub sensitivity: Sensitivity,
+    pub capture_enabled: bool,
+}
+
+/// Read the same sensitive-session source used by recording exclusivity.
+/// Unlike the UI's best-effort reader, unreadable/malformed state stays unknown.
+/// Never discard a restriction merely because its owner has exited.
+/// First-party capture callers must snapshot this before starting capture
+/// and carry it to the queue. Reading it at promotion time would lose the
+/// original restriction when a sensitive session has ended.
+pub fn recording_policy() -> Option<RecordingPolicy> {
+    let path = session_path();
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(RecordingPolicy {
+            sensitivity: Sensitivity::Normal,
+            capture_enabled: true,
+        }),
+        Ok(metadata) if metadata.is_file() => fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SensitiveSession>(&bytes).ok())
+            .map(|_| RecordingPolicy {
+                sensitivity: Sensitivity::Restricted,
+                capture_enabled: false,
+            }),
+        _ => None,
+    }
 }
 
 /// Return true when a sensitive session file is active.
@@ -218,12 +250,16 @@ pub fn stop(
 
 /// Return an error if a sensitive session is active.
 pub fn ensure_inactive_for_recording() -> Result<(), SensitiveError> {
-    if let Some(existing) = active_session() {
-        return Err(SensitiveError::AlreadyActive {
-            title: existing.title,
-        });
-    }
-    Ok(())
+    // Capture callers publish their PID before this check. Serialize with
+    // sensitive start so neither transition can pass while the other starts.
+    with_lock(|| {
+        if let Some(existing) = active_session() {
+            return Err(SensitiveError::AlreadyActive {
+                title: existing.title,
+            });
+        }
+        Ok(())
+    })
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T, SensitiveError>) -> Result<T, SensitiveError> {
@@ -272,7 +308,9 @@ fn remove_session_file() -> Result<(), SensitiveError> {
 }
 
 fn ensure_recording_inactive() -> Result<(), SensitiveError> {
-    if pid::inspect_pid_file(&pid::pid_path()).is_active() {
+    if pid::inspect_pid_file(&pid::pid_path()).is_active()
+        || pid::inspect_pid_file(&pid::live_transcript_pid_path()).is_active()
+    {
         return Err(SensitiveError::RecordingActive);
     }
     Ok(())
@@ -479,6 +517,21 @@ mod tests {
             let error = start(Some("Board sync")).unwrap_err();
             assert!(matches!(error, SensitiveError::RecordingActive));
             pid::remove().ok();
+        });
+    }
+
+    #[test]
+    fn sensitive_start_rejects_active_live_transcript() {
+        with_temp_home(|_| {
+            let live_guard = pid::create_pid_guard(&pid::live_transcript_pid_path()).unwrap();
+            let result = start(Some("Private discussion"));
+            assert!(
+                matches!(result, Err(SensitiveError::RecordingActive)),
+                "sensitive mode must not start while Live captures audio: {result:?}"
+            );
+            assert!(!session_path().exists());
+            drop(live_guard);
+            assert!(start(Some("Private discussion")).is_ok());
         });
     }
 

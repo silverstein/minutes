@@ -110,6 +110,11 @@ impl CaptureMode {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordingMetadata {
+    /// Binds policy to this capture rather than a stale metadata file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_recorded_at: Option<chrono::DateTime<chrono::Local>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_policy: Option<crate::sensitive::RecordingPolicy>,
     pub mode: CaptureMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_session_id: Option<String>,
@@ -143,6 +148,8 @@ pub fn write_recording_metadata_with_context(
     }
 
     let metadata = RecordingMetadata {
+        policy_recorded_at: Some(chrono::Local::now()),
+        recording_policy: crate::sensitive::recording_policy(),
         mode,
         context_session_id: context_session_id.map(str::to_string),
     };
@@ -914,6 +921,7 @@ mod tests {
         // walks per UI status poll.
         let _guard = crate::test_support::home_env_lock();
         let job = crate::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-status-check".into(),
             mode: CaptureMode::Meeting,
             content_type: crate::markdown::ContentType::Meeting,
@@ -969,6 +977,7 @@ mod tests {
         // desc; the active in-flight job must surface as the summary.
         let _guard = crate::test_support::home_env_lock();
         let mk = |id: &str, state: crate::jobs::JobState, title: &str| crate::jobs::ProcessingJob {
+            recording_policy: None,
             id: id.into(),
             mode: CaptureMode::Meeting,
             content_type: crate::markdown::ContentType::Meeting,

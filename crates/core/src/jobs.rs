@@ -70,6 +70,9 @@ impl JobState {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessingJob {
+    /// Capture-time egress policy. Legacy/imported jobs remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_policy: Option<crate::sensitive::RecordingPolicy>,
     pub id: String,
     pub mode: CaptureMode,
     pub content_type: ContentType,
@@ -262,6 +265,20 @@ pub fn queue_live_capture_with_transcript_checkpoint(
         .unwrap_or_else(|| audio_path.clone());
     let new_screen_dir = crate::screen::screens_dir_for(&new_screen_anchor);
     let job = ProcessingJob {
+        recording_policy: pid::read_recording_metadata()
+            .filter(|metadata| {
+                metadata.mode == mode
+                    && metadata.context_session_id == context_session_id
+                    && metadata
+                        .policy_recorded_at
+                        .zip(recording_started_at)
+                        .is_some_and(|(policy_at, started)| {
+                            policy_at >= started
+                                && recording_finished_at
+                                    .is_some_and(|finished| policy_at <= finished)
+                        })
+            })
+            .and_then(|metadata| metadata.recording_policy),
         id: job_id,
         mode,
         content_type: mode.content_type(),
@@ -647,6 +664,7 @@ pub fn enqueue_capture_job(
         context_session_id,
         calendar_event,
         template_slug,
+        None,
     )
 }
 
@@ -659,6 +677,9 @@ pub fn enqueue_capture_job(
 /// dismantle the recovery pair on success. Give the job its own hard link
 /// (copy fallback) instead; the archived source remains durable through
 /// success, failure, retry, and worker crashes.
+/// `recording_policy` must be the snapshot from before capture started, never
+/// inferred from the current session or configuration when promotion runs.
+/// Unknown captures/imports pass `None` and cannot authorize remote uploads.
 #[allow(clippy::too_many_arguments)]
 pub fn enqueue_preserved_capture_job(
     mode: CaptureMode,
@@ -671,6 +692,7 @@ pub fn enqueue_preserved_capture_job(
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
+    recording_policy: Option<crate::sensitive::RecordingPolicy>,
 ) -> std::io::Result<ProcessingJob> {
     let job_id = next_job_id();
     let audio_path = link_preserved_capture_into_job(&job_id, preserved_audio_path)?;
@@ -686,6 +708,7 @@ pub fn enqueue_preserved_capture_job(
         context_session_id,
         calendar_event,
         template_slug,
+        recording_policy,
     );
     if result.is_err() {
         fs::remove_file(audio_path).ok();
@@ -735,8 +758,10 @@ fn enqueue_capture_job_with_id(
     context_session_id: Option<String>,
     calendar_event: Option<CalendarEvent>,
     template_slug: Option<String>,
+    recording_policy: Option<crate::sensitive::RecordingPolicy>,
 ) -> std::io::Result<ProcessingJob> {
     let job = ProcessingJob {
+        recording_policy,
         id: job_id,
         mode,
         content_type: mode.content_type(),
@@ -1687,6 +1712,13 @@ fn process_pending_jobs_with_transcriber(
     while let Some(job) = next_pending_job() {
         let owner_pid = std::process::id();
         let Some(mut job) = update_job_state(&job.id, |job| {
+            // A remote worker may die after sending a chunk. Exhaust the
+            // crash-recovery budget BEFORE dispatch so recovery fails closed
+            // instead of repeating an uncertain upload. Manual requeue still
+            // resets the budget and is the user's explicit retry.
+            if crate::transcribe::effective_batch_engine(config) == "openai-compatible" {
+                job.retry_count = MAX_AUTO_RETRIES;
+            }
             job.state = JobState::Transcribing;
             job.stage = JobState::Transcribing.default_stage();
             job.owner_pid = Some(owner_pid);
@@ -2207,6 +2239,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -2628,6 +2661,7 @@ mod tests {
             fs::write(&output_path, "# final").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-preserve".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2688,6 +2722,7 @@ mod tests {
             fs::write(&output_path, "# native final").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-preserve-native".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2753,6 +2788,7 @@ mod tests {
                 fs::write(&output_path, "# out").unwrap();
 
                 let job = ProcessingJob {
+                    recording_policy: None,
                     id: job_id.into(),
                     mode: CaptureMode::Meeting,
                     content_type: ContentType::Meeting,
@@ -2860,6 +2896,7 @@ mod tests {
     fn list_jobs_recovers_stale_worker_claims() {
         with_temp_home(|_| {
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-stale".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -2901,6 +2938,7 @@ mod tests {
 
     fn crash_test_job(id: &str, state: JobState) -> ProcessingJob {
         ProcessingJob {
+            recording_policy: None,
             id: id.into(),
             mode: CaptureMode::Meeting,
             content_type: ContentType::Meeting,
@@ -2976,6 +3014,7 @@ mod tests {
             // that's exactly the "loop forever on a deterministic crash"
             // case from issue #229.
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-burned".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3033,6 +3072,7 @@ mod tests {
         with_temp_home(|dir| {
             let audio_path = dir.path().join("fake.wav");
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-retry-reset".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3076,6 +3116,7 @@ mod tests {
             let audio_path = dir.path().join("fake.wav");
             let output_path = dir.path().join("existing.md").display().to_string();
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-failed".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3123,6 +3164,7 @@ mod tests {
             fs::write(&audio_path, b"fake-wav").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-dismissed".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3170,6 +3212,7 @@ mod tests {
             fs::write(&audio_path, b"fake-wav").unwrap();
 
             let job = ProcessingJob {
+                recording_policy: None,
                 id: "job-complete".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3214,6 +3257,7 @@ mod tests {
     fn processing_summary_prefers_active_work_over_newer_queued_jobs() {
         with_temp_home(|_| {
             let active = ProcessingJob {
+                recording_policy: None,
                 id: "job-active".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3243,6 +3287,7 @@ mod tests {
                 crashed_while_transcribing: false,
             };
             let queued = ProcessingJob {
+                recording_policy: None,
                 id: "job-queued".into(),
                 mode: CaptureMode::Meeting,
                 content_type: ContentType::Meeting,
@@ -3287,6 +3332,7 @@ mod tests {
     /// suite avoids drift while not refactoring the existing fixtures.
     fn make_test_job(id: &str, state: JobState) -> ProcessingJob {
         ProcessingJob {
+            recording_policy: None,
             id: id.into(),
             mode: CaptureMode::Meeting,
             content_type: ContentType::Meeting,

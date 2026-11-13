@@ -822,6 +822,23 @@ fn whisper_model_readiness(
 }
 
 fn batch_transcription_readiness_view(config: &Config) -> SurfaceReadinessView {
+    if minutes_core::transcribe::effective_transcription_engine(config) == "openai-compatible" {
+        let status = minutes_core::transcribe::remote_transcription_status(config);
+        return SurfaceReadinessView {
+            configured_backend: config.transcription.engine.clone(),
+            resolved_backend: "openai-compatible".into(),
+            ready: status.is_ok(),
+            model_name: config.transcription.openai_compatible_model.clone(),
+            detail: minutes_core::transcribe::remote_transcription_notice(config),
+            next_action: if status.is_ok() {
+                "none"
+            } else {
+                "configure-remote-transcription"
+            }
+            .into(),
+            fallback_order: vec!["openai-compatible".into()],
+        };
+    }
     let (ready, model_name, model_file) =
         whisper_model_readiness(config, &config.transcription.model);
     if config.transcription.engine == "parakeet" {
@@ -4940,12 +4957,21 @@ fn desktop_recording_consent_required(
         return None;
     }
 
-    let disclosure = config.consent.disclosure_script.trim();
-    if disclosure.is_empty() {
-        Some(Config::default().consent.disclosure_script)
-    } else {
-        Some(disclosure.to_string())
+    let mut disclosure_config = config.clone();
+    if disclosure_config
+        .consent
+        .disclosure_script
+        .trim()
+        .is_empty()
+    {
+        disclosure_config.consent.disclosure_script = Config::default().consent.disclosure_script;
     }
+    disclosure_config.consent.disclosure_script = disclosure_config
+        .consent
+        .disclosure_script
+        .trim()
+        .to_owned();
+    Some(disclosure_config.recording_disclosure())
 }
 
 fn show_user_notification_nonmodal(app_handle: &tauri::AppHandle, title: &str, body: &str) {
@@ -4996,7 +5022,8 @@ fn maybe_save_and_show_recording_consent(
     }
 
     let basis = desktop_recording_consent_basis(config);
-    let disclosure = config.consent.disclosure_script.trim();
+    let disclosure_text = config.recording_disclosure();
+    let disclosure = disclosure_text.trim();
     let notice = if config.consent.mode == ConsentMode::Off {
         None
     } else {
@@ -5011,10 +5038,17 @@ fn maybe_save_and_show_recording_consent(
     match config.consent.mode {
         ConsentMode::Off => {}
         ConsentMode::Remind => {
-            let mut body =
-                "Recording + transcribing locally - audio stays on your device.".to_string();
+            let mut body = if minutes_core::transcribe::effective_transcription_engine(config)
+                == "openai-compatible"
+            {
+                String::new()
+            } else {
+                "Recording + transcribing locally - audio stays on your device.".to_string()
+            };
             if let Some(disclosure) = notice {
-                body.push('\n');
+                if !body.is_empty() {
+                    body.push('\n');
+                }
                 body.push_str(disclosure);
             }
             eprintln!("[minutes] {}", body.replace('\n', " "));
@@ -5022,10 +5056,7 @@ fn maybe_save_and_show_recording_consent(
         }
         ConsentMode::Require => {
             if let Some(disclosure) = notice {
-                eprintln!(
-                    "[minutes] Recording + transcribing locally - audio stays on your device. {}",
-                    disclosure
-                );
+                eprintln!("[minutes] {}", disclosure);
             }
         }
     }
@@ -14006,6 +14037,11 @@ pub fn cmd_get_settings() -> serde_json::Value {
         },
         "transcription": {
             "engine": config.transcription.engine,
+            "remote_notice": minutes_core::transcribe::remote_transcription_notice(&config),
+            "openai_compatible_base_url": config.transcription.openai_compatible_base_url,
+            "openai_compatible_model": config.transcription.openai_compatible_model,
+            "openai_compatible_api_key_env": config.transcription.openai_compatible_api_key_env,
+            "openai_compatible_max_upload_bytes": config.transcription.openai_compatible_max_upload_bytes,
             "resolved_engine": batch_readiness.resolved_backend,
             "auto_engine_reason": auto_engine.reason,
             "sherpa_selectable": sherpa_selectable,
@@ -14377,9 +14413,11 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
             reject_unselectable_apple_speech(&value, "transcription engine")?;
             // Settings offers Auto and Parakeet v3 (sherpa); this list predated
             // them, so choosing either failed and Whisper could not be left.
-            if !["auto", "whisper", "sherpa", "parakeet"].contains(&value.as_str()) {
+            if !["auto", "whisper", "sherpa", "parakeet", "openai-compatible"]
+                .contains(&value.as_str())
+            {
                 return Err(format!(
-                    "unknown transcription engine '{}'. Valid: auto, whisper, sherpa, parakeet",
+                    "unknown transcription engine '{}'. Valid: auto, whisper, sherpa, parakeet, openai-compatible",
                     value
                 ));
             }
@@ -14393,6 +14431,28 @@ pub fn cmd_set_setting(section: String, key: String, value: String) -> Result<St
                 .into());
             }
             config.transcription.engine = value.clone();
+        }
+        ("transcription", "openai_compatible_base_url") => {
+            config.transcription.openai_compatible_base_url = value.clone();
+            minutes_core::transcribe::remote_transcription_host(&config)?;
+        }
+        ("transcription", "openai_compatible_model") => {
+            config.transcription.openai_compatible_model = value.clone()
+        }
+        ("transcription", "openai_compatible_api_key_env") => {
+            if !value
+                .bytes()
+                .enumerate()
+                .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
+            {
+                return Err("Enter an environment variable name, never an API key".into());
+            }
+            config.transcription.openai_compatible_api_key_env = value.clone();
+        }
+        ("transcription", "openai_compatible_max_upload_bytes") => {
+            config.transcription.openai_compatible_max_upload_bytes = value
+                .parse()
+                .map_err(|_| "Enter an upload limit in bytes")?;
         }
         ("transcription", "model") => config.transcription.model = value.clone(),
         ("transcription", "parakeet_model") => {
@@ -17492,6 +17552,57 @@ mod tests {
         });
     }
 
+    #[test]
+    fn remote_transcription_settings_round_trip_and_switch_back() {
+        with_temp_home(|_| {
+            let original = Config::load();
+            cmd_set_setting(
+                "transcription".into(),
+                "engine".into(),
+                "openai-compatible".into(),
+            )
+            .unwrap();
+            for (key, value) in [
+                ("openai_compatible_base_url", "http://127.0.0.1:9876/v1"),
+                ("openai_compatible_model", "synthetic-model"),
+                (
+                    "openai_compatible_api_key_env",
+                    "SYNTHETIC_TRANSCRIPTION_KEY",
+                ),
+                ("openai_compatible_max_upload_bytes", "1234567"),
+            ] {
+                cmd_set_setting("transcription".into(), key.into(), value.into()).unwrap();
+            }
+            let loaded = Config::load();
+            assert_eq!(loaded.transcription.engine, "openai-compatible");
+            assert_eq!(
+                loaded.transcription.openai_compatible_base_url,
+                "http://127.0.0.1:9876/v1"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_model,
+                "synthetic-model"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_api_key_env,
+                "SYNTHETIC_TRANSCRIPTION_KEY"
+            );
+            assert_eq!(
+                loaded.transcription.openai_compatible_max_upload_bytes,
+                1234567
+            );
+            assert_eq!(loaded.transcription.model, original.transcription.model);
+            assert_eq!(loaded.live_transcript.model, original.live_transcript.model);
+            cmd_set_setting("transcription".into(), "engine".into(), "whisper".into()).unwrap();
+            let local = Config::load();
+            assert_eq!(local.transcription.engine, "whisper");
+            assert_eq!(
+                local.transcription.openai_compatible_base_url,
+                loaded.transcription.openai_compatible_base_url
+            );
+        });
+    }
+
     /// Ban the `.ok()`/`let _ =` swallow on `cmd_set_setting`. A discarded
     /// Result hides an "Unknown setting" error and silently drops the write —
     /// the exact failure mode behind the palette/live regressions. Require `?`
@@ -19338,6 +19449,7 @@ mod tests {
     #[test]
     fn processing_job_view_includes_user_facing_stage_label() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-summary".into(),
             title: Some("Design review".into()),
             mode: CaptureMode::Meeting,
@@ -20376,6 +20488,7 @@ mod tests {
     #[test]
     fn needs_review_jobs_surface_as_preserved_capture_notices() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-review".into(),
             title: Some("Interview".into()),
             mode: CaptureMode::Meeting,
@@ -20417,6 +20530,7 @@ mod tests {
             minutes_core::diarize::CaptureSource::System,
         );
         let mut job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-recovered-system".into(),
             title: Some("Recovered call".into()),
             mode: CaptureMode::Meeting,
@@ -20460,6 +20574,7 @@ mod tests {
     #[test]
     fn startup_retryable_notices_do_not_surface_stale_failure_details() {
         let job = minutes_core::jobs::ProcessingJob {
+            recording_policy: None,
             id: "job-failed".into(),
             title: Some("Legacy Method Agent Capacity".into()),
             mode: CaptureMode::Meeting,
@@ -20508,6 +20623,7 @@ mod tests {
         with_temp_home(|_| {
             let now = chrono::Local::now();
             let dismissed_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-dismissed".into(),
                 title: Some("Already handled".into()),
                 mode: CaptureMode::Meeting,
@@ -20552,6 +20668,7 @@ mod tests {
             let older_wav = dir.join("old-visible.wav");
             std::fs::write(&older_wav, b"riff").unwrap();
             let dismissed_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-new-dismissed".into(),
                 title: Some("New dismissed".into()),
                 mode: CaptureMode::Meeting,
@@ -20581,6 +20698,7 @@ mod tests {
                 recording_health: None,
             };
             let older_job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-old-visible".into(),
                 title: Some("Still retryable".into()),
                 mode: CaptureMode::Meeting,
@@ -20625,6 +20743,7 @@ mod tests {
             let now = chrono::Local::now();
             let missing_wav = dir.join("vanished.wav");
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-capture-gone".into(),
                 title: Some("consent-e2e-check".into()),
                 mode: CaptureMode::Meeting,
@@ -20667,6 +20786,7 @@ mod tests {
         with_temp_home(|_| {
             let old = chrono::Local::now() - chrono::Duration::days(10);
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-old-undismissed".into(),
                 title: Some("Old undismissed".into()),
                 mode: CaptureMode::Meeting,
@@ -20711,6 +20831,7 @@ mod tests {
             let audio_path = dir.join("job-path-fallback.wav");
             fs::write(&audio_path, b"fake-wav").unwrap();
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-path-fallback".into(),
                 title: Some("Path fallback".into()),
                 mode: CaptureMode::Meeting,
@@ -20771,6 +20892,7 @@ mod tests {
             let audio_path = dir.join("job-retry-ordering.wav");
             fs::write(&audio_path, b"fake-wav").unwrap();
             let job = minutes_core::jobs::ProcessingJob {
+                recording_policy: None,
                 id: "job-retry-ordering".into(),
                 title: Some("Retry ordering".into()),
                 mode: CaptureMode::Meeting,
@@ -23050,6 +23172,9 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
         app: app.clone(),
     };
 
+    // Keep the capture-time restriction even if sensitive-session state
+    // changes before the saved WAV is promoted on stop.
+    let recording_policy = minutes_core::sensitive::recording_policy();
     let mut config = Config::load();
     // Re-validate the pinned input device for mid-session disconnects
     // (#189). In-memory only; startup-side persistence is in main.rs.
@@ -23175,6 +23300,7 @@ fn run_live_session(app: tauri::AppHandle, active: Arc<AtomicBool>, stop_flag: A
                     live_context_session_id.clone(),
                     None,
                     None,
+                    recording_policy,
                 ) {
                     Ok(job) => {
                         let jsonl_path = path.with_extension("jsonl");
@@ -26247,5 +26373,28 @@ mod external_stop_tests {
             external_stop_decision(true, false),
             ExternalStopDecision::RefuseForeign
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_transcription_tests {
+    use super::*;
+
+    #[test]
+    fn remote_batch_readiness_and_consent_name_host_without_whisper_fallback() {
+        let mut config = Config::default();
+        config.transcription.engine = "openai-compatible".into();
+        config.transcription.openai_compatible_base_url = "http://localhost:8000/v1".into();
+        config.consent.mode = ConsentMode::Require;
+        let readiness = batch_transcription_readiness_view(&config);
+        assert!(readiness.ready);
+        assert_eq!(readiness.resolved_backend, "openai-compatible");
+        assert_eq!(readiness.fallback_order, vec!["openai-compatible"]);
+        assert!(readiness.detail.contains("localhost"));
+        let disclosure =
+            desktop_recording_consent_required(CaptureMode::Meeting, &config, false).unwrap();
+        assert!(disclosure.contains("localhost"));
+        assert!(disclosure.contains("remote"));
+        assert!(!disclosure.contains("locally on my device"));
     }
 }

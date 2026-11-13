@@ -1,3 +1,9 @@
+mod openai_compatible;
+
+pub use openai_compatible::{
+    remote_transcription_host, remote_transcription_notice, remote_transcription_status,
+};
+
 use crate::config::Config;
 use crate::error::TranscribeError;
 #[cfg(test)]
@@ -42,7 +48,7 @@ pub struct FilterStats {
     pub audio_duration_secs: f64,
     /// Samples after silence stripping (0 = all silence)
     pub samples_after_silence_strip: usize,
-    /// Raw segments from whisper/parakeet before any filtering
+    /// Raw segments from the transcription engine before any filtering
     pub raw_segments: usize,
     /// Segments skipped by whisper's no_speech_prob > 0.8
     pub skipped_no_speech: usize,
@@ -81,7 +87,7 @@ impl FilterStats {
             parts.push("silence strip removed ALL audio".into());
             return parts.join(", ");
         }
-        parts.push(format!("whisper produced {} segments", self.raw_segments));
+        parts.push(format!("engine produced {} segments", self.raw_segments));
         if self.raw_segments == 0 {
             return parts.join(", ");
         }
@@ -242,9 +248,24 @@ pub struct DecodeHints {
     // Independent capture sources must share their original clock. Removing
     // quiet intervals from just one source would make timestamp merging wrong.
     preserve_source_timeline: bool,
+    // Validated from capture-time job metadata or a normal-only corpus snapshot.
+    remote_policy: Option<std::sync::Arc<openai_compatible::AudioPolicy>>,
 }
 
 impl DecodeHints {
+    pub(crate) fn with_remote_policy(
+        mut self,
+        original: &Path,
+        config: &Config,
+    ) -> Result<Self, TranscribeError> {
+        if effective_batch_engine(config) == "openai-compatible" {
+            self.remote_policy = Some(std::sync::Arc::new(openai_compatible::authorize_audio(
+                original, config,
+            )?));
+        }
+        Ok(self)
+    }
+
     pub fn from_candidates(priority: &[String], contextual: &[String]) -> Self {
         let mut seen = std::collections::HashSet::new();
         let mut priority_phrases = Vec::new();
@@ -279,6 +300,7 @@ impl DecodeHints {
             contextual_phrases,
             audio_format_extension: None,
             preserve_source_timeline: false,
+            remote_policy: None,
         }
     }
 
@@ -296,6 +318,7 @@ impl DecodeHints {
         let mut merged = Self::from_candidates(&merged_priority, &merged_contextual);
         merged.audio_format_extension = self.audio_format_extension.clone();
         merged.preserve_source_timeline = self.preserve_source_timeline;
+        merged.remote_policy = self.remote_policy.clone();
         merged
     }
 
@@ -532,6 +555,7 @@ impl<'a> BatchTranscriptionSession<'a> {
             );
         }
         match effective_engine {
+            "openai-compatible" => openai_compatible::transcribe(audio_path, config, hints),
             "whisper" => transcribe_whisper_dispatch(audio_path, config, hints),
             "parakeet" => transcribe_parakeet_dispatch(audio_path, config, hints),
             "sherpa" => {
@@ -608,6 +632,8 @@ pub(crate) fn effective_batch_engine(config: &Config) -> &str {
         || (requested.eq_ignore_ascii_case("sherpa") && !sherpa_selectable(config))
     {
         "whisper"
+    } else if requested.eq_ignore_ascii_case("openai-compatible") {
+        "openai-compatible"
     } else {
         requested
     }
@@ -719,7 +745,9 @@ pub fn transcription_engine_resolution(config: &Config) -> TranscriptionEngineRe
     }
 
     let engine = effective_batch_engine(config);
-    let reason = if requested.eq_ignore_ascii_case("whisper") {
+    let reason = if engine == "openai-compatible" {
+        "remote batch transcription: explicitly configured; no fallback"
+    } else if requested.eq_ignore_ascii_case("whisper") {
         "whisper: configured"
     } else if requested.eq_ignore_ascii_case("sherpa") && engine == "sherpa" {
         "sherpa: configured and available"
@@ -1071,6 +1099,9 @@ fn transcribe_meeting_with_hints_inner(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
+    if effective_batch_engine(config) == "openai-compatible" {
+        return transcribe_dispatch(audio_path, config, hints);
+    }
     let samples =
         load_audio_samples_with_format(audio_path, hints.audio_format_extension(), config)?;
     transcribe_meeting_samples(audio_path, &samples, config, hints)
@@ -1084,6 +1115,11 @@ pub(crate) fn transcribe_meeting_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
+    // Remote chunking preserves the complete source clock and exact segments.
+    // Never run VAD rotation or its whole-file fallback on uploaded audio.
+    if effective_batch_engine(config) == "openai-compatible" {
+        return openai_compatible::transcribe(audio_path, config, hints);
+    }
     const MIN_MEETING_CHUNKS: usize = 2;
 
     let audio_duration_secs = samples.len() as f64 / 16000.0;

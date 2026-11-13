@@ -4159,6 +4159,8 @@
       border-top: 1px solid var(--border);
     }
 
+    #settings-remote-transcription[hidden] { display: none; }
+
     .about-controls-copy {
       font-size: var(--text-xs);
       color: var(--text-secondary);
@@ -7213,6 +7215,7 @@
             <select id="settings-transcription-engine" class="settings-field">
               <option value="auto">Auto (Whisper)</option>
               <option value="whisper">Whisper — broad language support, built-in</option>
+              <option value="openai-compatible">OpenAI-compatible — remote, batch only (opt in)</option>
               <option value="sherpa" disabled>Parakeet v3 — unavailable</option>
               <option value="parakeet" disabled>Parakeet — unavailable</option>
               <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
@@ -7222,6 +7225,19 @@
               <button class="btn btn-secondary btn-sm" id="btn-settings-parakeet-install">Install Parakeet v3</button>
               <span id="settings-parakeet-install-status"></span>
             </div>
+          </div>
+        </div>
+        <div class="about-controls" id="settings-remote-transcription" hidden>
+          <div class="about-controls-group">
+            <label for="settings-transcription-base-url">Remote transcription base URL</label>
+            <input id="settings-transcription-base-url" class="settings-field" type="url" spellcheck="false">
+            <label for="settings-transcription-remote-model">Remote model</label>
+            <input id="settings-transcription-remote-model" class="settings-field" spellcheck="false">
+            <label for="settings-transcription-key-env">API key environment variable name (never the key)</label>
+            <input id="settings-transcription-key-env" class="settings-field" spellcheck="false">
+            <label for="settings-transcription-upload-limit">Upload limit in bytes (default 25000000)</label>
+            <input id="settings-transcription-upload-limit" class="settings-field" type="number" min="1024" max="100000000">
+            <div class="about-controls-meta">Requires a normal-sensitivity capture policy or a matching Markdown record in your meetings folder before upload. Unclassified recordings are refused. Audio and stems remain on disk if a request fails.</div>
           </div>
         </div>
         <div class="about-controls" id="settings-whisper-section">
@@ -8747,7 +8763,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return list.map(backendLabel).join(' -> ');
     }
 
-    function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine, appleSpeechSelectable = false) {
+    function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine, appleSpeechSelectable = false, remoteNotice = '') {
+      if (batchEngine === 'openai-compatible') {
+        return `${remoteNotice} Standalone live transcript uses local ${backendLabel(resolvedBackend)}. Recording-sidecar live stays local. These live backends do not replace remote batch transcription after a failure.`;
+      }
       const fallbackText = fallbackOrderLabel(fallbackOrder);
       const batchLabel = backendLabel(batchEngine);
       const appleHint = appleSpeechSelectable && resolvedBackend !== 'apple-speech'
@@ -14123,6 +14142,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
                     : 'Parakeet v3 is not installed here; this preference resolves to Whisper for batch, recording, and recording-sidecar transcription.')
                   : 'The main engine controls batch, recording, and recording-sidecar transcription. Standalone live transcript has its own backend setting under Capture.')));
         }
+        const remoteTranscription = resolvedBatchEngine === 'openai-compatible';
+        if (remoteTranscription && engineDetail) engineDetail.textContent = s.transcription.remote_notice;
+        document.getElementById('settings-remote-transcription').hidden = !remoteTranscription;
+        for (const [id, key] of [
+          ['settings-transcription-base-url', 'openai_compatible_base_url'],
+          ['settings-transcription-remote-model', 'openai_compatible_model'],
+          ['settings-transcription-key-env', 'openai_compatible_api_key_env'],
+          ['settings-transcription-upload-limit', 'openai_compatible_max_upload_bytes'],
+        ]) document.getElementById(id).value = s.transcription[key] ?? '';
         refreshParakeetInstall();
         if (engineAppleOpt) {
           engineAppleOpt.disabled = true;
@@ -14157,14 +14185,17 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             liveFallbackOrder,
             resolvedBatchEngine,
             Boolean(appleSpeechStatus && appleSpeechStatus.selectable),
+            s.transcription.remote_notice || '',
           );
         }
         // Whisper stays visible under Parakeet: it still takes over when
         // Parakeet fails, so its model has to be chosen and downloaded.
         const batchUsesWhisper = resolvedBatchEngine === 'whisper';
+        // This preference selects only the batch model. Live inference has
+        // its own model resolution; do not advertise this as a live selector.
+        document.getElementById('settings-whisper-section').classList.toggle('is-hidden', remoteTranscription);
         document.getElementById('settings-whisper-model-label').textContent = batchUsesWhisper
-          ? 'Whisper model'
-          : 'Whisper model (used if Parakeet fails)';
+          ? 'Whisper model' : 'Whisper model (used if Parakeet fails)';
         document.getElementById('settings-parakeet-section').classList.toggle('is-hidden', !(eng === 'parakeet' || liveMentionsParakeet));
         document.getElementById('settings-parakeet-model').value = s.transcription.parakeet_model || 'tdt-ctc-110m';
         renderParakeetSettingsStatus(parakeetStatus, parakeetSelectable, parakeetUnavailableReason);
@@ -14888,6 +14919,22 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       } finally {
         button.disabled = false;
       }
+    });
+    document.getElementById('settings-transcription-base-url').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_base_url', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-remote-model').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_model', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-key-env').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_api_key_env', value: e.target.value });
+      await loadSettings();
+    });
+    document.getElementById('settings-transcription-upload-limit').addEventListener('change', async (e) => {
+      await invoke('cmd_set_setting', { section: 'transcription', key: 'openai_compatible_max_upload_bytes', value: e.target.value });
+      await loadSettings();
     });
     document.getElementById('settings-transcription-engine').addEventListener('change', async (e) => {
       await invoke('cmd_set_setting', { section: 'transcription', key: 'engine', value: e.target.value });

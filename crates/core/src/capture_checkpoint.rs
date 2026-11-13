@@ -68,7 +68,10 @@ impl CaptureCheckpoint {
         context: Option<&str>,
         recorded_at: chrono::DateTime<chrono::Local>,
     ) -> Option<Self> {
-        if !config.recording.transcript_checkpoints || crate::sensitive::is_active() {
+        if !config.recording.transcript_checkpoints
+            || crate::sensitive::is_active()
+            || crate::transcribe::effective_batch_engine(config) == "openai-compatible"
+        {
             return None;
         }
         let title = title.map(str::to_owned);

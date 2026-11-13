@@ -167,16 +167,106 @@ pub struct TranscribeResult {
     pub detected_language: Option<String>,
 }
 
-#[cfg(any(feature = "whisper", test))]
+#[cfg(test)]
 fn prepare_whisper_samples(
     samples: Vec<f32>,
     integrated_vad: bool,
     hints: &DecodeHints,
 ) -> Vec<f32> {
+    prepare_whisper_samples_with_map(samples, integrated_vad, hints).0
+}
+
+/// [`prepare_whisper_samples`], and the map of the kept samples when silence
+/// was stripped. Stripped audio has a shorter clock than `samples`.
+#[cfg(any(feature = "whisper", test))]
+fn prepare_whisper_samples_with_map(
+    samples: Vec<f32>,
+    integrated_vad: bool,
+    hints: &DecodeHints,
+) -> (Vec<f32>, Option<Vec<whisper_guard::audio::KeptRun>>) {
     if integrated_vad || hints.preserve_source_timeline {
-        samples
+        (samples, None)
     } else {
-        strip_silence(&samples, 16000)
+        let (stripped, runs) = whisper_guard::audio::strip_silence_with_map(&samples, 16000);
+        (stripped, Some(runs))
+    }
+}
+
+/// The text of a `[m:ss] text` line, or of any line that starts with a
+/// bracketed label.
+#[cfg(any(feature = "whisper", test))]
+fn labelled_text(line: &str) -> Option<&str> {
+    let (_, text) = line.trim().strip_prefix('[')?.split_once(']')?;
+    Some(text.trim())
+}
+
+/// The whole seconds of the `[m:ss]` label of a line.
+#[cfg(any(feature = "whisper", test))]
+fn label_secs(line: &str) -> Option<u64> {
+    let (label, _) = line.trim().strip_prefix('[')?.split_once(']')?;
+    let (mins, secs) = label.split_once(':')?;
+    Some(mins.parse::<u64>().ok()? * 60 + secs.parse::<u64>().ok()?)
+}
+
+/// Each line of `result.text` with the index of its segment, if it has one.
+///
+/// Cleanup removes lines, changes lines and adds annotation lines.
+/// `result.segments` holds the lines that cleanup left as they were, in
+/// order. So a line is the next segment when it has the text of that segment.
+/// A changed line or an annotation has no segment and does not use one up:
+/// the lines after it keep their exact times.
+#[cfg(any(feature = "whisper", test))]
+fn line_segments(result: &TranscribeResult) -> Vec<(&str, Option<usize>)> {
+    let mut next = 0usize;
+    result
+        .text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let segment = result
+                .segments
+                .get(next)
+                .filter(|segment| labelled_text(line) == Some(segment.text.as_str()))
+                .map(|_| next);
+            if segment.is_some() {
+                next += 1;
+            }
+            (line, segment)
+        })
+        .collect()
+}
+
+/// Put the times of `result` back on the clock of the audio before silence
+/// was stripped. `runs` is the map from
+/// [`whisper_guard::audio::strip_silence_with_map`].
+#[cfg(any(feature = "whisper", test))]
+fn restore_stripped_clock(result: &mut TranscribeResult, runs: &[whisper_guard::audio::KeptRun]) {
+    let input_secs =
+        |secs: f64| whisper_guard::audio::input_position(runs, secs * 16_000.0) / 16_000.0;
+    let label = |secs: f64, text: &str| {
+        let secs = secs.max(0.0).floor() as u64;
+        format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+    };
+    let lines: Vec<String> = line_segments(result)
+        .into_iter()
+        .map(|(line, segment)| match segment {
+            Some(index) => {
+                let segment = &result.segments[index];
+                label(input_secs(segment.start), &segment.text)
+            }
+            // A changed line has only its label. An annotation has no time.
+            None => match (label_secs(line), labelled_text(line)) {
+                (Some(secs), Some(text)) => label(input_secs(secs as f64), text),
+                _ => line.to_owned(),
+            },
+        })
+        .collect();
+    for segment in &mut result.segments {
+        segment.start = input_secs(segment.start);
+        segment.end = input_secs(segment.end);
+    }
+    if !lines.is_empty() {
+        result.text = format!("{}\n", lines.join("\n"));
     }
 }
 
@@ -963,12 +1053,15 @@ impl crate::decode_groups::AudioDecoder for WhisperCall<'_> {
         &mut self,
         audio: &[f32],
     ) -> Result<Option<crate::decode_groups::DecodedAudio>, TranscribeError> {
-        match transcribe_whisper_samples(
+        // The group decoder maps each line back to the source through the
+        // clock of `audio`. Energy stripping must not change that clock.
+        match transcribe_whisper_samples_on_clock(
             self.ctx,
             audio,
             Path::new("<decode-group>"),
             self.config,
             self.hints,
+            true,
         ) {
             Ok(result) => Ok(Some(crate::decode_groups::DecodedAudio {
                 segments: timed_lines(&result),
@@ -980,46 +1073,33 @@ impl crate::decode_groups::AudioDecoder for WhisperCall<'_> {
     }
 }
 
-/// The lines of one call with their times. Exact segment times when the
-/// lines are the segments, else the whole seconds of each `[m:ss]` label.
+/// The lines of one call with their times. A line that is a segment has the
+/// exact times of that segment ([`line_segments`]). A line that cleanup
+/// changed has only its `[m:ss]` label: it starts somewhere in that second.
 /// Lines without a time label, such as cleanup annotations, are dropped, as
 /// they were in the per-chunk path.
-#[cfg_attr(not(feature = "whisper"), allow(dead_code))]
+#[cfg(any(feature = "whisper", test))]
 fn timed_lines(result: &TranscribeResult) -> Vec<crate::decode_groups::TimedText> {
     use crate::decode_groups::TimedText;
-    let lines: Vec<&str> = result
-        .text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let exact = lines.len() == result.segments.len()
-        && lines.iter().zip(&result.segments).all(|(line, segment)| {
-            line.split_once(']')
-                .is_some_and(|(_, text)| text.trim() == segment.text)
-        });
-    if exact {
-        return result
-            .segments
-            .iter()
-            .map(|segment| TimedText {
-                start: segment.start,
-                end: segment.end,
-                text: segment.text.clone(),
-            })
-            .collect();
-    }
-    lines
-        .iter()
-        .filter_map(|line| {
-            let rest = line.trim().strip_prefix('[')?;
-            let (timestamp, text) = rest.split_once(']')?;
-            let (mins, secs) = timestamp.split_once(':')?;
-            let start = (mins.parse::<u64>().ok()? * 60 + secs.parse::<u64>().ok()?) as f64;
-            Some(TimedText {
-                start,
-                end: start,
-                text: text.trim().to_owned(),
-            })
+    line_segments(result)
+        .into_iter()
+        .filter_map(|(line, segment)| match segment {
+            Some(index) => {
+                let segment = &result.segments[index];
+                Some(TimedText {
+                    start: segment.start,
+                    end: segment.end,
+                    text: segment.text.clone(),
+                })
+            }
+            None => {
+                let start = label_secs(line)? as f64;
+                Some(TimedText {
+                    start,
+                    end: start + 1.0,
+                    text: labelled_text(line)?.to_owned(),
+                })
+            }
         })
         .collect()
 }
@@ -1479,9 +1559,13 @@ fn correlate_sherpa_segments(
 
 /// Correlate cleanup-surviving whisper lines back to raw segment timing data.
 ///
-/// `cleanup_lines` is a subsequence of `all_lines` (same order, some removed).
 /// `seg_data` is parallel to `all_lines`: `(start_secs, end_secs, clean_text)`.
-#[cfg(feature = "whisper")]
+/// The lines of `cleanup_lines` that cleanup left as they were are a
+/// subsequence of `all_lines`. Cleanup also adds annotation lines and changes
+/// lines. Such a line matches no raw line. It gets no segment, and the search
+/// for the next line continues from the same place, so the lines after it
+/// keep their timing.
+#[cfg(any(feature = "whisper", test))]
 fn correlate_whisper_segments(
     cleanup_lines: &[String],
     all_lines: &[String],
@@ -1490,19 +1574,16 @@ fn correlate_whisper_segments(
     let mut si = 0usize;
     let mut result = Vec::new();
     for cleaned in cleanup_lines {
-        while si < all_lines.len() {
-            if &all_lines[si] == cleaned {
-                let (start, end, text) = &seg_data[si];
-                result.push(TranscriptSegment {
-                    start: *start,
-                    end: *end,
-                    text: text.clone(),
-                });
-                si += 1;
-                break;
-            }
-            si += 1;
-        }
+        let Some(found) = all_lines[si..].iter().position(|line| line == cleaned) else {
+            continue;
+        };
+        let (start, end, text) = &seg_data[si + found];
+        result.push(TranscriptSegment {
+            start: *start,
+            end: *end,
+            text: text.clone(),
+        });
+        si += found + 1;
     }
     result
 }
@@ -1571,6 +1652,22 @@ fn transcribe_whisper_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
+    transcribe_whisper_samples_on_clock(ctx, samples, audio_path, config, hints, false)
+}
+
+/// [`transcribe_whisper_samples`]. With `keep_input_clock`, the times of the
+/// result are on the clock of `samples` also when energy stripping removed
+/// silence before the decode. Without it they are on the stripped clock, as
+/// they always were for a whole file.
+#[cfg(feature = "whisper")]
+fn transcribe_whisper_samples_on_clock(
+    ctx: &whisper_rs::WhisperContext,
+    samples: &[f32],
+    audio_path: &Path,
+    config: &Config,
+    hints: &DecodeHints,
+    keep_input_clock: bool,
+) -> Result<TranscribeResult, TranscribeError> {
     let mut stats = FilterStats {
         audio_duration_secs: samples.len() as f64 / 16000.0,
         ..Default::default()
@@ -1597,7 +1694,8 @@ fn transcribe_whisper_samples(
 
     let prefix_samples = source_clock_prefix_samples(&samples, hints);
     let samples = samples[prefix_samples..].to_vec();
-    let samples = prepare_whisper_samples(samples, use_integrated_vad, hints);
+    let (samples, mut stripped) =
+        prepare_whisper_samples_with_map(samples, use_integrated_vad, hints);
     stats.samples_after_silence_strip = samples.len();
 
     if samples.is_empty() {
@@ -1634,19 +1732,25 @@ fn transcribe_whisper_samples(
             audio_duration_secs: result.stats.audio_duration_secs,
             ..Default::default()
         };
-        let stripped = prepare_whisper_samples(samples.clone(), false, hints);
-        retry_stats.samples_after_silence_strip = stripped.len();
-        if !stripped.is_empty() {
+        let (retry_samples, retry_stripped) =
+            prepare_whisper_samples_with_map(samples.clone(), false, hints);
+        retry_stats.samples_after_silence_strip = retry_samples.len();
+        if !retry_samples.is_empty() {
             result = transcribe_with_whisper(
                 ctx,
-                &stripped,
+                &retry_samples,
                 audio_path,
                 config,
                 retry_stats,
                 true,
                 hints,
             )?;
+            stripped = retry_stripped;
         }
+    }
+
+    if let (true, Some(runs)) = (keep_input_clock, &stripped) {
+        restore_stripped_clock(&mut result, runs);
     }
 
     restore_source_clock(&mut result, prefix_samples as f64 / 16_000.0);
@@ -2486,6 +2590,9 @@ fn decode_with_ffmpeg_binary(
 pub(crate) const VAD_WINDOW_SAMPLES: usize = 1_600;
 /// The silence after a chunk at which the chunker closes it and resets.
 pub(crate) const VAD_CLOSE_PAUSE_SAMPLES: usize = 8 * VAD_WINDOW_SAMPLES;
+/// The chunker keeps a chunk open this long after its last loud window, so a
+/// chunk that it closes at a pause ends with this much quiet audio.
+pub(crate) const VAD_HANGOVER_SAMPLES: usize = 5 * VAD_WINDOW_SAMPLES;
 /// The chunker splits speech without such a pause at this length.
 pub(crate) const VAD_MAX_CHUNK_SAMPLES: usize = 45 * 16_000;
 
@@ -2498,7 +2605,7 @@ pub(crate) fn detect_meeting_vad_chunks(samples: &[f32]) -> Vec<(usize, usize)> 
     const NOISE_FLOOR_MIN: f32 = 0.0001;
     const NOISE_FLOOR_MAX: f32 = 0.02;
     const NOISE_MULTIPLIER: f32 = 4.0;
-    const HANGOVER_CHUNKS: u32 = 5;
+    const HANGOVER_CHUNKS: u32 = (VAD_HANGOVER_SAMPLES / VAD_WINDOW_SAMPLES) as u32;
     const ADAPT_RATE: f32 = 0.02;
 
     if samples.is_empty() {
@@ -5277,6 +5384,226 @@ mod tests {
         assert_eq!(result.text, "[0:05] yes\n");
         assert_eq!(result.segments[0].start, 5.25);
         assert_eq!(result.segments[0].end, 6.0);
+    }
+
+    /// A result as `transcribe_with_whisper` makes it from raw segments
+    /// `(start, end, text)`: the real cleanup, then the real correlation.
+    fn cleaned_result(raw: &[(f64, f64, &str)]) -> TranscribeResult {
+        let lines: Vec<String> = raw
+            .iter()
+            .map(|(start, _, text)| {
+                let secs = *start as u64;
+                format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
+            })
+            .collect();
+        let seg_data: Vec<(f64, f64, String)> = raw
+            .iter()
+            .map(|(start, end, text)| (*start, *end, text.to_string()))
+            .collect();
+        let cleanup = run_transcript_cleanup_pipeline(lines.clone());
+        let segments = correlate_whisper_segments(&cleanup.lines, &lines, &seg_data);
+        TranscribeResult {
+            text: format!("{}\n", cleanup.lines.join("\n")),
+            stats: FilterStats::default(),
+            segments,
+            detected_language: None,
+        }
+    }
+
+    #[test]
+    fn a_cleanup_annotation_does_not_take_the_exact_times_of_later_lines() {
+        // Three identical segments, then the segment of the second chunk.
+        // Cleanup keeps the first, adds an annotation line, and keeps the
+        // last. So the text has three lines and the result two segments.
+        let result = cleaned_result(&[
+            (1.0, 3.0, "We agreed on the budget for March."),
+            (3.0, 5.0, "We agreed on the budget for March."),
+            (5.0, 7.0, "We agreed on the budget for March."),
+            (9.8, 15.4, "Then let us look at the hiring plan."),
+        ]);
+        let lines: Vec<&str> = result.text.lines().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[1].contains("identical segments collapsed"),
+            "{lines:?}"
+        );
+        assert_eq!(result.segments.len(), 2);
+        assert_eq!(
+            line_segments(&result)
+                .iter()
+                .map(|(_, segment)| *segment)
+                .collect::<Vec<_>>(),
+            vec![Some(0), None, Some(1)]
+        );
+
+        // Each surviving segment keeps its exact times. The annotation has
+        // no time and is dropped.
+        let timed = timed_lines(&result);
+        assert_eq!(timed.len(), 2);
+        assert_eq!((timed[0].start, timed[0].end), (1.0, 3.0));
+        assert_eq!((timed[1].start, timed[1].end), (9.8, 15.4));
+
+        // Source chunks at 100 s and 160 s. The last segment starts in the
+        // quiet end of the first chunk. With its exact times it belongs to
+        // the second chunk, 160 s. With the rounded label 0:09 and no end, it
+        // would be in the first chunk, 109 s.
+        const S: usize = 16_000;
+        let group = crate::decode_groups::DecodeGroup {
+            chunks: vec![(100 * S, 110 * S), (160 * S, 165 * S)],
+        };
+        let samples = vec![0.1f32; 165 * S];
+        let mut decoder = |_: &[f32]| {
+            Ok(Some(crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: FilterStats::default(),
+            }))
+        };
+        let out = crate::decode_groups::decode_groups(&mut decoder, &samples, &[group], 0).unwrap();
+        assert_eq!(
+            out.lines,
+            vec![
+                "[1:41] We agreed on the budget for March.",
+                "[2:40] Then let us look at the hiring plan.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_that_cleanup_changed_keeps_its_label_and_the_next_line_its_segment() {
+        let result = TranscribeResult {
+            text: "[0:02] first\n[0:05] changed by cleanup\n[0:09] last\n".into(),
+            stats: FilterStats::default(),
+            segments: vec![
+                TranscriptSegment {
+                    start: 2.4,
+                    end: 4.0,
+                    text: "first".into(),
+                },
+                TranscriptSegment {
+                    start: 9.7,
+                    end: 12.0,
+                    text: "last".into(),
+                },
+            ],
+            detected_language: None,
+        };
+        let timed = timed_lines(&result);
+        assert_eq!(timed.len(), 3);
+        assert_eq!((timed[0].start, timed[0].end), (2.4, 4.0));
+        // Only the label is known: the line starts somewhere in that second.
+        assert_eq!((timed[1].start, timed[1].end), (5.0, 6.0));
+        assert_eq!(timed[1].text, "changed by cleanup");
+        assert_eq!((timed[2].start, timed[2].end), (9.7, 12.0));
+    }
+
+    #[test]
+    fn energy_stripping_does_not_change_the_clock_of_a_decode_group() {
+        const S: usize = 16_000;
+        // 86 s: a 0.2 s burst at 0 s and at 19 s, and 5 s of speech at 80 s.
+        // The chunker cannot close a chunk shorter than 1 s, so the first
+        // chunk runs from the first burst to the end of the second.
+        let tone = |n: usize| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * n as f32 / 16000.0).sin();
+        let mut samples = vec![0.0f32; 86 * S];
+        for (start, len) in [(0, S / 5), (19 * S, S / 5), (80 * S, 5 * S)] {
+            for n in 0..len {
+                samples[start + n] = tone(n);
+            }
+        }
+        let plan = crate::decode_groups::DecodePlan::for_source(&samples, 30 * S);
+        assert_eq!(plan.groups().len(), 1);
+        let chunks = &plan.groups()[0].chunks;
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!((chunks[0].0, chunks[1].0), (0, 80 * S));
+        assert!(chunks[0].1 > 19 * S, "{chunks:?}");
+
+        // What the Whisper call does without a Silero model and without the
+        // source-timeline hint: strip silence, decode, clean up. The stand-in
+        // decoder reports one segment for the 5 s of speech, with the times
+        // that it has in the audio it got.
+        let speech_in = |audio: &[f32]| {
+            let mut run = 0;
+            for (n, sample) in audio.iter().enumerate() {
+                run = if *sample != 0.0 { run + 1 } else { 0 };
+                if run == 2 * S {
+                    return (n + 1 - run) as f64 / S as f64;
+                }
+            }
+            panic!("no speech in the decoder audio");
+        };
+        let decode = |audio: &[f32], keep_input_clock: bool| {
+            let (stripped, runs) =
+                prepare_whisper_samples_with_map(audio.to_vec(), false, &DecodeHints::default());
+            let runs = runs.expect("energy stripping ran");
+            assert!(stripped.len() < audio.len() / 2, "silence was stripped");
+            let start = speech_in(&stripped);
+            let mut result = cleaned_result(&[(start, start + 5.0, "The speech at eighty.")]);
+            if keep_input_clock {
+                restore_stripped_clock(&mut result, &runs);
+            }
+            crate::decode_groups::DecodedAudio {
+                segments: timed_lines(&result),
+                stats: FilterStats::default(),
+            }
+        };
+
+        let mut kept = |audio: &[f32]| Ok(Some(decode(audio, true)));
+        let out =
+            crate::decode_groups::decode_groups(&mut kept, &samples, plan.groups(), 0).unwrap();
+        assert_eq!(out.lines, vec!["[1:20] The speech at eighty."]);
+
+        // On the stripped clock, the same segment is inside the first chunk.
+        let mut lost = |audio: &[f32]| Ok(Some(decode(audio, false)));
+        let out =
+            crate::decode_groups::decode_groups(&mut lost, &samples, plan.groups(), 0).unwrap();
+        assert_ne!(out.lines, vec!["[1:20] The speech at eighty."]);
+    }
+
+    #[test]
+    fn the_stripped_clock_is_restored_in_segments_and_labels() {
+        // 1 s kept, a pad, then input 61 s onward at output 1.3 s.
+        let runs = [
+            whisper_guard::audio::KeptRun {
+                output_start: 0,
+                input_start: 0,
+                len: 16_000,
+            },
+            whisper_guard::audio::KeptRun {
+                output_start: 20_800,
+                input_start: 61 * 16_000,
+                len: 5 * 16_000,
+            },
+        ];
+        let mut result = TranscribeResult {
+            text: "[0:00] one\n[...] [repeated audio removed - 2 identical segments collapsed]\n[0:02] changed\n[0:03] two\n".into(),
+            stats: FilterStats::default(),
+            segments: vec![
+                TranscriptSegment {
+                    start: 0.25,
+                    end: 0.9,
+                    text: "one".into(),
+                },
+                TranscriptSegment {
+                    start: 3.8,
+                    end: 5.3,
+                    text: "two".into(),
+                },
+            ],
+            detected_language: None,
+        };
+        restore_stripped_clock(&mut result, &runs);
+        assert_eq!(
+            result.text,
+            "[0:00] one\n[...] [repeated audio removed - 2 identical segments collapsed]\n\
+             [1:01] changed\n[1:03] two\n"
+        );
+        assert_eq!(
+            (result.segments[0].start, result.segments[0].end),
+            (0.25, 0.9)
+        );
+        assert_eq!(
+            (result.segments[1].start, result.segments[1].end),
+            (63.5, 65.0)
+        );
     }
 
     #[test]

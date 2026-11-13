@@ -57,7 +57,7 @@ a span only when all of these hold:
   either edge of the span.
 
 The settings fingerprint also names the decode strategy: one call per chunk, or
-groups with their target, loop thresholds and retry policy. A span made with
+groups with their version, target, kept pause, loop thresholds and retry policy. A span made with
 another strategy is rejected even when the core version, settings and audio match.
 
 The final pass plans the decode groups of the whole source once. Groups that no
@@ -91,13 +91,30 @@ The same plan is used by the whole-file pass, checkpoint spans and the gaps
 between accepted spans.
 
 - Groups are packed greedily from the start of each source. A chunk joins the
-  open group while the group's chunk audio stays at most 30 s
-  (`WHISPER_GROUP_TARGET_SAMPLES`). Pauses between chunks do not count.
+  open group while the audio that Whisper gets for the group stays at most 30 s
+  (`WHISPER_GROUP_TARGET_SAMPLES`). That audio is the chunks and the kept pauses
+  between them.
 - 30 s is a packing target, not a maximum. The VAD chunker splits speech without
   a pause at 45 s, and such a chunk is a group of its own.
-- Whisper gets the chunks of a group back to back, without the pauses between
-  them: the same audio as one call per chunk. Each line is mapped back to the
-  source clock through the chunk that holds most of its segment.
+- Whisper gets the chunks of a group with the pauses between them. A pause of
+  up to 1 s (`GROUP_PAUSE_SAMPLES`) is kept whole. A longer pause is cut to 1 s:
+  0.5 s after the chunk before and 0.5 s before the chunk after. Without pauses,
+  Whisper `medium` dropped a one-word answer and timed short answers early in a
+  test with 60 s and 45 s pauses. A stem of a call is quiet while the other side
+  speaks, so whole pauses would use up the 30 s window.
+- Each line is mapped back to the source clock, sample for sample. Whisper
+  starts a segment where the segment before it ended, which is often in a pause
+  or in the quiet end of the speech before. A VAD chunk is not one stretch of
+  speech: it ends with 0.5 s of quiet, and a one-word answer shorter than 1 s
+  stays in one chunk with the sentence after a long silence. So the group
+  decoder finds the stretches of speech inside each chunk. A line starts in the
+  first stretch that its segment holds at least 0.3 s of. A line that starts
+  before that stretch gets the start of the stretch. A line that starts inside
+  it keeps its exact time.
+- The clock of the call does not change when Silero is not installed and energy
+  stripping removes silence before the decode. The stripped times are mapped
+  back (`whisper_guard::strip_silence_with_map`). A cleanup annotation in the
+  output of a call does not change the exact times of the other lines.
 - A cut is the point after a group where the VAD chunker resets: 800 ms after the
   group's last chunk, or at its end for a 45 s split. A span from one cut to
   another gets the same chunks and groups as the whole source. During a

@@ -3,10 +3,16 @@
 //! Whisper encodes a full 30 s window for every call and pads shorter audio to
 //! 30 s. With one call per VAD chunk, most of that work is padding, because
 //! most meeting chunks are short (issue #1340). The Whisper meeting path packs
-//! adjacent VAD chunks into groups and decodes each group in one call. The
-//! decoder gets the chunks of a group back to back, without the pauses between
-//! them: the same audio that the per-chunk pass decoded. Each output line is
-//! mapped back to the source clock through the chunk that holds most of it.
+//! adjacent VAD chunks into groups and decodes each group in one call.
+//!
+//! The decoder gets the chunks of a group with the pauses between them. A
+//! pause of up to [`GROUP_PAUSE_SAMPLES`] is kept whole. A longer pause is cut
+//! to that length: half of it stays after the chunk before, half before the
+//! chunk after. Whisper needs the pauses to keep short answers apart and to
+//! time them. Without them it joins the end of one chunk to the start of the
+//! next. The kept pauses count toward the group target. The decoder audio is
+//! made of [runs](Run) of source audio, and each output time is mapped back to
+//! the source clock through the run that holds it, sample for sample.
 //!
 //! One plan serves all three paths: the whole-file pass, the checkpoint spans
 //! that a host transcribes while recording, and the gaps between accepted
@@ -33,15 +39,29 @@ use whisper_guard::segments::{find_repetition_loop, LOOP_MIN_REPEATS, LOOP_MIN_W
 
 const RATE: usize = 16_000;
 
-/// The packing target for one Whisper call: the chunk audio of a group,
-/// pauses not included. It is a target, not a maximum. A VAD chunk longer than
-/// the target (the chunker splits speech only at 45 s) is a group of its own.
+/// The packing target for one Whisper call: the audio the decoder gets for a
+/// group, which is its chunks and the kept pauses between them. It is a
+/// target, not a maximum. A VAD chunk longer than the target (the chunker
+/// splits speech only at 45 s) is a group of its own.
 pub const WHISPER_GROUP_TARGET_SAMPLES: usize = 30 * RATE;
+
+/// The longest pause that the decoder gets between two chunks of a group.
+/// The chunker closes a chunk after 0.8 s of silence, so most pauses inside a
+/// conversation are kept whole. A stem of a call is quiet while the other
+/// side speaks. Those long pauses are cut to this length, so that they do not
+/// use up the 30 s window.
+pub const GROUP_PAUSE_SAMPLES: usize = RATE;
 
 /// Change when grouping or the loop retry changes in a way that the values in
 /// [`strategy_id`] do not show. Checkpoint spans made with another strategy
 /// are then rejected and decoded again.
-const GROUPED_STRATEGY_VERSION: u32 = 1;
+const GROUPED_STRATEGY_VERSION: u32 = 2;
+
+/// The pause that a group keeps between two chunks that are `gap` samples
+/// apart.
+fn kept_pause(gap: usize) -> usize {
+    gap.min(GROUP_PAUSE_SAMPLES)
+}
 
 /// The group target that the Whisper meeting path uses.
 pub(crate) fn whisper_group_target_samples() -> usize {
@@ -56,7 +76,8 @@ pub(crate) fn strategy_id(group_target: usize) -> String {
     }
     format!(
         "groups-v{GROUPED_STRATEGY_VERSION};target={group_target};\
-         loop={LOOP_MIN_REPEATS}x{LOOP_MIN_WORDS}w;retry=per-chunk-once"
+         pause={GROUP_PAUSE_SAMPLES};loop={LOOP_MIN_REPEATS}x{LOOP_MIN_WORDS}w;\
+         retry=per-chunk-once"
     )
 }
 
@@ -76,9 +97,22 @@ impl DecodeGroup {
         self.chunks[self.chunks.len() - 1].1
     }
 
-    /// The samples the decoder gets for this group.
+    /// The samples the decoder gets for this group: its chunks and the kept
+    /// pauses between them.
     pub fn audio_samples(&self) -> usize {
-        self.chunks.iter().map(|&(start, end)| end - start).sum()
+        let chunks: usize = self.chunks.iter().map(|&(start, end)| end - start).sum();
+        let pauses: usize = self
+            .chunks
+            .windows(2)
+            .map(|pair| kept_pause(pair[1].0 - pair[0].1))
+            .sum();
+        chunks + pauses
+    }
+
+    /// [`audio_samples`](Self::audio_samples) of this group with `chunk`
+    /// added after its last chunk.
+    fn audio_samples_with(&self, (start, end): (usize, usize)) -> usize {
+        self.audio_samples() + kept_pause(start - self.end()) + (end - start)
     }
 
     fn offset(&self, by: usize) -> Self {
@@ -93,25 +127,18 @@ impl DecodeGroup {
 }
 
 /// Pack chunks greedily, in order. A chunk joins the open group while the
-/// group's audio, with this chunk, is at most `target` samples. Otherwise it
-/// starts a new group. So a chunk longer than `target` is a group of its own,
-/// and a target of 0 gives one group per chunk.
+/// group's audio, with the kept pause before this chunk and this chunk, is at
+/// most `target` samples. Otherwise it starts a new group. So a chunk longer
+/// than `target` is a group of its own, and a target of 0 gives one group per
+/// chunk.
 pub fn pack_groups(chunks: &[(usize, usize)], target: usize) -> Vec<DecodeGroup> {
     let mut groups: Vec<DecodeGroup> = Vec::new();
-    let mut open_samples = 0usize;
-    for &(start, end) in chunks {
-        let len = end - start;
+    for &chunk in chunks {
         match groups.last_mut() {
-            Some(group) if open_samples + len <= target => {
-                group.chunks.push((start, end));
-                open_samples += len;
-            }
-            _ => {
-                groups.push(DecodeGroup {
-                    chunks: vec![(start, end)],
-                });
-                open_samples = len;
-            }
+            Some(group) if group.audio_samples_with(chunk) <= target => group.chunks.push(chunk),
+            _ => groups.push(DecodeGroup {
+                chunks: vec![chunk],
+            }),
         }
     }
     groups
@@ -161,9 +188,8 @@ impl DecodePlan {
             // Only the last chunk of growing audio can still change, and it
             // only grows. Its group is the last one. The group before it is
             // finished when even its current length does not fit.
-            let (start, end) = next.chunks[0];
             let next_is_open = !complete && index + 2 == groups.len() && next.chunks.len() == 1;
-            if next_is_open && group.audio_samples() + (end - start) <= target {
+            if next_is_open && group.audio_samples_with(next.chunks[0]) <= target {
                 break;
             }
             cuts.push(chunker_reset_after(group.chunks[group.chunks.len() - 1]));
@@ -342,7 +368,51 @@ pub(crate) fn decode_groups(
     Ok(out)
 }
 
-/// One decoder call on `chunks` joined back to back.
+/// A run of source audio in the audio of one decoder call: `len` samples
+/// from `source` of the planned audio are at `joined` of the decoder audio.
+/// The decoder clock and the source clock run together inside a run. Between
+/// two runs, a part of a pause is left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Run {
+    joined: usize,
+    source: usize,
+    len: usize,
+}
+
+/// The runs of one decoder call on `chunks`: the chunks and the kept pauses
+/// between them. Two chunks with a pause of at most [`GROUP_PAUSE_SAMPLES`]
+/// between them are in one run.
+fn group_runs(chunks: &[(usize, usize)]) -> Vec<Run> {
+    let keep = GROUP_PAUSE_SAMPLES;
+    let mut runs: Vec<Run> = Vec::new();
+    for &(start, end) in chunks {
+        let Some(run) = runs.last_mut() else {
+            runs.push(Run {
+                joined: 0,
+                source: start,
+                len: end - start,
+            });
+            continue;
+        };
+        let gap = start - (run.source + run.len);
+        if gap <= keep {
+            run.len += gap + (end - start);
+            continue;
+        }
+        let after = keep / 2;
+        let before = keep - after;
+        run.len += after;
+        let joined = run.joined + run.len;
+        runs.push(Run {
+            joined,
+            source: start - before,
+            len: before + (end - start),
+        });
+    }
+    runs
+}
+
+/// One decoder call on `chunks` with the kept pauses between them.
 fn decode_chunks(
     decoder: &mut impl AudioDecoder,
     samples: &[f32],
@@ -353,9 +423,10 @@ fn decode_chunks(
         lines: Vec::new(),
         stats: FilterStats::default(),
     };
-    let audio: Vec<f32> = chunks
+    let runs = group_runs(chunks);
+    let audio: Vec<f32> = runs
         .iter()
-        .flat_map(|&(start, end)| samples[start..end].iter().copied())
+        .flat_map(|run| samples[run.source..run.source + run.len].iter().copied())
         .collect();
     if audio.is_empty() {
         return Ok(out);
@@ -364,11 +435,12 @@ fn decode_chunks(
         return Ok(out);
     };
     out.stats = decoded.stats;
+    let speech = speech_stretches(samples, chunks);
     out.lines = decoded
         .segments
         .iter()
         .map(|segment| {
-            let secs = source_secs(chunks, clock_offset, segment);
+            let secs = source_secs(&speech, &runs, clock_offset, segment);
             let secs = secs.max(0.0).floor() as u64;
             format!("[{}:{:02}] {}", secs / 60, secs % 60, segment.text)
         })
@@ -376,42 +448,118 @@ fn decode_chunks(
     Ok(out)
 }
 
-/// The source time of a segment from a call on `chunks` joined back to back.
-/// The segment belongs to the chunk that holds most of it, so a segment that
-/// starts a little early, in the quiet end of the chunk before, keeps the
-/// time of its own chunk and not the time before a long pause.
-fn source_secs(chunks: &[(usize, usize)], clock_offset: usize, segment: &TimedText) -> f64 {
+/// A segment must have this much of a stretch of speech to start in it. The
+/// end of the segment before it is where Whisper starts a segment, and that
+/// time can be a little before the speech really ends.
+const SPEECH_START_MIN_SAMPLES: usize = 3 * RATE / 10;
+
+/// The source time of a segment from a call on `chunks`, whose audio is
+/// `runs`. `speech` is [`speech_stretches`] of the chunks.
+///
+/// Whisper starts a segment where the segment before it ended. So a start is
+/// often early: in the quiet end of the speech before, or anywhere in a
+/// pause. The end of a segment is close to the end of its speech. So the
+/// segment starts in the first stretch of speech that it holds at least
+/// [`SPEECH_START_MIN_SAMPLES`] of, or else in the stretch it holds most of.
+/// A segment that starts before that stretch gets the start of the stretch.
+/// For the first speech of a chunk, that is the time the per-chunk pass gave
+/// it. A segment that starts inside the stretch keeps its exact time.
+fn source_secs(
+    speech: &[(usize, usize)],
+    runs: &[Run],
+    clock_offset: usize,
+    segment: &TimedText,
+) -> f64 {
     let start = segment.start * RATE as f64;
     let end = segment.end.max(segment.start) * RATE as f64;
-    let mut joined = 0usize;
-    let mut best: Option<(f64, usize, usize)> = None; // (overlap, joined start, source start)
-    for &(chunk_start, chunk_end) in chunks {
+    let mut most: Option<(f64, usize, usize)> = None; // (held, joined start, source start)
+    for &(from_source, to_source) in speech {
+        let joined = joined_position(runs, from_source);
         let from = joined as f64;
-        let to = (joined + chunk_end - chunk_start) as f64;
-        let overlap = end.min(to) - start.max(from);
-        let holds_start = start >= from && start < to;
-        let score = if end > start {
-            overlap
-        } else if holds_start {
-            0.0
-        } else {
-            -1.0
-        };
-        if score >= 0.0 && best.is_none_or(|(best, _, _)| score > best) {
-            best = Some((score, joined, chunk_start));
+        let to = (joined + to_source - from_source) as f64;
+        let held = end.min(to) - start.max(from);
+        if held >= SPEECH_START_MIN_SAMPLES as f64 {
+            most = Some((held, joined, from_source));
+            break;
         }
-        joined += chunk_end - chunk_start;
+        if held > 0.0 && most.is_none_or(|(most, _, _)| held > most) {
+            most = Some((held, joined, from_source));
+        }
     }
-    // A time past the joined audio belongs to the last chunk.
-    let (joined_start, source_start) = best.map_or_else(
-        || {
-            let last = chunks[chunks.len() - 1];
-            (joined - (last.1 - last.0), last.0)
-        },
-        |(_, joined_start, source_start)| (joined_start, source_start),
-    );
-    let within = (start - joined_start as f64).max(0.0);
-    (clock_offset + source_start) as f64 / RATE as f64 + within / RATE as f64
+    let source = match most {
+        // The start of a stretch is known to one window. A segment that
+        // starts less than that before it keeps its exact time.
+        Some((_, joined, source)) => {
+            let before = joined as f64 - start;
+            let window = crate::transcribe::VAD_WINDOW_SAMPLES as f64;
+            source as f64 - if before < window { before } else { 0.0 }
+        }
+        // No speech at all: the segment is in a pause or after the audio. It
+        // keeps the exact source time of its start.
+        None => {
+            let run = runs
+                .iter()
+                .rev()
+                .find(|run| run.joined as f64 <= start)
+                .unwrap_or(&runs[0]);
+            run.source as f64 + (start - run.joined as f64).clamp(0.0, run.len as f64)
+        }
+    };
+    clock_offset as f64 / RATE as f64 + source / RATE as f64
+}
+
+/// Where the source sample `source` is in the decoder audio. `source` must be
+/// inside a run.
+fn joined_position(runs: &[Run], source: usize) -> usize {
+    let run = runs
+        .iter()
+        .rev()
+        .find(|run| run.source <= source)
+        .unwrap_or(&runs[0]);
+    run.joined + (source - run.source)
+}
+
+/// The stretches of speech inside `chunks`, `[start, end)` in samples of
+/// `samples`, in order.
+///
+/// A VAD chunk is not one stretch of speech. It ends with the quiet hangover
+/// of the chunker. And the chunker does not close a chunk shorter than 1 s,
+/// so a one-word answer and the sentence after a long silence can be one
+/// chunk. A window of 100 ms is speech when its level is within 20 dB of the
+/// loud level of its chunk. Speech windows less than the chunker hangover
+/// apart are one stretch. The result depends only on the audio of each chunk,
+/// so a checkpoint span and the whole-source pass get the same stretches.
+fn speech_stretches(samples: &[f32], chunks: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let window = crate::transcribe::VAD_WINDOW_SAMPLES;
+    let hangover = crate::transcribe::VAD_HANGOVER_SAMPLES;
+    let mut stretches: Vec<(usize, usize)> = Vec::new();
+    for &(chunk_start, chunk_end) in chunks {
+        let levels: Vec<f32> = samples[chunk_start..chunk_end]
+            .chunks(window)
+            .map(|w| (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt())
+            .collect();
+        let mut sorted = levels.clone();
+        sorted.sort_by(f32::total_cmp);
+        let loud = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+        let first = stretches.len();
+        for (index, level) in levels.iter().enumerate() {
+            if *level <= loud / 10.0 {
+                continue;
+            }
+            let from = chunk_start + index * window;
+            let to = (from + window).min(chunk_end);
+            let in_this_chunk = stretches.len() > first;
+            match stretches.last_mut() {
+                Some(open) if in_this_chunk && from - open.1 < hangover => open.1 = to,
+                _ => stretches.push((from, to)),
+            }
+        }
+        // A chunk of one level, as in a test fixture, is one stretch.
+        if stretches.len() == first {
+            stretches.push((chunk_start, chunk_end));
+        }
+    }
+    stretches
 }
 
 /// A deterministic stand-in for Whisper, for tests that must not need a model.
@@ -522,25 +670,78 @@ mod tests {
     }
 
     #[test]
-    fn packing_counts_chunk_audio_not_pauses() {
-        // 10 s of speech, a 60 s pause, 10 s, a 60 s pause, 10 s: one call.
-        let chunks = chunks_of(&[(0.0, 10.0), (70.0, 80.0), (140.0, 150.0)]);
+    fn packing_counts_chunk_audio_and_kept_pauses() {
+        // 10 s of speech, a 60 s pause, 10 s, a 60 s pause, 9 s. A long
+        // pause counts as the 1 s that the decoder gets of it: 31 s is too
+        // much for one call, 21 s is not.
+        let chunks = chunks_of(&[(0.0, 10.0), (70.0, 80.0), (140.0, 149.0)]);
+        let groups = pack_groups(&chunks, 30 * S);
+        assert_eq!(
+            group_spans(&groups),
+            vec![chunks[..2].to_vec(), chunks[2..].to_vec()]
+        );
+        assert_eq!(groups[0].audio_samples(), 21 * S);
+        assert_eq!((groups[0].start(), groups[0].end()), (0, 80 * S));
+        // With 8 s at the end, the three chunks and two pauses are 30 s.
+        let chunks = chunks_of(&[(0.0, 10.0), (70.0, 80.0), (140.0, 148.0)]);
         let groups = pack_groups(&chunks, 30 * S);
         assert_eq!(group_spans(&groups), vec![chunks.clone()]);
         assert_eq!(groups[0].audio_samples(), 30 * S);
-        assert_eq!((groups[0].start(), groups[0].end()), (0, 150 * S));
+        // A pause shorter than 1 s counts with its own length.
+        let chunks = chunks_of(&[(0.0, 10.0), (10.9, 20.0)]);
+        assert_eq!(pack_groups(&chunks, 30 * S)[0].audio_samples(), 20 * S);
+    }
+
+    #[test]
+    fn the_decoder_gets_short_pauses_whole_and_long_pauses_cut() {
+        // Chunks at 2 s, 5.9 s and 70 s: a 0.9 s pause, then a 60 s pause.
+        let chunks = chunks_of(&[(2.0, 5.0), (5.9, 10.0), (70.0, 74.0)]);
+        let runs = group_runs(&chunks);
+        assert_eq!(
+            runs,
+            vec![
+                // The first two chunks, the pause between them, and the
+                // first 0.5 s of the long pause.
+                Run {
+                    joined: 0,
+                    source: 2 * S,
+                    len: 8 * S + S / 2
+                },
+                // The last 0.5 s of the long pause, and the third chunk.
+                Run {
+                    joined: 8 * S + S / 2,
+                    source: 70 * S - S / 2,
+                    len: 4 * S + S / 2
+                },
+            ]
+        );
+        let audio: usize = runs.iter().map(|run| run.len).sum();
+        assert_eq!(audio, pack_groups(&chunks, 30 * S)[0].audio_samples());
+        // The decoder audio is those runs of the source, sample for sample.
+        let samples: Vec<f32> = (0..75 * S).map(|n| n as f32).collect();
+        let mut heard = Vec::new();
+        let mut decoder = |audio: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
+            heard = audio.to_vec();
+            Ok(None)
+        };
+        decode_groups(&mut decoder, &samples, &pack_groups(&chunks, 30 * S), 0).unwrap();
+        assert_eq!(heard.len(), audio);
+        assert_eq!(heard[0], (2 * S) as f32);
+        assert_eq!(heard[8 * S + S / 2 - 1], (10 * S + S / 2 - 1) as f32);
+        assert_eq!(heard[8 * S + S / 2], (70 * S - S / 2) as f32);
+        assert_eq!(heard[audio - 1], (74 * S - 1) as f32);
     }
 
     #[test]
     fn a_group_that_reaches_the_target_exactly_is_full() {
-        let exact = chunks_of(&[(0.0, 20.0), (21.0, 31.0), (32.0, 32.5)]);
+        let exact = chunks_of(&[(0.0, 20.0), (21.0, 30.0), (31.0, 31.5)]);
         let groups = pack_groups(&exact, 30 * S);
         assert_eq!(
             group_spans(&groups),
             vec![exact[..2].to_vec(), exact[2..].to_vec()]
         );
         // One sample over the target starts a new group.
-        let over = vec![(0, 20 * S), (21 * S, 31 * S + 1)];
+        let over = vec![(0, 20 * S), (21 * S, 30 * S + 1)];
         assert_eq!(pack_groups(&over, 30 * S).len(), 2);
     }
 
@@ -648,35 +849,100 @@ mod tests {
         assert_eq!(out.lines[0], "[60:00] w0");
     }
 
+    /// The source time of a segment `start..end` of a call on `chunks`,
+    /// where each chunk is speech up to the 0.5 s hangover at its end.
+    fn secs_of(chunks: &[(usize, usize)], start: f64, end: f64) -> f64 {
+        let speech: Vec<(usize, usize)> = chunks.iter().map(|c| (c.0, c.1 - S / 2)).collect();
+        secs_with_speech(chunks, &speech, start, end)
+    }
+
+    fn secs_with_speech(
+        chunks: &[(usize, usize)],
+        speech: &[(usize, usize)],
+        start: f64,
+        end: f64,
+    ) -> f64 {
+        let segment = TimedText {
+            start,
+            end,
+            text: "x".into(),
+        };
+        source_secs(speech, &group_runs(chunks), 0, &segment)
+    }
+
     #[test]
-    fn a_segment_that_starts_early_keeps_its_own_chunk_time() {
-        // Chunks at 100 s and 160 s, joined back to back. The second segment
-        // starts 0.2 s early, inside the quiet end of the first chunk.
+    fn a_segment_that_starts_early_keeps_its_own_speech_time() {
+        // Chunks at 100 s and 160 s. The decoder gets 10 s, 0.5 s of the
+        // pause, 0.5 s of the pause, 5 s: the second chunk is at 11 s.
         let chunks = [(100 * S, 110 * S), (160 * S, 165 * S)];
-        let early = TimedText {
-            start: 9.8,
-            end: 14.0,
-            text: "x".into(),
-        };
-        assert_eq!(source_secs(&chunks, 0, &early).floor(), 160.0);
-        let inside = TimedText {
-            start: 2.5,
-            end: 4.0,
-            text: "x".into(),
-        };
-        assert_eq!(source_secs(&chunks, 0, &inside), 102.5);
-        let no_end = TimedText {
-            start: 11.0,
-            end: 11.0,
-            text: "x".into(),
-        };
-        assert_eq!(source_secs(&chunks, 0, &no_end), 161.0);
-        let past_end = TimedText {
-            start: 16.0,
-            end: 16.0,
-            text: "x".into(),
-        };
-        assert_eq!(source_secs(&chunks, 0, &past_end), 166.0);
+        // Whisper starts the second segment where the first ended: in the
+        // quiet end of the first chunk, 9.6 s.
+        assert_eq!(secs_of(&chunks, 9.6, 15.4), 160.0);
+        // Or in the kept pause.
+        assert_eq!(secs_of(&chunks, 10.2, 15.4), 160.0);
+        // A segment that starts inside speech keeps its exact time.
+        assert_eq!(secs_of(&chunks, 2.5, 4.0), 102.5);
+        assert_eq!(secs_of(&chunks, 12.0, 15.0), 161.0);
+        // Also a segment that goes on over the pause into the next chunk.
+        assert_eq!(secs_of(&chunks, 8.0, 15.0), 108.0);
+        // Without speech, a time is mapped through its run.
+        assert_eq!(secs_of(&chunks, 2.5, 2.5), 102.5);
+        assert_eq!(secs_of(&chunks, 10.2, 10.4), 110.2);
+        assert_eq!(secs_of(&chunks, 10.6, 10.8), 159.6);
+        assert_eq!(secs_of(&chunks, 20.0, 20.0), 165.0);
+    }
+
+    #[test]
+    fn a_short_answer_is_not_given_to_the_speech_before_it() {
+        // "Okay, then we ship on Friday." and, 1.2 s later, "Agreed.", as
+        // the VAD chunker cuts them. Whisper ended the first segment 0.27 s
+        // before the speech of the first chunk ends, and started "Agreed."
+        // there. That is less than a segment needs to start in a stretch.
+        let chunks = chunks_of(&[(112.4, 115.1), (116.3, 117.4)]);
+        let first_speech_ends = 2.7 - 0.5;
+        let agreed_at = 2.7 + 1.0;
+        assert_eq!(
+            secs_of(&chunks, first_speech_ends - 0.27, agreed_at + 0.6).floor(),
+            116.0
+        );
+        // The same after a loop, with one call per chunk.
+        let own = [chunks[1]];
+        assert_eq!(secs_of(&own, 0.0, 0.6).floor(), 116.0);
+    }
+
+    #[test]
+    fn a_sentence_after_a_one_word_answer_in_the_same_chunk_gets_its_own_time() {
+        // "Right." is shorter than 1 s, so the chunker cannot close its
+        // chunk. The chunk goes on over 13 s of silence into the next
+        // sentence. Whisper starts that sentence where "Right." ended.
+        let chunk = chunks_of(&[(520.6, 539.9)]);
+        let speech = chunks_of(&[(520.6, 521.0), (534.4, 539.4)]);
+        assert_eq!(secs_with_speech(&chunk, &speech, 0.0, 0.5), 520.6);
+        let sentence = secs_with_speech(&chunk, &speech, 0.5, 18.7);
+        assert!((sentence - 534.4).abs() < 0.001, "{sentence}");
+    }
+
+    #[test]
+    fn speech_stretches_leave_out_the_quiet_parts_of_a_chunk() {
+        // One chunk: 0.4 s of speech, 13 s of room noise, 5 s of speech,
+        // 0.5 s of room noise. A second chunk of one level.
+        let mut samples = vec![0.001f32; 30 * S];
+        samples[S..S + 4 * S / 10].fill(0.2);
+        samples[14 * S..19 * S].fill(0.3);
+        // A dip of 0.3 s inside the speech does not split it.
+        samples[16 * S..16 * S + 3 * S / 10].fill(0.001);
+        samples[25 * S..28 * S].fill(0.2);
+        let chunks = [(S, 19 * S + S / 2), (25 * S, 28 * S)];
+        assert_eq!(
+            speech_stretches(&samples, &chunks),
+            vec![(S, S + 4 * S / 10), (14 * S, 19 * S), (25 * S, 28 * S)]
+        );
+        // A louder or quieter recording has the same stretches.
+        let quiet: Vec<f32> = samples.iter().map(|s| s / 50.0).collect();
+        assert_eq!(
+            speech_stretches(&quiet, &chunks),
+            speech_stretches(&samples, &chunks)
+        );
     }
 
     #[test]

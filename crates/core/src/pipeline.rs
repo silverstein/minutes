@@ -2457,6 +2457,7 @@ struct PreparedTranscriptionResult {
     sources: Option<crate::source_transcript::SourceTranscript>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transcribe_prepared_input_with_hints(
     prepared: &PreparedTranscriptionInput,
     original: &Path,
@@ -2465,13 +2466,25 @@ fn transcribe_prepared_input_with_hints(
     config: &Config,
     decode_hints: crate::transcribe::DecodeHints,
     checkpoint: Option<&crate::transcript_checkpoint::TranscriptCheckpoint>,
+    checkpoint_path: Option<&Path>,
 ) -> Result<PreparedTranscriptionResult, crate::error::TranscribeError> {
     use crate::transcript_checkpoint::{self as checkpoints, CheckpointSource};
-    // Host checkpoints apply to ambient meeting sources only; an authorized
+    // Checkpoints apply to ambient meeting sources only; an authorized
     // capability is always transcribed in full.
+    let ambient_meeting = input_authority.is_none() && content_type == ContentType::Meeting;
+    // A job's checkpoint file holds the host's spans and the spans that
+    // earlier attempts finished. The final pass adds the groups it finishes,
+    // so a retry decodes only the rest.
+    let mut progress = checkpoint_path
+        .filter(|_| ambient_meeting)
+        .map(checkpoints::CheckpointFile::open);
+    let offered = match &progress {
+        Some(file) => Some(file.checkpoint().clone()),
+        None => checkpoint.filter(|_| ambient_meeting).cloned(),
+    };
     let spans_for = |source| {
-        checkpoint
-            .filter(|_| input_authority.is_none() && content_type == ContentType::Meeting)
+        offered
+            .as_ref()
             .map(|checkpoint| checkpoint.spans_for(source))
             .unwrap_or_default()
     };
@@ -2480,6 +2493,8 @@ fn transcribe_prepared_input_with_hints(
             // Sequential calls bound model memory; this is final processing,
             // never the live capture/optional-consumer path. A short response
             // on one track must not fail the whole meeting's word threshold.
+            // Each source saves its finished groups before the next source
+            // starts, and both before diarization.
             return transcribe_independent_stems(
                 stems,
                 config.transcription.cross_source_echo_suppression,
@@ -2492,12 +2507,14 @@ fn transcribe_prepared_input_with_hints(
                     let (source_config, source_hints) =
                         checkpoints::source_inputs(source, config, &decode_hints);
                     let spans = spans_for(source);
-                    if !spans.is_empty() {
+                    if !spans.is_empty() || progress.is_some() {
                         return checkpoints::transcribe_meeting_with_spans(
                             path,
+                            source,
                             &source_config,
                             &source_hints,
                             &spans,
+                            progress.as_mut(),
                         );
                     }
                     crate::transcription_coordinator::transcribe_path_for_content_with_hints(
@@ -2511,12 +2528,14 @@ fn transcribe_prepared_input_with_hints(
         }
         if let PreparedTranscriptionInput::Original = prepared {
             let spans = spans_for(CheckpointSource::Recording);
-            if !spans.is_empty() {
+            if !spans.is_empty() || progress.is_some() {
                 let transcription = checkpoints::transcribe_meeting_with_spans(
                     original,
+                    CheckpointSource::Recording,
                     config,
                     &decode_hints,
                     &spans,
+                    progress.as_mut(),
                 )?;
                 return Ok(PreparedTranscriptionResult {
                     transcription,
@@ -3559,6 +3578,12 @@ pub struct BackgroundPipelineContext {
     pub calendar_event: Option<crate::calendar::CalendarEvent>,
     pub recorded_at: Option<DateTime<Local>>,
     pub requested_title: Option<String>,
+    /// The title for decode hints and the calendar match in
+    /// [`transcribe_to_artifact`], when it is not the `title` argument.
+    /// `Some(None)` is an untitled call. A queued job sets it to the title it
+    /// was queued with: a retry gets the generated display title as `title`,
+    /// and hints from that title would reject every finished span.
+    pub decode_title: Option<Option<String>>,
     pub recording_health: Option<crate::markdown::RecordingHealth>,
     /// Canonical context session for desktop and screen evidence captured
     /// alongside this recording.
@@ -3571,6 +3596,11 @@ pub struct BackgroundPipelineContext {
     /// settings, and transcribes the rest. See [`crate::transcript_checkpoint`].
     pub transcript_checkpoint:
         Option<std::sync::Arc<crate::transcript_checkpoint::TranscriptCheckpoint>>,
+    /// The job's checkpoint file. When set, final transcription reads its
+    /// spans from this file instead of `transcript_checkpoint`, and adds the
+    /// decode groups it finishes, so a retry after a crash decodes only the
+    /// rest. The queue worker removes the file when the job completes.
+    pub checkpoint_path: Option<PathBuf>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -5024,9 +5054,13 @@ fn transcribe_to_artifact_with_authority(
         }
     }
 
+    let decode_title = decode_title(title, context);
     let matched_event = if content_type == ContentType::Meeting {
         context.calendar_event.clone().or_else(|| {
-            select_calendar_event(&crate::calendar::events_overlapping(recording_date), title)
+            select_calendar_event(
+                &crate::calendar::events_overlapping(recording_date),
+                decode_title,
+            )
         })
     } else {
         None
@@ -5037,7 +5071,7 @@ fn transcribe_to_artifact_with_authority(
         .unwrap_or_default();
     let vocabulary = load_vocabulary_for_decode_hints();
     let mut decode_hints = queued_meeting_decode_hints_for_event(
-        title,
+        decode_title,
         context.pre_context.as_deref(),
         matched_event.as_ref(),
         config,
@@ -5070,6 +5104,7 @@ fn transcribe_to_artifact_with_authority(
         config,
         decode_hints,
         context.transcript_checkpoint.as_deref(),
+        context.checkpoint_path.as_deref(),
     )?;
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
@@ -5118,6 +5153,18 @@ fn transcribe_to_artifact_with_authority(
         ),
     }
     artifact
+}
+
+/// The title that decode hints and the calendar match use: the context's
+/// decode title when it has one, else the display `title`.
+fn decode_title<'a>(
+    title: Option<&'a str>,
+    context: &'a BackgroundPipelineContext,
+) -> Option<&'a str> {
+    match &context.decode_title {
+        Some(decode_title) => decode_title.as_deref(),
+        None => title,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6218,6 +6265,7 @@ where
         content_type,
         config,
         decode_hints,
+        None,
         None,
     )?;
     crate::process_trace::stage("transcribe.done");
@@ -12001,6 +12049,32 @@ mod tests {
             ],
         );
         assert_eq!(merged, vec!["Andrea", "Dan", "Samantha", "Mat"]);
+    }
+
+    #[test]
+    fn a_retry_builds_decode_hints_from_the_queued_title() {
+        // A retry gets the generated display title. Hints from it would
+        // differ from the first attempt's, and reject every finished span.
+        let config = Config::default();
+        let hints = |title| queued_meeting_decode_hints_for_event(title, None, None, &config, None);
+        let shown = Some("Roadmap review with Priya Raman");
+        assert_ne!(hints(None), hints(shown));
+
+        let untitled = BackgroundPipelineContext {
+            decode_title: Some(None),
+            ..BackgroundPipelineContext::default()
+        };
+        assert_eq!(decode_title(shown, &untitled), None);
+        let titled = BackgroundPipelineContext {
+            decode_title: Some(Some("Planning".into())),
+            ..BackgroundPipelineContext::default()
+        };
+        assert_eq!(decode_title(shown, &titled), Some("Planning"));
+        // Hosts that set no decode title keep using the title argument.
+        assert_eq!(
+            decode_title(shown, &BackgroundPipelineContext::default()),
+            shown
+        );
     }
 
     #[test]

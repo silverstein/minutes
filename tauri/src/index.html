@@ -452,14 +452,23 @@
       transition: opacity 100ms ease-out 150ms;
     }
 
-    .recall-tabs { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; overflow-x: auto; }
-    .recall-tab { display: flex; min-width: 130px; max-width: 220px; flex: 1 0 130px; border: 1px solid var(--border-mid); border-radius: 6px; }
-    .recall-tab button { background: var(--bg-elevated); color: var(--text-secondary); border: none; padding: 8px; cursor: pointer; }
-    .recall-tab [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; text-align: left; }
-    .recall-tab [aria-selected="true"] { background: var(--bg-hover); color: var(--text); }
+    /* Tabs share the title row with the Recall actions: soft pills, the
+       close button only on the active or hovered tab, no boxes or dividers. */
+    .recall-tabs { display: flex; align-items: center; gap: 2px; flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; -webkit-app-region: no-drag; }
+    .recall-tabs::-webkit-scrollbar { display: none; }
+    .recall-tab { position: relative; display: flex; align-items: center; flex: 0 1 auto; min-width: 88px; max-width: 200px; border-radius: var(--radius); transition: background-color 120ms ease; }
+    .recall-tab:hover { background: var(--surface-fill-hover); }
+    .recall-tab:has([aria-selected="true"]) { background: var(--surface-fill-strong); }
+    .recall-tab button { background: transparent; color: var(--text-secondary); border: none; font: inherit; cursor: pointer; }
+    .recall-tab [role="tab"] { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; padding: 6px 4px 6px 9px; font-size: var(--text-xs); font-weight: 500; text-align: left; border-radius: var(--radius); }
+    .recall-tab [aria-selected="true"] { color: var(--text); }
     .recall-tab-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .recall-tab-close { flex-shrink: 0; }
-    .recall-tab-add { background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border-mid); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+    .recall-tab-close { flex-shrink: 0; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 4px; padding: 0; border-radius: 6px; color: var(--text-tertiary); font-size: var(--text-sm); line-height: 1; opacity: 0; }
+    .recall-tab:hover .recall-tab-close, .recall-tab:focus-within .recall-tab-close, .recall-tab:has([aria-selected="true"]) .recall-tab-close { opacity: 1; }
+    .recall-tab .recall-tab-close:hover { background: var(--surface-fill-strong); color: var(--text); }
+    .recall-tab-add { flex-shrink: 0; display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; background: transparent; color: var(--text-secondary); border: none; border-radius: var(--radius); font: inherit; font-size: var(--text-body); line-height: 1; cursor: pointer; }
+    .recall-tab-add:hover { background: var(--surface-fill-hover); color: var(--text); }
+    @media (prefers-reduced-motion: reduce) { .recall-tab { transition: none; } }
     .recall-tab-glyph { display: inline-block; width: 9px; height: 9px; border: 1.5px solid currentColor; border-radius: 50%; flex-shrink: 0; color: var(--text-secondary); margin-inline: 3px; }
     .recall-tab-glyph.waiting { color: var(--accent); background: currentColor; }
     .recall-tab-glyph.working { border-top-color: transparent; animation: recall-tab-spin 1s linear infinite; }
@@ -472,8 +481,8 @@
     .recall-tab-prompt p { flex: 1 1 220px; min-width: 0; margin: 0; color: var(--text); font-size: var(--text-body); }
     .recall-tab-prompt-hint { color: var(--text-secondary); }
     .recall-tab-prompt .btn { margin: 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: normal; }
-    .recall-tab.recall-tab-closable { border-color: var(--accent-border-strong); }
-    .recall-tab.recall-tab-closable .recall-tab-close { color: var(--accent); background: var(--accent-tint); }
+    .recall-tab.recall-tab-closable { box-shadow: inset 0 0 0 1px var(--accent-border-strong); }
+    .recall-tab.recall-tab-closable .recall-tab-close { opacity: 1; color: var(--accent); background: var(--accent-tint); }
     .recall-tabs button:focus-visible, .recall-tab-prompt button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     @keyframes recall-tab-spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .recall-tab-glyph.working { animation: none; border-style: dotted; } }
@@ -481,12 +490,10 @@
     .recall-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 10px 14px;
-      border-bottom: 1px solid var(--border-mid);
-      background: var(--bg-elevated);
-      border-top-left-radius: 18px;
-      border-top-right-radius: 18px;
+      gap: 8px;
+      padding: 8px 12px 8px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
       flex-shrink: 0;
       -webkit-app-region: drag;
       /* Actions wrap under the title at narrow widths instead of crushing it
@@ -499,8 +506,22 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      /* Never squeezed past a readable stub ("Reca" was the whole title). */
-      min-width: 9ch;
+      min-width: 0;
+      flex: 0 1 auto;
+    }
+
+    /* The tabs already name the conversation. The phase shows only when it
+       says something (Prep, Listening, Debrief, Weekly), and the context
+       summary only when there is one. */
+    .recall-header-info.default-phase .recall-phase-dot,
+    .recall-header-info.default-phase .recall-phase-label {
+      display: none;
+    }
+    .recall-header-info.default-phase:has(.recall-context-label:empty) {
+      display: none;
+    }
+    .recall-header-info:not(.default-phase) .recall-context-label:not(:empty)::before {
+      content: '\2014\00a0';
     }
 
     .recall-phase-dot {
@@ -619,7 +640,9 @@
 
     .recall-header-actions {
       display: flex;
-      gap: 8px;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
       -webkit-app-region: no-drag;
       flex-shrink: 0;
     }
@@ -667,28 +690,6 @@
       text-transform: uppercase;
       color: var(--accent);
       margin: 18px 0 8px;
-    }
-
-    .recall-close {
-      padding: 2px 8px;
-      border-radius: 6px;
-      border: none;
-      background: transparent;
-      color: var(--text-tertiary);
-      font-size: var(--text-sm);
-      cursor: pointer;
-      line-height: 1;
-    }
-
-    .recall-close:hover {
-      color: var(--text-secondary);
-      background: var(--bg-hover);
-    }
-
-    .recall-close:focus-visible {
-      outline: none;
-      color: var(--text-secondary);
-      background: var(--bg-hover);
     }
 
     .recall-end-btn {
@@ -1347,13 +1348,16 @@
     }
 
     /* The right-hand pane headers share the title row. */
+    /* The header is the title row: it starts at the window's top edge so it
+       centers on the traffic lights, like the document header beside it. */
     html[data-platform="macos"] .recall-panel.expanded {
-      padding-top: 8px;
+      padding-top: 0;
     }
 
     html[data-platform="macos"] .recall-header {
-      padding-top: 5px;
-      padding-bottom: 5px;
+      min-height: 52px;
+      padding-top: 0;
+      padding-bottom: 0;
       position: relative;
       z-index: 6;
     }
@@ -1421,7 +1425,7 @@
     /* With the list collapsed, whichever pane is leftmost starts after the
        traffic lights and the toggle. */
     html[data-platform="macos"] body.sidebar-collapsed .recall-header {
-      margin-left: 104px;
+      padding-left: 114px;
     }
 
     html[data-platform="macos"] body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
@@ -1429,7 +1433,7 @@
     }
 
     html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-header {
-      margin-left: 34px;
+      padding-left: 44px;
     }
 
     html[data-platform="macos"].is-fullscreen body.sidebar-collapsed .recall-panel:not(.expanded) ~ .md-viewer .md-viewer-header {
@@ -2210,14 +2214,13 @@
       margin-right: 6px;
     }
 
-    /* Open, Recall has its own header and close button beside the list, so
-       the toggle only repeats it. Show it as the way in, not the way out. */
+    /* One control opens and closes Recall, in the same place either way, like
+       Documents beside it. A second close button in the Recall header looked
+       like the list pane's collapse button and left no visible way back. */
     .recall-toggle-btn[aria-expanded="true"] {
-      display: none;
-    }
-
-    .recall-toggle-btn[aria-expanded="true"] + .list-toggle-btn {
-      margin-left: auto;
+      color: var(--text);
+      border-color: var(--border-mid);
+      background: var(--surface-fill);
     }
 
     .sidebar-collapse-btn {
@@ -5843,7 +5846,7 @@
     .recall-panel {
       border-radius: 0;
       padding: 16px;
-      gap: 12px;
+      gap: 8px;
     }
 
     /* With the panel collapsed, the `padding: 16px` above — combined with
@@ -5856,17 +5859,9 @@
       padding: 0;
     }
 
-    .recall-header {
-      border-radius: 12px;
-    }
-
     .recall-terminal {
       border-radius: 0;
       gap: 12px;
-    }
-
-    .recall-close {
-      transition: transform 0.17s ease, background-color 0.17s ease, color 0.17s ease, box-shadow 0.17s ease;
     }
 
     .audio-viz .bar {
@@ -6742,10 +6737,9 @@
 
   <!-- ── Recall panel (right side, embedded terminal) ── -->
   <div class="recall-panel" id="recall-panel" aria-hidden="true" inert>
-    <div class="recall-tabs" id="recall-tabs" role="tablist" aria-label="Recall conversations"></div>
-    <div class="recall-tab-prompt" id="recall-tab-prompt" role="region" aria-label="Recall tab action" hidden></div>
     <div class="recall-header" data-tauri-drag-region>
-      <div class="recall-header-info" data-tauri-drag-region>
+      <div class="recall-tabs" id="recall-tabs" role="tablist" aria-label="Recall conversations"></div>
+      <div class="recall-header-info default-phase" id="recall-header-info" data-tauri-drag-region>
         <div class="recall-phase-dot" id="recall-dot" aria-label="Phase: Recall" data-tauri-drag-region></div>
         <span class="recall-phase-label" id="recall-phase-label" data-tauri-drag-region>Recall</span>
         <span class="recall-context-label" id="recall-context-label" data-tauri-drag-region></span>
@@ -6755,9 +6749,9 @@
         <button class="btn btn-secondary btn-sm recall-end-btn" id="btn-recall-end">End Session</button>
         <button class="recall-mode-toggle" id="btn-recall-mode-toggle" title="Switch to Terminal"
           hidden aria-hidden="true"></button>
-        <button class="recall-close" id="btn-recall-close" title="Close panel">&times;</button>
       </div>
     </div>
+    <div class="recall-tab-prompt" id="recall-tab-prompt" role="region" aria-label="Recall tab action" hidden></div>
     <div class="recall-context-chips" id="recall-context-chips" role="list" aria-label="In this conversation" hidden></div>
     <div class="recall-note" id="recall-note">
       <div class="recall-note-row">
@@ -16249,6 +16243,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     const recallDot = document.getElementById('recall-dot');
     const recallPhaseLabel = document.getElementById('recall-phase-label');
     const recallContextLabel = document.getElementById('recall-context-label');
+    const recallHeaderInfo = document.getElementById('recall-header-info');
     const recallTerminalContainer = document.getElementById('recall-terminal-container');
     const recallLoading = document.getElementById('recall-loading');
     const recallNote = document.getElementById('recall-note');
@@ -16919,7 +16914,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         labels.weekly = 'Weekly';
       }
       recallPhaseLabel.textContent = labels[phase] || 'Recall';
-      recallContextLabel.textContent = context ? `\u2014 ${context}` : '';
+      recallHeaderInfo.classList.toggle('default-phase', phase === 'recall');
+      recallContextLabel.textContent = context || '';
       recallDot.setAttribute('aria-label', 'Phase: ' + (labels[phase] || 'Recall'));
 
       recallWeeklyView.classList.toggle('active', phase === 'weekly');
@@ -17457,6 +17453,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallPanel.setAttribute('aria-hidden', 'false');
       splitHandle.classList.add('visible');
       assistantBtn.setAttribute('aria-expanded', 'true');
+      assistantBtn.title = 'Close Recall';
       recallExpanded = true;
       expandAnimating = false;
 
@@ -17486,6 +17483,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallPanel.setAttribute('aria-hidden', 'true');
       splitHandle.classList.remove('visible');
       assistantBtn.setAttribute('aria-expanded', 'false');
+      assistantBtn.title = 'Open Recall';
 
       const isFullscreen = await currentWindow.isFullscreen().catch(() => false);
 
@@ -17599,7 +17597,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (mode === 'assistant' && !meetingPath && !options.tabId) {
           try {
             const bundle = await invoke('cmd_proactive_context_bundle');
-            recallContextLabel.textContent = bundle.summary ? `\u2014 ${bundle.summary}` : '';
+            recallContextLabel.textContent = bundle.summary || '';
           } catch (contextError) {
             console.error('Recall proactive context:', contextError);
           }
@@ -19336,10 +19334,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       }
     });
 
-    document.getElementById('btn-recall-close').addEventListener('click', () => {
-      userExplicitlyCollapsed = true;
-      collapseRecallPanel();
-    });
 
     // Ending a session while the agent is still writing loses the answer, and
     // the button sits beside Weekly. While output is arriving, the first click

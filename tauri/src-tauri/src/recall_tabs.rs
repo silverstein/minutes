@@ -166,7 +166,7 @@ impl TabStore {
                 }
                 self.tabs.push(Tab {
                     id: "assistant".into(),
-                    title: "Recall".into(),
+                    title: "Chat".into(),
                     phase: None,
                     meeting_path: fs::read(
                         root.parent().unwrap_or(root).join("recall-workspace.json"),
@@ -196,7 +196,7 @@ impl TabStore {
                         tab.title = Path::new(path)
                             .file_stem()
                             .and_then(|p| p.to_str())
-                            .unwrap_or("Recall")
+                            .unwrap_or("Chat")
                             .replace('-', " ");
                     }
                 }
@@ -260,7 +260,11 @@ impl TabStore {
         // Upgrade generic free-chat names once, retaining their identity on
         // subsequent restores and after other tabs are closed.
         for index in 0..self.tabs.len() {
-            if self.tabs[index].meeting_path.is_none() && self.tabs[index].title == "Chat" {
+            // "Recall" was the name of the one legacy conversation; the panel
+            // itself is Recall, so a tab named that said nothing.
+            if self.tabs[index].meeting_path.is_none()
+                && matches!(self.tabs[index].title.as_str(), "Chat" | "Recall")
+            {
                 self.tabs[index].title = self.next_chat_title();
             }
         }

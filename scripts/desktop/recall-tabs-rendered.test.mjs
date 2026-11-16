@@ -14,7 +14,7 @@ const source = readFileSync('tauri/src/index.html', 'utf8');
 const css = source.match(/<style>([\s\S]*?)<\/style>/)[1];
 const controller = readFileSync('tauri/src/scripts/recall-tabs.js', 'utf8');
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-<div id="recall-panel" class="recall-panel expanded"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div><div class="recall-header"><div class="recall-header-actions"></div></div>
+<div id="recall-panel" class="recall-panel expanded"><div class="recall-header"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div class="recall-header-actions"></div></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
 <span data-recall-meeting="/live.md"></span><span data-recall-meeting="/prep.md"></span></div><script>${controller}</script><script>
 const actions=[];let model={active:'live',tabs:[{id:'live',title:'Live call',meeting_path:'/live.md',status:'working',live:true},{id:'prep',title:'Board prep',meeting_path:'/prep.md',status:'working'},{id:'chat',title:'Chat',status:'done'},{id:'other',title:'Other',status:'done'}]};
 const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),resume:id=>actions.push(['resume',id]),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});

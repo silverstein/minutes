@@ -766,6 +766,68 @@ pub fn dedup_segments(lines: &[String]) -> Vec<String> {
     result
 }
 
+/// Back-to-back repeats of one phrase that [`find_repetition_loop`] counts as
+/// a decoder loop. People repeat a phrase two or three times ("no, no, no",
+/// "thank you, thank you"). A loop repeats until the decode window ends.
+pub const LOOP_MIN_REPEATS: usize = 4;
+
+/// Words a loop must cover in total. Short emphatic repeats ("go go go go",
+/// "yeah yeah yeah yeah") stay below it: a one-word phrase needs 16 repeats,
+/// a four-word phrase needs 4.
+pub const LOOP_MIN_WORDS: usize = 16;
+
+/// A phrase that repeats back to back inside one segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepetitionLoop {
+    /// Words in the repeated phrase.
+    pub phrase_words: usize,
+    /// Consecutive times the phrase occurs.
+    pub repeats: usize,
+    /// Index of the first word of the run, in the segment's words.
+    pub first_word: usize,
+}
+
+/// Find a repetition loop inside one segment.
+///
+/// [`dedup_segments`] collapses loops that span consecutive segments. Whisper
+/// can also loop inside a single segment, for example one sentence seven
+/// times in one line. This function finds that case. It only reports the
+/// loop: the caller decides what to do, for example decode that audio again
+/// in smaller pieces.
+///
+/// A loop is a phrase that occurs at least [`LOOP_MIN_REPEATS`] times back to
+/// back and covers at least [`LOOP_MIN_WORDS`] words. Words are compared with
+/// the same key as [`dedup_segments`]: case and edge punctuation on words may
+/// vary, numbers must match exactly. So a sentence that repeats with another
+/// name, number or a negation is not a loop.
+///
+/// Accepts `[m:ss] text` lines or plain text.
+pub fn find_repetition_loop(line: &str) -> Option<RepetitionLoop> {
+    let words = repetition_key(text_part(line));
+    let max_phrase = words.len() / LOOP_MIN_REPEATS;
+    for phrase_words in 1..=max_phrase {
+        for first_word in 0..words.len() {
+            let phrase = &words[first_word..];
+            if phrase.len() < phrase_words * LOOP_MIN_REPEATS {
+                break;
+            }
+            let phrase = &phrase[..phrase_words];
+            let repeats = words[first_word..]
+                .chunks_exact(phrase_words)
+                .take_while(|next| *next == phrase)
+                .count();
+            if repeats >= LOOP_MIN_REPEATS && repeats * phrase_words >= LOOP_MIN_WORDS {
+                return Some(RepetitionLoop {
+                    phrase_words,
+                    repeats,
+                    first_word,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Detect interleaved repetition patterns that escape consecutive dedup.
 ///
 /// Whisper often hallucinates alternating patterns like:
@@ -1343,6 +1405,69 @@ mod tests {
         assert_eq!(stats.lines_removed, 0);
         assert!(cleaned.contains("First line"));
         assert!(cleaned.contains("Third line"));
+    }
+
+    // ── find_repetition_loop ──
+
+    #[test]
+    fn loop_inside_one_segment_is_found() {
+        // The real case from issue #1340: one sentence seven times in one line.
+        let sentence = "So we will send the deck to the team by Friday.";
+        let line = format!("[4:12] Okay. {}", [sentence; 7].join(" "));
+        let found = find_repetition_loop(&line).expect("a loop");
+        assert_eq!(found.phrase_words, 11);
+        assert_eq!(found.repeats, 7);
+        assert_eq!(found.first_word, 1);
+        // The consecutive-segment cleanup keeps the line as it is.
+        assert_eq!(dedup_segments(std::slice::from_ref(&line)), vec![line]);
+    }
+
+    #[test]
+    fn loop_ignores_case_and_edge_punctuation() {
+        let line = "Let me check that. let me check that, LET ME CHECK THAT! Let me check that.";
+        assert_eq!(
+            find_repetition_loop(line),
+            Some(RepetitionLoop {
+                phrase_words: 4,
+                repeats: 4,
+                first_word: 0
+            })
+        );
+        assert!(find_repetition_loop(&"the ".repeat(16)).is_some());
+    }
+
+    #[test]
+    fn legitimate_repetition_is_not_a_loop() {
+        for line in [
+            "No, no, no, that is not what I meant.",
+            "Thank you. Thank you. Thank you so much.",
+            "Go go go go go!",
+            "Yeah yeah yeah yeah yeah yeah yeah, fine.",
+            "I'm sorry, I'm sorry, I'm sorry.",
+            "Let me check. Let me check. Let me check. Okay, here it is.",
+            "very very very very very very very very very very very very very very very",
+        ] {
+            assert_eq!(find_repetition_loop(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn changed_names_numbers_and_negation_are_not_a_loop() {
+        for line in [
+            "We sold 5 units. We sold 6 units. We sold 7 units. We sold 8 units. We sold 9 units.",
+            "Send it to Priya now. Send it to Amara now. Send it to Jonas now. Send it to Mei now.",
+            "It works on Mac. It doesn't work on Mac. It works on Mac. It does not work on Mac.",
+            "Room 1.5 is free. Room 1,5 is free. Room 15 is free. Room -15 is free.",
+        ] {
+            assert_eq!(find_repetition_loop(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn short_or_empty_lines_have_no_loop() {
+        assert_eq!(find_repetition_loop(""), None);
+        assert_eq!(find_repetition_loop("[0:00] "), None);
+        assert_eq!(find_repetition_loop("[0:00] hello"), None);
     }
 
     // ── dedup_segments ──

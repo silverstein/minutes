@@ -11,19 +11,23 @@
 //!
 //! - its PCM digest matches the same samples of the final source file,
 //! - its settings fingerprint matches the settings of the final pass
-//!   (core version, transcription config, decode hints),
-//! - it lies inside the file and does not overlap an earlier accepted span.
+//!   (core version, transcription config, decode strategy, decode hints),
+//! - it lies inside the file and does not overlap an earlier accepted span,
+//! - its decode groups are exactly the final pass's groups for that audio, so
+//!   no group crosses either edge of the span.
 //!
 //! Anything else is ignored and that range is transcribed as usual. With no
 //! checkpoint, or no accepted span, processing is unchanged.
 //!
-//! Spans use the same VAD chunking, decoder settings and per-source options as
-//! the final pass. Each chunk is decoded independently, so a span's lines
-//! match what the final pass would produce for those chunks. Lines are kept
-//! before the transcript cleanup pipeline, which runs once over the whole
-//! source, as it does without a checkpoint.
+//! Spans use the same decode plan ([`crate::decode_groups`]), decoder,
+//! settings and per-source options as the final pass. Each group is decoded
+//! independently, so a span's lines match what the final pass would produce
+//! for those groups. The final pass decodes only the groups that no accepted
+//! span covers. Lines are kept before the transcript cleanup pipeline, which
+//! runs once over the whole source, as it does without a checkpoint.
 
 use crate::config::Config;
+use crate::decode_groups::{DecodeGroup, DecodePlan};
 use crate::error::TranscribeError;
 use crate::transcribe::{self, DecodeHints, TranscribeResult};
 use serde::{Deserialize, Serialize};
@@ -121,8 +125,10 @@ pub fn decode_hints_for_queued_meeting_at(
 /// Transcribe one span of a source during the recording.
 ///
 /// `samples` are the source's canonical 16 kHz mono samples starting at
-/// `start_sample` (a 16-bit WAV sample `s` is `s as f32 / 32768.0`). Cut a span
-/// in a pause, so no word is split between two spans. `hints` are the job's
+/// `start_sample` (a 16-bit WAV sample `s` is `s as f32 / 32768.0`). Start and
+/// end a span only at a cut of the source's decode plan
+/// ([`DecodePlan::cuts`] of [`DecodePlan::for_growing_source`]). The final
+/// pass rejects a span whose groups differ from its own. `hints` are the job's
 /// decode hints, normally from [`decode_hints_for_queued_meeting`].
 pub fn transcribe_span(
     samples: &[f32],
@@ -140,7 +146,7 @@ pub fn transcribe_span(
 pub struct SpanTranscriber {
     config: Config,
     hints: DecodeHints,
-    decoder: transcribe::CheckpointChunkDecoder,
+    decoder: transcribe::MeetingGroupDecoder,
 }
 
 impl SpanTranscriber {
@@ -171,14 +177,24 @@ impl SpanTranscriber {
                     .into(),
             ));
         }
-        let chunks = transcribe::detect_meeting_vad_chunks(samples);
+        let plan = DecodePlan::for_source(samples, transcribe::meeting_group_target(&config));
         let clock_offset = usize::try_from(start_sample).map_err(|_| {
             TranscribeError::UnsupportedFormat("span starts past the audio budget".into())
         })?;
+        let had_model = self.decoder.model_loaded();
         let lines = self
             .decoder
-            .transcribe(samples, &chunks, clock_offset, &config, &hints)?
+            .transcribe(samples, plan.groups(), clock_offset, &config, &hints)?
             .lines;
+        if !had_model && self.decoder.model_loaded() {
+            tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
+            crate::logging::log_step(
+                "capture_checkpoint_model_load",
+                "",
+                0,
+                serde_json::json!({"engine":"whisper"}),
+            );
+        }
         Ok(CheckpointSpan {
             source,
             start_sample,
@@ -230,10 +246,18 @@ pub(crate) fn transcribe_meeting_with_spans(
         config,
         crate::pipeline::private_audio_processing_available(),
     );
+    let group_target = transcribe::meeting_group_target(config);
+    let plan = DecodePlan::for_source(&samples, group_target);
     let accepted = if bypass {
         Vec::new()
     } else {
-        accepted_spans(&samples, spans, &settings_fingerprint(config, hints))
+        accepted_spans(
+            &samples,
+            spans,
+            &settings_fingerprint(config, hints),
+            &plan,
+            group_target,
+        )
     };
     tracing::info!(
         offered = spans.len(),
@@ -261,31 +285,10 @@ pub(crate) fn transcribe_meeting_with_spans(
         return transcribe::transcribe_meeting_samples(audio_path, &samples, config, hints);
     }
 
-    let mut out = transcribe::ChunkLines {
-        lines: Vec::new(),
-        stats: transcribe::FilterStats {
-            audio_duration_secs: samples.len() as f64 / SAMPLE_RATE as f64,
-            ..Default::default()
-        },
-    };
-    let mut cursor = 0usize;
-    for span in accepted.iter().map(Some).chain([None]) {
-        let gap_end = span.map_or(samples.len(), |s| s.start_sample as usize);
-        if gap_end > cursor {
-            let chunks: Vec<(usize, usize)> =
-                transcribe::detect_meeting_vad_chunks(&samples[cursor..gap_end])
-                    .into_iter()
-                    .map(|(start, end)| (start + cursor, end + cursor))
-                    .collect();
-            let gap = transcribe::transcribe_chunk_lines(&samples, &chunks, 0, config, hints)?;
-            out.add_stats(&gap.stats);
-            out.lines.extend(gap.lines);
-        }
-        if let Some(span) = span {
-            out.lines.extend(span.lines.iter().cloned());
-            cursor = span.end_sample as usize;
-        }
-    }
+    let mut decoder = transcribe::MeetingGroupDecoder::default();
+    let out = assemble_source(&samples, &plan, &accepted, |groups| {
+        decoder.transcribe(&samples, groups, 0, config, hints)
+    })?;
 
     match transcribe::finish_chunk_lines(out) {
         Some(result) => Ok(result),
@@ -294,11 +297,54 @@ pub(crate) fn transcribe_meeting_with_spans(
     }
 }
 
-/// Spans that fit `samples` exactly, in order and without overlap.
+/// The lines of a whole source, before cleanup: the lines of each accepted
+/// span, and `decode` for each run of groups between them. `accepted` must
+/// come from [`accepted_spans`] with the same `plan`, so every group is
+/// either inside one span or in a gap.
+fn assemble_source(
+    samples: &[f32],
+    plan: &DecodePlan,
+    accepted: &[&CheckpointSpan],
+    mut decode: impl FnMut(&[DecodeGroup]) -> Result<transcribe::ChunkLines, TranscribeError>,
+) -> Result<transcribe::ChunkLines, TranscribeError> {
+    let mut out = transcribe::ChunkLines {
+        lines: Vec::new(),
+        stats: transcribe::FilterStats {
+            audio_duration_secs: samples.len() as f64 / SAMPLE_RATE as f64,
+            ..Default::default()
+        },
+    };
+    let groups = plan.groups();
+    let mut next = 0usize;
+    for span in accepted.iter().map(Some).chain([None]) {
+        let gap_end = span.map_or(samples.len(), |s| s.start_sample as usize);
+        let first = next;
+        while next < groups.len() && groups[next].end() <= gap_end {
+            next += 1;
+        }
+        if next > first {
+            let gap = decode(&groups[first..next])?;
+            out.add_stats(&gap.stats);
+            out.lines.extend(gap.lines);
+        }
+        if let Some(span) = span {
+            out.lines.extend(span.lines.iter().cloned());
+            while next < groups.len() && groups[next].start() < span.end_sample as usize {
+                next += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Spans that fit `samples` exactly, in order and without overlap, and whose
+/// decode groups are the groups of `plan` for that audio.
 fn accepted_spans<'a>(
     samples: &[f32],
     spans: &[&'a CheckpointSpan],
     settings: &str,
+    plan: &DecodePlan,
+    group_target: usize,
 ) -> Vec<&'a CheckpointSpan> {
     let mut sorted = spans.to_vec();
     sorted.sort_by_key(|s| (s.start_sample, s.end_sample));
@@ -317,6 +363,12 @@ fn accepted_spans<'a>(
             != pcm_digest(&samples[span.start_sample as usize..span.end_sample as usize])
         {
             Some("audio differs")
+        } else if !plan.matches_span(
+            &samples[span.start_sample as usize..span.end_sample as usize],
+            span.start_sample as usize,
+            group_target,
+        ) {
+            Some("span edges are not decode-group boundaries")
         } else {
             None
         };
@@ -343,10 +395,23 @@ fn accepted_spans<'a>(
 }
 
 fn settings_fingerprint(config: &Config, hints: &DecodeHints) -> String {
+    fingerprint_with_strategy(
+        config,
+        hints,
+        &crate::decode_groups::strategy_id(transcribe::meeting_group_target(config)),
+    )
+}
+
+/// `strategy` names how audio is cut into decoder calls and when a call is
+/// retried. Spans from another strategy have other lines at the same
+/// settings, so they must not match.
+fn fingerprint_with_strategy(config: &Config, hints: &DecodeHints, strategy: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
     hasher.update([0]);
     hasher.update(transcribe::effective_batch_engine(config).as_bytes());
+    hasher.update([0]);
+    hasher.update(strategy.as_bytes());
     hasher.update([0]);
     hasher.update(format!("{:?}", config.transcription).as_bytes());
     hasher.update([0]);
@@ -391,31 +456,96 @@ mod tests {
         (0..len).map(|i| (i % 97) as f32 / 97.0 - 0.5).collect()
     }
 
+    const GROUP: usize = crate::decode_groups::WHISPER_GROUP_TARGET_SAMPLES;
+    const RATE: usize = SAMPLE_RATE as usize;
+
+    /// Speech bursts of 1.2 to 9 s with pauses of 0.4 to 7 s, `secs` long.
+    fn bursts(secs: f64) -> Vec<f32> {
+        let mut bursts = Vec::new();
+        let mut t = 0.7;
+        let mut id = 0u32;
+        while t < secs - 12.0 {
+            let len = [1.2, 4.0, 9.0, 2.5, 6.3][id as usize % 5];
+            bursts.push((t, len, id % 300));
+            t += len + [0.4, 1.5, 7.0, 0.9, 2.2, 3.1][id as usize % 6];
+            id += 1;
+        }
+        crate::decode_groups::fake::burst_audio(secs, &bursts)
+    }
+
+    /// The whole-source plan and its cuts, with 0 first.
+    fn plan_and_cuts(samples: &[f32], target: usize) -> (DecodePlan, Vec<usize>) {
+        let plan = DecodePlan::for_source(samples, target);
+        let cuts = std::iter::once(0)
+            .chain(plan.cuts().iter().copied())
+            .collect();
+        (plan, cuts)
+    }
+
+    fn voice(audio: &[f32], from: usize, to: usize, settings: &str) -> CheckpointSpan {
+        span(
+            CheckpointSource::Voice,
+            from as u64,
+            &audio[from..to],
+            settings,
+        )
+    }
+
     #[test]
     fn matching_spans_are_accepted_in_order() {
-        let audio = ramp(48_000);
-        let a = span(CheckpointSource::Voice, 0, &audio[..16_000], "s");
-        let b = span(CheckpointSource::Voice, 16_000, &audio[16_000..32_000], "s");
-        let accepted = accepted_spans(&audio, &[&b, &a], "s");
+        let audio = bursts(90.0);
+        let (plan, c) = plan_and_cuts(&audio, GROUP);
+        let a = voice(&audio, c[0], c[1], "s");
+        let b = voice(&audio, c[1], c[3], "s");
+        let accepted = accepted_spans(&audio, &[&b, &a], "s", &plan, GROUP);
         assert_eq!(accepted, vec![&a, &b]);
     }
 
     #[test]
     fn spans_that_do_not_fit_the_final_audio_are_ignored() {
-        let audio = ramp(48_000);
-        let good = span(CheckpointSource::Voice, 0, &audio[..16_000], "s");
-        let other_settings = span(CheckpointSource::Voice, 16_000, &audio[16_000..32_000], "t");
-        let mut changed = audio[32_000..48_000].to_vec();
+        let audio = bursts(240.0);
+        let (plan, c) = plan_and_cuts(&audio, GROUP);
+        assert!(c.len() > 6, "{c:?}");
+        let good = voice(&audio, c[0], c[1], "s");
+        let other_settings = voice(&audio, c[1], c[2], "t");
+        let mut changed = audio[c[2]..c[3]].to_vec();
         changed[5] += 0.25;
-        let other_audio = span(CheckpointSource::Voice, 32_000, &changed, "s");
-        let past_end = span(CheckpointSource::Voice, 40_000, &ramp(16_000), "s");
-        let overlap = span(CheckpointSource::Voice, 8_000, &audio[8_000..24_000], "s");
-        let accepted = accepted_spans(
-            &audio,
-            &[&good, &other_settings, &other_audio, &past_end, &overlap],
+        let other_audio = span(CheckpointSource::Voice, c[2] as u64, &changed, "s");
+        let past_end = span(
+            CheckpointSource::Voice,
+            (audio.len() - RATE) as u64,
+            &ramp(2 * RATE),
             "s",
         );
+        let overlap = voice(&audio, c[1] - RATE / 2, c[2], "s");
+        // Ends inside a group that has more than one chunk.
+        let g = (3..plan.groups().len())
+            .find(|&g| plan.groups()[g].chunks.len() > 1)
+            .unwrap();
+        let inside = voice(&audio, c[g], plan.groups()[g].chunks[0].1 + RATE / 10, "s");
+        let accepted = accepted_spans(
+            &audio,
+            &[
+                &good,
+                &other_settings,
+                &other_audio,
+                &past_end,
+                &overlap,
+                &inside,
+            ],
+            "s",
+            &plan,
+            GROUP,
+        );
         assert_eq!(accepted, vec![&good]);
+        // The same span is accepted when another plan has a group edge there.
+        let per_chunk = DecodePlan::for_source(&audio, 0);
+        let edge = per_chunk.cuts()[0];
+        let one_chunk = voice(&audio, 0, edge, "s");
+        assert_eq!(
+            accepted_spans(&audio, &[&one_chunk], "s", &per_chunk, 0).len(),
+            1
+        );
     }
 
     #[test]
@@ -493,6 +623,32 @@ mod tests {
         assert_ne!(base, settings_fingerprint(&config, &DecodeHints::default()));
     }
 
+    #[test]
+    fn per_chunk_and_grouped_spans_never_match_each_other() {
+        use crate::decode_groups::strategy_id;
+        let config = Config::default();
+        let hints = DecodeHints::from_candidates(&["Priya".into()], &[]);
+        let grouped = fingerprint_with_strategy(&config, &hints, &strategy_id(GROUP));
+        let per_chunk = fingerprint_with_strategy(&config, &hints, &strategy_id(0));
+        let other_target = fingerprint_with_strategy(&config, &hints, &strategy_id(25 * RATE));
+        assert_ne!(grouped, per_chunk);
+        assert_ne!(grouped, other_target);
+        // Spans saved before the strategy was part of the fingerprint.
+        let mut hasher = Sha256::new();
+        hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+        hasher.update([0]);
+        hasher.update(transcribe::effective_batch_engine(&config).as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", config.transcription).as_bytes());
+        hasher.update([0]);
+        hasher.update(format!("{:?}", hints.without_audio_format_extension()).as_bytes());
+        let unversioned = hex(&hasher.finalize());
+        for current in [&grouped, &per_chunk, &settings_fingerprint(&config, &hints)] {
+            assert_ne!(*current, unversioned);
+        }
+        assert!([grouped, per_chunk].contains(&settings_fingerprint(&config, &hints)));
+    }
+
     fn write_wav(path: &Path, samples: &[i16]) -> Vec<f32> {
         let spec = hound::WavSpec {
             channels: 1,
@@ -525,7 +681,7 @@ mod tests {
     fn a_fully_covered_source_reuses_its_spans_without_decoding() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("meeting.voice.wav");
-        let pcm: Vec<i16> = (0..48_000).map(|i| ((i % 400) as i16 - 200) * 40).collect();
+        let pcm: Vec<i16> = bursts(60.0).iter().map(|&s| (s * 32768.0) as i16).collect();
         let samples = write_wav(&path, &pcm);
         let Some(config) = speechless_config() else {
             return;
@@ -533,21 +689,18 @@ mod tests {
         let hints = DecodeHints::from_candidates(&["Priya".into()], &[]);
         let (config, hints) = source_inputs(CheckpointSource::Voice, &config, &hints);
         let settings = settings_fingerprint(&config, &hints);
-        let mut first = span(CheckpointSource::Voice, 0, &samples[..24_000], &settings);
+        let (_, c) = plan_and_cuts(&samples, transcribe::meeting_group_target(&config));
+        assert!(c.len() > 2 && c[1] < samples.len(), "{c:?}");
+        let mut first = voice(&samples, 0, c[1], &settings);
         first.lines = vec!["[0:00] first piece".into()];
-        let mut second = span(
-            CheckpointSource::Voice,
-            24_000,
-            &samples[24_000..],
-            &settings,
-        );
+        let mut second = voice(&samples, c[1], samples.len(), &settings);
         second.lines = vec!["[0:01] second piece".into()];
 
         let result =
             transcribe_meeting_with_spans(&path, &config, &hints, &[&second, &first]).unwrap();
 
         assert_eq!(result.text, "[0:00] first piece\n[0:01] second piece\n");
-        assert_eq!(result.stats.audio_duration_secs, 3.0);
+        assert_eq!(result.stats.audio_duration_secs, 60.0);
         assert_eq!(result.stats.final_words, 6);
     }
 
@@ -555,20 +708,17 @@ mod tests {
     fn checkpoint_lines_go_through_the_same_cleanup_as_the_batch_pass() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("meeting.wav");
-        let pcm: Vec<i16> = (0..32_000).map(|i| ((i % 300) as i16 - 150) * 50).collect();
+        let pcm: Vec<i16> = bursts(60.0).iter().map(|&s| (s * 32768.0) as i16).collect();
         let samples = write_wav(&path, &pcm);
         let Some(config) = speechless_config() else {
             return;
         };
         let hints = DecodeHints::default();
         let settings = settings_fingerprint(&config, &hints);
+        let (_, c) = plan_and_cuts(&samples, transcribe::meeting_group_target(&config));
+        assert!(c.len() > 2 && c[1] < samples.len(), "{c:?}");
         // A repetition loop split across two spans is collapsed as one run.
-        let mut first = span(
-            CheckpointSource::Recording,
-            0,
-            &samples[..16_000],
-            &settings,
-        );
+        let mut first = span(CheckpointSource::Recording, 0, &samples[..c[1]], &settings);
         first.lines = vec![
             "[0:00] thank you".into(),
             "[0:00] thank you".into(),
@@ -576,8 +726,8 @@ mod tests {
         ];
         let mut second = span(
             CheckpointSource::Recording,
-            16_000,
-            &samples[16_000..],
+            c[1] as u64,
+            &samples[c[1]..],
             &settings,
         );
         second.lines = vec!["[0:01] thank you".into(), "[0:01] next topic".into()];
@@ -617,6 +767,7 @@ mod tests {
         let initial = hints_for(title, context, None);
         let (source_config, initial) = source_inputs(CheckpointSource::Voice, &config, &initial);
         let audio = ramp(16_000);
+        let plan = DecodePlan::for_source(&audio, GROUP);
         let old = span(
             CheckpointSource::Voice,
             0,
@@ -632,7 +783,9 @@ mod tests {
             assert!(accepted_spans(
                 &audio,
                 &[&old],
-                &settings_fingerprint(&source_config, &final_hints)
+                &settings_fingerprint(&source_config, &final_hints),
+                &plan,
+                GROUP,
             )
             .is_empty());
         }
@@ -642,7 +795,107 @@ mod tests {
         let (_, calendar_hints) = source_inputs(CheckpointSource::Voice, &config, &calendar_hints);
         let settings = settings_fingerprint(&source_config, &calendar_hints);
         let matching = span(CheckpointSource::Voice, 0, &audio, &settings);
-        assert_eq!(accepted_spans(&audio, &[&matching], &settings).len(), 1);
+        assert_eq!(
+            accepted_spans(&audio, &[&matching], &settings, &plan, GROUP).len(),
+            1
+        );
+    }
+
+    /// What `SpanTranscriber` does for one span, with the fake decoder.
+    fn fake_span(
+        audio: &[f32],
+        (from, to): (usize, usize),
+        decoder: &mut crate::decode_groups::fake::FakeWhisper,
+    ) -> CheckpointSpan {
+        let samples = &audio[from..to];
+        let plan = DecodePlan::for_source(samples, GROUP);
+        let lines = crate::decode_groups::decode_groups(decoder, samples, plan.groups(), from)
+            .unwrap()
+            .lines;
+        CheckpointSpan {
+            lines,
+            ..span(CheckpointSource::System, from as u64, samples, "s")
+        }
+    }
+
+    /// What `transcribe_meeting_with_spans` does after loading the audio, with
+    /// the fake decoder. Returns the text and the final pass's decoder calls.
+    fn fake_final_pass(
+        audio: &[f32],
+        spans: &[&CheckpointSpan],
+        decoder: &mut crate::decode_groups::fake::FakeWhisper,
+    ) -> (String, usize) {
+        let plan = DecodePlan::for_source(audio, GROUP);
+        let accepted = accepted_spans(audio, spans, "s", &plan, GROUP);
+        assert_eq!(accepted.len(), spans.len(), "a span was rejected");
+        let before = decoder.calls;
+        let lines = assemble_source(audio, &plan, &accepted, |groups| {
+            crate::decode_groups::decode_groups(decoder, audio, groups, 0)
+        })
+        .unwrap();
+        let text = transcribe::finish_chunk_lines(lines).unwrap().text;
+        (text, decoder.calls - before)
+    }
+
+    fn assert_checkpoints_do_not_change_the_transcript(loop_ids: &[u32]) {
+        use crate::decode_groups::fake::FakeWhisper;
+        let audio = bursts(420.0);
+        let plan = DecodePlan::for_source(&audio, GROUP);
+        let mut decoder = FakeWhisper::looping(loop_ids);
+        let (whole, calls) = fake_final_pass(&audio, &[], &mut decoder);
+        if loop_ids.is_empty() {
+            assert_eq!(calls, plan.groups().len());
+        } else {
+            assert!(calls > plan.groups().len(), "no group was retried");
+        }
+        assert!(whole
+            .lines()
+            .all(|line| whisper_guard::find_repetition_loop(line).is_none()));
+        assert!(whole.lines().count() > 40, "{}", whole.lines().count());
+
+        // The recording-time producer's spans. The audio after the last cut
+        // was not finished at Stop and is left to the final pass.
+        let cuts = crate::capture_checkpoint::cut_like_feed(&audio, 120 * RATE, GROUP);
+        assert!(cuts.len() >= 2, "{cuts:?}");
+        let mut producer = FakeWhisper::looping(loop_ids);
+        let spans: Vec<CheckpointSpan> = cuts
+            .iter()
+            .map(|&cut| fake_span(&audio, cut, &mut producer))
+            .collect();
+        let all: Vec<&CheckpointSpan> = spans.iter().collect();
+        let (full, tail_calls) = fake_final_pass(&audio, &all, &mut decoder);
+        assert_eq!(full, whole);
+        let tail_groups = plan
+            .groups()
+            .iter()
+            .filter(|g| g.start() >= cuts.last().unwrap().1)
+            .count();
+        assert!(tail_groups > 0);
+        assert!(tail_calls >= tail_groups && tail_calls < calls);
+
+        // Only some spans: the first one missing, or only the first one.
+        for partial in [&all[1..], &all[..1]] {
+            assert_eq!(fake_final_pass(&audio, partial, &mut decoder).0, whole);
+        }
+        // A fully covered source makes no decoder call.
+        let covered = fake_span(&audio, (0, audio.len()), &mut producer);
+        assert_eq!(
+            fake_final_pass(&audio, &[&covered], &mut decoder),
+            (whole, 0)
+        );
+    }
+
+    #[test]
+    fn no_full_and_partial_checkpoints_give_the_same_transcript() {
+        assert_checkpoints_do_not_change_the_transcript(&[]);
+    }
+
+    #[test]
+    fn the_loop_retry_is_the_same_in_spans_gaps_and_the_whole_file() {
+        // Bursts early, in the middle and late, so that loops land in spans
+        // and in the tail that the final pass decodes.
+        let ids: Vec<u32> = (0..300).step_by(7).collect();
+        assert_checkpoints_do_not_change_the_transcript(&ids);
     }
 
     #[test]

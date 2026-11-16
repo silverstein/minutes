@@ -89,6 +89,10 @@ inside a repetition region rather than deleting the entire passage. This may
 retain more imperfect hallucination variants; high word overlap alone cannot
 justify deleting a real statement.
 
+- **Loops inside one segment are reported, not removed.** Whisper can repeat
+  one sentence many times inside a single segment. `find_repetition_loop` finds
+  a phrase that repeats 4+ times back to back and covers 16+ words. It does not
+  change the text: Minutes uses it to decode that audio again in smaller pieces.
 - **Filler-word floor.** Single trailing fillers (`Yeah.`, `Okay.`, `You.`) are
   intentionally preserved - they're often legitimate one-word closings.
   Only a 5+ run of filler at the end triggers trim. The bracketed noise tokens
@@ -108,7 +112,7 @@ justify deleting a real statement.
 
 ```toml
 [dependencies]
-whisper-guard = "0.3.2"
+whisper-guard = "0.3.3"
 ```
 
 ### Using a forked or pinned `whisper-rs`?
@@ -119,7 +123,7 @@ GPU patches, or model compatibility - looking at you, screenpipe-audio), use:
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.3.2", default-features = false }
+whisper-guard = { version = "0.3.3", default-features = false }
 ```
 
 …and the cleaning pipeline works regardless of which `whisper-rs` is in your tree.
@@ -206,6 +210,17 @@ let normalized = normalize_audio(&resampled);
 let speech_only = strip_silence(&normalized, 16_000);
 ```
 
+Stripped audio has a shorter clock than the input. To put transcript times back
+on the input clock, use `strip_silence_with_map` and `input_position`:
+
+```rust
+use whisper_guard::{input_position, strip_silence_with_map};
+
+let (speech_only, kept) = strip_silence_with_map(&normalized, 16_000);
+// A segment that starts 2.5 s into `speech_only`:
+let input_secs = input_position(&kept, 2.5 * 16_000.0) / 16_000.0;
+```
+
 ### Whisper parameter presets (optional)
 
 Behind the `whisper` feature, `params` exposes preconfigured `FullParams` builders
@@ -214,7 +229,7 @@ you depend on `whisper-rs` directly.
 
 ```toml
 [dependencies]
-whisper-guard = { version = "0.3.2", features = ["whisper"] }
+whisper-guard = { version = "0.3.3", features = ["whisper"] }
 ```
 
 ## Examples

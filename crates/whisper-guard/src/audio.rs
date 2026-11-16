@@ -17,8 +17,39 @@
 /// thresholds are scaled proportionally from a 16kHz baseline (100ms chunks,
 /// 500ms max silence, 300ms padding, 200ms context, 500ms hangover).
 pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    strip_silence_with_map(samples, sample_rate).0
+}
+
+/// A run of input samples that [`strip_silence_with_map`] kept: `len` samples
+/// from `input_start` of the input are at `output_start` of the output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptRun {
+    pub output_start: usize,
+    pub input_start: usize,
+    pub len: usize,
+}
+
+/// [`strip_silence`], and where each kept sample came from.
+///
+/// The output has a shorter clock than the input. A caller that needs the
+/// times of the transcript on the input clock maps them back with
+/// [`input_position`]. The runs are in order. The output samples between two
+/// runs are the padding that replaced a silence.
+pub fn strip_silence_with_map(samples: &[f32], sample_rate: u32) -> (Vec<f32>, Vec<KeptRun>) {
+    let whole = |samples: &[f32]| {
+        let runs = if samples.is_empty() {
+            Vec::new()
+        } else {
+            vec![KeptRun {
+                output_start: 0,
+                input_start: 0,
+                len: samples.len(),
+            }]
+        };
+        (samples.to_vec(), runs)
+    };
     if sample_rate < 100 {
-        return samples.to_vec();
+        return whole(samples);
     }
     let rate = sample_rate as usize;
     let chunk_size = rate / 10; // 100ms chunks
@@ -28,7 +59,7 @@ pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     const ENERGY_MULTIPLIER: f32 = 4.0; // speech must be 4x above noise floor
 
     if samples.len() < chunk_size * 3 {
-        return samples.to_vec();
+        return whole(samples);
     }
 
     let num_chunks = samples.len() / chunk_size;
@@ -79,8 +110,25 @@ pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 
     // Phase 5: assemble output — keep speech, replace long silence with short pad
     let mut output = Vec::with_capacity(samples.len());
+    let mut runs: Vec<KeptRun> = Vec::new();
     let mut consecutive_silence = 0usize;
     let silence_pad: Vec<f32> = vec![0.0; pad_chunks * chunk_size];
+    let mut keep_input = |output: &mut Vec<f32>, start: usize, end: usize| {
+        match runs.last_mut() {
+            Some(run)
+                if run.input_start + run.len == start
+                    && run.output_start + run.len == output.len() =>
+            {
+                run.len += end - start;
+            }
+            _ => runs.push(KeptRun {
+                output_start: output.len(),
+                input_start: start,
+                len: end - start,
+            }),
+        }
+        output.extend_from_slice(&samples[start..end]);
+    };
 
     for (i, &kept) in keep.iter().enumerate() {
         let start = i * chunk_size;
@@ -91,11 +139,11 @@ pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
                 output.extend_from_slice(&silence_pad);
             }
             consecutive_silence = 0;
-            output.extend_from_slice(&samples[start..end]);
+            keep_input(&mut output, start, end);
         } else {
             consecutive_silence += 1;
             if consecutive_silence <= max_silence_chunks {
-                output.extend_from_slice(&samples[start..end]);
+                keep_input(&mut output, start, end);
             }
         }
     }
@@ -103,7 +151,7 @@ pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     // Include any trailing partial chunk
     let remainder_start = num_chunks * chunk_size;
     if remainder_start < samples.len() {
-        output.extend_from_slice(&samples[remainder_start..]);
+        keep_input(&mut output, remainder_start, samples.len());
     }
 
     let original_secs = samples.len() as f64 / rate as f64;
@@ -117,7 +165,27 @@ pub fn strip_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
         );
     }
 
-    output
+    (output, runs)
+}
+
+/// The input position, in samples, of the output position `output` of
+/// [`strip_silence_with_map`]. A position inside a kept run maps exactly. A
+/// position in the padding that replaced a silence maps to the end of that
+/// silence, where the next run starts. A position after the last run maps to
+/// the end of the last run.
+pub fn input_position(runs: &[KeptRun], output: f64) -> f64 {
+    let after = runs.partition_point(|run| run.output_start as f64 <= output);
+    let Some(run) = after.checked_sub(1).and_then(|index| runs.get(index)) else {
+        return runs.first().map_or(output, |run| run.input_start as f64);
+    };
+    let within = output - run.output_start as f64;
+    if within < run.len as f64 {
+        return run.input_start as f64 + within;
+    }
+    match runs.get(after) {
+        Some(next) => next.input_start as f64,
+        None => (run.input_start + run.len) as f64,
+    }
 }
 
 /// Normalize audio to a target peak level for consistent whisper input.
@@ -307,6 +375,72 @@ mod tests {
             "should preserve both speech segments: {:.1}s",
             result_secs
         );
+    }
+
+    fn tone(secs: f64) -> Vec<f32> {
+        (0..(secs * 16000.0) as usize)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 16000.0).sin())
+            .collect()
+    }
+
+    #[test]
+    fn the_map_gives_the_input_position_of_each_kept_sample() {
+        // 1 s of tone, 60 s of silence, 2 s of tone, 20 s of silence, 1 s.
+        let mut samples = tone(1.0);
+        samples.extend(vec![0.0f32; 60 * 16000]);
+        samples.extend(tone(2.0));
+        samples.extend(vec![0.0f32; 20 * 16000]);
+        samples.extend(tone(1.0));
+
+        let (output, runs) = strip_silence_with_map(&samples, 16000);
+        assert_eq!(output, strip_silence(&samples, 16000));
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        // Each run is the input, sample for sample.
+        for run in &runs {
+            assert_eq!(
+                output[run.output_start..run.output_start + run.len],
+                samples[run.input_start..run.input_start + run.len]
+            );
+        }
+        // The second tone starts at 61 s of the input, the third at 83 s.
+        let second = runs[1].output_start + (61 * 16000 - runs[1].input_start);
+        assert!((second as f64) < 4.0 * 16000.0, "the output is short");
+        assert_eq!(input_position(&runs, second as f64), 61.0 * 16000.0);
+        assert_eq!(
+            input_position(&runs, second as f64 + 8000.0),
+            61.5 * 16000.0
+        );
+        let third = runs[2].output_start + (83 * 16000 - runs[2].input_start);
+        assert_eq!(input_position(&runs, third as f64), 83.0 * 16000.0);
+        // A position in the padding maps to where the next run starts.
+        let pad = (runs[0].output_start + runs[0].len) as f64 + 10.0;
+        assert!(pad < runs[1].output_start as f64);
+        assert_eq!(input_position(&runs, pad), runs[1].input_start as f64);
+        // A position after the output maps to the end of the last run.
+        assert_eq!(
+            input_position(&runs, output.len() as f64 + 16000.0),
+            samples.len() as f64
+        );
+    }
+
+    #[test]
+    fn audio_that_is_not_stripped_maps_to_itself() {
+        let samples = tone(3.0);
+        let (output, runs) = strip_silence_with_map(&samples, 16000);
+        assert_eq!(output, samples);
+        assert_eq!(
+            runs,
+            vec![KeptRun {
+                output_start: 0,
+                input_start: 0,
+                len: samples.len()
+            }]
+        );
+        assert_eq!(input_position(&runs, 20000.0), 20000.0);
+        let short = tone(0.1);
+        assert_eq!(strip_silence_with_map(&short, 16000).1.len(), 1);
+        assert!(strip_silence_with_map(&[], 16000).1.is_empty());
+        assert_eq!(input_position(&[], 5.0), 5.0);
     }
 
     #[test]

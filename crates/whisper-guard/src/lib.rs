@@ -46,7 +46,7 @@
 //! GPU patches, or model compatibility), use:
 //!
 //! ```toml
-//! whisper-guard = { version = "0.3.2", default-features = false }
+//! whisper-guard = { version = "0.3.3", default-features = false }
 //! ```
 //!
 //! …and the cleaning pipeline works regardless of which whisper-rs is in your tree.
@@ -62,6 +62,7 @@
 //!
 //! **Post-transcription segment cleaning** ([`segments`]):
 //! - Consecutive repetition (3+ similar segments collapsed)
+//! - Repetition loops inside one segment, reported by [`find_repetition_loop`]
 //! - Interleaved A/B/A/B hallucination patterns
 //! - Bracketed noise marker collapse (`[Śmiech]`, `[music]`, `[risas]`, any language)
 //! - Foreign-script hallucination detection (e.g., CJK in a Latin transcript)
@@ -79,8 +80,10 @@ pub mod segments;
 pub mod params;
 
 // Re-export the most common entry points
-pub use audio::{normalize_audio, resample, strip_silence};
+pub use audio::{
+    input_position, normalize_audio, resample, strip_silence, strip_silence_with_map, KeptRun,
+};
 pub use segments::{
-    clean_segments, clean_segments_with_options, clean_transcript, strip_trailing_commands,
-    CleanOptions, CleanStats,
+    clean_segments, clean_segments_with_options, clean_transcript, find_repetition_loop,
+    strip_trailing_commands, CleanOptions, CleanStats, RepetitionLoop,
 };

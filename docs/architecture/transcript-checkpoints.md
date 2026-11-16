@@ -134,11 +134,13 @@ that a crash left beside the checkpoint.
 
 Retention: the checkpoint file holds transcript text. It stays as long as the
 job can be retried: through a failure, through a "needs review" result (which
-permits a manual requeue) and through each retry. There is no separate expiry,
-so retry progress is never thrown away while the failed job and its audio are
-kept. The file is removed when the job completes, and when the job's artifacts
-are deleted (`jobs::remove_capture_artifacts`), together with leftover temporary
-files.
+permits a manual requeue) and through each retry. The file is removed when the
+job completes. Otherwise it stays as long as the job's capture audio in the jobs
+folder does. Nothing in the app removes that audio automatically today, so the
+checkpoint of a failed or "needs review" job also stays until someone deletes
+it. `jobs::remove_capture_artifacts` removes both, with leftover temporary
+files, but only tests call it now. Cleanup of old job audio and checkpoints is
+separate work.
 
 Durability: the contract is process death. A worker that is killed, or that
 crashes, leaves either the previous checkpoint or the new one, and both are

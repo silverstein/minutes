@@ -1826,7 +1826,7 @@ fn process_pending_jobs_with_transcriber(
             ));
             // "Needs review" permits a manual requeue, as a failure does.
             // The checkpoint stays for that retry. It goes when the job
-            // completes or its artifacts are deleted.
+            // completes. Until then it stays as long as the job's audio.
             maybe_mark_context_session_complete(&review_job, artifact.write_result.content_type);
             // Graph answers are disposable, policy-fresh projections of the
             // current Markdown corpus; there is no durable index to refresh.

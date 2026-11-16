@@ -30,12 +30,12 @@
     let model = snapshot;
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
-    let chooser = null, pendingLive = null, returnFocus = null;
+    let chooser = null, pendingLive = null, returnFocus = null, pendingClose = null;
     function revealActiveTab() {
       if (!strip.hidden && strip.clientWidth) strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
     }
     if (typeof ResizeObserver !== 'undefined') new ResizeObserver(revealActiveTab).observe(strip);
-    function dismiss() { chooser = null; returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
+    function dismiss() { chooser = null; pendingClose = null; returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
     // Cancel puts the keyboard back where the person was typing: the element
     // focused before the prompt opened, else the visible tab's terminal, else
     // the selected tab. Without this, focus falls to the page and keys vanish.
@@ -161,10 +161,21 @@
         select(model.tabs[(index + action.direction + model.tabs.length) % model.tabs.length].id);
       }
       if (action.type === 'create') createTab();
-      if (action.type === 'close' && model.active) close(model.active);
+      if (action.type === 'close' && model.active) {
+        // The confirmation is open for this tab: a second ⌘W confirms, as in
+        // Terminal. A live meeting still needs the button.
+        const confirm = pendingClose?.id === model.active && !model.tabs.find(t => t.id === model.active)?.live ? pendingClose.action : null;
+        if (confirm) { dismiss(); confirm(); } else close(model.active);
+      }
     }, true);
     return { update,
-      confirmClose: (id, action = () => close(id, true)) => show('Close this conversation? Its process will stop and its saved conversation will leave Recall. Your agent keeps its transcript history.', [['Close conversation', action]]),
+      confirmClose: (id, action = () => close(id, true)) => {
+        const tab = model.tabs.find(t => t.id === id);
+        const name = tab ? shortTitle(tab) : 'this conversation';
+        const again = tab && !tab.live ? `Press ${mac ? '⌘W' : 'Ctrl+W'} again to close.` : '';
+        show(`Close ${name}? Its process stops and its saved conversation leaves Recall. Your agent keeps the transcript.`, [['Close conversation', action]], again);
+        pendingClose = { id, action };
+      },
       chooseFinished,
       syncPendingLive: (id, action) => {
         if (!id) {

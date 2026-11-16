@@ -64,6 +64,14 @@ try {
   await page.getByRole('button', { name: 'Close Live call', exact: true }).click();
   await page.getByRole('button', { name: 'Close conversation', exact: true }).click();
   assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['close', 'live', true]);
+  await page.evaluate(() => { fixture.controls.confirmClose('chat'); });
+  assert.match(await page.locator('#recall-tab-prompt').innerText(), /again to close/, 'a finished tab offers the second shortcut');
+  const activeBefore = await page.evaluate(() => fixture.model.active);
+  await page.evaluate(() => { fixture.model.active = 'chat'; fixture.controls.update(structuredClone(fixture.model)); fixture.controls.confirmClose('chat'); });
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: !/Mac/.test(navigator.platform), metaKey: /Mac/.test(navigator.platform), bubbles: true })));
+  assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['close', 'chat', true], 'a second close shortcut confirms the open confirmation');
+  assert.equal(await page.locator('#recall-tab-prompt').isVisible(), false);
+  await page.evaluate(active => { fixture.model.active = active; fixture.controls.update(structuredClone(fixture.model)); }, activeBefore);
   await page.evaluate(() => fixture.controls.chooseFinished(id => fixture.actions.push(['replace', id])));
   assert.equal(await page.getByRole('button', { name: 'Close Chat', exact: true }).count(), 1); // strip
   assert.equal(await page.getByRole('button', { name: 'Close Chat and continue', exact: true }).count(), 1, 'one suggested close, the first inactive finished tab');

@@ -624,6 +624,15 @@
       flex-shrink: 0;
     }
 
+    /* Resume is a sentence-case primary beside these; match it, as
+       .detail-actions does, so the row has one casing. */
+    .recall-header-actions .btn-secondary {
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: var(--text-xs);
+      font-weight: 500;
+    }
+
     .recall-weekly-view {
       display: none;
       flex: 1;

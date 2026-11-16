@@ -129,10 +129,14 @@
       const active = model.tabs.find(tab => tab.id === model.active);
       let resumeButton = strip.parentElement.querySelector('#recall-resume');
       if (!resumeButton && active?.shell && active.claude_session_id && !active.claude_active) {
+        // A compact action beside Weekly and End Session, not a row of its own.
         resumeButton = document.createElement('button'); resumeButton.id = 'recall-resume';
-        resumeButton.type = 'button'; resumeButton.className = 'btn btn-secondary btn-sm';
-        resumeButton.textContent = 'Resume previous conversation';
-        strip.after(resumeButton);
+        resumeButton.type = 'button'; resumeButton.className = 'btn btn-primary btn-sm';
+        resumeButton.textContent = 'Resume';
+        resumeButton.setAttribute('aria-label', 'Resume previous conversation');
+        resumeButton.title = 'Resume this tab\'s previous Claude conversation';
+        const actions = strip.parentElement.querySelector('.recall-header-actions');
+        if (actions) actions.prepend(resumeButton); else strip.after(resumeButton);
       }
       if (resumeButton) {
         resumeButton.hidden = !(active?.shell && active.claude_session_id && !active.claude_active);

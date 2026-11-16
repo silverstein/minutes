@@ -14,7 +14,7 @@ const source = readFileSync('tauri/src/index.html', 'utf8');
 const css = source.match(/<style>([\s\S]*?)<\/style>/)[1];
 const controller = readFileSync('tauri/src/scripts/recall-tabs.js', 'utf8');
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-<div id="recall-panel" class="recall-panel expanded"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
+<div id="recall-panel" class="recall-panel expanded"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div><div class="recall-header"><div class="recall-header-actions"></div></div>
 <span data-recall-meeting="/live.md"></span><span data-recall-meeting="/prep.md"></span></div><script>${controller}</script><script>
 const actions=[];let model={active:'live',tabs:[{id:'live',title:'Live call',meeting_path:'/live.md',status:'working',live:true},{id:'prep',title:'Board prep',meeting_path:'/prep.md',status:'working'},{id:'chat',title:'Chat',status:'done'},{id:'other',title:'Other',status:'done'}]};
 const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),resume:id=>actions.push(['resume',id]),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});
@@ -77,6 +77,7 @@ try {
   assert.equal(await page.locator('.recall-tab.recall-tab-closable').count(), 0, 'dismissal clears the strip highlight');
   await page.evaluate(() => { Object.assign(fixture.model.tabs[1], { shell: true, claude_session_id: 'saved-1', claude_active: false }); fixture.controls.update(structuredClone(fixture.model)); });
   assert.equal(await page.getByRole('button', { name: 'Resume previous conversation' }).count(), 1);
+  assert.equal(await page.locator('.recall-header-actions > #recall-resume').count(), 1, 'resume sits with the header actions, not in a row of its own');
   assert.equal(await page.evaluate(() => fixture.actions.some(action => action[0] === 'resume')), false);
   await page.getByRole('button', { name: 'Resume previous conversation' }).click();
   assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['resume', 'prep']);

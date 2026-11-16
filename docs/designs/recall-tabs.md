@@ -28,7 +28,7 @@ path. With `[assistant] agent = "claude"`, a saved Claude ID is passed through
 `--resume`, and configured `agent_args` retain the user's choices. Claude searches
 projects for an explicit ID. No unqualified `--continue` is shared across new tabs.
 With a shell such as `agent = "zsh"`, restoration starts only that shell. The
-in-panel **Resume previous conversation** action submits `claude --resume <id>`
+**Resume** action in the Recall header (accessible name "Resume previous conversation") submits `claude --resume <id>`
 only when clicked, preserving shell aliases. It refuses a nonempty/uncertain
 input line, an active Claude session, or a terminal whose foreground process is
 not the original shell. Unix foreground checks are required for this action;

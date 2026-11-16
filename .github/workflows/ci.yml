@@ -810,6 +810,12 @@ jobs:
         working-directory: crates/mcp
         run: npx vitest run src/captureRelay.test.ts
 
+      # Some unit cases drive the built server over stdio. Build before the
+      # suite so fresh runners cannot depend on a developer's existing dist/.
+      - name: Build MCP server
+        working-directory: crates/mcp
+        run: npm run build
+
       - name: MCP full unit suite
         working-directory: crates/mcp
         run: npm run test:unit
@@ -821,10 +827,6 @@ jobs:
       # prefixes, `..` paths, required runtime files), and smoke-test the
       # handshake. This class of regression now fails CI before a release
       # can ship it.
-
-      - name: Build MCP server
-        working-directory: crates/mcp
-        run: npm run build
 
       - name: MCP process, transport and first-recall integration contracts
         working-directory: crates/mcp

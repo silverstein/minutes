@@ -1590,6 +1590,8 @@ fn looks_like_google_meet_meeting_url(url: &str) -> bool {
     let Some(rest) = without_scheme.strip_prefix("meet.google.com/") else {
         return false;
     };
+    // Meet also serves meetings at `meet.google.com/meet/<code>`.
+    let rest = rest.strip_prefix("meet/").unwrap_or(rest);
 
     let first_segment = rest
         .split(['?', '#', '/'])
@@ -2245,6 +2247,18 @@ mod tests {
         ));
         assert!(!looks_like_google_meet_meeting_url(
             "https://example.com/abc-defg-hij"
+        ));
+        assert!(looks_like_google_meet_meeting_url(
+            "https://meet.google.com/meet/abc-defg-hij"
+        ));
+        assert!(looks_like_google_meet_meeting_url(
+            "https://meet.google.com/meet/abc-defg-hij?authuser=0"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://meet.google.com/meet/"
+        ));
+        assert!(!looks_like_google_meet_meeting_url(
+            "https://meet.google.com/meet/landing"
         ));
     }
 

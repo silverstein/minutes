@@ -103,6 +103,8 @@ import {
   type CaptureRelaySnapshot,
 } from "./captureRelay.js";
 import {
+  assertMeetingsRoot,
+  MeetingsRootError,
   withStableCorpusLease,
   type CorpusLeaseHooks,
   type StableCorpusSnapshot,
@@ -2257,7 +2259,7 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // `./version.ts` (see issue #183). Hosted `.mcpb` bundles will run
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
-const MCP_SERVER_VERSION = "0.33.1";
+const MCP_SERVER_VERSION = "0.33.2";
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);
@@ -6106,6 +6108,7 @@ registerDocsAppTool(
   async ({ path: filePath, include_restricted }) => {
     try {
       const meetingsDir = await getEffectiveMeetingsDir();
+      await assertMeetingsRoot(meetingsDir);
       const { path: resolved, content: rawContent } = await readTextFileInDirectory(
         filePath,
         meetingsDir,
@@ -6204,9 +6207,14 @@ registerDocsAppTool(
         structuredContent: structuredOut,
         _meta: { ui: { resourceUri: UI_RESOURCE_URI }, view: "detail", path: resolved },
       };
-    } catch {
+    } catch (error) {
       return {
-        content: [{ type: "text" as const, text: "Meeting could not be safely read." }],
+        content: [{
+          type: "text" as const,
+          text: error instanceof MeetingsRootError
+            ? error.message
+            : "Meeting could not be safely read.",
+        }],
         isError: true,
       };
     }

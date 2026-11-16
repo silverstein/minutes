@@ -243,6 +243,10 @@ pub struct TranscriptionConfig {
     pub model: String,
     pub model_path: PathBuf,
     pub min_words: usize,
+    /// Suppress high-confidence microphone echoes of contemporaneous system
+    /// speech in independent-source final transcription. Default: true.
+    /// Set false to retain every source line, including echo duplicates.
+    pub cross_source_echo_suppression: bool,
     pub language: Option<String>,
     /// Silero VAD model name (resolved under model_path, e.g. "silero-v6.2.0" -> ggml-silero-v6.2.0.bin).
     /// Set to empty string to disable VAD (falls back to energy-based silence stripping).
@@ -1780,6 +1784,7 @@ impl Default for TranscriptionConfig {
             model: "small".into(),
             model_path: minutes_dir().join("models"),
             min_words: 3,
+            cross_source_echo_suppression: true,
             language: None,
             vad_model: "silero-v6.2.0".into(),
             vad_engine: "whisper-silero".into(),
@@ -2629,6 +2634,22 @@ mod tests {
         assert!(!v.restricted_meetings_eligible);
         assert!(!v.retain_non_self_embeddings);
         assert_eq!(v.candidate_retention_days, 30);
+    }
+
+    #[test]
+    fn cross_source_echo_suppression_defaults_on_and_round_trips_off() {
+        let default: Config = toml::from_str("[transcription]\n").unwrap();
+        assert!(default.transcription.cross_source_echo_suppression);
+        let off: Config =
+            toml::from_str("[transcription]\ncross_source_echo_suppression = false\n").unwrap();
+        assert!(!off.transcription.cross_source_echo_suppression);
+        let serialized = toml::to_string(&off).unwrap();
+        let reloaded: Config = toml::from_str(&serialized).unwrap();
+        assert!(!reloaded.transcription.cross_source_echo_suppression);
+        assert!(
+            toml::from_str::<Config>("[transcription]\ncross_source_echo_suppression = 1\n")
+                .is_err()
+        );
     }
 
     #[test]

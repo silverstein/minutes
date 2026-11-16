@@ -1,6 +1,9 @@
+import { writeSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import {
+  corpusDenialReason,
+  validateCorpusDenialReason,
   markCorpusLeaseWorkerProcess,
   runCorpusLeaseWorkerRequest,
   type CorpusLeaseWorkerBridge,
@@ -13,7 +16,13 @@ import { retireBoundReadersForProcessShutdown } from "./secure-read.js";
 const MAX_CONTROL_LINE_BYTES = 512 * 1024;
 markCorpusLeaseWorkerProcess();
 
-function fail(): never {
+function fail(reason: unknown = "internal"): never {
+  try {
+    const message = { type: "denied", reason: validateCorpusDenialReason(reason) };
+    writeSync(1, JSON.stringify(message) + "\n");
+  } catch {
+    // A broken pipe must not expose an error or prevent termination.
+  }
   process.exit(70);
 }
 
@@ -74,7 +83,7 @@ const bridge: CorpusLeaseWorkerBridge = {
   },
 };
 
-let exitCode = 0;
+let denialReason: string | undefined;
 try {
   const first = await nextResponse();
   if (
@@ -92,12 +101,13 @@ try {
     first.request as CorpusLeaseWorkerRequest,
     bridge
   );
-} catch {
-  exitCode = 70;
+} catch (error) {
+  denialReason = corpusDenialReason(error);
 }
 try {
   await retireBoundReadersForProcessShutdown();
-} catch {
-  exitCode = 70;
+} catch (error) {
+  denialReason ??= corpusDenialReason(error);
 }
-process.exit(exitCode);
+if (denialReason !== undefined) fail(denialReason);
+process.exit(0);

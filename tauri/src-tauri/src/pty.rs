@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use tauri::Emitter;
 
 pub const ASSISTANT_SESSION_ID: &str = "assistant";
-const MAX_SESSIONS: usize = 1;
+pub const MAX_SESSIONS: usize = 4;
 
 /// A signed app's assistant must use that same app's CLI, including when the
 /// regular app and Minutes Dev are installed at different versions.
@@ -150,13 +150,13 @@ pub struct SpawnConfig {
 #[derive(Default)]
 pub struct PtyManager {
     sessions: HashMap<String, PtySession>,
+    pub tabs: crate::recall_tabs::TabStore,
 }
 
 impl PtyManager {
     pub fn assistant_session_id(&self) -> Option<String> {
-        self.sessions
-            .contains_key(ASSISTANT_SESSION_ID)
-            .then(|| ASSISTANT_SESSION_ID.to_string())
+        let id = self.tabs.active.as_deref().unwrap_or(ASSISTANT_SESSION_ID);
+        self.sessions.contains_key(id).then(|| id.to_string())
     }
 
     pub fn session_title(&self, session_id: &str) -> Option<String> {
@@ -177,6 +177,14 @@ impl PtyManager {
             .map(|session| session.command.clone())
     }
 
+    /// Explicit resume actions may write only while the original shell owns
+    /// the terminal foreground. Never send a command into another TUI/process.
+    pub fn shell_is_foreground(&self, session_id: &str) -> bool {
+        self.sessions.get(session_id).is_some_and(|session| {
+            crate::pty_foreground::shell_is_foreground(&*session.master, &*session.child)
+        })
+    }
+
     /// Whether the session's agent reads focus changes through Minutes'
     /// prompt hook rather than typed notices.
     pub fn session_focus_hook(&self, session_id: &str) -> bool {
@@ -191,24 +199,11 @@ impl PtyManager {
             .map(|session| session.context_dir.clone())
     }
 
-    pub fn set_session_title(
-        &mut self,
-        session_id: &str,
-        title: impl Into<String>,
-    ) -> Result<(), String> {
-        let session = self
-            .sessions
-            .get_mut(session_id)
-            .ok_or("Session not found")?;
-        session.title = title.into();
-        Ok(())
-    }
-
     /// Spawn a new PTY session running the given command.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(&mut self, cfg: SpawnConfig, cols: u16, rows: u16) -> Result<(), String> {
         if self.sessions.len() >= MAX_SESSIONS {
-            return Err("Minutes only supports one assistant session at a time.".into());
+            return Err("Recall supports at most four tabs. Close a finished tab first.".into());
         }
 
         if self.sessions.contains_key(&cfg.session_id) {
@@ -372,6 +367,20 @@ impl PtyManager {
             .map_err(|e| format!("Resize failed: {}", e))
     }
 
+    /// try_wait reaps finished children without blocking the optional observer.
+    /// Removing their handles permits an explicit restart in the same tab.
+    pub fn reap_exited(&mut self) -> Vec<String> {
+        let exited: Vec<_> = self
+            .sessions
+            .iter_mut()
+            .filter_map(|(id, session)| session.child.try_wait().ok().flatten().map(|_| id.clone()))
+            .collect();
+        for id in &exited {
+            self.sessions.remove(id);
+        }
+        exited
+    }
+
     pub fn take_session(&mut self, session_id: &str) -> Option<PtySession> {
         self.sessions.remove(session_id)
     }
@@ -422,9 +431,110 @@ pub fn kill_session(mut session: PtySession) -> PathBuf {
         }
         // else: detach — never block on a ConPTY reader that won't see EOF.
     }
+    // Reap the killed child off the caller's thread. Waiting must never hold
+    // the manager lock or delay shutdown when a platform's PTY exit is slow.
+    let mut child = session.child;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     session.context_dir
 }
 
 pub fn kill_all(sessions: Vec<PtySession>) -> Vec<PathBuf> {
     sessions.into_iter().map(kill_session).collect()
+}
+
+#[cfg(all(test, unix))]
+mod lifecycle_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn natural_exit_is_reaped_and_releases_the_tab_for_restart() {
+        const MARKER: &str = "MINUTES_PTY_EXIT_FIXTURE";
+        if std::env::var_os(MARKER).is_none() {
+            // Keep PTY creation out of the desktop suite's accumulated native
+            // runtime state. Match the foreground fixture's bounded process.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pty::lifecycle_tests::natural_exit_is_reaped_and_releases_the_tab_for_restart",
+                    "--nocapture",
+                ])
+                .env(MARKER, "1")
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("PTY exit fixture exceeded 20 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-i");
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().unwrap();
+        drop(pair.slave);
+        let writer = pair.master.take_writer().unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let drain = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        });
+        let mut manager = PtyManager::default();
+        manager.sessions.insert(
+            "fixture".into(),
+            PtySession {
+                master: pair.master,
+                writer,
+                reader_handle: Some(drain),
+                child,
+                context_dir: PathBuf::new(),
+                title: "fixture".into(),
+                command: "/bin/sh".into(),
+                theme_dark: None,
+                focus_hook: false,
+            },
+        );
+        assert!(
+            manager.reap_exited().is_empty(),
+            "running shells are retained"
+        );
+        manager.write_input("fixture", b"exit 7\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if manager.reap_exited() == ["fixture"] {
+                break;
+            }
+            assert!(Instant::now() < deadline, "exited shell was not reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(manager.session_command("fixture").is_none());
+        assert!(manager.write_input("fixture", b"ignored").is_err());
+        // A removed handle alone is insufficient: the OS must no longer have
+        // an unreaped child owned by this process.
+        assert_eq!(
+            unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
 }

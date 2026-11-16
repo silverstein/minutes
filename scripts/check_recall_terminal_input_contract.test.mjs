@@ -21,14 +21,12 @@ function extractFunction(name) {
   throw new Error(`unterminated ${name} in ${PANEL}`);
 }
 
-function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
+function createHarness({ meetingPath = "/meetings/private.md", shell = false } = {}) {
   const source = `
     (() => {
-      let pendingRecallTerminalMeetingPath = ${JSON.stringify(meetingPath)};
-      let recallTerminalContextPending = true;
-      let recallTerminalInputDraft = '';
-      let recallTerminalInputReliable = true;
-      const SESSION_ID = 'recall';
+      const tab = { shell: ${JSON.stringify(shell)}, id: 'recall', meetingPath: ${JSON.stringify(meetingPath)}, pending: true, draft: '', reliable: true };
+      let active = tab;
+      const activeRecallState = () => active;
       const calls = [];
       const notices = [];
       let prepareError = null;
@@ -50,11 +48,13 @@ function createHarness({ meetingPath = "/meetings/private.md" } = {}) {
 
       return {
         send: forwardRecallTerminalData,
+        switchTo: other => { active = other; },
+        originalTab: tab,
         state: () => ({
-          pending: pendingRecallTerminalMeetingPath,
-          contextPending: recallTerminalContextPending,
-          draft: recallTerminalInputDraft,
-          reliable: recallTerminalInputReliable,
+          pending: tab.meetingPath,
+          contextPending: tab.pending,
+          draft: tab.draft,
+          reliable: tab.reliable,
           calls: structuredClone(calls),
           notices: structuredClone(notices),
         }),
@@ -101,14 +101,14 @@ test("the first plain question prepares the meeting before Return", async () => 
 });
 
 test("a general question with no selected meeting prepares the meeting directory once", async () => {
-  const harness = createHarness({ meetingPath: null });
+  const harness = createHarness({ meetingPath: null, sessionId: "recall" });
   await harness.send("What did I commit to this week?\r", true);
   await harness.send("And last week?\r", true);
 
   const state = harness.state();
   const prepares = commands(harness, "cmd_prepare_recall_terminal_meeting");
   assert.equal(prepares.length, 1, "the general context is materialized exactly once");
-  assert.deepEqual(prepares[0].args, { meetingPath: null });
+  assert.deepEqual(prepares[0].args, { meetingPath: null, sessionId: "recall" });
   assert.equal(state.pending, null);
   assert.equal(state.contextPending, false);
   assert.match(state.notices.at(-1).message, /meeting directory is ready/);
@@ -116,7 +116,7 @@ test("a general question with no selected meeting prepares the meeting directory
 });
 
 test("a general question still cannot bypass the privacy checks", async () => {
-  const harness = createHarness({ meetingPath: null });
+  const harness = createHarness({ meetingPath: null, sessionId: "recall" });
   await harness.send("\r", true);
 
   const state = harness.state();
@@ -267,6 +267,85 @@ test("the panel wires xterm's user-input signal with a fail-closed fallback", ()
   assert.match(panel, /_core\?\.coreService\?\.onUserInput/);
   assert.match(
     panel,
-    /const isUserInput = !recallTerminalHasUserInputSignal \|\| recallTerminalNextDataIsUserInput/,
+    /const isUserInput = !tab.hasSignal \|\| tab.nextUser/,
   );
+});
+
+
+test("an input queued for tab A stays on A after selection switches to B", async () => {
+  const harness = createHarness();
+  const original = harness.originalTab;
+  const pending = harness.send("Question for A?\r", true, original);
+  const other = { id: "tab-b", meetingPath: "/meetings/b.md", pending: true, draft: "draft B", reliable: true };
+  harness.switchTo(other);
+  await pending;
+  assert.equal(other.draft, "draft B");
+  assert.equal(other.pending, true);
+  assert.ok(harness.state().calls.every(call => call.args.sessionId === "recall"));
+  assert.equal(original.pending, false);
+});
+
+
+test("queued input must never read another tab's selected meeting", async () => {
+  const harness = createHarness({ meetingPath: "/meetings/a.md" });
+  const a = harness.originalTab;
+  const b = { id: "tab-b", meetingPath: "/meetings/b.md", pending: true, draft: "", reliable: true };
+  harness.switchTo(b);
+  await harness.send("A question\r", true, a);
+  const preparation = harness.state().calls.find(call => call.command === 'cmd_prepare_recall_terminal_meeting');
+  assert.deepEqual(preparation.args, { meetingPath: "/meetings/a.md", sessionId: "recall" });
+  assert.equal(b.pending, true);
+});
+
+test("shell commands and manual Claude questions never invoke the frontend context gate", async () => {
+  const harness = createHarness({ shell: true });
+  for (const input of ['claude\r', '\r', '/login\r', 'What did we decide?\r']) await harness.send(input, true);
+  assert.equal(commands(harness, 'cmd_prepare_recall_terminal_meeting').length, 0);
+  assert.equal(commands(harness, 'cmd_pty_input').filter(call => call.args.data === '\r').length, 4);
+  assert.equal(harness.state().contextPending, true);
+});
+
+test("shell resume requires explicit action and an empty reliable inactive line", async () => {
+  const calls = []; const notices = [];
+  const tab = { id: 'shell', shell: true, claudeActive: false, draft: '', reliable: true, queue: Promise.resolve() };
+  const resume = vm.runInNewContext(`(${extractFunction('resumeRecallTab')})`, {
+    recallStateFor: () => tab,
+    invoke: async (command, args) => calls.push({ command, args }),
+    setRecallProviderNotice: message => notices.push(message),
+  });
+  assert.equal(calls.length, 0);
+  for (const patch of [{ draft: 'unfinished' }, { draft: '', reliable: false }, { reliable: true, claudeActive: true }]) {
+    Object.assign(tab, patch); await resume(tab.id);
+  }
+  assert.equal(calls.length, 0); assert.equal(notices.length, 3);
+  tab.claudeActive = false;
+  await resume(tab.id);
+  assert.deepEqual(calls.map(call => call.command), ['cmd_recall_tab_resume']);
+  assert.equal(calls[0].args.tabId, 'shell');
+});
+
+test("Discuss never pastes natural language into an idle shell", async () => {
+  const pastes = [];
+  const tab = { shell: true, claudeActive: false, alive: true, draft: '', reliable: true, terminal: { focus() {}, paste: text => pastes.push(text) } };
+  const discuss = vm.runInNewContext(`(${extractFunction('discussMeetingWithAgent')})`, {
+    openRecall: async () => true, setRecallPhase() {}, recallDevMode: true, activeRecallState: () => tab,
+  });
+  await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 0);
+  tab.claudeActive = true;
+  await discuss('/meeting.md', 'Board prep'); assert.equal(pastes.length, 1);
+  assert.ok(pastes[0].includes('CURRENT_MEETING.md'));
+});
+
+test("restore activates freshly discovered shell metadata instead of the pre-spawn snapshot", async () => {
+  let spawned = false; const selected = []; const updated = [];
+  const before = { active: 'migrated', tabs: [{ id: 'migrated', shell: false }] };
+  const after = { active: 'migrated', tabs: [{ id: 'migrated', shell: true }] };
+  const restore = vm.runInNewContext(`(${extractFunction('restoreRecallTabs')})`, {
+    invoke: async command => { assert.equal(command, 'cmd_recall_tabs'); return spawned ? after : before; },
+    recallTabsController: { update: model => updated.push(model) }, recallTabsModel: null,
+    ensureRecallTabProcesses: async () => { spawned = true; },
+    activateRecallTab: async (id, model) => selected.push(model.tabs.find(tab => tab.id === id)),
+  });
+  await restore(); assert.equal(selected.length, 1); assert.equal(selected[0].shell, true);
+  assert.equal(updated.at(-1).tabs[0].shell, true);
 });

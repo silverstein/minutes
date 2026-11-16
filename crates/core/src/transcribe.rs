@@ -236,6 +236,36 @@ fn line_segments(result: &TranscribeResult) -> Vec<(&str, Option<usize>)> {
         .collect()
 }
 
+/// The clock of the times that a Whisper call returns.
+#[cfg(any(feature = "whisper", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallClock {
+    /// The clock of the audio after energy stripping. A whole file has always
+    /// used it.
+    Stripped,
+    /// The clock of the audio that the call got.
+    Input,
+}
+
+/// The clock of a decode group call. The group decoder maps each line back to
+/// the source through the clock of the audio it gave the call, so energy
+/// stripping must not change it.
+#[cfg(any(feature = "whisper", test))]
+const DECODE_GROUP_CLOCK: CallClock = CallClock::Input;
+
+/// Put the times of `result` on `clock`. `stripped` is the map from energy
+/// stripping, when it ran.
+#[cfg(any(feature = "whisper", test))]
+fn put_on_call_clock(
+    result: &mut TranscribeResult,
+    stripped: Option<&[whisper_guard::audio::KeptRun]>,
+    clock: CallClock,
+) {
+    if let (CallClock::Input, Some(runs)) = (clock, stripped) {
+        restore_stripped_clock(result, runs);
+    }
+}
+
 /// Put the times of `result` back on the clock of the audio before silence
 /// was stripped. `runs` is the map from
 /// [`whisper_guard::audio::strip_silence_with_map`].
@@ -1053,15 +1083,13 @@ impl crate::decode_groups::AudioDecoder for WhisperCall<'_> {
         &mut self,
         audio: &[f32],
     ) -> Result<Option<crate::decode_groups::DecodedAudio>, TranscribeError> {
-        // The group decoder maps each line back to the source through the
-        // clock of `audio`. Energy stripping must not change that clock.
         match transcribe_whisper_samples_on_clock(
             self.ctx,
             audio,
             Path::new("<decode-group>"),
             self.config,
             self.hints,
-            true,
+            DECODE_GROUP_CLOCK,
         ) {
             Ok(result) => Ok(Some(crate::decode_groups::DecodedAudio {
                 segments: timed_lines(&result),
@@ -1652,13 +1680,17 @@ fn transcribe_whisper_samples(
     config: &Config,
     hints: &DecodeHints,
 ) -> Result<TranscribeResult, TranscribeError> {
-    transcribe_whisper_samples_on_clock(ctx, samples, audio_path, config, hints, false)
+    transcribe_whisper_samples_on_clock(
+        ctx,
+        samples,
+        audio_path,
+        config,
+        hints,
+        CallClock::Stripped,
+    )
 }
 
-/// [`transcribe_whisper_samples`]. With `keep_input_clock`, the times of the
-/// result are on the clock of `samples` also when energy stripping removed
-/// silence before the decode. Without it they are on the stripped clock, as
-/// they always were for a whole file.
+/// [`transcribe_whisper_samples`], with the times of the result on `clock`.
 #[cfg(feature = "whisper")]
 fn transcribe_whisper_samples_on_clock(
     ctx: &whisper_rs::WhisperContext,
@@ -1666,7 +1698,7 @@ fn transcribe_whisper_samples_on_clock(
     audio_path: &Path,
     config: &Config,
     hints: &DecodeHints,
-    keep_input_clock: bool,
+    clock: CallClock,
 ) -> Result<TranscribeResult, TranscribeError> {
     let mut stats = FilterStats {
         audio_duration_secs: samples.len() as f64 / 16000.0,
@@ -1749,9 +1781,7 @@ fn transcribe_whisper_samples_on_clock(
         }
     }
 
-    if let (true, Some(runs)) = (keep_input_clock, &stripped) {
-        restore_stripped_clock(&mut result, runs);
-    }
+    put_on_call_clock(&mut result, stripped.as_deref(), clock);
 
     restore_source_clock(&mut result, prefix_samples as f64 / 16_000.0);
     Ok(result)
@@ -5520,39 +5550,43 @@ mod tests {
         // source-timeline hint: strip silence, decode, clean up. The stand-in
         // decoder reports one segment for the 5 s of speech, with the times
         // that it has in the audio it got.
+        // A call on one chunk alone, from the lost-speech retry, gives no
+        // line here. So the retry cannot hide a wrong clock in the group.
         let speech_in = |audio: &[f32]| {
             let mut run = 0;
             for (n, sample) in audio.iter().enumerate() {
                 run = if *sample != 0.0 { run + 1 } else { 0 };
                 if run == 2 * S {
-                    return (n + 1 - run) as f64 / S as f64;
+                    return Some((n + 1 - run) as f64 / S as f64);
                 }
             }
-            panic!("no speech in the decoder audio");
+            None
         };
-        let decode = |audio: &[f32], keep_input_clock: bool| {
+        let decode = |audio: &[f32], clock: CallClock| {
             let (stripped, runs) =
                 prepare_whisper_samples_with_map(audio.to_vec(), false, &DecodeHints::default());
-            let runs = runs.expect("energy stripping ran");
-            assert!(stripped.len() < audio.len() / 2, "silence was stripped");
-            let start = speech_in(&stripped);
-            let mut result = cleaned_result(&[(start, start + 5.0, "The speech at eighty.")]);
-            if keep_input_clock {
-                restore_stripped_clock(&mut result, &runs);
+            assert!(runs.is_some(), "energy stripping ran");
+            if audio.len() < 20 * S {
+                return Ok(None);
             }
-            crate::decode_groups::DecodedAudio {
+            assert!(stripped.len() < audio.len() / 2, "silence was stripped");
+            let start = speech_in(&stripped).expect("speech in the group audio");
+            let mut result = cleaned_result(&[(start, start + 5.0, "The speech at eighty.")]);
+            put_on_call_clock(&mut result, runs.as_deref(), clock);
+            Ok(Some(crate::decode_groups::DecodedAudio {
                 segments: timed_lines(&result),
                 stats: FilterStats::default(),
-            }
+            }))
         };
 
-        let mut kept = |audio: &[f32]| Ok(Some(decode(audio, true)));
+        // The clock that a decode group call uses.
+        let mut kept = |audio: &[f32]| decode(audio, DECODE_GROUP_CLOCK);
         let out =
             crate::decode_groups::decode_groups(&mut kept, &samples, plan.groups(), 0).unwrap();
         assert_eq!(out.lines, vec!["[1:20] The speech at eighty."]);
 
         // On the stripped clock, the same segment is inside the first chunk.
-        let mut lost = |audio: &[f32]| Ok(Some(decode(audio, false)));
+        let mut lost = |audio: &[f32]| decode(audio, CallClock::Stripped);
         let out =
             crate::decode_groups::decode_groups(&mut lost, &samples, plan.groups(), 0).unwrap();
         assert_ne!(out.lines, vec!["[1:20] The speech at eighty."]);

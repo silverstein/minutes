@@ -31,6 +31,15 @@
 //! if it loops too. That is what the per-chunk pass produced before grouping,
 //! and it bounds the extra work to one call per chunk of a flagged group.
 //!
+//! The lost-speech guard: in a group, Whisper can drop a short reply ("Okay.",
+//! "Love it.") that it keeps when the chunk is decoded alone. Each line of a
+//! group starts in a [stretch of speech](speech_stretches) or in a pause.
+//! When a stretch of a chunk has no line that starts in it, that chunk is
+//! decoded again on its own, once, and its lines replace the lines that the
+//! group gave for it. The other chunks keep the group lines. This is the
+//! per-chunk output for that chunk, so the extra work is at most one call per
+//! chunk, as for the loop guard.
+//!
 //! Other engines keep one call per chunk: their plan has one chunk per group.
 
 use crate::error::TranscribeError;
@@ -52,10 +61,10 @@ pub const WHISPER_GROUP_TARGET_SAMPLES: usize = 30 * RATE;
 /// use up the 30 s window.
 pub const GROUP_PAUSE_SAMPLES: usize = RATE;
 
-/// Change when grouping or the loop retry changes in a way that the values in
-/// [`strategy_id`] do not show. Checkpoint spans made with another strategy
-/// are then rejected and decoded again.
-const GROUPED_STRATEGY_VERSION: u32 = 2;
+/// Change when grouping, the line timing or a retry changes in a way that the
+/// values in [`strategy_id`] do not show. Checkpoint spans made with another
+/// strategy are then rejected and decoded again.
+const GROUPED_STRATEGY_VERSION: u32 = 3;
 
 /// The pause that a group keeps between two chunks that are `gap` samples
 /// apart.
@@ -69,7 +78,9 @@ pub(crate) fn whisper_group_target_samples() -> usize {
 }
 
 /// The decode strategy for a group target, as recorded in the checkpoint
-/// settings fingerprint. A target of 0 means one call per chunk.
+/// settings fingerprint. A target of 0 means one call per chunk. The speech
+/// stretch values set both the line times and the lost-speech retry, so they
+/// are part of it.
 pub(crate) fn strategy_id(group_target: usize) -> String {
     if group_target == 0 {
         return "per-chunk".into();
@@ -77,7 +88,11 @@ pub(crate) fn strategy_id(group_target: usize) -> String {
     format!(
         "groups-v{GROUPED_STRATEGY_VERSION};target={group_target};\
          pause={GROUP_PAUSE_SAMPLES};loop={LOOP_MIN_REPEATS}x{LOOP_MIN_WORDS}w;\
-         retry=per-chunk-once"
+         retry=per-chunk-once;lost-speech=per-chunk-once;\
+         speech=window{window},loud-p{SPEECH_LOUD_PERCENTILE},floor-div{SPEECH_FLOOR_DIVISOR},\
+         gap{gap},start{SPEECH_START_MIN_SAMPLES}",
+        window = crate::transcribe::VAD_WINDOW_SAMPLES,
+        gap = crate::transcribe::VAD_HANGOVER_SAMPLES,
     )
 }
 
@@ -288,10 +303,20 @@ where
     }
 }
 
-/// Decode `groups` of `samples`, one call per group, with the loop guard.
-/// Lines are `[m:ss] text` on the source clock: `clock_offset` is the source
-/// sample at which `samples` starts. Lines are not cleaned up here. Cleanup
-/// runs once over the whole assembled source.
+/// What the retries of one decode did, for the log.
+#[derive(Debug, Default)]
+struct Tally {
+    calls: usize,
+    loop_retried: usize,
+    still_looping: usize,
+    lost_speech_groups: usize,
+    lost_speech_chunks: usize,
+}
+
+/// Decode `groups` of `samples`, one call per group, with the loop guard and
+/// the lost-speech guard. Lines are `[m:ss] text` on the source clock:
+/// `clock_offset` is the source sample at which `samples` starts. Lines are
+/// not cleaned up here. Cleanup runs once over the whole assembled source.
 #[cfg_attr(not(feature = "whisper"), allow(dead_code))]
 pub(crate) fn decode_groups(
     decoder: &mut impl AudioDecoder,
@@ -303,69 +328,130 @@ pub(crate) fn decode_groups(
         lines: Vec::new(),
         stats: FilterStats::default(),
     };
-    let mut calls = 0usize;
-    let mut retried = 0usize;
-    let mut still_looping = 0usize;
+    let mut tally = Tally::default();
     for group in groups {
-        calls += 1;
-        let mut lines = decode_chunks(decoder, samples, &group.chunks, clock_offset)?;
-        if group.chunks.len() > 1 {
-            if let Some(found) = lines
-                .lines
-                .iter()
-                .find_map(|line| find_repetition_loop(line))
-            {
-                retried += 1;
-                tracing::warn!(
-                    start_sample = clock_offset + group.start(),
-                    end_sample = clock_offset + group.end(),
-                    chunks = group.chunks.len(),
-                    phrase_words = found.phrase_words,
-                    repeats = found.repeats,
-                    "repetition loop in a decode group; decoding its chunks one by one"
-                );
-                lines = ChunkLines {
-                    lines: Vec::new(),
-                    stats: FilterStats::default(),
-                };
-                for chunk in &group.chunks {
-                    calls += 1;
-                    let one =
-                        decode_chunks(decoder, samples, std::slice::from_ref(chunk), clock_offset)?;
-                    lines.add_stats(&one.stats);
-                    lines.lines.extend(one.lines);
-                }
-                if lines
-                    .lines
-                    .iter()
-                    .any(|line| find_repetition_loop(line).is_some())
-                {
-                    still_looping += 1;
-                }
-            }
-        }
+        let lines = decode_group(decoder, samples, group, clock_offset, &mut tally)?;
         out.add_stats(&lines.stats);
         out.lines.extend(lines.lines);
     }
     tracing::info!(
         groups = groups.len(),
-        calls,
-        retried,
-        still_looping,
+        calls = tally.calls,
+        retried = tally.loop_retried,
+        still_looping = tally.still_looping,
+        lost_speech_groups = tally.lost_speech_groups,
+        lost_speech_chunks = tally.lost_speech_chunks,
         "decoded meeting audio in groups"
     );
-    if retried > 0 {
+    if tally.loop_retried > 0 {
         crate::logging::log_step(
             "decode_group_loop_retry",
             "",
             0,
             serde_json::json!({
-                "groups": groups.len(), "calls": calls,
-                "retried": retried, "still_looping": still_looping,
+                "groups": groups.len(), "calls": tally.calls,
+                "retried": tally.loop_retried, "still_looping": tally.still_looping,
+            }),
+        );
+    }
+    if tally.lost_speech_chunks > 0 {
+        crate::logging::log_step(
+            "decode_group_lost_speech_retry",
+            "",
+            0,
+            serde_json::json!({
+                "groups": groups.len(), "calls": tally.calls,
+                "groups_retried": tally.lost_speech_groups,
+                "chunks_retried": tally.lost_speech_chunks,
             }),
         );
     }
     Ok(out)
+}
+
+/// One group: one call, then at most one call per chunk from a retry.
+fn decode_group(
+    decoder: &mut impl AudioDecoder,
+    samples: &[f32],
+    group: &DecodeGroup,
+    clock_offset: usize,
+    tally: &mut Tally,
+) -> Result<ChunkLines, TranscribeError> {
+    tally.calls += 1;
+    let call = decode_chunks(decoder, samples, &group.chunks)?;
+    if group.chunks.len() == 1 {
+        return Ok(call.into_lines(clock_offset));
+    }
+
+    let looping = call
+        .lines
+        .iter()
+        .find_map(|line| find_repetition_loop(&line.label(clock_offset)));
+    if let Some(found) = looping {
+        tally.loop_retried += 1;
+        tracing::warn!(
+            start_sample = clock_offset + group.start(),
+            end_sample = clock_offset + group.end(),
+            chunks = group.chunks.len(),
+            phrase_words = found.phrase_words,
+            repeats = found.repeats,
+            "repetition loop in a decode group; decoding its chunks one by one"
+        );
+        let mut lines = ChunkLines {
+            lines: Vec::new(),
+            stats: FilterStats::default(),
+        };
+        for chunk in &group.chunks {
+            tally.calls += 1;
+            let one = decode_chunks(decoder, samples, std::slice::from_ref(chunk))?;
+            let one = one.into_lines(clock_offset);
+            lines.add_stats(&one.stats);
+            lines.lines.extend(one.lines);
+        }
+        if lines
+            .lines
+            .iter()
+            .any(|line| find_repetition_loop(line).is_some())
+        {
+            tally.still_looping += 1;
+        }
+        return Ok(lines);
+    }
+
+    let lost = call.chunks_with_lost_speech();
+    if lost.is_empty() {
+        return Ok(call.into_lines(clock_offset));
+    }
+    tally.lost_speech_groups += 1;
+    tally.lost_speech_chunks += lost.len();
+    tracing::info!(
+        start_sample = clock_offset + group.start(),
+        end_sample = clock_offset + group.end(),
+        chunks = group.chunks.len(),
+        lost_chunks = lost.len(),
+        "speech without a line in a decode group; decoding those chunks alone"
+    );
+    let mut lines = ChunkLines {
+        lines: Vec::new(),
+        stats: call.stats.clone(),
+    };
+    for (index, chunk) in group.chunks.iter().enumerate() {
+        if lost.contains(&index) {
+            tally.calls += 1;
+            let one = decode_chunks(decoder, samples, std::slice::from_ref(chunk))?;
+            let one = one.into_lines(clock_offset);
+            lines.add_stats(&one.stats);
+            lines.lines.extend(one.lines);
+        } else {
+            lines.lines.extend(
+                call.lines
+                    .iter()
+                    .filter(|line| line.chunk == index)
+                    .map(|line| line.label(clock_offset)),
+            );
+        }
+    }
+    Ok(lines)
 }
 
 /// A run of source audio in the audio of one decoder call: `len` samples
@@ -412,15 +498,71 @@ fn group_runs(chunks: &[(usize, usize)]) -> Vec<Run> {
     runs
 }
 
+/// One line of a decoder call, placed in the planned audio.
+#[derive(Debug, Clone)]
+struct PlacedLine {
+    /// Where the line starts, in samples of the planned audio.
+    at: f64,
+    /// The index of the chunk of the call that the line belongs to.
+    chunk: usize,
+    /// The index of the speech stretch of the call that the line starts in.
+    stretch: Option<usize>,
+    text: String,
+}
+
+impl PlacedLine {
+    /// The `[m:ss] text` line on the source clock.
+    fn label(&self, clock_offset: usize) -> String {
+        let secs = (clock_offset as f64 + self.at) / RATE as f64;
+        let secs = secs.max(0.0).floor() as u64;
+        format!("[{}:{:02}] {}", secs / 60, secs % 60, self.text)
+    }
+}
+
+/// The result of one decoder call on some chunks.
+struct DecodedCall {
+    lines: Vec<PlacedLine>,
+    stretches: Vec<Stretch>,
+    stats: FilterStats,
+}
+
+impl DecodedCall {
+    fn into_lines(self, clock_offset: usize) -> ChunkLines {
+        ChunkLines {
+            lines: self
+                .lines
+                .iter()
+                .map(|line| line.label(clock_offset))
+                .collect(),
+            stats: self.stats,
+        }
+    }
+
+    /// The chunks, by index in the call, that have a stretch of speech with
+    /// no line that starts in it.
+    fn chunks_with_lost_speech(&self) -> Vec<usize> {
+        let mut lost: Vec<usize> = self
+            .stretches
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| !self.lines.iter().any(|line| line.stretch == Some(index)))
+            .map(|(_, stretch)| stretch.chunk)
+            .collect();
+        lost.dedup();
+        lost
+    }
+}
+
 /// One decoder call on `chunks` with the kept pauses between them.
 fn decode_chunks(
     decoder: &mut impl AudioDecoder,
     samples: &[f32],
     chunks: &[(usize, usize)],
-    clock_offset: usize,
-) -> Result<ChunkLines, TranscribeError> {
-    let mut out = ChunkLines {
+) -> Result<DecodedCall, TranscribeError> {
+    let stretches = speech_stretches(samples, chunks);
+    let mut out = DecodedCall {
         lines: Vec::new(),
+        stretches,
         stats: FilterStats::default(),
     };
     let runs = group_runs(chunks);
@@ -435,14 +577,24 @@ fn decode_chunks(
         return Ok(out);
     };
     out.stats = decoded.stats;
-    let speech = speech_stretches(samples, chunks);
     out.lines = decoded
         .segments
-        .iter()
+        .into_iter()
         .map(|segment| {
-            let secs = source_secs(&speech, &runs, clock_offset, segment);
-            let secs = secs.max(0.0).floor() as u64;
-            format!("[{}:{:02}] {}", secs / 60, secs % 60, segment.text)
+            let (at, stretch) = place_segment(&out.stretches, &runs, &segment);
+            let chunk = match stretch {
+                Some(index) => out.stretches[index].chunk,
+                None => chunks
+                    .iter()
+                    .rposition(|&(start, _)| start as f64 <= at)
+                    .unwrap_or(0),
+            };
+            PlacedLine {
+                at,
+                chunk,
+                stretch,
+                text: segment.text,
+            }
         })
         .collect();
     Ok(out)
@@ -453,8 +605,15 @@ fn decode_chunks(
 /// time can be a little before the speech really ends.
 const SPEECH_START_MIN_SAMPLES: usize = 3 * RATE / 10;
 
-/// The source time of a segment from a call on `chunks`, whose audio is
-/// `runs`. `speech` is [`speech_stretches`] of the chunks.
+/// The loud level of a chunk is this percentile of its window levels.
+const SPEECH_LOUD_PERCENTILE: usize = 95;
+
+/// A window is speech when its level is above the loud level divided by this
+/// (20 dB below it).
+const SPEECH_FLOOR_DIVISOR: usize = 10;
+
+/// Where a segment from a call on audio `runs` starts in the planned audio,
+/// and the index of the stretch of `speech` it starts in, if any.
 ///
 /// Whisper starts a segment where the segment before it ended. So a start is
 /// often early: in the quiet end of the speech before, or anywhere in a
@@ -464,35 +623,31 @@ const SPEECH_START_MIN_SAMPLES: usize = 3 * RATE / 10;
 /// A segment that starts before that stretch gets the start of the stretch.
 /// For the first speech of a chunk, that is the time the per-chunk pass gave
 /// it. A segment that starts inside the stretch keeps its exact time.
-fn source_secs(
-    speech: &[(usize, usize)],
-    runs: &[Run],
-    clock_offset: usize,
-    segment: &TimedText,
-) -> f64 {
+fn place_segment(speech: &[Stretch], runs: &[Run], segment: &TimedText) -> (f64, Option<usize>) {
     let start = segment.start * RATE as f64;
     let end = segment.end.max(segment.start) * RATE as f64;
-    let mut most: Option<(f64, usize, usize)> = None; // (held, joined start, source start)
-    for &(from_source, to_source) in speech {
-        let joined = joined_position(runs, from_source);
+    let mut most: Option<(f64, usize, usize)> = None; // (held, joined start, stretch)
+    for (index, stretch) in speech.iter().enumerate() {
+        let joined = joined_position(runs, stretch.start);
         let from = joined as f64;
-        let to = (joined + to_source - from_source) as f64;
+        let to = (joined + stretch.end - stretch.start) as f64;
         let held = end.min(to) - start.max(from);
         if held >= SPEECH_START_MIN_SAMPLES as f64 {
-            most = Some((held, joined, from_source));
+            most = Some((held, joined, index));
             break;
         }
         if held > 0.0 && most.is_none_or(|(most, _, _)| held > most) {
-            most = Some((held, joined, from_source));
+            most = Some((held, joined, index));
         }
     }
-    let source = match most {
+    match most {
         // The start of a stretch is known to one window. A segment that
         // starts less than that before it keeps its exact time.
-        Some((_, joined, source)) => {
+        Some((_, joined, index)) => {
             let before = joined as f64 - start;
             let window = crate::transcribe::VAD_WINDOW_SAMPLES as f64;
-            source as f64 - if before < window { before } else { 0.0 }
+            let early = if before < window { before } else { 0.0 };
+            (speech[index].start as f64 - early, Some(index))
         }
         // No speech at all: the segment is in a pause or after the audio. It
         // keeps the exact source time of its start.
@@ -502,10 +657,10 @@ fn source_secs(
                 .rev()
                 .find(|run| run.joined as f64 <= start)
                 .unwrap_or(&runs[0]);
-            run.source as f64 + (start - run.joined as f64).clamp(0.0, run.len as f64)
+            let at = run.source as f64 + (start - run.joined as f64).clamp(0.0, run.len as f64);
+            (at, None)
         }
-    };
-    clock_offset as f64 / RATE as f64 + source / RATE as f64
+    }
 }
 
 /// Where the source sample `source` is in the decoder audio. `source` must be
@@ -519,44 +674,69 @@ fn joined_position(runs: &[Run], source: usize) -> usize {
     run.joined + (source - run.source)
 }
 
-/// The stretches of speech inside `chunks`, `[start, end)` in samples of
-/// `samples`, in order.
+/// A stretch of speech `[start, end)` in samples of the planned audio, inside
+/// the chunk with index `chunk` of a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stretch {
+    start: usize,
+    end: usize,
+    chunk: usize,
+}
+
+/// The stretches of speech inside `chunks`, in order.
 ///
 /// A VAD chunk is not one stretch of speech. It ends with the quiet hangover
 /// of the chunker. And the chunker does not close a chunk shorter than 1 s,
 /// so a one-word answer and the sentence after a long silence can be one
-/// chunk. A window of 100 ms is speech when its level is within 20 dB of the
-/// loud level of its chunk. Speech windows less than the chunker hangover
-/// apart are one stretch. The result depends only on the audio of each chunk,
-/// so a checkpoint span and the whole-source pass get the same stretches.
-fn speech_stretches(samples: &[f32], chunks: &[(usize, usize)]) -> Vec<(usize, usize)> {
+/// chunk. The loud level of a chunk is a high percentile of its 100 ms window
+/// levels. A window is speech when its level is within 20 dB of the loudest
+/// chunk of the call. So a chunk that holds only faint talk or room noise
+/// has no stretch, and a line does not start in it. Speech windows less than
+/// the chunker hangover apart are one stretch. The result depends only on the
+/// audio of the chunks of one call, which is the same in a checkpoint span
+/// and in the whole-source pass. Change [`GROUPED_STRATEGY_VERSION`] when
+/// this changes in a way that [`strategy_id`] does not show.
+fn speech_stretches(samples: &[f32], chunks: &[(usize, usize)]) -> Vec<Stretch> {
     let window = crate::transcribe::VAD_WINDOW_SAMPLES;
     let hangover = crate::transcribe::VAD_HANGOVER_SAMPLES;
-    let mut stretches: Vec<(usize, usize)> = Vec::new();
-    for &(chunk_start, chunk_end) in chunks {
-        let levels: Vec<f32> = samples[chunk_start..chunk_end]
-            .chunks(window)
-            .map(|w| (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt())
-            .collect();
-        let mut sorted = levels.clone();
-        sorted.sort_by(f32::total_cmp);
-        let loud = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
+    let levels: Vec<Vec<f32>> = chunks
+        .iter()
+        .map(|&(start, end)| {
+            samples[start..end]
+                .chunks(window)
+                .map(|w| (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt())
+                .collect()
+        })
+        .collect();
+    let loud = levels
+        .iter()
+        .map(|levels| {
+            let mut sorted = levels.clone();
+            sorted.sort_by(f32::total_cmp);
+            sorted
+                .get((sorted.len() * SPEECH_LOUD_PERCENTILE / 100).min(sorted.len().max(1) - 1))
+                .copied()
+                .unwrap_or(0.0)
+        })
+        .fold(0.0f32, f32::max);
+    let mut stretches: Vec<Stretch> = Vec::new();
+    for (chunk, (&(chunk_start, chunk_end), levels)) in chunks.iter().zip(&levels).enumerate() {
         let first = stretches.len();
         for (index, level) in levels.iter().enumerate() {
-            if *level <= loud / 10.0 {
+            if *level <= loud / SPEECH_FLOOR_DIVISOR as f32 {
                 continue;
             }
             let from = chunk_start + index * window;
             let to = (from + window).min(chunk_end);
             let in_this_chunk = stretches.len() > first;
             match stretches.last_mut() {
-                Some(open) if in_this_chunk && from - open.1 < hangover => open.1 = to,
-                _ => stretches.push((from, to)),
+                Some(open) if in_this_chunk && from - open.end < hangover => open.end = to,
+                _ => stretches.push(Stretch {
+                    start: from,
+                    end: to,
+                    chunk,
+                }),
             }
-        }
-        // A chunk of one level, as in a test fixture, is one stretch.
-        if stretches.len() == first {
-            stretches.push((chunk_start, chunk_end));
         }
     }
     stretches
@@ -588,10 +768,14 @@ pub(crate) mod fake {
     /// `loop_ids` returns a looping segment for it. In the test fixtures a
     /// chunk holds at most two bursts, so only a group call loops. With
     /// `loop_always`, a call with fewer bursts loops too. Counts calls.
+    ///
+    /// A burst in `drop_ids` has no segment in a call that holds three or
+    /// more bursts, as Whisper drops a short reply in a group.
     pub(crate) struct FakeWhisper {
         pub(crate) calls: usize,
         pub(crate) loop_ids: Vec<u32>,
         pub(crate) loop_always: bool,
+        pub(crate) drop_ids: Vec<u32>,
     }
 
     impl FakeWhisper {
@@ -600,6 +784,14 @@ pub(crate) mod fake {
                 calls: 0,
                 loop_ids: Vec::new(),
                 loop_always: false,
+                drop_ids: Vec::new(),
+            }
+        }
+
+        pub(crate) fn dropping(ids: &[u32]) -> Self {
+            Self {
+                drop_ids: ids.to_vec(),
+                ..Self::new()
             }
         }
 
@@ -637,6 +829,12 @@ pub(crate) mod fake {
                 return Ok(None);
             }
             let several = segments.len() > 2;
+            if several {
+                segments.retain(|segment| {
+                    let id: u32 = segment.text[1..].parse().unwrap();
+                    !self.drop_ids.contains(&id)
+                });
+            }
             for segment in &mut segments {
                 let id: u32 = segment.text[1..].parse().unwrap();
                 if self.loop_ids.contains(&id) && (several || self.loop_always) {
@@ -721,7 +919,11 @@ mod tests {
         let samples: Vec<f32> = (0..75 * S).map(|n| n as f32).collect();
         let mut heard = Vec::new();
         let mut decoder = |audio: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
-            heard = audio.to_vec();
+            // The first call is the group. The calls after it are the
+            // lost-speech retry, because this decoder finds no speech.
+            if heard.is_empty() {
+                heard = audio.to_vec();
+            }
             Ok(None)
         };
         decode_groups(&mut decoder, &samples, &pack_groups(&chunks, 30 * S), 0).unwrap();
@@ -867,7 +1069,15 @@ mod tests {
             end,
             text: "x".into(),
         };
-        source_secs(speech, &group_runs(chunks), 0, &segment)
+        let speech: Vec<Stretch> = speech
+            .iter()
+            .map(|&(start, end)| Stretch {
+                start,
+                end,
+                chunk: chunks.iter().rposition(|c| c.0 <= start).unwrap_or(0),
+            })
+            .collect();
+        place_segment(&speech, &group_runs(chunks), &segment).0 / S as f64
     }
 
     #[test]
@@ -933,10 +1143,25 @@ mod tests {
         samples[16 * S..16 * S + 3 * S / 10].fill(0.001);
         samples[25 * S..28 * S].fill(0.2);
         let chunks = [(S, 19 * S + S / 2), (25 * S, 28 * S)];
+        let found: Vec<(usize, usize, usize)> = speech_stretches(&samples, &chunks)
+            .iter()
+            .map(|s| (s.start, s.end, s.chunk))
+            .collect();
         assert_eq!(
-            speech_stretches(&samples, &chunks),
-            vec![(S, S + 4 * S / 10), (14 * S, 19 * S), (25 * S, 28 * S)]
+            found,
+            vec![
+                (S, S + 4 * S / 10, 0),
+                (14 * S, 19 * S, 0),
+                (25 * S, 28 * S, 1)
+            ]
         );
+        // A chunk of faint talk, 30 dB below the loudest chunk of the call,
+        // has no stretch. Alone, it is its own loudest chunk.
+        let mut faint = samples.clone();
+        faint[25 * S..28 * S].fill(0.0095);
+        let found = speech_stretches(&faint, &chunks);
+        assert!(found.iter().all(|s| s.chunk == 0), "{found:?}");
+        assert_eq!(speech_stretches(&faint, &chunks[1..]).len(), 1);
         // A louder or quieter recording has the same stretches.
         let quiet: Vec<f32> = samples.iter().map(|s| s / 50.0).collect();
         assert_eq!(
@@ -1010,12 +1235,13 @@ mod tests {
         let mut decoder = |_: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
             calls += 1;
             Ok(Some(DecodedAudio {
+                // Two lines in the first chunk, one in the second.
                 segments: texts
                     .iter()
-                    .enumerate()
-                    .map(|(n, text)| TimedText {
-                        start: n as f64,
-                        end: n as f64 + 1.0,
+                    .zip([0.0, 1.0, 3.0])
+                    .map(|(text, start)| TimedText {
+                        start,
+                        end: start + 1.0,
                         text: text.to_string(),
                     })
                     .collect(),
@@ -1027,6 +1253,137 @@ mod tests {
         assert_eq!(calls, 1);
         let text: Vec<_> = out.lines.iter().map(|l| l[7..].to_string()).collect();
         assert_eq!(text, texts);
+    }
+
+    /// A burst that is the only speech of its chunk, in a group with other
+    /// chunks: the burst, its chunk and the index of its group.
+    fn lone_burst_in_a_group(
+        plan: &DecodePlan,
+        bursts: &[(f64, f64, u32)],
+    ) -> (u32, (usize, usize), usize) {
+        for (index, group) in plan.groups().iter().enumerate() {
+            if group.chunks.len() < 3 {
+                continue;
+            }
+            for &chunk in &group.chunks {
+                let inside: Vec<_> = bursts
+                    .iter()
+                    .filter(|b| {
+                        let at = (b.0 * S as f64) as usize;
+                        at >= chunk.0 && at < chunk.1
+                    })
+                    .collect();
+                if inside.len() == 1 {
+                    return (inside[0].2, chunk, index);
+                }
+            }
+        }
+        panic!("no lone burst in a group");
+    }
+
+    #[test]
+    fn a_reply_lost_in_a_group_is_found_by_decoding_its_chunk_alone() {
+        let (samples, bursts) = fixture();
+        let plan = DecodePlan::for_source(&samples, 30 * S);
+        let (id, _, _) = lone_burst_in_a_group(&plan, &bursts);
+        let mut fake = FakeWhisper::dropping(&[id]);
+        let out = decode_groups(&mut fake, &samples, plan.groups(), 0).unwrap();
+        // One more call, for that chunk only.
+        assert_eq!(fake.calls, plan.groups().len() + 1);
+        // The lines are those of a group decode that keeps the reply.
+        let mut clean = FakeWhisper::new();
+        let expected = decode_groups(&mut clean, &samples, plan.groups(), 0).unwrap();
+        assert_eq!(clean.calls, plan.groups().len());
+        assert_eq!(out.lines, expected.lines);
+        assert!(out.lines.iter().any(|l| l.ends_with(&format!(" w{id}"))));
+    }
+
+    #[test]
+    fn a_retried_chunk_replaces_only_its_own_lines() {
+        // A group of three chunks. The decoder of the group gives the first
+        // and last chunk, and drops the reply of the middle one. Alone, it
+        // gives each chunk a line marked as its own call.
+        let samples = burst_audio(20.0, &[(1.0, 3.0, 1), (6.0, 0.6, 2), (9.0, 4.0, 3)]);
+        let plan = DecodePlan::for_source(&samples, 30 * S);
+        assert_eq!(plan.groups().len(), 1);
+        assert_eq!(plan.groups()[0].chunks.len(), 3);
+        let mut calls = 0;
+        let mut decoder = |audio: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
+            calls += 1;
+            let line = |start: f64, text: &str| TimedText {
+                start,
+                end: start + 0.5,
+                text: text.into(),
+            };
+            Ok(Some(DecodedAudio {
+                segments: if audio.len() > 6 * S {
+                    vec![line(0.0, "first"), line(6.6, "last")]
+                } else {
+                    vec![line(0.0, "alone")]
+                },
+                stats: FilterStats::default(),
+            }))
+        };
+        let out = decode_groups(&mut decoder, &samples, plan.groups(), 0).unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            out.lines,
+            vec!["[0:01] first", "[0:06] alone", "[0:09] last"]
+        );
+    }
+
+    #[test]
+    fn a_reply_after_faint_talk_is_timed_at_the_reply_and_not_decoded_again() {
+        // Speech, then 10 s of faint talk from across the room, then a short
+        // reply. Whisper writes nothing for the faint talk and starts the
+        // reply where the speech before it ended.
+        let mut samples = vec![0.0f32; 20 * S];
+        samples[..3 * S].fill(0.2);
+        samples[5 * S..15 * S].fill(0.005);
+        samples[17 * S..17 * S + 6 * S / 10].fill(0.2);
+        let group = DecodeGroup {
+            chunks: vec![(0, 3 * S + S / 2), (5 * S, 15 * S), (17 * S, 18 * S)],
+        };
+        let mut calls = 0;
+        let mut decoder = |_: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
+            calls += 1;
+            let line = |start: f64, end: f64, text: &str| TimedText {
+                start,
+                end,
+                text: text.into(),
+            };
+            Ok(Some(DecodedAudio {
+                segments: vec![
+                    line(0.0, 2.9, "We ship on Friday."),
+                    line(2.9, 16.1, "Okay."),
+                ],
+                stats: FilterStats::default(),
+            }))
+        };
+        let out = decode_groups(&mut decoder, &samples, &[group], 0).unwrap();
+        assert_eq!(out.lines, vec!["[0:00] We ship on Friday.", "[0:17] Okay."]);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_group_without_lost_speech_is_not_decoded_again() {
+        let (samples, _) = fixture();
+        let plan = DecodePlan::for_source(&samples, 30 * S);
+        let mut fake = FakeWhisper::new();
+        decode_groups(&mut fake, &samples, plan.groups(), 0).unwrap();
+        assert_eq!(fake.calls, plan.groups().len());
+        // A group that the decoder finds no speech in is decoded chunk by
+        // chunk, once.
+        let mut nothing_in_groups = 0;
+        let mut decoder = |audio: &[f32]| -> Result<Option<DecodedAudio>, TranscribeError> {
+            nothing_in_groups += 1;
+            let _ = audio;
+            Ok(None)
+        };
+        decode_groups(&mut decoder, &samples, plan.groups(), 0).unwrap();
+        let chunks: usize = plan.groups().iter().map(|g| g.chunks.len()).sum();
+        let lone = plan.groups().iter().filter(|g| g.chunks.len() == 1).count();
+        assert_eq!(nothing_in_groups, plan.groups().len() + chunks - lone);
     }
 
     #[test]

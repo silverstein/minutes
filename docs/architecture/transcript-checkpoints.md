@@ -126,6 +126,14 @@ between accepted spans.
   chunk. That output is kept, even if it loops again, because it is what one
   call per chunk produced before groups. The retry happens in the same way in
   all three paths.
+- Lost-speech guard: in a group, Whisper can drop a short reply ("Okay.",
+  "Love it.") that it keeps when its chunk is decoded alone. When a stretch of
+  speech in a chunk of a group has no line that starts in it, that chunk is
+  decoded again once, on its own. Its lines replace the lines that the group
+  gave for that chunk. The other chunks keep the group lines. So the extra work
+  is at most one call per chunk, and the retry depends only on the audio of the
+  group, as in all three paths. The speech-stretch values are part of the
+  strategy id, so spans made with other values are decoded again.
 - Other engines keep one call per chunk: their plan has one chunk per group.
 
 ## Equivalence

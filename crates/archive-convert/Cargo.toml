@@ -13,7 +13,7 @@ minutes-archive-worker-control = { path = "../archive-worker-control" }
 # it was adopted, so a range would silently take a parser this project has
 # not exercised. Its PDF path is never called -- see convert_via_anydoc.
 anydoc = "=0.2.4"
-flate2 = "=1.1.10"
+flate2 = "=1.1.11"
 libc = "0.2"
 # Pinned to the exact version pdf-extract already carries, so the text-origin
 # inspection reads the same parsed document the extractor reads, not a second
@@ -26,7 +26,7 @@ serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
 thiserror = { workspace = true }
-zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
+zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.7"

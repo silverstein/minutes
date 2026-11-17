@@ -257,6 +257,75 @@ fn restriction_or_unknown_policy_refuses_without_connecting() {
 }
 
 #[test]
+fn survivor_stems_without_mov_use_capture_group_policy() {
+    crate::test_support::with_temp_home(|root| {
+        for role in ["system", "voice"] {
+            let (mut config, audio) = fixture(root, 1);
+            let survivor = audio.with_extension(format!("{role}.wav"));
+            std::fs::rename(&audio, &survivor).unwrap();
+            assert!(!audio.with_extension("mov").exists());
+            assert!(!survivor.with_extension("md").exists());
+            let (base, handle) = server(vec![(200, OK)], |_| {});
+            config.transcription.openai_compatible_base_url = base;
+            let result = super::super::transcribe_meeting(&survivor, &config).unwrap();
+            assert_eq!(result.segments[0].text, "hello from server");
+            assert_eq!(handle.join().unwrap().len(), 1);
+            assert!(survivor.exists());
+        }
+    });
+}
+
+#[test]
+fn survivor_stems_keep_group_sensitivity_capture_and_corpus_checks() {
+    crate::test_support::with_temp_home(|root| {
+        for role in ["system", "voice"] {
+            for case in ["restricted", "disabled", "outside_corpus", "missing"] {
+                let (mut config, audio) = fixture(root, 1);
+                let policy = audio.with_extension("md");
+                let normal = std::fs::read_to_string(&policy).unwrap();
+                let survivor = audio.with_extension(format!("{role}.wav"));
+                std::fs::rename(&audio, &survivor).unwrap();
+                // A stem-local normal policy must never override its group's veto.
+                std::fs::write(survivor.with_extension("md"), &normal).unwrap();
+                match case {
+                    "restricted" => {
+                        std::fs::write(&policy, normal.replace("normal", "restricted")).unwrap();
+                    }
+                    "disabled" => {
+                        std::fs::write(
+                            &policy,
+                            normal.replace("sensitivity: normal", "capture: none"),
+                        )
+                        .unwrap();
+                    }
+                    "outside_corpus" => {
+                        config.output_dir = root.join("another-corpus");
+                        std::fs::create_dir_all(&config.output_dir).unwrap();
+                    }
+                    _ => std::fs::remove_file(&policy).unwrap(),
+                }
+                assert!(!audio.with_extension("mov").exists());
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                config.transcription.openai_compatible_base_url =
+                    format!("http://{}/v1", listener.local_addr().unwrap());
+                let error = super::super::transcribe_meeting(&survivor, &config)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("egress policy refused"),
+                    "{role}: {case}: {error}"
+                );
+                assert!(
+                    matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+                );
+                std::fs::remove_file(survivor.with_extension("md")).unwrap();
+            }
+        }
+    });
+}
+
+#[test]
 fn policy_is_rechecked_between_chunks() {
     crate::test_support::with_temp_home(|root| {
         let (mut config, audio) = fixture(root, 2);

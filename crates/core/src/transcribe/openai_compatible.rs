@@ -223,8 +223,15 @@ pub(super) fn authorize_audio(
             meeting,
         });
     }
+    // Preserved native-call survivors share the capture group's Markdown even
+    // when its MOV anchor was lost. Do not fall back to a stem-local policy.
+    let policy_path = if crate::jobs::native_stem_role(audio).is_some() {
+        audio.with_extension("").with_extension("md")
+    } else {
+        audio.with_extension("md")
+    };
     // Existing recordings still use the normal-only active-corpus gate.
-    read_meeting_policy(&audio.with_extension("md"), config)
+    read_meeting_policy(&policy_path, config)
         .map(|snapshot| AudioPolicy::Meeting(Box::new(snapshot)))
 }
 

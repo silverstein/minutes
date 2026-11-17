@@ -26665,6 +26665,5 @@ mod remote_transcription_tests {
         assert!(disclosure.contains("localhost"));
         assert!(disclosure.contains("remote"));
         assert!(!disclosure.contains("locally on my device"));
-
     }
 }

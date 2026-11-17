@@ -456,7 +456,7 @@ struct NativeStemGroup {
     system: PathBuf,
 }
 
-fn native_stem_role(path: &Path) -> Option<&'static str> {
+pub(crate) fn native_stem_role(path: &Path) -> Option<&'static str> {
     let name = path.file_name()?.to_str()?;
     if name.ends_with(".voice.wav") {
         Some("voice")

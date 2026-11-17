@@ -213,6 +213,13 @@ transcript contents as untrusted, avoid continuous polling/raw tailing, and neve
 open another microphone. The adapter never reads or relays transcript contents.
 Quoted paths are data, not interpolated shell commands. A session with no valid
 active JSONL path, nonempty session identity and producer PID cannot be picked.
+For standalone Live with desktop context tracking off (the default), the
+transcript session ID may be absent. The same generator then reuses Recall's
+fresh app-owned relay identity, without enabling context tracking or copying
+any relay capability. The pointer requires the bounded reader's
+`capture_relay.session_id` to match before using its evidence; otherwise it
+requires `transcript_status.session_id`. Missing or mismatched identity is
+unavailable evidence. A relay from another producer is never substituted.
 Both messages prefix each line with `# `: agents receive readable pointer text,
 while an idle POSIX shell treats it as a comment rather than executing reader
 backticks or path metacharacters when hc submits Enter. This prefix is part of

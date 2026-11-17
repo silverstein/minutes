@@ -485,6 +485,32 @@ mod tests {
         }
     }
     #[test]
+    fn standalone_live_without_context_tracking_uses_verified_relay_identity() {
+        assert!(!Config::default().desktop_context.enabled);
+        let mut status = status();
+        status.session_id = None;
+        status.pid = Some(std::process::id());
+        let pointer = crate::context::live_transcript_pointer_with_relay(
+            &status,
+            Some("synthetic-relay-epoch"),
+        )
+        .unwrap();
+        assert!(pointer.contains("Expected capture_relay.session_id: \"synthetic-relay-epoch\""));
+        assert!(pointer.contains("minutes transcript --since N --include-current --format json"));
+        assert!(pointer.contains("discard unavailable or mismatched identities"));
+        assert!(!pointer.contains("auth_token"));
+        assert!(crate::context::live_transcript_pointer_with_relay(&status, None).is_none());
+        // A real transcript identity remains authoritative when both exist.
+        status.session_id = Some("synthetic-transcript".into());
+        let pointer = crate::context::live_transcript_pointer_with_relay(
+            &status,
+            Some("synthetic-relay-epoch"),
+        )
+        .unwrap();
+        assert!(pointer.contains("Expected transcript_status.session_id: \"synthetic-transcript\""));
+        assert!(!pointer.contains("synthetic-relay-epoch"));
+    }
+    #[test]
     fn local_live_listing_resolves_labels_without_returning_screen_or_cwd() {
         let (dir, hc) = fake(
             r#"

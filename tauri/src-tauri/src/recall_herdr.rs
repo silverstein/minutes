@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 
 static TRANSITION: Mutex<()> = Mutex::new(());
 const DEADLINE: Duration = Duration::from_secs(5);
+const HC_NOT_FOUND: &str = "hc was not found on the assistant PATH";
 const NESTED_ENV: [&str; 4] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
@@ -88,8 +89,7 @@ impl Hc {
             .iter()
             .find(|(key, _)| key == "PATH")
             .ok_or("Assistant PATH is unavailable")?;
-        let executable = which::which_in("hc", Some(&path.1), cwd)
-            .map_err(|_| "hc was not found on the assistant PATH")?;
+        let executable = which::which_in("hc", Some(&path.1), cwd).map_err(|_| HC_NOT_FOUND)?;
         Ok(Self {
             executable,
             timeout: DEADLINE,
@@ -138,12 +138,27 @@ impl Hc {
             return Err("Herdr returned too much metadata".into());
         }
         if !success && bytes.is_empty() {
-            // Do not echo arbitrary subprocess stderr (may contain private context).
-            let _ = stderr.rewind();
-            return Err("Herdr command failed".into());
+            stderr.rewind().map_err(|e| e.to_string())?;
+            stderr
+                .take(65_537)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > 65_536 {
+                return Err("Herdr returned too much metadata".into());
+            }
         }
-        let json = serde_json::from_slice(&bytes).map_err(|_| "Herdr returned invalid metadata")?;
-        Ok((success, json))
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "Herdr returned invalid metadata")?;
+        if success {
+            Ok((true, json))
+        } else {
+            // Errors in hc 0.1.21 use stderr. Consume only the bounded kind;
+            // never retain or display arbitrary error messages, hints or context.
+            let kind = json["error"]["kind"]
+                .as_str()
+                .ok_or("Herdr returned invalid error metadata")?;
+            Ok((false, serde_json::json!({"error": {"kind": kind}})))
+        }
     }
     fn available(&self) -> bool {
         self.call(&["server".into(), "status".into(), "--json".into()])
@@ -407,20 +422,9 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
         (tab, manager.session_theme_dark(id))
     };
     let workspace = crate::recall_tabs::workspace(id)?;
-    let agent = crate::commands::resolve_agent_binary(&config.assistant.agent)
-        .map_err(|e| e.user_message())?;
-    let mut args = crate::context::assistant_skills::terminal_args(
-        &config.assistant.agent,
-        crate::commands::filtered_agent_args(&config.assistant.agent, &config.assistant.agent_args),
-        &workspace,
-    );
-    if crate::commands::command_is_claude(&config.assistant.agent) {
-        args = crate::commands::recall_tab_claude_args(
-            args,
-            &workspace,
-            tab.claude_session_id.as_deref(),
-        );
-    }
+    let (agent_name, _) = launch_spec(&config, &tab, &root, &workspace);
+    // Resolve before stopping the local process, including Claude inside a shell.
+    crate::commands::resolve_agent_binary(&agent_name).map_err(|e| e.user_message())?;
     let mut name = terminal_name(id);
     match hc.get(&name)? {
         Lookup::Live(_) => return Err("A Herdr terminal already owns this conversation".into()),
@@ -479,16 +483,12 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
                 latest = saved.clone();
             }
         }
-        if crate::commands::command_is_claude(&config.assistant.agent) {
-            args = crate::commands::recall_tab_claude_args(
-                args,
-                &workspace,
-                latest.claude_session_id.as_deref(),
-            );
-        }
-        Ok((latest, args))
+        let (agent_name, args) = launch_spec(&config, &latest, &root, &workspace);
+        let agent =
+            crate::commands::resolve_agent_binary(&agent_name).map_err(|e| e.user_message())?;
+        Ok((latest, agent, args))
     })();
-    let (latest, args) = finish_preparation(prepared, || restore_local(app, id, theme))?;
+    let (latest, agent, args) = finish_preparation(prepared, || restore_local(app, id, theme))?;
     match hc.run(&name, &latest, &workspace, &agent, args) {
         Ok(address) => set_owner(app, id, Some(address)),
         Err(error) => {
@@ -503,6 +503,36 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
             }
         }
     }
+}
+
+fn launch_spec(config: &Config, tab: &Tab, root: &Path, workspace: &Path) -> (String, Vec<String>) {
+    let resume = tab.claude_session_id.as_deref().filter(|id| {
+        crate::recall_tabs::transcript_available(
+            root,
+            &tab.id,
+            id,
+            tab.claude_transcript_path.as_deref(),
+        )
+    });
+    let configured_claude = crate::commands::command_is_claude(&config.assistant.agent);
+    let (agent, args) = if resume.is_some() && !configured_claude {
+        // A shell's flags are not Claude flags. Resume the conversation launched
+        // inside it using the same Claude resolver as Recall's session tooling.
+        ("claude", Vec::new())
+    } else {
+        (
+            config.assistant.agent.as_str(),
+            crate::commands::filtered_agent_args(
+                &config.assistant.agent,
+                &config.assistant.agent_args,
+            ),
+        )
+    };
+    let mut args = crate::context::assistant_skills::terminal_args(agent, args, workspace);
+    if crate::commands::command_is_claude(agent) {
+        args = crate::commands::recall_tab_claude_args(args, workspace, resume);
+    }
+    (agent.to_string(), args)
 }
 
 #[derive(Debug, PartialEq)]
@@ -536,13 +566,21 @@ fn release_terminal(hc: &Hc, target: &str, end: bool, confirm_missing: bool) -> 
 }
 
 fn take_back_with<T>(
-    hc: &Hc,
+    hc: Result<&Hc, String>,
     target: &str,
     end: bool,
     confirm_missing: bool,
     reclaim: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    release_terminal(hc, target, end, confirm_missing)?;
+    match hc {
+        Ok(hc) => release_terminal(hc, target, end, confirm_missing)?,
+        Err(error) if error == HC_NOT_FOUND => {
+            if !confirm_missing {
+                return Err("RECALL_HERDR_MISSING_CONFIRM".into());
+            }
+        }
+        Err(error) => return Err(error),
+    }
     reclaim()
 }
 
@@ -638,7 +676,7 @@ pub async fn cmd_recall_herdr_take_back(
 ) -> Result<TabStore, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _transition = transition_guard()?;
-        let hc = Hc::locate()?;
+        let hc = Hc::locate();
         let state = app.state::<crate::commands::AppState>();
         let target = state
             .pty_manager
@@ -651,7 +689,7 @@ pub async fn cmd_recall_herdr_take_back(
             .and_then(|t| t.herdr_terminal.clone())
             .ok_or("This tab is not in Herdr")?;
         take_back_with(
-            &hc,
+            hc.as_ref().map_err(Clone::clone),
             &target,
             end_terminal,
             confirm_missing.unwrap_or(false),
@@ -742,11 +780,11 @@ mod tests {
     }
     #[test]
     fn missing_owner_requires_its_own_confirmation_then_clears_the_saved_fence() {
-        let (dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3");
+        let (dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}' >&2; exit 3");
         let mut tabs = TabStore::default();
         let id = tabs.open(dir.path(), None, true).unwrap();
         set_tab_owner(&mut tabs, dir.path(), &id, Some("t42".into())).unwrap();
-        let blocked = take_back_with(&hc, "t42", true, false, || {
+        let blocked = take_back_with(Ok(&hc), "t42", true, false, || {
             set_tab_owner(&mut tabs, dir.path(), &id, None)
         });
         assert_eq!(blocked.unwrap_err(), "RECALL_HERDR_MISSING_CONFIRM");
@@ -755,7 +793,7 @@ mod tests {
             "End confirmation is not missing-owner confirmation"
         );
         let mut restarts = 0;
-        take_back_with(&hc, "t42", false, true, || {
+        take_back_with(Ok(&hc), "t42", false, true, || {
             set_tab_owner(&mut tabs, dir.path(), &id, None)?;
             restarts += 1;
             Ok(())
@@ -766,6 +804,163 @@ mod tests {
         restored.ensure(dir.path()).unwrap();
         assert!(restored.tabs[0].herdr_terminal.is_none());
         assert!(restored.tabs[0].handed_off_at.is_none());
+    }
+    #[test]
+    fn uninstalled_hc_requires_missing_confirmation_before_reclaiming() {
+        let dir = tempfile::tempdir().unwrap();
+        let locate = || {
+            Hc::locate_in(
+                &[("PATH".into(), dir.path().to_string_lossy().into_owned())],
+                dir.path(),
+            )
+        };
+        let mut tabs = TabStore::default();
+        let id = tabs.open(dir.path(), None, true).unwrap();
+        set_tab_owner(&mut tabs, dir.path(), &id, Some("t42".into())).unwrap();
+        let mut restarts = 0;
+        for (discovery, end, confirm, expected) in [
+            (locate(), false, false, "RECALL_HERDR_MISSING_CONFIRM"),
+            (locate(), true, false, "RECALL_HERDR_MISSING_CONFIRM"),
+            (
+                Err("Other discovery failure".into()),
+                false,
+                true,
+                "Other discovery failure",
+            ),
+        ] {
+            let result = take_back_with(
+                discovery.as_ref().map_err(Clone::clone),
+                "t42",
+                end,
+                confirm,
+                || {
+                    restarts += 1;
+                    set_tab_owner(&mut tabs, dir.path(), &id, None)
+                },
+            );
+            assert_eq!(result.unwrap_err(), expected);
+            assert_eq!(restarts, 0);
+            assert!(tabs.tabs[0].herdr_terminal.is_some());
+        }
+        take_back_with(
+            locate().as_ref().map_err(Clone::clone),
+            "t42",
+            false,
+            true,
+            || {
+                restarts += 1;
+                set_tab_owner(&mut tabs, dir.path(), &id, None)
+            },
+        )
+        .unwrap();
+        assert_eq!(restarts, 1);
+        let mut restored = TabStore::default();
+        restored.ensure(dir.path()).unwrap();
+        assert!(restored.tabs[0].herdr_terminal.is_none());
+        assert!(restored.tabs[0].handed_off_at.is_none());
+        // hc may have been reinstalled while the prompt was open. Missing-owner
+        // confirmation never grants permission to kill a now-live terminal.
+        let (_dir, hc) = fake("echo '{\"address\":\"t42\",\"state\":\"live\"}'");
+        assert_eq!(
+            take_back_with(Ok(&hc), "t42", false, true, || Ok(())).unwrap_err(),
+            "RECALL_HERDR_END_CONFIRM"
+        );
+    }
+    #[test]
+    fn shell_tab_with_a_matching_transcript_moves_the_claude_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("tabs/tab-123");
+        let transcript = dir.path().join("saved-123.jsonl");
+        std::fs::write(&transcript, "synthetic nonempty transcript\n").unwrap();
+        let mut tab = tab();
+        tab.shell = true;
+        tab.claude_active = true;
+        tab.claude_session_id = Some("saved-123".into());
+        tab.claude_transcript_path = Some(transcript.clone());
+        let mut config = Config::default();
+        config.assistant.agent = "zsh".into();
+        config.assistant.agent_args = vec!["-l".into()];
+        assert_eq!(
+            launch_spec(&config, &tab, dir.path(), &workspace),
+            ("claude".into(), vec!["--resume".into(), "saved-123".into()])
+        );
+        // An explicit Claude configuration keeps its executable and settings,
+        // but replaces stale inherited session selection with this tab's ID.
+        config.assistant.agent = "/custom/bin/claude".into();
+        config.assistant.agent_args = vec![
+            "--settings".into(),
+            "custom.json".into(),
+            "--continue".into(),
+            "--resume".into(),
+            "old-session".into(),
+        ];
+        assert_eq!(
+            launch_spec(&config, &tab, dir.path(), &workspace),
+            (
+                "/custom/bin/claude".into(),
+                vec![
+                    "--settings".into(),
+                    "custom.json".into(),
+                    "--resume".into(),
+                    "saved-123".into()
+                ]
+            )
+        );
+        config.assistant.agent = "zsh".into();
+        config.assistant.agent_args = vec!["-l".into()];
+        for invalid in [
+            PathBuf::from("missing.jsonl"),
+            dir.path().join("wrong-id.jsonl"),
+        ] {
+            std::fs::write(dir.path().join("wrong-id.jsonl"), "synthetic\n").unwrap();
+            tab.claude_transcript_path = Some(invalid);
+            assert_eq!(
+                launch_spec(&config, &tab, dir.path(), &workspace),
+                ("zsh".into(), vec!["-l".into()])
+            );
+        }
+        tab.claude_transcript_path = Some(transcript.clone());
+        std::fs::write(&transcript, "").unwrap();
+        assert_eq!(
+            launch_spec(&config, &tab, dir.path(), &workspace),
+            ("zsh".into(), vec!["-l".into()])
+        );
+    }
+    #[test]
+    fn errors_use_bounded_stderr_and_expose_only_the_error_kind() {
+        for redirect in [">&2", ""] {
+            let (_dir, hc) = fake(&format!(
+                r#"echo '{{"error":{{"kind":"not_found","message":"PRIVATE","hint":"PRIVATE"}},"address":"PRIVATE"}}' {redirect}; exit 3"#
+            ));
+            let (ok, json) = hc.call(&["get".into()]).unwrap();
+            assert!(!ok);
+            assert_eq!(json, serde_json::json!({"error":{"kind":"not_found"}}));
+            assert!(matches!(hc.get("t42").unwrap(), Lookup::Missing));
+            assert_eq!(
+                hc.kill("t42").unwrap_err(),
+                "Herdr could not end the terminal"
+            );
+        }
+        for body in [
+            "echo PRIVATE >&2; exit 1",
+            "echo '{\"error\":{\"message\":\"PRIVATE\"}}' >&2; exit 1",
+            "echo invalid-stdout; echo '{\"error\":{\"kind\":\"not_found\"}}' >&2; exit 3",
+            "echo '{\"address\":\"t42\",\"state\":\"live\"}' >&2",
+        ] {
+            let (_dir, hc) = fake(body);
+            let error = hc.call(&[]).unwrap_err();
+            assert!(!error.contains("PRIVATE"));
+        }
+        let (_dir, hc) = fake("head -c 65537 /dev/zero >&2; exit 1");
+        assert_eq!(
+            hc.call(&[]).unwrap_err(),
+            "Herdr returned too much metadata"
+        );
+        let (_dir, hc) = fake("head -c 65537 /dev/zero; exit 1");
+        assert_eq!(
+            hc.call(&[]).unwrap_err(),
+            "Herdr returned too much metadata"
+        );
     }
     #[test]
     fn pre_run_failure_restores_local_ownership_and_restarts_once() {
@@ -854,7 +1049,7 @@ mod tests {
                 "finished",
             ),
             (
-                "echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3",
+                "echo '{\"error\":{\"kind\":\"not_found\"}}' >&2; exit 3",
                 "missing",
             ),
         ] {
@@ -877,7 +1072,7 @@ mod tests {
     fn failed_run_is_distinct_from_an_uncertain_timeout() {
         for (body, uncertain) in [
             (
-                "echo '{\"error\":{\"kind\":\"spawn_failed\"}}'; exit 1",
+                "echo '{\"error\":{\"kind\":\"spawn_failed\"}}' >&2; exit 1",
                 false,
             ),
             ("exec /bin/sleep 30", true),
@@ -970,7 +1165,7 @@ printf '%s\n' "$@" > '{}'
             message: "Timeout".into(),
             uncertain: true,
         };
-        let (_dir, missing) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3");
+        let (_dir, missing) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}' >&2; exit 3");
         assert_eq!(
             reconcile_launch(&missing, "minutes-test", &rejected),
             Recovery::Restart
@@ -1008,7 +1203,7 @@ esac
         release_terminal(&hc, "t42", true, false).unwrap();
         assert!(dir.path().join("hc.ended").exists());
         release_terminal(&hc, "t42", false, false).unwrap();
-        let (_dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3");
+        let (_dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}' >&2; exit 3");
         assert!(release_terminal(&hc, "t42", true, false).is_err());
         let (_dir, hc) = fake("case \"$1\" in get) echo '{\"address\":\"t42\",\"state\":\"live\"}';; kill) echo '{}';; esac");
         assert!(

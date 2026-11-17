@@ -58,13 +58,18 @@ errors; rollback repairs the tab metadata before clearing a poisoned lock.
 If persistence or local restart itself fails, that distinct recovery error is
 shown instead of claiming success. Normal shutdown retains its existing asynchronous reaping behavior.
 
-The launch uses the configured assistant agent and filtered `agent_args`, the
-same skill arguments and Claude session-argument normalization as a local tab,
-and the tab's own working directory. Only a matching nonempty transcript earns
-`--resume`; a never-used Claude tab starts fresh. Transcript metadata is refreshed
-after the local child exits so a final saved turn can be recovered. Configured
-shells remain shells, following existing Recall semantics; their Resume action
-continues to be explicit after Take back.
+The launch uses the tab's own working directory and checks the same
+`transcript_available` metadata as Recall. A matching nonempty Claude transcript
+selects Claude with `--resume <id>`, including when the configured agent is a
+shell and the user launched Claude inside it. Claude is resolved through the
+shared binary resolver used by Recall's Claude tooling. Shell arguments (such
+as `zsh -l`) are not passed to Claude. A configured Claude executable retains its
+filtered `agent_args`, skill arguments and session-argument normalization. With
+no resumable Claude transcript, the configured agent and its arguments are used;
+a never-used Claude tab starts fresh. The binary is resolved before stopping
+the local process, then transcript metadata and launch selection are refreshed
+after the child exits so a final saved turn can be recovered. Normal shell
+restoration after Take back retains its explicit Resume action.
 
 `hc run --json --bg --no-parent --outlive-parent` receives the `minutes.tab` label
 and, when there is a meeting, its filename stem as `minutes.meeting`. The default
@@ -82,8 +87,12 @@ clears server-inherited nested-Claude markers as well as clearing them on the
 Every `hc` invocation has a five-second process deadline and runs on a blocking
 worker, outside capture. The client is killed and reaped on timeout. Output is
 read from anonymous files rather than blocking pipe readers; JSON parsing is
-limited to 64 KiB. Arbitrary stderr is not displayed to avoid exposing private
-context. No provider login or permissions are changed.
+limited to 64 KiB per selected stream. Successful JSON comes from stdout. On a
+nonzero exit with empty stdout, error JSON is read from stderr with the same
+bound, matching hc 0.1.21. Failed-command JSON retains only `error.kind`, from
+either stream; messages, hints and arbitrary stderr are never displayed. Invalid
+or oversized errors remain ambiguous failures. No provider login or permissions
+are changed.
 
 A rejected launch is reconciled by name. Confirmed absence/finished state after
 a definitive rejection clears the fence, restarts the local tab with its previous
@@ -101,6 +110,10 @@ from End terminal: it clears the owner/timestamp and restarts locally. The backe
 rechecks before acting; if the terminal has become live, the missing-owner approval
 does not authorize ending it. This gives an interrupted launch with no eventual
 record a user-controlled exit without treating absence as automatic proof.
+If `hc` has been uninstalled, Take back uses this same missing-owner confirmation
+and clears the persisted fence only after explicit approval. Other discovery
+errors still fail closed. If `hc` is found again when the user confirms, its
+terminal is checked again; a live terminal still requires End confirmation.
 
 The tab displays In Herdr, Copy address, Open terminal (copies an `hc attach`
 command with an explanatory notice), and Take back. There is no interactive
@@ -127,9 +140,16 @@ Only these fields are consumed; the server returns additional metadata.
 | `hc run --json --bg ... -- <argv>` | `{"address":"t1d","state":"live",...}` | The local address is the handoff result. |
 | `hc get t1d --json` (alive) | `{"address":"t1d","state":"live","exit_code":null,"status":{"state":"done"},...}` | `done` is agent status; this program is still alive. |
 | `hc get t1d --json` (exited) | `{"address":"t1d","state":"finished","exit_code":0,"finished_ms":123,...}` | `state` is the lifetime discriminator; nonzero exit also ends ownership. |
-| `hc get <missing> --json` | `{"error":{"kind":"not_found","message":"...","hint":"..."}}` with exit 3 | Absence is recognized separately from transport/parse errors. |
+| `hc get <missing> --json` | stderr: `{"error":{"kind":"not_found","message":"...","hint":"..."}}`, empty stdout, exit 3 | Absence is recognized separately from transport/parse errors. |
+| `hc run --json ...` (invalid cwd or missing binary) | stderr: `{"error":{"kind":"spawn_failed",...}}`, empty stdout, exit 1 | A parsed rejection can be reconciled by terminal name. |
+| `hc kill <missing> --json` | stderr: `{"error":{"kind":"not_found",...}}`, empty stdout, exit 3 | Failed kill does not establish exit. |
 | `hc ls --json` | `{"hidden_finished":2,"terminals":[{"address":"t1d","state":"live",...}]}` | Observed for compatibility; not used by the adapter. |
 | `hc kill <address> --json` | `{"address":"t1f","state":"finished","reason":"killed","signal":1,...}` | Only acknowledgement. A subsequent `get` must report `finished`. |
+
+The error streams above were checked separately on Linux hc 0.1.21 using an
+isolated server and temporary socket/state/config directories. The owned server
+was stopped afterward and the shared server PID stayed unchanged. The Mac
+reviewer independently observed the same missing-terminal stderr contract.
 
 ## Qualification boundary
 
@@ -137,9 +157,14 @@ Automated coverage uses isolated fake executables found through an isolated
 PATH, with absent, down, invalid, slow, rejected and successful responses. It
 checks literal argv preservation, server-side environment cleanup, live-vs-done
 lifetime, kill confirmation, uncertain-launch fencing and a real Unix child reap.
+Fake command rejections use stderr; one compatibility case also covers stdout.
+Error tests check both 64 KiB limits, malformed errors, and stripping private
+messages/hints. A shell tab with an active saved Claude transcript selects Claude
+and the exact resume ID; absent, empty or mismatched transcripts keep the shell.
 GUI-path lookup is tested with an hc-free process PATH and a fake executable
 in an augmented directory. Missing-owner confirmation and pre-run failure tests
-check persisted fence removal and local-restart dispatch; Working status is
+check persisted fence removal and local-restart dispatch, including uninstalled
+hc and a live terminal found after reinstall; Working status is
 refused. Palette tests keep discovery unresolved while listing and executing an
 ordinary command, then check late append and one edge command per Herdr action.
 The tab persistence test restores the ownership fields and accepts old manifests.

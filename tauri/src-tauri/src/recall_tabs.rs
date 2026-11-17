@@ -428,7 +428,12 @@ fn transcript_file_exists(path: &Path, id: &str) -> bool {
 // Metadata only: never open or parse Claude's conversation contents. The hook's
 // reported path also supports custom Claude config directories. Legacy singleton
 // conversations still live under the parent workspace's project key.
-fn transcript_available(root: &Path, tab_id: &str, id: &str, reported: Option<&Path>) -> bool {
+pub(crate) fn transcript_available(
+    root: &Path,
+    tab_id: &str,
+    id: &str,
+    reported: Option<&Path>,
+) -> bool {
     if !valid_id(id) {
         return false;
     }

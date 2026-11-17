@@ -36,3 +36,61 @@ test('Herdr adapter remains at the desktop edge', () => {
   }
   scan('crates/core/src');
 });
+
+function paletteFunction(source, name) {
+  const start = source.indexOf(`    async function ${name}(`);
+  assert.ok(start >= 0, name);
+  const body = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let index = body; index < source.length; index++) {
+    if (source[index] === '{') depth++;
+    if (source[index] === '}' && --depth === 0) return source.slice(start, index + 1);
+  }
+  throw new Error(`Unterminated ${name}`);
+}
+function paletteFixture() {
+  const source = readFileSync('tauri/src/palette/index.html', 'utf8');
+  const calls = [], renders = [];
+  let answer;
+  const availability = new Promise(resolve => { answer = resolve; });
+  const sandbox = vm.createContext({ console, calls, renders, invoke: async (name, args) => {
+    calls.push({ name, args });
+    if (name === 'cmd_recall_herdr_available') return availability;
+    if (name === 'palette_list') return { commands: [{ id: 'ordinary', title: 'Ordinary command' }], recents: [] };
+    return null;
+  } });
+  vm.runInContext(`
+    let allCommands = [], recents = [], commandLoad = 0, focusedIndex = 0, mode = { kind: 'browsing' };
+    const queryEl = { value: '' }, hintEl = { textContent: '' };
+    const render = () => renders.push(allCommands.map(command => command.id));
+    const resultsFromResponse = () => null;
+    const enterResultsMode = () => { throw new Error('Unexpected results'); };
+    ${['appendHerdrCommand', 'fetchCommands', 'closePalette', 'executeWithFreshVisibility'].map(name => paletteFunction(source, name)).join('\n')}
+    globalThis.fixture = { fetch: fetchCommands, execute: executeWithFreshVisibility, commands: () => allCommands };
+  `, sandbox);
+  return { calls, renders, answer, ...sandbox.fixture };
+}
+
+test('a hung Herdr probe cannot delay the palette list or ordinary commands', { timeout: 1000 }, async () => {
+  const fixture = paletteFixture();
+  await fixture.fetch();
+  assert.deepEqual(Array.from(fixture.renders[0]), ['ordinary']);
+  await fixture.execute({ id: 'ordinary' });
+  assert.equal(fixture.calls.filter(call => call.name === 'palette_execute').length, 1);
+  assert.equal(fixture.calls.filter(call => call.name === 'cmd_recall_herdr_available').length, 1);
+  fixture.answer(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.commands().length, 1, 'a discovery result from before execution cannot overwrite the fresh command state');
+});
+
+test('Herdr discovery appends later and execution delegates one authoritative edge check', async () => {
+  const fixture = paletteFixture();
+  await fixture.fetch();
+  fixture.answer(true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(Array.from(fixture.commands(), command => command.id), ['ordinary', 'recall-open-in-herdr']);
+  await fixture.execute({ id: 'recall-open-in-herdr' });
+  assert.equal(fixture.calls.filter(call => call.name === 'cmd_recall_herdr_palette').length, 1);
+  assert.equal(fixture.calls.filter(call => call.name === 'cmd_recall_herdr_available').length, 1, 'execution must not add a duplicate frontend probe');
+  assert.equal(fixture.calls.filter(call => call.name === 'palette_execute').length, 0, 'the portable dispatcher never receives the edge-only command');
+});

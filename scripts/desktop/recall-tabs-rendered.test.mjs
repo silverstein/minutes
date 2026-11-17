@@ -17,7 +17,7 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</st
 <div id="recall-panel" class="recall-panel expanded"><div class="recall-header"><div id="recall-tabs" class="recall-tabs" role="tablist"></div><div class="recall-header-actions"></div></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
 <span data-recall-meeting="/live.md"></span><span data-recall-meeting="/prep.md"></span></div><script>${controller}</script><script>
 const actions=[];let model={active:'live',tabs:[{id:'live',title:'Live call',meeting_path:'/live.md',status:'working',live:true},{id:'prep',title:'Board prep',meeting_path:'/prep.md',status:'working'},{id:'chat',title:'Chat',status:'done'},{id:'other',title:'Other',status:'done'}]};
-const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),resume:id=>actions.push(['resume',id]),openInHerdr:id=>actions.push(['herdr',id]),takeBack:(id,end)=>actions.push(['take-back',id,!!end]),copyAddress:address=>actions.push(['copy',address]),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});
+const controls=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke:async()=>{},isRecording:()=>true,select:id=>{actions.push(['select',id]);model.active=id;controls.update(structuredClone(model));},create:()=>actions.push(['new']),resume:id=>actions.push(['resume',id]),openInHerdr:id=>actions.push(['herdr',id]),takeBack:(id,end,missing)=>actions.push(missing?['take-back',id,!!end,true]:['take-back',id,!!end]),copyAddress:address=>actions.push(['copy',address]),close:(id,confirmed)=>{actions.push(['close',id,!!confirmed]);if(!confirmed)controls.confirmClose(id);}});
 controls.update(structuredClone(model));window.fixture={actions,model,controls};</script></body></html>`;
 const server = createServer((request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname;
@@ -94,6 +94,10 @@ try {
   // Availability, explicit handoff confirmation and durable external-owner state.
   assert.equal(await page.getByRole('button', { name: 'Conversation actions for Board prep' }).count(), 0);
   await page.evaluate(() => fixture.controls.setHerdrAvailable(true));
+  await page.evaluate(() => fixture.controls.confirmOpen('live'));
+  assert.match(await page.locator('#recall-tab-prompt').innerText(), /Wait for this reply to finish/);
+  assert.equal(await page.locator('#recall-tab-prompt').getByRole('button', { name: 'Open in Herdr', exact: true }).count(), 0);
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await page.getByRole('button', { name: 'Conversation actions for Board prep' }).click();
   await page.getByRole('button', { name: 'Open in Herdr', exact: true }).click();
   assert.match(await page.locator('#recall-tab-prompt').innerText(), /Move this conversation to Herdr/);
@@ -115,6 +119,15 @@ try {
   await page.evaluate(() => fixture.controls.confirmTakeBack('prep'));
   await page.getByRole('button', { name: 'End terminal and take back', exact: true }).click();
   assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['take-back', 'prep', true]);
+  await page.evaluate(() => fixture.controls.confirmMissing('prep'));
+  assert.match(await page.locator('#recall-tab-prompt').innerText(), /Herdr has no record of this terminal/);
+  assert.equal(await page.getByRole('button', { name: 'Cancel', exact: true }).evaluate(node => node === document.activeElement), true);
+  const beforeMissingCancel = await page.evaluate(() => fixture.actions.length);
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(() => fixture.actions.length), beforeMissingCancel);
+  await page.evaluate(() => fixture.controls.confirmMissing('prep'));
+  await page.getByRole('button', { name: 'Take conversation back', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => fixture.actions.at(-1)), ['take-back', 'prep', false, true]);
   await page.evaluate(() => { fixture.controls.setHerdrAvailable(false); });
   assert.equal(await page.locator('#recall-herdr-state').isVisible(), true, 'a saved owner stays visible even when discovery is down');
   await page.evaluate(() => { delete fixture.model.tabs[1].herdr_terminal; fixture.controls.update(structuredClone(fixture.model)); });

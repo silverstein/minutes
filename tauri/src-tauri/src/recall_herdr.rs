@@ -78,7 +78,18 @@ impl Hc {
         Self::locate()
     }
     fn locate() -> Result<Self, String> {
-        let executable = which::which("hc").map_err(|_| "hc was not found on PATH")?;
+        Self::locate_in(
+            &crate::pty::assistant_process_environment(),
+            &std::env::current_dir().map_err(|e| e.to_string())?,
+        )
+    }
+    fn locate_in(environment: &[(String, String)], cwd: &Path) -> Result<Self, String> {
+        let path = environment
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .ok_or("Assistant PATH is unavailable")?;
+        let executable = which::which_in("hc", Some(&path.1), cwd)
+            .map_err(|_| "hc was not found on the assistant PATH")?;
         Ok(Self {
             executable,
             timeout: DEADLINE,
@@ -268,9 +279,25 @@ fn emit(app: &tauri::AppHandle, tabs: &TabStore) {
 fn set_owner(app: &tauri::AppHandle, id: &str, owner: Option<String>) -> Result<TabStore, String> {
     let state = app.state::<crate::commands::AppState>();
     let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
-    let previous = manager.tabs.clone();
-    let tab = manager
-        .tabs
+    set_tab_owner(
+        &mut manager.tabs,
+        &crate::context::workspace_dir(),
+        id,
+        owner,
+    )?;
+    let tabs = manager.tabs.clone();
+    drop(manager);
+    emit(app, &tabs);
+    Ok(tabs)
+}
+fn set_tab_owner(
+    tabs: &mut TabStore,
+    root: &Path,
+    id: &str,
+    owner: Option<String>,
+) -> Result<(), String> {
+    let previous = tabs.clone();
+    let tab = tabs
         .tabs
         .iter_mut()
         .find(|t| t.id == id)
@@ -281,14 +308,47 @@ fn set_owner(app: &tauri::AppHandle, id: &str, owner: Option<String>) -> Result<
         .as_ref()
         .map(|_| chrono::Utc::now().to_rfc3339());
     tab.process_exited = false;
-    if let Err(error) = manager.tabs.save(&crate::context::workspace_dir()) {
-        manager.tabs = previous;
+    if let Err(error) = tabs.save(root) {
+        *tabs = previous;
         return Err(error);
     }
+    Ok(())
+}
+fn restore_local(app: &tauri::AppHandle, id: &str, theme: Option<bool>) -> Result<(), String> {
+    let state = app.state::<crate::commands::AppState>();
+    // A pre-run failure cannot have transferred ownership. Repair this tab's
+    // persisted fence even if the failed operation poisoned the manager lock.
+    let mut manager = state
+        .pty_manager
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_tab_owner(
+        &mut manager.tabs,
+        &crate::context::workspace_dir(),
+        id,
+        None,
+    )?;
+    state.pty_manager.clear_poison();
     let tabs = manager.tabs.clone();
     drop(manager);
     emit(app, &tabs);
-    Ok(tabs)
+    restart(app, id, theme)
+}
+fn finish_preparation<T>(
+    result: Result<T, String>,
+    restore: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    result.map_err(|error| match restore() {
+        Ok(()) => format!("{error}. The conversation has restarted in Minutes."),
+        Err(recovery) => format!("{error}. Could not restore the local tab: {recovery}"),
+    })
+}
+fn ensure_idle(tab: &Tab) -> Result<(), String> {
+    if tab.status == crate::recall_tabs::Status::Working {
+        Err("Wait for this reply to finish, then move it to Herdr".into())
+    } else {
+        Ok(())
+    }
 }
 fn restart(app: &tauri::AppHandle, id: &str, theme: Option<bool>) -> Result<(), String> {
     let state = app.state::<crate::commands::AppState>();
@@ -343,6 +403,7 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
         if tab.herdr_terminal.is_some() {
             return Err("This conversation is already in Herdr".into());
         }
+        ensure_idle(&tab)?;
         (tab, manager.session_theme_dark(id))
     };
     let workspace = crate::recall_tabs::workspace(id)?;
@@ -377,40 +438,57 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
         Lookup::Missing => {}
     }
     // Write-ahead ownership fences every spawn route, including relaunch.
-    set_owner(app, id, Some(name.clone()))?;
-    let session = state
-        .pty_manager
-        .lock()
-        .map_err(|_| "Recall unavailable")?
-        .take_session(id);
-    if let Some(session) = session {
-        if let Err((session, error)) = stop_and_reap(session) {
-            // Keep the original handle so every local spawn still sees its owner.
-            state
-                .pty_manager
-                .lock()
-                .map_err(|_| "Recall unavailable")?
-                .restore_session(id.to_string(), *session);
-            set_owner(app, id, None)?;
-            return Err(error);
-        }
-    }
-    // Re-read transcript metadata after reaping: the last local turn may just have flushed.
-    let mut latest = tab;
     {
         let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
         manager.tabs.refresh(&root)?;
-        if let Some(saved) = manager.tabs.tabs.iter().find(|t| t.id == id) {
-            latest = saved.clone();
+        ensure_idle(
+            manager
+                .tabs
+                .tabs
+                .iter()
+                .find(|t| t.id == id)
+                .ok_or("Recall tab not found")?,
+        )?;
+        set_tab_owner(&mut manager.tabs, &root, id, Some(name.clone()))?;
+        emit(app, &manager.tabs);
+    }
+    // Everything fallible before run is inside this recovery envelope.
+    let prepared = (|| {
+        let session = state
+            .pty_manager
+            .lock()
+            .map_err(|_| "Recall unavailable")?
+            .take_session(id);
+        if let Some(session) = session {
+            if let Err((session, error)) = stop_and_reap(session) {
+                // Keep the original handle so every local spawn still sees its owner.
+                state
+                    .pty_manager
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .restore_session(id.to_string(), *session);
+                return Err(error);
+            }
         }
-    }
-    if crate::commands::command_is_claude(&config.assistant.agent) {
-        args = crate::commands::recall_tab_claude_args(
-            args,
-            &workspace,
-            latest.claude_session_id.as_deref(),
-        );
-    }
+        // Re-read transcript metadata after reaping: the last local turn may just have flushed.
+        let mut latest = tab;
+        {
+            let mut manager = state.pty_manager.lock().map_err(|_| "Recall unavailable")?;
+            manager.tabs.refresh(&root)?;
+            if let Some(saved) = manager.tabs.tabs.iter().find(|t| t.id == id) {
+                latest = saved.clone();
+            }
+        }
+        if crate::commands::command_is_claude(&config.assistant.agent) {
+            args = crate::commands::recall_tab_claude_args(
+                args,
+                &workspace,
+                latest.claude_session_id.as_deref(),
+            );
+        }
+        Ok((latest, args))
+    })();
+    let (latest, args) = finish_preparation(prepared, || restore_local(app, id, theme))?;
     match hc.run(&name, &latest, &workspace, &agent, args) {
         Ok(address) => set_owner(app, id, Some(address)),
         Err(error) => {
@@ -440,17 +518,32 @@ fn reconcile_launch(hc: &Hc, name: &str, error: &LaunchError) -> Recovery {
         _ => Recovery::Uncertain,
     }
 }
-fn release_terminal(hc: &Hc, target: &str, end: bool) -> Result<(), String> {
+fn release_terminal(hc: &Hc, target: &str, end: bool, confirm_missing: bool) -> Result<(), String> {
     match hc.get(target)? {
-        Lookup::Missing => Err("Herdr has no record of this terminal. Ownership is uncertain; Minutes did not start another copy.".into()),
+        Lookup::Missing if confirm_missing => Ok(()),
+        Lookup::Missing => Err("RECALL_HERDR_MISSING_CONFIRM".into()),
         Lookup::Finished => Ok(()),
         Lookup::Live(_) if !end => Err("RECALL_HERDR_END_CONFIRM".into()),
         Lookup::Live(_) => {
             hc.kill(target)?;
-            if matches!(hc.get(target)?, Lookup::Finished) { Ok(()) }
-            else { Err("The Herdr terminal has not confirmed its exit. Minutes did not start another copy.".into()) }
+            if matches!(hc.get(target)?, Lookup::Finished) {
+                Ok(())
+            } else {
+                Err("The Herdr terminal has not confirmed its exit. Minutes did not start another copy.".into())
+            }
         }
     }
+}
+
+fn take_back_with<T>(
+    hc: &Hc,
+    target: &str,
+    end: bool,
+    confirm_missing: bool,
+    reclaim: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    release_terminal(hc, target, end, confirm_missing)?;
+    reclaim()
 }
 
 /// Unlike normal shutdown, handoff must establish child exit before hc run.
@@ -541,6 +634,7 @@ pub async fn cmd_recall_herdr_take_back(
     app: tauri::AppHandle,
     tab_id: String,
     end_terminal: bool,
+    confirm_missing: Option<bool>,
 ) -> Result<TabStore, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _transition = transition_guard()?;
@@ -556,16 +650,23 @@ pub async fn cmd_recall_herdr_take_back(
             .find(|t| t.id == tab_id)
             .and_then(|t| t.herdr_terminal.clone())
             .ok_or("This tab is not in Herdr")?;
-        release_terminal(&hc, &target, end_terminal)?;
-        set_owner(&app, &tab_id, None)?;
-        restart(&app, &tab_id, None)?;
-        let tabs = state
-            .pty_manager
-            .lock()
-            .map_err(|_| "Recall unavailable")?
-            .tabs
-            .clone();
-        Ok(tabs)
+        take_back_with(
+            &hc,
+            &target,
+            end_terminal,
+            confirm_missing.unwrap_or(false),
+            || {
+                set_owner(&app, &tab_id, None)?;
+                restart(&app, &tab_id, None)?;
+                let tabs = state
+                    .pty_manager
+                    .lock()
+                    .map_err(|_| "Recall unavailable")?
+                    .tabs
+                    .clone();
+                Ok(tabs)
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -624,6 +725,94 @@ mod tests {
             "id":"tab-123", "title":"Synthetic conversation", "meeting_path":"/synthetic/board.md", "claude_session_id": null
         })).unwrap()
     }
+    #[test]
+    fn gui_lookup_uses_the_augmented_assistant_path() {
+        let (dir, _) = fake("echo '{}'");
+        let gui = "/usr/bin:/bin:/usr/sbin:/sbin";
+        assert!(which::which_in("hc", Some(gui), dir.path()).is_err());
+        let path =
+            std::env::join_paths([dir.path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+        let hc = Hc::locate_in(
+            &[("PATH".into(), path.to_string_lossy().into_owned())],
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(hc.executable, dir.path().join("hc"));
+        assert!(Hc::locate_in(&[("PATH".into(), gui.into())], dir.path()).is_err());
+    }
+    #[test]
+    fn missing_owner_requires_its_own_confirmation_then_clears_the_saved_fence() {
+        let (dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3");
+        let mut tabs = TabStore::default();
+        let id = tabs.open(dir.path(), None, true).unwrap();
+        set_tab_owner(&mut tabs, dir.path(), &id, Some("t42".into())).unwrap();
+        let blocked = take_back_with(&hc, "t42", true, false, || {
+            set_tab_owner(&mut tabs, dir.path(), &id, None)
+        });
+        assert_eq!(blocked.unwrap_err(), "RECALL_HERDR_MISSING_CONFIRM");
+        assert!(
+            tabs.tabs[0].herdr_terminal.is_some(),
+            "End confirmation is not missing-owner confirmation"
+        );
+        let mut restarts = 0;
+        take_back_with(&hc, "t42", false, true, || {
+            set_tab_owner(&mut tabs, dir.path(), &id, None)?;
+            restarts += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(restarts, 1);
+        let mut restored = TabStore::default();
+        restored.ensure(dir.path()).unwrap();
+        assert!(restored.tabs[0].herdr_terminal.is_none());
+        assert!(restored.tabs[0].handed_off_at.is_none());
+    }
+    #[test]
+    fn pre_run_failure_restores_local_ownership_and_restarts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tabs = TabStore::default();
+        let id = tabs.open(dir.path(), None, true).unwrap();
+        set_tab_owner(&mut tabs, dir.path(), &id, Some("minutes-pending".into())).unwrap();
+        let mut restarts = 0;
+        let result: Result<(), String> =
+            finish_preparation(Err("Transcript refresh failed".into()), || {
+                set_tab_owner(&mut tabs, dir.path(), &id, None)?;
+                restarts += 1;
+                Ok(())
+            });
+        assert!(result.unwrap_err().contains("restarted in Minutes"));
+        assert_eq!(restarts, 1);
+        let mut restored = TabStore::default();
+        restored.ensure(dir.path()).unwrap();
+        assert!(restored.tabs[0].herdr_terminal.is_none());
+        finish_preparation(Ok(()), || {
+            restarts += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            restarts, 1,
+            "Successful preparation must not restart before hc run"
+        );
+    }
+    #[test]
+    fn a_working_tab_cannot_be_handed_off() {
+        let mut tab = tab();
+        tab.status = crate::recall_tabs::Status::Working;
+        assert_eq!(
+            ensure_idle(&tab).unwrap_err(),
+            "Wait for this reply to finish, then move it to Herdr"
+        );
+        for status in [
+            crate::recall_tabs::Status::Done,
+            crate::recall_tabs::Status::Waiting,
+            crate::recall_tabs::Status::Error,
+        ] {
+            tab.status = status;
+            assert!(ensure_idle(&tab).is_ok());
+        }
+    }
+
     #[test]
     fn absent_down_invalid_slow_and_successful_server() {
         let empty = tempfile::tempdir().unwrap();
@@ -812,18 +1001,18 @@ esac
 "#,
         );
         assert_eq!(
-            release_terminal(&hc, "t42", false).unwrap_err(),
+            release_terminal(&hc, "t42", false, false).unwrap_err(),
             "RECALL_HERDR_END_CONFIRM"
         );
         assert!(!dir.path().join("hc.ended").exists());
-        release_terminal(&hc, "t42", true).unwrap();
+        release_terminal(&hc, "t42", true, false).unwrap();
         assert!(dir.path().join("hc.ended").exists());
-        release_terminal(&hc, "t42", false).unwrap();
+        release_terminal(&hc, "t42", false, false).unwrap();
         let (_dir, hc) = fake("echo '{\"error\":{\"kind\":\"not_found\"}}'; exit 3");
-        assert!(release_terminal(&hc, "t42", true).is_err());
+        assert!(release_terminal(&hc, "t42", true, false).is_err());
         let (_dir, hc) = fake("case \"$1\" in get) echo '{\"address\":\"t42\",\"state\":\"live\"}';; kill) echo '{}';; esac");
         assert!(
-            release_terminal(&hc, "t42", true).is_err(),
+            release_terminal(&hc, "t42", true, false).is_err(),
             "kill acknowledgement alone cannot release ownership"
         );
     }

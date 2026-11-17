@@ -17639,16 +17639,16 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       create: openNewRecallChat,
       close: closeRecallTab, resume: resumeRecallTab,
       openInHerdr: id => transferRecallHerdr(id, false),
-      takeBack: (id, end = false) => transferRecallHerdr(id, true, end),
+      takeBack: (id, end = false, missing = false) => transferRecallHerdr(id, true, end, missing),
       copyAddress: async (text, message = 'Herdr address copied.') => {
         try { await navigator.clipboard.writeText(text); setRecallProviderNotice(message); }
         catch (_) { setRecallProviderNotice(`Copy this address or command: ${text}`); }
       },
     });
-    async function transferRecallHerdr(id, takeBack, endTerminal = false) {
+    async function transferRecallHerdr(id, takeBack, endTerminal = false, confirmMissing = false) {
       try {
         await invoke(takeBack ? 'cmd_recall_herdr_take_back' : 'cmd_recall_herdr_open',
-          takeBack ? { tabId: id, endTerminal } : { tabId: id, confirmed: true });
+          takeBack ? { tabId: id, endTerminal, confirmMissing } : { tabId: id, confirmed: true });
         // The original xterm retains scrollback; explicit reopen reconnects the PTY.
         const model = await invoke('cmd_recall_tabs');
         const local = recallStateFor(id); local.alive = false;
@@ -17659,6 +17659,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         }
         setRecallProviderNotice('');
       } catch (error) {
+        if (String(error).includes('RECALL_HERDR_MISSING_CONFIRM')) { recallTabsController.confirmMissing(id); return; }
         if (String(error).includes('RECALL_HERDR_END_CONFIRM')) { recallTabsController.confirmTakeBack(id); return; }
         const model = await invoke('cmd_recall_tabs');
         applyRecallTabsModel(model);

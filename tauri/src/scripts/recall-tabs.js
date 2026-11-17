@@ -199,11 +199,15 @@
     }, true);
     function confirmOpen(id) {
       if (!herdrAvailable || model.tabs.find(t => t.id === id)?.herdr_terminal) return;
+      if (model.tabs.find(t => t.id === id)?.status === 'working') {
+        show('Wait for this reply to finish, then move it to Herdr', []); return;
+      }
       show('Move this conversation to Herdr? Minutes will stop its copy so the conversation continues there.', [['Open in Herdr', () => openInHerdr?.(id)]]);
     }
     return { update,
       setHerdrAvailable: available => { herdrAvailable = !!available; update(model); },
       confirmOpen,
+      confirmMissing: id => show("Herdr has no record of this terminal. If it isn't running anywhere, take the conversation back?", [['Take conversation back', () => takeBack?.(id, false, true)]]),
       confirmTakeBack: id => show('End this Herdr terminal and take the conversation back? Minutes will wait for it to exit before resuming.', [['End terminal and take back', () => takeBack?.(id, true)]]),
       confirmClose: (id, action = () => close(id, true)) => {
         const tab = model.tabs.find(t => t.id === id);

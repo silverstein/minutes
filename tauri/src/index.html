@@ -17330,6 +17330,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     /// PTY, so toggling to terminal mode mid-session showed a black pane.
     async function applyRecallMode() {
       refreshRecallContextChips();
+      if (recallTabsModel.tabs.find(t => t.id === SESSION_ID)?.herdr_terminal) {
+        recallTerminalContainer.classList.add('hidden'); recallLoading.classList.remove('active');
+        if (recallChatPanel) recallChatPanel.style.display = 'none';
+        return;
+      }
       if (recallDevMode) {
         // Terminal (developer) mode — mirror openRecall()'s dev path.
         // cmd_spawn_terminal is idempotent: if the assistant session already
@@ -17567,6 +17572,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         const target = recallStateFor(options.tabId || model.active);
         if (options.newTab) target.untouched = true;
         await activateRecallTab(options.tabId || model.active, model);
+        if (model.tabs.find(t => t.id === target.id)?.herdr_terminal) return true;
         if (!options.restart && target.exited) return true;
       } catch (error) {
         recallLoading.classList.remove('active');
@@ -17632,6 +17638,45 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       select: id => openRecall('assistant', null, { tabId: id }),
       create: openNewRecallChat,
       close: closeRecallTab, resume: resumeRecallTab,
+      openInHerdr: id => transferRecallHerdr(id, false),
+      takeBack: (id, end = false) => transferRecallHerdr(id, true, end),
+      copyAddress: async (text, message = 'Herdr address copied.') => {
+        try { await navigator.clipboard.writeText(text); setRecallProviderNotice(message); }
+        catch (_) { setRecallProviderNotice(`Copy this address or command: ${text}`); }
+      },
+    });
+    async function transferRecallHerdr(id, takeBack, endTerminal = false) {
+      try {
+        await invoke(takeBack ? 'cmd_recall_herdr_take_back' : 'cmd_recall_herdr_open',
+          takeBack ? { tabId: id, endTerminal } : { tabId: id, confirmed: true });
+        // The original xterm retains scrollback; explicit reopen reconnects the PTY.
+        const model = await invoke('cmd_recall_tabs');
+        const local = recallStateFor(id); local.alive = false;
+        applyRecallTabsModel(model);
+        if (!model.tabs.find(t => t.id === id)?.herdr_terminal) {
+          if (id === SESSION_ID) await openRecall('assistant', null, { tabId: id, restart: true });
+          else await ensureRecallTabProcesses(model);
+        }
+        setRecallProviderNotice('');
+      } catch (error) {
+        if (String(error).includes('RECALL_HERDR_END_CONFIRM')) { recallTabsController.confirmTakeBack(id); return; }
+        const model = await invoke('cmd_recall_tabs');
+        applyRecallTabsModel(model);
+        if (!model.tabs.find(t => t.id === id)?.herdr_terminal && id === SESSION_ID) {
+          await openRecall('assistant', null, { tabId: id, restart: true });
+        }
+        setRecallProviderNotice(String(error), 'error');
+      }
+    }
+    function refreshRecallHerdrAvailability() {
+      invoke('cmd_recall_herdr_available').then(value => recallTabsController.setHerdrAvailable(value)).catch(() => recallTabsController.setHerdrAvailable(false));
+    }
+    refreshRecallHerdrAvailability();
+    window.addEventListener('focus', refreshRecallHerdrAvailability);
+    currentWindow.listen('recall:herdr-confirm', async event => {
+      await openRecall('assistant', null, { tabId: event.payload });
+      recallTabsController.setHerdrAvailable(true);
+      recallTabsController.confirmOpen(event.payload);
     });
     function withRecallMeetingTitles(model) {
       return { ...model, tabs: model.tabs.map(tab => {
@@ -17678,12 +17723,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       recallTabsController.update({ ...model, active: id });
       setRecallProviderNotice(metadata?.note || '');
       renderRecallTabHeader(metadata);
+      if (metadata?.herdr_terminal) { tab.alive = false; recallTerminalContainer.classList.add('hidden'); recallLoading.classList.remove('active'); }
       if (metadata?.process_exited) markRecallPtyEnded(tab);
-      recallExitBanner.classList.toggle('active', !!tab.exited);
+      recallExitBanner.classList.toggle('active', !!tab.exited && !metadata?.herdr_terminal);
       recallEndBtn.classList.toggle('active', !!tab.alive);
       requestAnimationFrame(() => {
         fitRecallTerminal(tab);
-        if (tab.id === SESSION_ID && document.getElementById('recall-tab-prompt').hidden) tab.terminal?.focus();
+        if (!metadata?.herdr_terminal && tab.id === SESSION_ID && document.getElementById('recall-tab-prompt').hidden) tab.terminal?.focus();
       });
       refreshRecallContextChips();
     }
@@ -17730,6 +17776,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       for (const metadata of model.tabs) {
         const state = recallTabStates.get(metadata.id);
         if (state) { state.shell = !!metadata.shell; state.claudeActive = !!metadata.claude_active; }
+        if (metadata.herdr_terminal && state) { state.alive = false; if (state.id === SESSION_ID) { recallTerminalContainer.classList.add('hidden'); recallExitBanner.classList.remove('active'); recallEndBtn.classList.remove('active'); } }
         if (state && metadata.process_exited) {
           markRecallPtyEnded(state);
           if (state.id === SESSION_ID) { recallExitBanner.classList.add('active'); recallEndBtn.classList.remove('active'); }
@@ -17771,7 +17818,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     async function ensureRecallTabProcesses(model) {
       for (const metadata of model.tabs) {
         const tab = recallStateFor(metadata.id);
-        if (tab.initialized) continue;
+        if (metadata.herdr_terminal || tab.initialized) continue;
         tab.meetingPath = metadata.meeting_path || null; tab.pending = true;
         tab.shell = !!metadata.shell; tab.claudeActive = !!metadata.claude_active;
         initRecallTerminal(tab); await registerPtyListeners(tab);

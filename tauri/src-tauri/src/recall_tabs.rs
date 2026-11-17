@@ -29,6 +29,10 @@ pub struct Tab {
     pub claude_session_id: Option<String>,
     #[serde(default)]
     pub claude_transcript_path: Option<PathBuf>,
+    #[serde(default)]
+    pub herdr_terminal: Option<String>,
+    #[serde(default)]
+    pub handed_off_at: Option<String>,
     #[serde(default, skip_deserializing)]
     pub process_exited: bool,
     #[serde(default)]
@@ -181,6 +185,8 @@ impl TabStore {
                     }),
                     claude_session_id: legacy,
                     claude_transcript_path: None,
+                    herdr_terminal: None,
+                    handed_off_at: None,
                     process_exited: false,
                     shell: false,
                     claude_active: false,
@@ -360,6 +366,8 @@ impl TabStore {
             meeting_path: meeting.map(str::to_string),
             claude_session_id: None,
             claude_transcript_path: None,
+            herdr_terminal: None,
+            handed_off_at: None,
             process_exited: false,
             shell: false,
             claude_active: false,
@@ -1004,6 +1012,27 @@ pub fn start_observer(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     #[test]
+    fn handoff_ownership_survives_relaunch_and_old_manifests_default_to_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = TabStore::default();
+        let id = store.open(dir.path(), None, true).unwrap();
+        let tab = &mut store.tabs[0];
+        assert!(tab.herdr_terminal.is_none());
+        tab.herdr_terminal = Some("t42".into());
+        tab.handed_off_at = Some("2026-11-17T00:00:00Z".into());
+        store.save(dir.path()).unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(dir.path()).unwrap();
+        assert_eq!(restored.tabs[0].id, id);
+        assert_eq!(restored.tabs[0].herdr_terminal.as_deref(), Some("t42"));
+        assert_eq!(restored.tabs[0].handed_off_at, store.tabs[0].handed_off_at);
+        assert!(requires_close_confirmation(&restored.tabs[0]));
+        let old: Tab = serde_json::from_value(serde_json::json!({"id":"old","title":"Chat","meeting_path":null,"claude_session_id":null})).unwrap();
+        assert!(old.herdr_terminal.is_none());
+        assert!(old.handed_off_at.is_none());
+    }
+
+    #[test]
     fn isolated_workspaces_cap_and_resume_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -1225,6 +1254,9 @@ pub fn cmd_recall_tab_resume(
 }
 
 fn shell_resume_command(tab: &Tab) -> Result<String, String> {
+    if tab.herdr_terminal.is_some() {
+        return Err("Take this conversation back from Herdr before resuming".into());
+    }
     if !tab.shell || tab.claude_active {
         return Err("Claude is already running in this tab".into());
     }
@@ -1253,6 +1285,9 @@ pub fn cmd_recall_tab_close(
             .iter()
             .find(|t| t.id == tab_id)
             .ok_or("Recall tab not found")?;
+        if tab.herdr_terminal.is_some() {
+            return Err("Take this conversation back from Herdr before closing its tab".into());
+        }
         if requires_close_confirmation(tab) && !confirmed.unwrap_or(false) {
             return Err("RECALL_CLOSE_CONFIRM".into());
         }
@@ -1312,7 +1347,8 @@ pub fn cmd_recall_tab_open(
 }
 
 fn requires_close_confirmation(tab: &Tab) -> bool {
-    tab.status == Status::Working
+    tab.herdr_terminal.is_some()
+        || tab.status == Status::Working
         || tab.live
         || tab.claude_active
         || tab.claude_session_id.is_some()

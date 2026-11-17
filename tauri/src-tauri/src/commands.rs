@@ -10800,7 +10800,7 @@ fn is_approval_bypass_flag(arg: &str) -> bool {
     )
 }
 
-fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
+pub(crate) fn filtered_agent_args(agent_name: &str, args: &[String]) -> Vec<String> {
     let allowed_bypass_flag = match agent_name {
         "claude" => Some("--dangerously-skip-permissions"),
         "codex" => Some("--dangerously-bypass-approvals-and-sandbox"),
@@ -11031,7 +11031,7 @@ pub fn spawn_terminal(
     )
 }
 
-fn recall_tab_claude_args(
+pub(crate) fn recall_tab_claude_args(
     args: Vec<String>,
     workspace: &Path,
     resume: Option<&str>,
@@ -11073,7 +11073,7 @@ fn recall_tab_claude_args(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spawn_terminal_tab(
+pub(crate) fn spawn_terminal_tab(
     app: &tauri::AppHandle,
     pty_manager: &Arc<Mutex<crate::pty::PtyManager>>,
     mode: &str,
@@ -11110,6 +11110,9 @@ fn spawn_terminal_tab(
         .find(|t| t.id == id)
         .cloned()
         .ok_or("Recall tab not found")?;
+    if tab.herdr_terminal.is_some() {
+        return Err("This conversation is in Herdr. Choose Take back to resume in Minutes.".into());
+    }
     let workspace =
         crate::context::create_tab_workspace_at(&config, &crate::recall_tabs::workspace(&id)?)?;
     let title = tab.title.clone();
@@ -11288,7 +11291,7 @@ fn recall_native_readiness_decision(
     }
 }
 
-fn command_is_claude(command: &str) -> bool {
+pub(crate) fn command_is_claude(command: &str) -> bool {
     Path::new(command)
         .file_stem()
         .and_then(|stem| stem.to_str())

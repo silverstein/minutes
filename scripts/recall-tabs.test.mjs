@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 const context = vm.createContext({});
@@ -19,4 +19,20 @@ test('Recall shortcuts use the platform modifier and preserve normal terminal ke
   }
   assert.equal(shortcut({ metaKey: true, key: '1' }, false), null);
   assert.equal(shortcut({ ctrlKey: true, key: '1' }, true), null);
+});
+
+test('Herdr adapter remains at the desktop edge', () => {
+  function scan(path) {
+    for (const item of readdirSync(path, { withFileTypes: true })) {
+      const next = `${path}/${item.name}`;
+      if (item.isDirectory()) scan(next);
+      else if (item.name.endsWith('.rs')) {
+        const text = readFileSync(next, 'utf8');
+        const herdrLines = text.split('\n').filter(line => /herdr/i.test(line)).map(line => line.trim());
+        assert.deepEqual(herdrLines, next.endsWith('/dictation_context.rs') ? ['\"herdr\",', 'fn herdr_is_terminal_code() {', 'infer_target_text_mode(Some(\"Herdr\"), Some(\"dev.herdr.app\"), None),'] : [], next);
+        assert.doesNotMatch(readFileSync(next, 'utf8'), /recall_herdr|herdr_terminal|handed_off_at|hc run|hc server status/i, next);
+      }
+    }
+  }
+  scan('crates/core/src');
 });

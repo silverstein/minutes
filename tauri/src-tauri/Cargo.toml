@@ -28,6 +28,8 @@ tauri-plugin-notification = "2"
 notify-rust = "4.12.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { workspace = true }
+tempfile = "3"
 serde_yaml = { workspace = true }
 minutes-core = { path = "../../crates/core", features = ["streaming", "diarize"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -59,5 +61,4 @@ arboard = "3"
 tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
-tempfile = "3"
 hound = { workspace = true }

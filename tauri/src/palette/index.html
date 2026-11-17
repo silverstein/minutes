@@ -679,13 +679,18 @@
       }
     }
 
+    // Optional desktop command stays outside the portable core palette enum.
+    async function withHerdrCommand(commands) {
+      const available = await invoke('cmd_recall_herdr_available').catch(() => false);
+      return available ? [...commands, { id: 'recall-open-in-herdr', title: 'Open in Herdr', description: 'Move the active Recall conversation to Herdr', keywords: ['recall', 'terminal', 'handoff'], section: 'navigation', input: 'none' }] : commands;
+    }
     async function fetchCommands() {
       try {
         const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
         const ui = currentMeeting ? { currentMeeting } : {};
         const response = await invoke("palette_list", { ui });
         if (response && Array.isArray(response.commands)) {
-          allCommands = response.commands;
+          allCommands = await withHerdrCommand(response.commands);
           recents = Array.isArray(response.recents) ? response.recents : [];
         } else {
           allCommands = [];
@@ -757,7 +762,7 @@
         const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
         const ui = currentMeeting ? { currentMeeting } : {};
         const fresh = await invoke("palette_list", { ui });
-        const visible = (fresh && Array.isArray(fresh.commands)) ? fresh.commands : [];
+        const visible = await withHerdrCommand((fresh && Array.isArray(fresh.commands)) ? fresh.commands : []);
         if (!visible.find((c) => c.id === commandId)) {
           allCommands = visible;
           recents = (fresh && Array.isArray(fresh.recents)) ? fresh.recents : [];
@@ -769,6 +774,9 @@
           return;
         }
 
+        if (commandId === 'recall-open-in-herdr') {
+          await invoke('cmd_recall_herdr_palette'); await closePalette(); return;
+        }
         const response = await invoke("palette_execute", { ui, action: actionJson });
         // Commands that return data show it here instead of closing.
         const command = visible.find((c) => c.id === commandId);

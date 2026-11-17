@@ -127,3 +127,23 @@ export async function testStripResize(page, url) {
   assert.equal(await page.evaluate(() => document.getElementById('recall-tabs').scrollLeft > 0), true, 'resize reveals the selected rightmost tab without a metadata update');
   assert.equal(await page.evaluate(() => document.activeElement === resizeFocus), true, 'revealing a tab does not move keyboard focus');
 }
+
+export async function testHerdrRestore(page, url) {
+  await page.goto(url); await page.waitForFunction(() => fixture.ready);
+  await page.evaluate(async () => {
+    const model = structuredClone(fixture.model);
+    Object.assign(model.tabs[1], { herdr_terminal: 't42', handed_off_at: '2026-11-17T00:00:00Z' });
+    fixture.applyModel(model);
+    for (const tab of fixture.tabs.values()) tab.initialized = false;
+    fixture.calls.length = 0;
+    await fixture.ensureProcesses(model);
+  });
+  const spawned = await page.evaluate(() => fixture.calls.filter(call => call.command === 'cmd_spawn_terminal').map(call => call.args.tabId));
+  assert.equal(spawned.includes('two'), false, 'relaunch never respawns a handed-off conversation');
+  assert.ok(spawned.includes('one'), 'other local tabs still restore');
+  await page.evaluate(() => { fixture.calls.length = 0; });
+  await page.evaluate(() => fixture.open('assistant', null, { tabId: 'two' }));
+  assert.equal(await page.evaluate(() => fixture.calls.filter(call => call.command === 'cmd_spawn_terminal').length), 0, 'opening an external tab cannot spawn a local copy');
+  assert.equal(await page.locator('#recall-terminal-container').evaluate(node => node.classList.contains('hidden')), true);
+  assert.equal(await page.locator('#recall-herdr-state').isVisible(), true);
+}

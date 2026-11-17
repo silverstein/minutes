@@ -186,6 +186,7 @@ try {
     const applyRecallRatio = () => {}, getStoredRecallRatio = () => 0.5;
     const persistRecallWorkspaceState = () => {};
     const recallDevMode = false;
+    const recallTabsModel = { tabs: [] }, SESSION_ID = null;
     const applyRecallMode = () => {};
     const registerChatListeners = async () => {};
     const syncNarrowLayout = () => window.fixture.syncLayout?.();
@@ -404,6 +405,7 @@ try {
   assert.ok(modeStart > 0 && modeEnd > modeStart, 'Production mode handoff markers exist');
   const handoff = await page.evaluate(async code => {
     const recallDevMode = false;
+    const recallTabsModel = { tabs: [] }, SESSION_ID = null;
     // applyRecallMode refreshes the context chips first; this fixture only
     // checks the chat handoff, so the refresh is a no-op here.
     const refreshRecallContextChips = () => {};

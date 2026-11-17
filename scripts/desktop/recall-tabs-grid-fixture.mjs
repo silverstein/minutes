@@ -72,7 +72,7 @@ const invoke=async(command,args)=>{
   }
   ` : `if(command==='cmd_recall_tab_open')throw new Error('RECALL_TAB_LIMIT');`}
 };
-${['recallStateFor','activeRecallState','fitRecallTerminal','initRecallTerminal','activateRecallTab','openNewRecallChat','withRecallMeetingTitles','renderRecallTabHeader','setRecallProviderNotice','dismissRecallProviderNotice','forwardRecallTerminalData','forwardRecallTerminalInput','updateRecallTerminalInputDraft','resumeRecallTab','markRecallPtyEnded','openRecallImpl','showRecallTabLimit','applyRecallTabsModel','refreshRecallAfterCapture','buildMeetingRow'].map(name => productionFunction(source, name)).join('\n')}
+${['recallStateFor','activeRecallState','fitRecallTerminal','initRecallTerminal','activateRecallTab','openNewRecallChat','withRecallMeetingTitles','renderRecallTabHeader','setRecallProviderNotice','dismissRecallProviderNotice','forwardRecallTerminalData','forwardRecallTerminalInput','updateRecallTerminalInputDraft','resumeRecallTab','markRecallPtyEnded','openRecallImpl','showRecallTabLimit','applyRecallTabsModel','ensureRecallTabProcesses','refreshRecallAfterCapture','buildMeetingRow'].map(name => productionFunction(source, name)).join('\n')}
 const opens=[];
 ${meetingOpen ? `
 let recallOpenQueue=Promise.resolve();
@@ -84,7 +84,7 @@ recallTabsModel.tabs[0].claude_session_id='saved-conversation';
 ` : `const openRecall=(...args)=>opens.push(args);`}
 const recallTabsController=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke,select:id=>activateRecallTab(id,recallTabsModel),create:openNewRecallChat,close:${meetingOpen ? 'closeRecallTab' : '()=>{}'}});
 for(const metadata of recallTabsModel.tabs){const tab=recallStateFor(metadata.id);initRecallTerminal(tab);tab.alive=true;tab.untouched=true;tab.terminal.resize(10,4);grids.set(tab.id,{cols:10,rows:4});}
-window.fixture={calls,opens,grids,tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,end:id=>markRecallPtyEnded(recallStateFor(id)),activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),applyModel:applyRecallTabsModel,buildRow:buildMeetingRow,afterCapture:refreshRecallAfterCapture,refreshes,
+window.fixture={calls,opens,grids,tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,end:id=>markRecallPtyEnded(recallStateFor(id)),activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),applyModel:applyRecallTabsModel,ensureProcesses:ensureRecallTabProcesses,buildRow:buildMeetingRow,afterCapture:refreshRecallAfterCapture,refreshes,
 ${meetingOpen ? 'discuss:discussMeetingWithAgent,restart:restartRecallTab,open:openRecall,boundary,' : ''}
 snapshot:id=>{const tab=recallTabStates.get(id);return {terminal:{cols:tab.terminal.cols,rows:tab.terminal.rows},pty:grids.get(id)};}};
 setTimeout(()=>{window.fixture.ready=true;},150);

@@ -381,6 +381,10 @@ impl PtyManager {
         exited
     }
 
+    pub(crate) fn restore_session(&mut self, id: String, session: PtySession) {
+        self.sessions.insert(id, session);
+    }
+
     pub fn take_session(&mut self, session_id: &str) -> Option<PtySession> {
         self.sessions.remove(session_id)
     }

@@ -169,3 +169,7 @@ Protocol references: [Claude hook input and exec form](https://code.claude.com/d
 [explicit cross-project session resume](https://code.claude.com/docs/en/cli-reference),
 [settings discovery](https://code.claude.com/docs/en/settings),
 [repository trust inheritance](https://code.claude.com/docs/en/permissions).
+
+Optional local terminal handoff is described in [Recall: Open in Herdr](recall-herdr.md).
+It adds an explicit external-owner fence; restoring or selecting that tab does
+not start a second local process.

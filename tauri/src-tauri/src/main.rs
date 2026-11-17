@@ -32,6 +32,7 @@ mod palette_dispatch;
 mod parakeet_install_commands;
 mod pty;
 mod pty_foreground;
+mod recall_herdr;
 mod recall_tabs;
 mod recording_audio;
 mod secret_store;
@@ -3516,6 +3517,10 @@ fn main() {
             commands::cmd_recall_chat_readiness,
             commands::cmd_prepare_recall_terminal_meeting,
             commands::cmd_spawn_terminal,
+            recall_herdr::cmd_recall_herdr_available,
+            recall_herdr::cmd_recall_herdr_open,
+            recall_herdr::cmd_recall_herdr_take_back,
+            recall_herdr::cmd_recall_herdr_palette,
             recall_tabs::cmd_recall_tabs,
             recall_tabs::cmd_recall_tab_open,
             recall_tabs::cmd_recall_tab_resume,

@@ -7,7 +7,7 @@
     const node = document.createElement('span');
     node.className = `recall-tab-glyph ${tab.status || 'done'}${tab.live ? ' live' : ''}`;
     node.setAttribute('role', 'img');
-    node.setAttribute('aria-label', `${tab.live ? 'Live meeting, ' : ''}${labels[tab.status] || labels.done}`);
+    node.setAttribute('aria-label', `${tab.herdr_terminal ? 'In Herdr' : `${tab.live ? 'Live meeting, ' : ''}${labels[tab.status] || labels.done}`}`);
     node.title = node.getAttribute('aria-label');
     return node;
   }
@@ -26,8 +26,12 @@
     if (event.key.toLowerCase() === 'w') return { type: 'close' };
     return null;
   }
-  function create({ strip, prompt, invoke, select, create: createTab, close, resume, isRecording }) {
+  function create({ strip, prompt, invoke, select, create: createTab, close, resume, isRecording, openInHerdr, takeBack, copyAddress }) {
     let model = snapshot;
+    let herdrAvailable = false;
+    const handoff = document.createElement('div');
+    handoff.id = 'recall-herdr-state'; handoff.className = 'recall-tab-prompt'; handoff.hidden = true;
+    handoff.setAttribute('role', 'status'); prompt.after(handoff);
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
     let chooser = null, pendingLive = null, returnFocus = null, pendingClose = null;
@@ -122,13 +126,38 @@
           const pending = chooser;
           if (pending && !tab.live) { dismiss(); pending.action(tab.id); } else close(tab.id);
         });
-        wrapper.append(button, end); strip.append(wrapper);
+        wrapper.append(button);
+        if (herdrAvailable || tab.herdr_terminal) {
+          const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'recall-tab-close'; menu.textContent = '⋯';
+          menu.setAttribute('aria-label', `Conversation actions for ${tab.title}`);
+          menu.addEventListener('click', () => show(`Actions for ${shortTitle(tab)}`, tab.herdr_terminal
+            ? [['Take back', () => takeBack?.(tab.id)]]
+            : [['Open in Herdr', () => confirmOpen(tab.id)]]));
+          wrapper.append(menu);
+        }
+        wrapper.append(end); strip.append(wrapper);
       }
       const add = document.createElement('button'); add.type = 'button'; add.className = 'recall-tab-add'; add.textContent = '+';
       add.setAttribute('aria-label', 'New Recall chat'); add.addEventListener('click', createTab); strip.append(add);
       const active = model.tabs.find(tab => tab.id === model.active);
+      handoff.hidden = !active?.herdr_terminal;
+      const owner = active?.herdr_terminal ? `${active.id}:${active.herdr_terminal}` : '';
+      if (handoff.dataset.owner !== owner) {
+        handoff.dataset.owner = owner; handoff.replaceChildren();
+        if (active?.herdr_terminal) {
+          const description = document.createElement('p'); description.textContent = `In Herdr · ${active.herdr_terminal}`; handoff.append(description);
+          for (const [label, action] of [
+            ['Copy address', () => copyAddress?.(active.herdr_terminal)],
+            ['Open terminal', () => copyAddress?.(`hc attach ${active.herdr_terminal}`, 'Paste this command in a terminal to open the conversation.')],
+            ['Take back', () => takeBack?.(active.id)],
+          ]) {
+            const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-secondary btn-sm';
+            button.textContent = label; button.addEventListener('click', action); handoff.append(button);
+          }
+        }
+      }
       let resumeButton = strip.parentElement.querySelector('#recall-resume');
-      if (!resumeButton && active?.shell && active.claude_session_id && !active.claude_active) {
+      if (!resumeButton && active?.shell && !active.herdr_terminal && active.claude_session_id && !active.claude_active) {
         // A compact action beside Weekly and End Session, not a row of its own.
         resumeButton = document.createElement('button'); resumeButton.id = 'recall-resume';
         resumeButton.type = 'button'; resumeButton.className = 'btn btn-primary btn-sm';
@@ -139,7 +168,7 @@
         if (actions) actions.prepend(resumeButton); else strip.after(resumeButton);
       }
       if (resumeButton) {
-        resumeButton.hidden = !(active?.shell && active.claude_session_id && !active.claude_active);
+        resumeButton.hidden = !(active?.shell && !active.herdr_terminal && active.claude_session_id && !active.claude_active);
         resumeButton.onclick = () => resume?.(model.active);
       }
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
@@ -168,7 +197,18 @@
         if (confirm) { dismiss(); confirm(); } else close(model.active);
       }
     }, true);
+    function confirmOpen(id) {
+      if (!herdrAvailable || model.tabs.find(t => t.id === id)?.herdr_terminal) return;
+      if (model.tabs.find(t => t.id === id)?.status === 'working') {
+        show('Wait for this reply to finish, then move it to Herdr', []); return;
+      }
+      show('Move this conversation to Herdr? Minutes will stop its copy so the conversation continues there.', [['Open in Herdr', () => openInHerdr?.(id)]]);
+    }
     return { update,
+      setHerdrAvailable: available => { herdrAvailable = !!available; update(model); },
+      confirmOpen,
+      confirmMissing: id => show("Herdr has no record of this terminal. If it isn't running anywhere, take the conversation back?", [['Take conversation back', () => takeBack?.(id, false, true)]]),
+      confirmTakeBack: id => show('End this Herdr terminal and take the conversation back? Minutes will wait for it to exit before resuming.', [['End terminal and take back', () => takeBack?.(id, true)]]),
       confirmClose: (id, action = () => close(id, true)) => {
         const tab = model.tabs.find(t => t.id === id);
         const name = tab ? shortTitle(tab) : 'this conversation';

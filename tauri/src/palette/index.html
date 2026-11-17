@@ -679,7 +679,16 @@
       }
     }
 
+    // Optional desktop command stays outside the portable core palette enum.
+    let commandLoad = 0;
+    async function appendHerdrCommand(commands, load) {
+      const available = await invoke('cmd_recall_herdr_available').catch(() => false);
+      if (!available || load !== commandLoad) return;
+      allCommands = [...commands, { id: 'recall-open-in-herdr', title: 'Open in Herdr', description: 'Move the active Recall conversation to Herdr', keywords: ['recall', 'terminal', 'handoff'], section: 'navigation', input: 'none' }];
+      if (mode.kind === 'browsing') render();
+    }
     async function fetchCommands() {
+      const load = ++commandLoad;
       try {
         const currentMeeting = await invoke("palette_current_meeting").catch(() => null);
         const ui = currentMeeting ? { currentMeeting } : {};
@@ -695,6 +704,7 @@
           focusedIndex = 0;
         }
         render();
+        if (response && Array.isArray(response.commands)) void appendHerdrCommand(response.commands, load);
       } catch (e) {
         console.error("[palette] palette_list failed:", e);
         allCommands = [];
@@ -751,6 +761,11 @@
         return;
       }
       try {
+        ++commandLoad; // Ignore a discovery response from a previous list.
+        if (commandId === 'recall-open-in-herdr') {
+          // One authoritative availability check, in the edge command.
+          await invoke('cmd_recall_herdr_palette'); await closePalette(); return;
+        }
         // Re-fetch authoritative visibility just before execute. If the
         // command is no longer visible, refuse and stay open so the
         // user sees what changed.

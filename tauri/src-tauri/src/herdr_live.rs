@@ -3,10 +3,10 @@ use super::{local_address, Hc};
 use minutes_core::{config::Config, live_transcript::SessionStatus};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{Emitter, Manager};
 
 #[derive(Clone, Debug, Serialize)]
@@ -111,17 +111,50 @@ impl Session {
     fn ended(&self) -> String {
         let directory =
             serde_json::to_string(&self.output_dir.to_string_lossy()).unwrap_or_default();
-        format!("Recording ended. Minutes is processing it now; the finished meeting will be saved in {directory}. Check progress with `minutes jobs`, then find it with `minutes list --limit 1`.")
+        format!("# Recording ended. Minutes is processing it now; the finished meeting will be saved in {directory}. Check progress with `minutes jobs`, then find it with `minutes list --limit 1`.")
     }
 }
 fn current_session() -> Option<Session> {
     let config = Config::load_strict().ok()?;
-    Session::from_status(&minutes_core::live_transcript::session_status(), &config)
+    let (key, started) = capture_identity()?;
+    // A fixed JSONL/status path can still refer to the prior recording during
+    // startup. Admit only status published for this capture, not its predecessor.
+    let published = std::fs::metadata(minutes_core::pid::live_transcript_status_path())
+        .ok()?
+        .modified()
+        .ok()?;
+    if published < started {
+        return None;
+    }
+    let mut session =
+        Session::from_status(&minutes_core::live_transcript::session_status(), &config)?;
+    session.key = key;
+    Some(session)
 }
 fn current_key() -> Option<String> {
-    let status = minutes_core::live_transcript::session_status();
-    crate::context::live_transcript_pointer(&status)?;
-    serde_json::to_string(&(status.pid, status.session_id, status.jsonl_path)).ok()
+    capture_identity().map(|(key, _)| key)
+}
+fn capture_identity() -> Option<(String, SystemTime)> {
+    capture_identity_at(
+        &minutes_core::pid::pid_path(),
+        &minutes_core::pid::live_transcript_pid_path(),
+    )
+}
+fn capture_identity_at(recording: &Path, live: &Path) -> Option<(String, SystemTime)> {
+    for (kind, path) in [("recording", recording), ("live", live)] {
+        if minutes_core::pid::inspect_pid_file(path).is_active() {
+            // This file is written once per capture and removed at Stop. Its
+            // version stays stable when a sidecar heartbeat/relay fails, and
+            // changes even when a new recording reuses the app PID/JSONL path.
+            let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+            let stamp = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            return Some((format!("{kind}:{stamp}"), modified));
+        }
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -158,15 +191,15 @@ struct Delivery {
 }
 
 impl Sharing {
-    fn view(&self, session: Option<&Session>) -> Result<View, String> {
+    fn view(&self, session_key: Option<&str>, ready: bool) -> Result<View, String> {
         let state = self.0.lock().map_err(|_| "Herdr sharing is unavailable")?;
         let pick = state
             .pick
             .as_ref()
-            .filter(|pick| session.is_some_and(|s| s.key == pick.session.key));
+            .filter(|pick| session_key == Some(pick.session.key.as_str()));
         Ok(View {
-            active: session.is_some(),
-            session: session.map(|s| s.key.clone()),
+            active: ready || pick.is_some(),
+            session: session_key.map(str::to_string),
             selected: pick.map(|p| p.terminal.clone()),
             phase: pick.map(|p| p.phase.clone()),
             notice: pick.and_then(|_| state.notice.clone()),
@@ -309,7 +342,9 @@ pub(crate) fn start_observer(app: tauri::AppHandle) {
 #[tauri::command]
 pub(crate) async fn cmd_herdr_live_view(app: tauri::AppHandle) -> Result<View, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<Sharing>().view(current_session().as_ref())
+        let key = current_key();
+        let ready = current_session().is_some_and(|s| Some(s.key.as_str()) == key.as_deref());
+        app.state::<Sharing>().view(key.as_deref(), ready)
     })
     .await
     .map_err(|_| "Herdr sharing is unavailable")?
@@ -440,6 +475,9 @@ mod tests {
         let mut ended = status();
         ended.active = false;
         assert!(Session::from_status(&ended, &Config::default()).is_none());
+        let mut anonymous = status();
+        anonymous.session_id = None;
+        assert!(Session::from_status(&anonymous, &Config::default()).is_none());
         for path in ["relative.jsonl", "/synthetic/not-a-transcript.md"] {
             let mut invalid = status();
             invalid.jsonl_path = Some(path.into());
@@ -487,7 +525,11 @@ esac
         let result = deliver(&hc, &pointer);
         sharing.finish(&pointer, result);
         assert_eq!(
-            sharing.view(Some(&session)).unwrap().phase.as_deref(),
+            sharing
+                .view(Some(&session.key), true)
+                .unwrap()
+                .phase
+                .as_deref(),
             Some("sent")
         );
         assert!(sharing.next(Some(&session.key)).is_none());
@@ -524,7 +566,11 @@ esac
             .unwrap();
         let ended = sharing.next(Some("next-recording")).unwrap();
         assert!(ended.ended);
-        assert!(sharing.view(Some(&session)).unwrap().selected.is_none());
+        assert!(sharing
+            .view(Some(&session.key), true)
+            .unwrap()
+            .selected
+            .is_none());
     }
     #[test]
     fn full_delivery_queue_never_backpressures_stop_or_restores_the_pick() {
@@ -543,6 +589,76 @@ esac
         sharing.finish(&delivery, Err("Delivery queue is full".into()));
         assert!(start.elapsed() < Duration::from_millis(100));
         assert!(sharing.0.lock().unwrap().pick.is_none());
+    }
+    #[test]
+    fn capture_lifetime_survives_sidecar_failure_and_distinguishes_reused_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("recording.pid");
+        let live = dir.path().join("live.pid");
+        std::fs::write(&recording, std::process::id().to_string()).unwrap();
+        let (key, modified) = capture_identity_at(&recording, &live).unwrap();
+        let mut session = session();
+        session.key = key.clone();
+        let sharing = Sharing::default();
+        sharing.pick(session.clone(), terminal(), 0).unwrap();
+        assert!(sharing.next(Some(&key)).is_some());
+        // Failed/stale sidecar status is not Stop. The producer is still alive,
+        // its version is unchanged, and the existing pick remains cancellable.
+        let mut failed = status();
+        failed.active = false;
+        failed.pid = None;
+        assert!(Session::from_status(&failed, &Config::default()).is_none());
+        let (still_running, _) = capture_identity_at(&recording, &live).unwrap();
+        assert_eq!(still_running, key);
+        assert!(sharing.next(Some(&still_running)).is_none());
+        assert!(sharing
+            .view(Some(&still_running), false)
+            .unwrap()
+            .selected
+            .is_some());
+        assert!(sharing.view(Some(&still_running), false).unwrap().active);
+        // A real Stop removes the PID file and drops the pick exactly once.
+        std::fs::remove_file(&recording).unwrap();
+        assert!(capture_identity_at(&recording, &live).is_none());
+        assert!(sharing.next(None).unwrap().ended);
+        // New capture, same app PID and fixed JSONL path: a different file
+        // version cannot inherit the old pick, even with context tracking off.
+        std::fs::write(&recording, std::process::id().to_string()).unwrap();
+        std::fs::File::open(&recording)
+            .unwrap()
+            .set_modified(modified + Duration::from_secs(1))
+            .unwrap();
+        let (next, _) = capture_identity_at(&recording, &live).unwrap();
+        assert_ne!(next, key);
+        assert!(sharing.next(Some(&next)).is_none());
+    }
+    #[test]
+    fn pointer_and_end_note_do_not_execute_if_the_user_picks_a_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut status = status();
+        status.jsonl_path = Some(
+            dir.path()
+                .join("$(touch marker).jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let config = Config {
+            output_dir: dir.path().join("$(touch marker)"),
+            ..Config::default()
+        };
+        let session = Session::from_status(&status, &config).unwrap();
+        for text in [&session.pointer, &session.ended()] {
+            assert!(std::process::Command::new("/bin/sh")
+                .args(["-c", text])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        assert!(
+            !dir.path().join("marker").exists(),
+            "Paths and reader backticks remain inert text in a shell terminal"
+        );
     }
     #[test]
     fn missing_dead_rejected_hung_and_invalid_servers_cannot_redirect_or_retry() {
@@ -570,7 +686,11 @@ esac
                 "Ambiguous sends must not be retried"
             );
             assert_eq!(
-                sharing.view(Some(&session)).unwrap().phase.as_deref(),
+                sharing
+                    .view(Some(&session.key), true)
+                    .unwrap()
+                    .phase
+                    .as_deref(),
                 Some("failed")
             );
         }

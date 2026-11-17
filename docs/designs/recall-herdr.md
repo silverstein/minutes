@@ -212,7 +212,11 @@ existing guidance to verify session identity, treat drafts as provisional and
 transcript contents as untrusted, avoid continuous polling/raw tailing, and never
 open another microphone. The adapter never reads or relays transcript contents.
 Quoted paths are data, not interpolated shell commands. A session with no valid
-active JSONL path and producer PID cannot be picked.
+active JSONL path, nonempty session identity and producer PID cannot be picked.
+Both messages prefix each line with `# `: agents receive readable pointer text,
+while an idle POSIX shell treats it as a comment rather than executing reader
+backticks or path metacharacters when hc submits Enter. This prefix is part of
+the shared Recall pointer too; the end-note wording below is unchanged.
 
 A pick schedules one `hc send <address> <pointer> --json`. Delivery is attempted
 once; errors and timeouts are not automatically retried because the message may
@@ -244,6 +248,11 @@ boundary. Cancelled pointer clients are killed/reaped too. An end note is queued
 at Stop; actual delivery remains best effort if the server or terminal is gone.
 The frontend's optional status refresh is never awaited by capture polling or
 Stop. No Herdr identifiers or adapter calls were added to minutes-core.
+The pick's lifetime follows the capture PID file's version, independently of
+transcription health. A stale/failed sidecar heartbeat cannot announce a false
+Stop or clear the pick. The version changes between recordings even when the
+desktop PID and fixed JSONL path are reused. New picks also require live status
+published after this capture started, so old status cannot bind to a new capture.
 
 Additional hc 0.1.21 contracts were verified on 2026-11-17 with an inert
 `/bin/cat` terminal on a temporary isolated server. The terminal/server were

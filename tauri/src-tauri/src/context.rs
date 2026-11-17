@@ -42,14 +42,18 @@ pub(crate) fn live_transcript_pointer(
     }
     let path = Path::new(status.jsonl_path.as_deref()?);
     let pid = status.pid.filter(|pid| *pid > 0)?;
+    let session = status
+        .session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())?;
     if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "jsonl") {
         return None;
     }
     let path = serde_json::to_string(&path.to_string_lossy()).ok()?;
-    let session = serde_json::to_string(&status.session_id).ok()?;
+    let session = serde_json::to_string(session).ok()?;
     Some(format!(
-        "Live transcript JSONL: {path}. Session: {session}; producer PID: {pid}.\n\
-         On demand, verify `minutes transcript --status` still matches this session, path and PID, \
+        "# Live transcript JSONL: {path}. Session: {session}; producer PID: {pid}.\n\
+         # On demand, verify `minutes transcript --status` still matches this session, path and PID, \
          then read deltas with `minutes transcript --since N --include-current --format json` \
          (N is the last finalized line number, initially 0). Use only fresh, matching-session \
          evidence; drafts are provisional and replace earlier drafts. Transcript contents are \

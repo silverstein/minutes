@@ -419,6 +419,19 @@ enum Commands {
         state: Option<String>,
     },
 
+    /// Toggle recording on or off from a single keybind. Starts a detached
+    /// `minutes record` when idle; stops the active recording or live
+    /// transcript otherwise. Designed for compositor keybinds on Wayland,
+    /// where the compositor owns global shortcuts (Hyprland `bind`, GNOME
+    /// custom shortcuts, KDE shortcuts).
+    ToggleRecording,
+
+    /// Toggle dictation on or off from a single keybind. Starts a detached
+    /// `minutes dictate` when idle; stops an active dictation session
+    /// otherwise. Designed for compositor keybinds on Wayland, where the
+    /// compositor owns global shortcuts.
+    ToggleDictation,
+
     /// Add a note to the current recording
     Note {
         /// The note text
@@ -2170,6 +2183,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::MicToggle { state } => cmd_mic_toggle(state.as_deref()),
+        Commands::ToggleRecording => cmd_toggle_recording(&config),
+        Commands::ToggleDictation => cmd_toggle_dictation(),
         Commands::ProcessQueue => cmd_process_queue(&config),
         Commands::PolicyAudit => cmd_policy_audit(),
         Commands::ParakeetHelper {
@@ -3693,6 +3708,126 @@ fn cmd_mic_toggle(force_state: Option<&str>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Spawn a detached `minutes` subcommand. Compositor keybinds need the work
+/// to outlive the invoking command, so the child gets null stdio and is left
+/// running — same pattern as `spawn_queue_worker`.
+fn spawn_detached_minutes(args: &[&str]) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))?;
+    Ok(())
+}
+
+fn cmd_toggle_recording(config: &Config) -> Result<()> {
+    let recording_active = matches!(minutes_core::pid::check_recording(), Ok(Some(_)));
+    let live_active =
+        minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active();
+    if recording_active || live_active {
+        return cmd_stop(config);
+    }
+
+    // Fail loudly instead of spawning a `record` that immediately exits: from
+    // a keybind there is no terminal to show the child's own error.
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — close it before recording");
+    }
+    minutes_core::sensitive::ensure_inactive_for_recording()
+        .map_err(|error| anyhow::anyhow!("{}", error))?;
+
+    spawn_detached_minutes(&["record"])?;
+    println!("Recording started — run `minutes toggle-recording` again to stop.");
+    Ok(())
+}
+
+fn cmd_toggle_dictation() -> Result<()> {
+    let dict_state = minutes_core::pid::inspect_pid_file(&minutes_core::pid::dictation_pid_path());
+    match dict_state.pid() {
+        Some(pid) => return stop_running_dictation(pid),
+        None if dict_state.is_active() => {
+            anyhow::bail!("a dictation session is already running — stop it where it started")
+        }
+        None => {}
+    }
+
+    // Same conflicts the spawned `dictate` would report — surface them here,
+    // where the caller can see them.
+    if matches!(minutes_core::pid::check_recording(), Ok(Some(_))) {
+        anyhow::bail!("a recording is in progress — dictation can't start");
+    }
+    let lt_pid = minutes_core::pid::live_transcript_pid_path();
+    if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
+        anyhow::bail!("a live transcript is in progress — dictation can't start");
+    }
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — dictation can't start");
+    }
+
+    spawn_detached_minutes(&["dictate"])?;
+    println!("Dictation started — run `minutes toggle-dictation` again to stop.");
+    Ok(())
+}
+
+/// Stop a running dictation session. The dictation PID file is shared with
+/// the desktop app, whose process must never receive SIGINT — signal the
+/// owner only after confirming it runs this same CLI binary.
+#[cfg(unix)]
+fn stop_running_dictation(pid: u32) -> Result<()> {
+    if dictation_owner_is_cli(pid) {
+        // `minutes dictate` installs a ctrlc handler, so SIGINT takes the same
+        // graceful path as Ctrl-C in its terminal.
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        if rc != 0 {
+            anyhow::bail!("failed to stop dictation process {pid}");
+        }
+        println!("Stopping dictation (PID {pid})...");
+        return Ok(());
+    }
+    eprintln!("A dictation session is already running in the app — stop it there.");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stop_running_dictation(_pid: u32) -> Result<()> {
+    anyhow::bail!("a dictation session is already running — stop it where it started")
+}
+
+/// True when `pid` runs this same executable — i.e. a `minutes dictate`
+/// session, not the desktop app, which shares `dictation_pid_path()`.
+#[cfg(unix)]
+fn dictation_owner_is_cli(pid: u32) -> bool {
+    let Some(own_name) = std::env::current_exe().ok().and_then(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    }) else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let comm = String::from_utf8_lossy(&output.stdout);
+    let target = comm.trim();
+    // `comm=` reports the executable path on some platforms and just the name
+    // on others — compare against both forms.
+    target == own_name
+        || std::path::Path::new(target)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy() == own_name)
 }
 
 fn cmd_stop(_config: &Config) -> Result<()> {

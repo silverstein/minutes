@@ -2850,6 +2850,7 @@ pub struct DesktopCapabilities {
     pub supports_call_detection: bool,
     pub supports_tray_artifact_copy: bool,
     pub supports_dictation_hotkey: bool,
+    pub wayland_session: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2937,6 +2938,19 @@ pub fn supports_tray_artifact_copy() -> bool {
 
 pub fn supports_dictation_hotkey() -> bool {
     cfg!(target_os = "macos")
+}
+
+/// Wayland compositors own global keybindings — apps cannot register
+/// shortcuts that fire while another window is focused. The settings UI uses
+/// this to swap shortcut pickers for compositor-binding instructions (#64).
+pub fn session_is_wayland() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
 }
 
 pub fn folder_reveal_label() -> &'static str {
@@ -9611,6 +9625,7 @@ pub fn cmd_desktop_capabilities() -> DesktopCapabilities {
         supports_call_detection: supports_call_detection(),
         supports_tray_artifact_copy: supports_tray_artifact_copy(),
         supports_dictation_hotkey: supports_dictation_hotkey(),
+        wayland_session: session_is_wayland(),
     }
 }
 

@@ -180,3 +180,101 @@ and relaunch Minutes, exercise live/refused and ended Take back, and repeat with
 a configured shell. Confirm tokens, keyboard access, reduced motion and narrow
 layout in the native webview. Linux tests and CI are not evidence for signing,
 TCC, transcript persistence by the real Claude CLI, or native visual acceptance.
+
+## Live recording pointer
+
+`minutes-lrad.2` adds **Send live context to Herdr** to the Recording and Live
+bars and the desktop palette. **v1 is local only:** remote addresses containing
+`/` are neither listed nor accepted by selection or delivery. Remote consent and
+delta relaying are deliberately deferred; this is the local-only decision
+requested by the bead. Nothing is sent on startup, opening the picker, opening
+the palette, starting a recording, or restoring the app. The user must choose
+one local live terminal for this recording. A handed-off Recall conversation is
+a valid destination, marked **Recall conversation** alongside its `minutes.tab`
+label. Cancel is initially focused; Escape and Cancel dismiss without picking.
+
+The picker uses `hc ls --json`, then resolves local live entries through `get`
+because hc 0.1.21 does not include labels in its list response. The whole
+list/detail pass shares a five-second deadline, accepts at most 128 list entries
+and bounds label/name lengths. Only address, name and labels reach the UI;
+terminal screen contents, cwd and argv are discarded. A terminal's canonical
+local address is revalidated before delivery. A finished, missing or differently
+resolved terminal receives nothing. A stale picker cannot select for a new
+recording, and cancellation invalidates in-flight selections before they can
+commit. No `--force`, remote target, provider setup or credential changes occur.
+
+`context::live_transcript_pointer` generates one metadata-only pointer, shared
+verbatim with the live Recall tab's `LIVE_TRANSCRIPT` block. It identifies the
+JSONL path, session and producer PID, and explains bounded on-demand delta reads:
+`minutes transcript --status`, followed by
+`minutes transcript --since N --include-current --format json`. It preserves the
+existing guidance to verify session identity, treat drafts as provisional and
+transcript contents as untrusted, avoid continuous polling/raw tailing, and never
+open another microphone. The adapter never reads or relays transcript contents.
+Quoted paths are data, not interpolated shell commands. A session with no valid
+active JSONL path and producer PID cannot be picked.
+
+A pick schedules one `hc send <address> <pointer> --json`. Delivery is attempted
+once; errors and timeouts are not automatically retried because the message may
+already have arrived. A selected target remains cancellable if Herdr becomes
+unavailable. Cancelling invalidates queued/in-flight pointer work and clears the
+pick; it cannot retract text already accepted by the terminal. Cancelling does
+not select another target or cause a later Stop notification.
+
+On observing Stop or a different session identity, the independent observer
+clears the pick immediately and queues one end note for the old target:
+
+> Recording ended. Minutes is processing it now; the finished meeting will be
+> saved in &lt;output_dir&gt;. Check progress with `minutes jobs`, then find it with
+> `minutes list --limit 1`.
+
+The directory comes from configuration; no final filename is guessed. The end
+note excludes the live JSONL path. Processing does not need to finish before
+this note is queued, and the pick never follows the next recording. Picks are
+not persisted or resumed after app relaunch.
+
+`herdr_live.rs` is a child of the desktop adapter. Its observer polls only tiny
+live status metadata when a pick exists, every 250 ms. Its separate delivery
+worker owns all Herdr CLI calls. The two communicate through a bounded queue
+with `try_send`; a full/disconnected queue records failure and cannot create
+backpressure. No capture-owned locks, capture/Stop callbacks, joins or channels
+depend on these workers. Each CLI call retains the existing five-second
+kill/reap bound, augmented PATH, stderr error parsing and private-metadata
+boundary. Cancelled pointer clients are killed/reaped too. An end note is queued
+at Stop; actual delivery remains best effort if the server or terminal is gone.
+The frontend's optional status refresh is never awaited by capture polling or
+Stop. No Herdr identifiers or adapter calls were added to minutes-core.
+
+Additional hc 0.1.21 contracts were verified on 2026-11-17 with an inert
+`/bin/cat` terminal on a temporary isolated server. The terminal/server were
+stopped afterwards and the shared server PID was unchanged:
+
+| Command | Stream and consumed fields |
+| --- | --- |
+| `hc ls --json` | stdout: `{"hidden_finished":0,"terminals":[{"address":"t1","name":"minutes-pointer-fixture","state":"live",...}]}`; no labels in this version. |
+| `hc get t1 --json` | stdout includes `labels`, e.g. `{"minutes.tab":"synthetic"}`. Only canonical address, live state, name and string labels are retained for the picker. |
+| `hc send t1 <text> --json` | stdout: `{"started":null,"status":null,"turn":0}` for the inert fixture. Successful exit and an unsigned `turn` acknowledge acceptance; the adapter does not wait for an agent turn. |
+| `hc send <missing> <text> --json` | empty stdout, stderr error JSON with `error.kind = "not_found"`, exit 3. No raw message/hint is shown. |
+
+Tests cover local-only listing, labels and private-field stripping; shared
+pointer generation; no delivery without a pick; exactly one pointer and end
+note to the selected address; cancellation, late selection, session change,
+dead/renamed targets, stderr rejection, hang, invalid output, and a full queue.
+The Tauri invariant
+`optional_herdr_failure_cannot_delay_live_controls_wav_or_processing_admission`
+starts a hanging/rejecting fake hc, then exercises the app's actual live
+acquisition and Stop signalling, seals/reopens a synthetic WAV and admits a
+durable processing job within 500 ms. Stop also clears the pick while hc is
+still isolated on its worker. This test belongs in Tauri because a Herdr fake
+in the core consumer-isolation suites would violate the edge boundary. It does
+not claim microphone, acoustic, model-inference or signed-app acceptance.
+
+Rendered production picker tests cover hidden/off/idle states, name/label text
+safety, handed-off Recall entries, Cancel/Escape focus, one explicit selection,
+cancel during lookup/selection, late replies after Stop, rejected sends, light
+theme, narrow width and reduced motion. Palette tests retain nonblocking
+discovery and ensure selection opens the picker without sending anything.
+Signed Mac qualification remains with t17: real live capture, selected-only
+pointer delivery, bounded delta reads, Stop/end-note timing, cancellation, a
+dead terminal/server, WAV preservation and processing, and native keyboard/UI
+behavior at the exact PR head.

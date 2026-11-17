@@ -1763,6 +1763,20 @@
       background: var(--green-tint-soft);
     }
 
+    .herdr-live-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+    .herdr-live-controls [hidden] { display: none; }
+    .herdr-live-notice { color: var(--text-secondary); font-size: var(--text-body); overflow-wrap: anywhere; }
+    .herdr-live-notice.is-error { color: var(--red); }
+    .herdr-live-dialog { position: fixed; inset: 0; margin: auto; width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 40px); box-sizing: border-box; overflow-y: auto; padding: 20px; border: 1px solid var(--border-mid); border-radius: 16px; background: var(--bg-elevated); color: var(--text); }
+    .herdr-live-dialog .btn, .herdr-live-controls .btn { text-transform: none; letter-spacing: normal; }
+    .herdr-live-dialog::backdrop { background: var(--shadow-stronger); }
+    .herdr-live-dialog h2 { margin: 0 0 12px; font-size: var(--text-lg); }
+    .herdr-live-dialog p { color: var(--text-secondary); }
+    .herdr-live-terminal { display: flex; flex-direction: column; gap: 4px; width: 100%; margin-bottom: 8px; padding: 12px; text-align: left; border: 1px solid var(--border-mid); border-radius: 8px; background: var(--bg); color: var(--text); overflow-wrap: anywhere; cursor: pointer; }
+    .herdr-live-terminal:hover { background: var(--bg-hover); }
+    .herdr-live-terminal small { color: var(--text-secondary); }
+    .herdr-live-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
     .coach-toggle.is-paused {
       color: var(--text-secondary);
       border-color: var(--border);
@@ -6432,6 +6446,11 @@
         <button class="btn btn-secondary btn-sm" id="btn-note-inline" title="Add a note">Add Note</button>
         <button class="btn btn-danger btn-sm" id="btn-stop">Stop Recording</button>
       </div>
+      <div class="herdr-live-controls">
+        <button class="btn btn-secondary btn-sm" id="btn-herdr-recording" type="button" hidden>Send live context to Herdr</button>
+        <button class="btn btn-secondary btn-sm" id="btn-herdr-recording-cancel" type="button" hidden>Cancel Herdr context</button>
+        <span class="herdr-live-notice" data-herdr-notice role="status" hidden></span>
+      </div>
     </div>
 
     <!-- Live transcript bar (hidden when not in live mode) -->
@@ -6455,7 +6474,19 @@
         <button class="btn btn-secondary btn-sm coach-toggle" id="btn-coach-live" type="button" aria-pressed="false">Coach</button>
         <button class="btn btn-secondary btn-sm" id="btn-stop-live">Stop Live</button>
       </div>
+      <div class="herdr-live-controls">
+        <button class="btn btn-secondary btn-sm" id="btn-herdr-live" type="button" hidden>Send live context to Herdr</button>
+        <button class="btn btn-secondary btn-sm" id="btn-herdr-live-cancel" type="button" hidden>Cancel Herdr context</button>
+        <span class="herdr-live-notice" data-herdr-notice role="status" hidden></span>
+      </div>
     </div>
+
+    <dialog class="herdr-live-dialog" id="herdr-live-dialog" aria-labelledby="herdr-live-title" aria-describedby="herdr-live-message">
+      <h2 id="herdr-live-title">Send live context to Herdr</h2>
+      <p id="herdr-live-message" data-herdr-message></p>
+      <div data-herdr-terminals></div>
+      <button class="btn btn-secondary btn-sm" type="button" data-herdr-dismiss>Cancel</button>
+    </dialog>
 
     <!-- Processing bar (hidden when not processing) -->
     <div class="processing-bar" id="processing-bar">
@@ -8285,6 +8316,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
   <link rel="stylesheet" href="vendor/xterm/xterm.css">
   <script src="scripts/recall-tabs.js"></script>
+  <script src="scripts/herdr-live.js"></script>
   <script src="vendor/xterm/xterm.js"></script>
   <script src="vendor/xterm/xterm-addon-fit.js"></script>
   <script src="vendor/xterm/minutes-theme.js"></script>
@@ -9282,6 +9314,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
 
     // ── Status polling ──
     let statusCheckInFlight = false;
+    let herdrLiveController = null;
 
     async function checkStatus() {
       if (statusCheckInFlight) return;
@@ -9540,6 +9573,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         console.error('Status:', e);
       } finally {
         statusCheckInFlight = false;
+        void herdrLiveController?.refresh();
       }
     }
 
@@ -17669,8 +17703,19 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         setRecallProviderNotice(String(error), 'error');
       }
     }
+    herdrLiveController = window.MinutesHerdrLive.create({
+      dialog: document.getElementById('herdr-live-dialog'),
+      pickButtons: ['btn-herdr-recording', 'btn-herdr-live'].map(id => document.getElementById(id)),
+      cancelButtons: ['btn-herdr-recording-cancel', 'btn-herdr-live-cancel'].map(id => document.getElementById(id)),
+      notices: [...document.querySelectorAll('[data-herdr-notice]')], invoke,
+    });
+    currentWindow.listen('herdr:live-changed', () => { void herdrLiveController.refresh(); });
+    currentWindow.listen('herdr:live-picker', () => { herdrLiveController.setAvailable(true); void herdrLiveController.open(); });
     function refreshRecallHerdrAvailability() {
-      invoke('cmd_recall_herdr_available').then(value => recallTabsController.setHerdrAvailable(value)).catch(() => recallTabsController.setHerdrAvailable(false));
+      invoke('cmd_recall_herdr_available').then(value => {
+        recallTabsController.setHerdrAvailable(value);
+        herdrLiveController.setAvailable(value);
+      }).catch(() => { recallTabsController.setHerdrAvailable(false); herdrLiveController.setAvailable(false); });
     }
     refreshRecallHerdrAvailability();
     window.addEventListener('focus', refreshRecallHerdrAvailability);
@@ -20706,6 +20751,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable || inTerminal;
     }
     function isOverlayActive() {
+      if (document.getElementById('herdr-live-dialog').open) return true;
       return [
         whatsNewScrim,
         aboutOverlay,

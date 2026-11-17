@@ -686,6 +686,10 @@
       if (!available || load !== commandLoad) return;
       allCommands = [...commands, { id: 'recall-open-in-herdr', title: 'Open in Herdr', description: 'Move the active Recall conversation to Herdr', keywords: ['recall', 'terminal', 'handoff'], section: 'navigation', input: 'none' }];
       if (mode.kind === 'browsing') render();
+      const live = await invoke('cmd_herdr_live_view').catch(() => null);
+      if (!live?.active || live.selected || load !== commandLoad) return;
+      allCommands = [...allCommands, { id: 'herdr-live-context', title: 'Send live context to Herdr', description: 'Choose one local terminal for this recording', keywords: ['live', 'recording', 'terminal'], section: 'recording', input: 'none' }];
+      if (mode.kind === 'browsing') render();
     }
     async function fetchCommands() {
       const load = ++commandLoad;
@@ -765,6 +769,9 @@
         if (commandId === 'recall-open-in-herdr') {
           // One authoritative availability check, in the edge command.
           await invoke('cmd_recall_herdr_palette'); await closePalette(); return;
+        }
+        if (commandId === 'herdr-live-context') {
+          await invoke('cmd_herdr_live_palette'); await closePalette(); return;
         }
         // Re-fetch authoritative visibility just before execute. If the
         // command is no longer visible, refuse and stay open so the

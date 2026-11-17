@@ -13,7 +13,7 @@ for (const id of ['recording-bar','live-bar','herdr-live-dialog']) document.body
 document.getElementById('recording-bar').classList.add('active');
 </script><script>${controller}</script><script>
 let view = { active: false, session: 's1', generation: 0, selected: null, phase: null, notice: null };
-const rows = [{address:'t42',name:'Board conversation',labels:{'minutes.tab':'tab-1',team:'QA'}}, {address:'t43',name:'<img src=x onerror="window.injection=true">',labels:{}}, {address:'remote/t9',name:'Remote',labels:{}}];
+const rows = [{address:'t42',name:'Board conversation',agent:'claude-code',location:'Development / Recall',labels:{'minutes.tab':'tab-1',team:'QA','herdr.seen':'288','herdr.space':'sp-private'}}, {address:'t43',name:'<img src=x onerror="window.injection=true">',agent:'codex',location:'Development / QA',labels:{}}, {address:'remote/t9',name:'Remote',agent:'codex',labels:{}}, {address:'t44',name:'Shell target',agent:'zsh',labels:{}}, {address:'t45',name:'Unknown target',agent:'python3',labels:{}}, {address:'t46',name:'Missing agent',labels:{}}];
 const calls = []; let releaseOptions=null, releasePick=null, hangOptions=false, hangPick=false, reject=false, stopped=0;
 const invoke=async(command,args)=>{
   calls.push({command,args});
@@ -49,7 +49,9 @@ window.fixture={controls,calls,view,rows,hangOptions:()=>{hangOptions=true;},rel
     const wide = await dialog.boundingBox();
     assert.ok(Math.abs(wide.x - (640-wide.width)/2)<1 && wide.y>0, 'Dialog is centered');
     assert.match(await dialog.textContent(), /Recall conversation/);
-    assert.match(await dialog.textContent(), /team=QA/);
+    assert.match(await dialog.textContent(), /Development \/ Recall · Claude Code · Recall conversation/);
+    assert.doesNotMatch(await dialog.textContent(), /herdr\.|sp-private|team=|minutes\.tab|Shell target|Unknown target|Missing agent/);
+    assert.equal(await dialog.locator('.herdr-live-terminal').first().locator(':scope > *').count(), 2);
     mkdirSync('target/recall-herdr-evidence', { recursive: true });
     await page.screenshot({path:'target/recall-herdr-evidence/lrad2-picker-dark.png'});
     assert.equal(await dialog.getByText('Remote', {exact:true}).count(), 0);
@@ -97,6 +99,9 @@ window.fixture={controls,calls,view,rows,hangOptions:()=>{hangOptions=true;},rel
     assert.ok(bounds.x>=0 && bounds.x+bounds.width<=320);
     assert.ok(Math.abs(bounds.x-(320-bounds.width)/2)<1 && bounds.y>0);
     assert.equal(await dialog.getByRole('button',{name:'Cancel',exact:true}).evaluate(node=>node===document.activeElement), true);
+    const row = dialog.locator('.herdr-live-terminal').first();
+    assert.ok((await row.boundingBox()).height < 80, 'Rows stay two short lines at narrow width');
+    assert.equal(await row.locator('small').evaluate(node=>getComputedStyle(node).whiteSpace), 'nowrap');
     await page.screenshot({path:'target/recall-herdr-evidence/lrad2-picker-light-narrow.png'});
     await page.keyboard.press('Escape');
     assert.equal(await page.evaluate(() => fixture.calls.filter(c=>c.command==='cmd_herdr_live_pick').some(c=>c.args.target!=='t42')), false);

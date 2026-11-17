@@ -52,22 +52,22 @@
       origin = button || document.activeElement;
       const token = ++opening;
       list.replaceChildren();
-      message.textContent = 'Loading local live terminals…';
+      message.textContent = 'Loading local agent terminals…';
       dialog.showModal(); dismiss.focus();
       try {
         const options = await invoke('cmd_herdr_live_options');
         if (token !== opening || !dialog.open) return;
         if (options.session !== model.session) { close(); await refresh(); return; }
-        const rows = (options.terminals || []).filter(row => local(row.address));
-        message.textContent = rows.length ? 'Send a live transcript pointer only to the terminal you choose. Local terminals only.' : 'No local live terminals are available.';
+        const rows = (options.terminals || []).filter(row => local(row.address) && ['claude-code', 'codex'].includes(row.agent));
+        message.textContent = rows.length ? 'Send a live transcript pointer only to the agent you choose. Local agent terminals only.' : 'No supported local agent terminals are available.';
         rows.forEach(row => {
           const entry = document.createElement('button');
           entry.type = 'button'; entry.className = 'herdr-live-terminal';
-          const title = document.createElement('span'); title.textContent = `${row.name || row.address} · ${row.address}`;
+          const title = document.createElement('span'); title.textContent = row.name || row.address;
           const labels = document.createElement('small');
-          const tags = Object.entries(row.labels || {}).map(([key, value]) => `${key}=${value}`);
-          if (row.labels?.['minutes.tab']) tags.unshift('Recall conversation');
-          labels.textContent = tags.join(' · ');
+          const agent = row.agent === 'claude-code' ? 'Claude Code' : 'Codex';
+          labels.textContent = [row.location, agent, row.labels?.['minutes.tab'] ? 'Recall conversation' : ''].filter(Boolean).join(' · ');
+          entry.title = [title.textContent, labels.textContent].join(' · ');
           entry.append(title, labels);
           entry.addEventListener('click', async () => {
             const selectedRequest = ++request;

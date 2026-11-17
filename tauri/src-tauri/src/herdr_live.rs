@@ -14,71 +14,132 @@ pub(crate) struct Terminal {
     address: String,
     name: String,
     labels: BTreeMap<String, String>,
+    agent: String,
+    location: String,
 }
 
+// Process names such as python3 do not establish that a terminal reads prompts.
+// Keep this allowlist explicit; shell comment syntax is not a delivery boundary.
+fn prompt_agent(row: &serde_json::Value) -> Option<&str> {
+    row["agent"]
+        .as_str()
+        .filter(|agent| matches!(*agent, "claude-code" | "codex"))
+}
+const ENDED_TARGET: &str = "That terminal has ended. Choose another.";
+const UNSUPPORTED_TARGET: &str =
+    "That terminal is no longer running a supported agent. Choose another.";
+fn selected_row<'a>(
+    rows: &'a [serde_json::Value],
+    target: &str,
+) -> Result<&'a serde_json::Value, String> {
+    let row = rows
+        .iter()
+        .find(|row| row["address"] == target)
+        .ok_or(ENDED_TARGET)?;
+    if row["state"] != "live" {
+        return Err(ENDED_TARGET.into());
+    }
+    prompt_agent(row).ok_or(UNSUPPORTED_TARGET)?;
+    Ok(row)
+}
 impl Hc {
-    fn terminals(&self) -> Result<Vec<Terminal>, String> {
-        let started = Instant::now();
+    fn live_rows(&self) -> Result<Vec<serde_json::Value>, String> {
         let (ok, json) = self.call(&["ls".into(), "--json".into()])?;
         if !ok {
             return Err("Could not list Herdr terminals".into());
         }
-        let rows = json["terminals"]
+        Ok(json["terminals"]
             .as_array()
-            .ok_or("Invalid Herdr terminal list")?;
+            .ok_or("Invalid Herdr terminal list")?
+            .iter()
+            .take(128)
+            .cloned()
+            .collect())
+    }
+    fn resolve_terminal(
+        &self,
+        row: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Option<Terminal>, String> {
+        let Some(address) = row["address"].as_str().filter(|v| local_address(v)) else {
+            return Ok(None);
+        };
+        let Some(agent) = prompt_agent(row).filter(|_| row["state"] == "live") else {
+            return Ok(None);
+        };
+        if timeout.is_zero() {
+            return Err("Herdr terminal listing timed out".into());
+        }
+        let bounded = Hc {
+            executable: self.executable.clone(),
+            timeout,
+        };
+        let (ok, detail) = bounded.call(&["get".into(), address.into(), "--json".into()])?;
+        if !ok || detail["state"] != "live" || detail["address"] != address {
+            return Ok(None);
+        }
+        // Retain only the useful Recall marker. Never return herdr.* IDs,
+        // arbitrary labels, terminal screen contents, cwd or argv to the UI.
+        let labels = detail["labels"]["minutes.tab"]
+            .as_str()
+            .map(|value| {
+                BTreeMap::from([("minutes.tab".into(), value.chars().take(256).collect())])
+            })
+            .unwrap_or_default();
+        let location = row["where"]
+            .as_str()
+            .or_else(|| detail["where"].as_str())
+            .or_else(|| detail["labels"]["where"].as_str())
+            .unwrap_or("")
+            .chars()
+            .take(256)
+            .collect();
+        Ok(Some(Terminal {
+            address: address.into(),
+            name: detail["name"]
+                .as_str()
+                .unwrap_or(address)
+                .chars()
+                .take(256)
+                .collect(),
+            labels,
+            agent: agent.into(),
+            location,
+        }))
+    }
+    fn terminals(&self) -> Result<Vec<Terminal>, String> {
+        let started = Instant::now();
+        let rows = self.live_rows()?;
         let mut terminals = Vec::new();
-        // ls 0.1.21 omits labels. Resolve each candidate through get, under one
-        // shared deadline, and consume only name/labels, never its screen/cwd.
-        for row in rows.iter().take(128) {
-            let Some(address) = row["address"].as_str().filter(|v| local_address(v)) else {
-                continue;
-            };
-            if row["state"] != "live" {
-                continue;
+        // ls 0.1.21 supplies the current agent, but omits labels. Resolve only
+        // local supported agents through get, under one shared deadline.
+        for row in rows {
+            if let Some(terminal) =
+                self.resolve_terminal(&row, self.timeout.saturating_sub(started.elapsed()))?
+            {
+                terminals.push(terminal);
             }
-            let remaining = self.timeout.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                return Err("Herdr terminal listing timed out".into());
-            }
-            let bounded = Hc {
-                executable: self.executable.clone(),
-                timeout: remaining,
-            };
-            let (ok, detail) = bounded.call(&["get".into(), address.into(), "--json".into()])?;
-            if !ok || detail["state"] != "live" || detail["address"] != address {
-                continue;
-            }
-            let labels = detail["labels"]
-                .as_object()
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(|(k, v)| {
-                            v.as_str().map(|v| {
-                                (k.chars().take(128).collect(), v.chars().take(256).collect())
-                            })
-                        })
-                        .take(32)
-                        .collect()
-                })
-                .unwrap_or_default();
-            terminals.push(Terminal {
-                address: address.into(),
-                name: detail["name"]
-                    .as_str()
-                    .unwrap_or(address)
-                    .chars()
-                    .take(256)
-                    .collect(),
-                labels,
-            });
         }
         Ok(terminals)
+    }
+    fn selected_terminal(&self, target: &str) -> Result<Terminal, String> {
+        if !local_address(target) {
+            return Err("Only local Herdr terminals are supported".into());
+        }
+        let started = Instant::now();
+        let rows = self.live_rows()?;
+        let row = selected_row(&rows, target)?;
+        self.resolve_terminal(row, self.timeout.saturating_sub(started.elapsed()))?
+            .ok_or_else(|| ENDED_TARGET.into())
     }
     fn send_pointer(&self, target: &str, text: &str, cancelled: &AtomicBool) -> Result<(), String> {
         if !local_address(target) {
             return Err("Only local Herdr terminals are supported".into());
         }
+        // Fresh ls immediately before every pointer/end-note send: get's live
+        // state alone cannot distinguish an agent that returned to a shell.
+        let rows = self.live_rows()?;
+        selected_row(&rows, target)?;
         let (ok, json) = self.call_cancellable(
             &["send".into(), target.into(), text.into(), "--json".into()],
             cancelled,
@@ -295,7 +356,7 @@ fn deliver(hc: &Hc, delivery: &Delivery) -> Result<(), String> {
         super::Lookup::Live(address) if address == delivery.target => {
             hc.send_pointer(&address, &delivery.text, &delivery.cancelled)
         }
-        _ => Err("The picked Herdr terminal is no longer live; nothing was sent".into()),
+        _ => Err(ENDED_TARGET.into()),
     }
 }
 
@@ -392,11 +453,7 @@ pub(crate) async fn cmd_herdr_live_pick(
         let current = current_session()
             .filter(|s| s.key == session)
             .ok_or("The live recording changed; choose again")?;
-        let terminal = Hc::discover()?
-            .terminals()?
-            .into_iter()
-            .find(|t| t.address == target)
-            .ok_or("Choose a local live terminal from the current list")?;
+        let terminal = Hc::discover()?.selected_terminal(&target)?;
         if current_session().is_none_or(|s| s.key != current.key) {
             return Err("The recording ended; nothing was sent".into());
         }
@@ -456,6 +513,8 @@ mod tests {
             address: "t42".into(),
             name: "Picked only".into(),
             labels: BTreeMap::new(),
+            agent: "codex".into(),
+            location: "Development / Tests".into(),
         }
     }
     #[test]
@@ -516,8 +575,8 @@ mod tests {
             r#"
 printf '%s\n' "$*" >> "$0.calls"
 case "$1" in
-ls) echo '{"hidden_finished":1,"terminals":[{"address":"t42","state":"live"},{"address":"remote/t9","state":"live"},{"address":"t8","state":"finished"}]}' ;;
-get) echo '{"address":"t42","name":"Recall handoff","state":"live","labels":{"minutes.tab":"synthetic","team":"QA"},"screen":"PRIVATE","cwd":"PRIVATE"}' ;;
+ls) echo '{"hidden_finished":1,"terminals":[{"address":"t42","state":"live","agent":"codex","where":"Development / Tests"},{"address":"remote/t9","state":"live"},{"address":"t8","state":"finished"}]}' ;;
+get) echo '{"address":"t42","name":"Recall handoff","state":"live","labels":{"minutes.tab":"synthetic","team":"QA","herdr.seen":"288","herdr.space":"PRIVATE","where":"fallback"},"screen":"PRIVATE","cwd":"PRIVATE"}' ;;
 esac
 "#,
         );
@@ -527,6 +586,9 @@ esac
         assert_eq!(terminals[0].name, "Recall handoff");
         let json = serde_json::to_string(&terminals).unwrap();
         assert!(!json.contains("PRIVATE"));
+        assert!(!json.contains("herdr.") && !json.contains("team"));
+        assert_eq!(terminals[0].agent, "codex");
+        assert_eq!(terminals[0].location, "Development / Tests");
         let calls = std::fs::read_to_string(dir.path().join("hc.calls")).unwrap();
         assert!(!calls.contains("remote/") && !calls.contains("t8"));
     }
@@ -535,6 +597,7 @@ esac
         let (dir, hc) = fake(
             r#"
 case "$1" in
+ls) echo '{"terminals":[{"address":"t42","state":"live","agent":"codex"}]}' ;;
 get) printf '{"address":"%s","state":"live"}\n' "$2" ;;
 send) printf '%s\n%s\n' "$2" "$3" >> "$0.messages"; echo '{"started":null,"status":null,"turn":0}' ;;
 esac
@@ -659,32 +722,59 @@ esac
         assert!(sharing.next(Some(&next)).is_none());
     }
     #[test]
-    fn pointer_and_end_note_do_not_execute_if_the_user_picks_a_shell() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut status = status();
-        status.jsonl_path = Some(
-            dir.path()
-                .join("$(touch marker).jsonl")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let config = Config {
-            output_dir: dir.path().join("$(touch marker)"),
-            ..Config::default()
-        };
-        let session = Session::from_status(&status, &config).unwrap();
-        for text in [&session.pointer, &session.ended()] {
-            assert!(std::process::Command::new("/bin/sh")
-                .args(["-c", text])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success());
+    fn shells_missing_and_unknown_agents_are_not_listed_or_pickable() {
+        for agent in ["zsh", "bash", "sh", "python3", "cat", "", "unknown"] {
+            let (dir, hc) = fake(&format!(
+                r#"
+case "$1" in
+ls) echo '{{"terminals":[{{"address":"t42","state":"live","agent":"{agent}"}}]}}';;
+*) touch "$0.unexpected";;
+esac
+"#
+            ));
+            assert!(hc.terminals().unwrap().is_empty(), "{agent}");
+            assert_eq!(hc.selected_terminal("t42").unwrap_err(), UNSUPPORTED_TARGET);
+            assert!(hc
+                .send_pointer("t42", "synthetic", &AtomicBool::new(false))
+                .is_err());
+            assert!(!dir.path().join("hc.unexpected").exists());
         }
-        assert!(
-            !dir.path().join("marker").exists(),
-            "Paths and reader backticks remain inert text in a shell terminal"
+        let (_dir, hc) = fake("echo '{\"terminals\":[{\"address\":\"t42\",\"state\":\"live\"}]}'");
+        assert!(hc.terminals().unwrap().is_empty());
+        assert_eq!(hc.selected_terminal("t42").unwrap_err(), UNSUPPORTED_TARGET);
+        for body in [
+            "echo '{\"terminals\":[]}'",
+            "echo '{\"terminals\":[{\"address\":\"t42\",\"state\":\"finished\",\"agent\":\"codex\"}]}'",
+        ] {
+            let (_dir, hc) = fake(body);
+            assert_eq!(hc.selected_terminal("t42").unwrap_err(), ENDED_TARGET);
+        }
+    }
+    #[test]
+    fn agent_returning_to_a_shell_after_pick_cannot_receive_pointer_or_end_note() {
+        let (dir, hc) = fake(
+            r#"
+case "$1" in
+ls) if test -f "$0.shell"; then agent=zsh; else agent=claude-code; fi
+    printf '{"terminals":[{"address":"t42","state":"live","agent":"%s"}]}' "$agent";;
+get) if test -f "$0.flip"; then touch "$0.shell"; fi
+     echo '{"address":"t42","name":"Agent","state":"live"}';;
+send) touch "$0.sent"; echo '{"turn":0}';;
+esac
+"#,
         );
+        let picked = hc.selected_terminal("t42").unwrap();
+        assert_eq!(picked.agent, "claude-code");
+        let sharing = Sharing::default();
+        let session = session();
+        sharing.pick(session.clone(), picked, 0).unwrap();
+        // It was eligible at pick time; fresh ls, after get, must refuse it now.
+        std::fs::write(dir.path().join("hc.flip"), "").unwrap();
+        let pointer = sharing.next(Some(&session.key)).unwrap();
+        assert_eq!(deliver(&hc, &pointer).unwrap_err(), UNSUPPORTED_TARGET);
+        let ended = sharing.next(None).unwrap();
+        assert_eq!(deliver(&hc, &ended).unwrap_err(), UNSUPPORTED_TARGET);
+        assert!(!dir.path().join("hc.sent").exists());
     }
     #[test]
     fn missing_dead_rejected_hung_and_invalid_servers_cannot_redirect_or_retry() {
@@ -694,7 +784,7 @@ esac
             "echo '{\"address\":\"t43\",\"state\":\"live\"}'",
             "exec /bin/sleep 30",
             "echo invalid",
-            r#"case "$1" in get) echo '{"address":"t42","state":"live"}';; send) echo '{"error":{"kind":"blocked","message":"PRIVATE"}}' >&2; exit 1;; esac"#,
+            r#"case "$1" in ls) echo '{"terminals":[{"address":"t42","state":"live","agent":"codex"}]}';; get) echo '{"address":"t42","state":"live"}';; send) echo '{"error":{"kind":"blocked","message":"PRIVATE"}}' >&2; exit 1;; esac"#,
         ] {
             let (_dir, hc) = fake(body);
             let sharing = Sharing::default();
@@ -735,7 +825,7 @@ esac
                 "echo '{\"error\":{\"kind\":\"blocked\"}}' >&2; exit 1"
             };
             let (dir, mut hc) = fake(&format!(
-                r#"case "$1" in get) echo '{{"address":"t42","state":"live"}}';; send) touch "$0.started"; {body};; esac"#
+                r#"case "$1" in ls) echo '{{"terminals":[{{"address":"t42","state":"live","agent":"codex"}}]}}';; get) echo '{{"address":"t42","state":"live"}}';; send) touch "$0.started"; {body};; esac"#
             ));
             hc.timeout = Duration::from_secs(2);
             let sharing = Sharing::default();

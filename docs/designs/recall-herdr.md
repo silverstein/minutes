@@ -196,9 +196,11 @@ label. Cancel is initially focused; Escape and Cancel dismiss without picking.
 The picker uses `hc ls --json`, then resolves local live entries through `get`
 because hc 0.1.21 does not include labels in its list response. The whole
 list/detail pass shares a five-second deadline, accepts at most 128 list entries
-and bounds label/name lengths. Only address, name and labels reach the UI;
-terminal screen contents, cwd and argv are discarded. A terminal's canonical
-local address is revalidated before delivery. A finished, missing or differently
+and bounds label/name lengths. Only address, name, supported agent kind,
+readable `where` location and the useful `minutes.tab` Recall marker reach the UI. `herdr.*` IDs and arbitrary
+labels, terminal screen contents, cwd and argv are discarded. Rows show two
+short lines: name (or address), then location / agent kind / Recall marker.
+A terminal's canonical local address is revalidated before delivery. A finished, missing or differently
 resolved terminal receives nothing. A stale picker cannot select for a new
 recording, and cancellation invalidates in-flight selections before they can
 commit. No `--force`, remote target, provider setup or credential changes occur.
@@ -220,10 +222,18 @@ any relay capability. The pointer requires the bounded reader's
 `capture_relay.session_id` to match before using its evidence; otherwise it
 requires `transcript_status.session_id`. Missing or mismatched identity is
 unavailable evidence. A relay from another producer is never substituted.
-Both messages prefix each line with `# `: agents receive readable pointer text,
-while an idle POSIX shell treats it as a comment rather than executing reader
-backticks or path metacharacters when hc submits Enter. This prefix is part of
-the shared Recall pointer too; the end-note wording below is unchanged.
+Both messages retain the shared `# ` prefix for readability, but it is not a
+shell safety boundary: interactive zsh has `interactive_comments` off by
+default and can execute these messages, including backtick substitutions.
+Only local live terminals whose fresh `hc ls --json` `agent` is `claude-code`
+or `codex` are eligible. Shells, missing/unknown kinds and ambiguous executable
+names such as `python3` are excluded. The current kind is checked at listing,
+again at pick time, and in a fresh list immediately before every pointer or
+end-note send, after checking the terminal is still live. A program change
+between these observations cannot be made atomic with hc send; errors and
+unsupported observations fail closed without sending. No message is rewritten
+into executable shell syntax. Other agent kinds require a confirmed prompt
+reader contract before adding them to the explicit allowlist.
 
 A pick schedules one `hc send <address> <pointer> --json`. Delivery is attempted
 once; errors and timeouts are not automatically retried because the message may
@@ -272,8 +282,10 @@ stopped afterwards and the shared server PID was unchanged:
 | `hc send t1 <text> --json` | stdout: `{"started":null,"status":null,"turn":0}` for the inert fixture. Successful exit and an unsigned `turn` acknowledge acceptance; the adapter does not wait for an agent turn. |
 | `hc send <missing> <text> --json` | empty stdout, stderr error JSON with `error.kind = "not_found"`, exit 3. No raw message/hint is shown. |
 
-Tests cover local-only listing, labels and private-field stripping; shared
-pointer generation; no delivery without a pick; exactly one pointer and end
+Tests cover local-only supported-agent listing, labels and private-field
+stripping; refusing shells/missing/unknown agent kinds at pick and send time;
+an agent returning to zsh between pick/get/send; clear ended-terminal messages;
+shared pointer generation; no delivery without a pick; exactly one pointer and end
 note to the selected address; cancellation, late selection, session change,
 dead/renamed targets, stderr rejection, hang, invalid output, and a full queue.
 The Tauri invariant
@@ -285,8 +297,9 @@ still isolated on its worker. This test belongs in Tauri because a Herdr fake
 in the core consumer-isolation suites would violate the edge boundary. It does
 not claim microphone, acoustic, model-inference or signed-app acceptance.
 
-Rendered production picker tests cover hidden/off/idle states, name/label text
-safety, handed-off Recall entries, Cancel/Escape focus, one explicit selection,
+Rendered production picker tests cover hidden/off/idle states, supported-agent
+filtering, internal-label exclusion, two short row lines, metadata text safety,
+handed-off Recall entries, Cancel/Escape focus, one explicit selection,
 cancel during lookup/selection, late replies after Stop, rejected sends, light
 theme, narrow width and reduced motion. Palette tests retain nonblocking
 discovery and ensure selection opens the picker without sending anything.

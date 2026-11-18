@@ -11130,7 +11130,11 @@ pub(crate) fn spawn_terminal_tab(
         );
         // Claude discovers these project-local hooks even when started manually
         // inside a configured shell. Never modify ~/.claude or duplicate --settings hooks.
-        crate::recall_tabs::settings(&workspace)?;
+        crate::recall_tabs::settings(&root)?;
+        crate::recall_tabs::private_write(
+            &workspace.join(".recall-tab"),
+            b"Minutes Recall tab v1\n",
+        )?;
         crate::recall_tabs::set_focus_target(&workspace, tab.meeting_path.as_deref(), false)?;
         let shell = is_shell_command(&agent_bin.to_string_lossy());
         if let Some(metadata) = manager.tabs.tabs.iter_mut().find(|t| t.id == id) {
@@ -11158,7 +11162,7 @@ pub(crate) fn spawn_terminal_tab(
                 app_handle: app.clone(),
                 command: agent_bin.to_string_lossy().into_owned(),
                 args: agent_args,
-                cwd: workspace.clone(),
+                cwd: crate::recall_tabs::launch_directory(&root, &workspace, agent_name),
                 context_dir: workspace,
                 title: title.clone(),
                 target_window: "main".into(),

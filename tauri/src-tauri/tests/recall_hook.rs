@@ -1,0 +1,107 @@
+//! Exercise the actual pre-GUI hook entrypoint in isolated child environments.
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+fn invoke(root: &Path, tab: Option<&str>, event: &str) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_minutes-app"));
+    command
+        .args(["--recall-hook", root.to_str().unwrap(), event])
+        .env_remove("MINUTES_RECALL_TAB")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(tab) = tab {
+        command.env("MINUTES_RECALL_TAB", tab);
+    }
+    let mut child = command.spawn().unwrap();
+    // Invalid identities can exit before reading stdin.
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"session_id":"saved-session","prompt":""}"#);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Recall hook did not exit before its pre-GUI deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn native_hook_routes_context_and_status_by_environment_without_gui_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(root.join(".recall-root"), "root").unwrap();
+    for (id, focus) in [
+        ("tab-a", "ALPHA"),
+        ("tab-b", "BRAVO"),
+        ("tab-live", "LIVE GUIDANCE"),
+    ] {
+        let dir = root.join("tabs").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".recall-tab"), "tab").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), focus).unwrap();
+    }
+    for tab in [
+        None,
+        Some("unknown"),
+        Some("../tab-a"),
+        Some("tabs/tab-a"),
+        Some("/tmp"),
+    ] {
+        let output = invoke(root, tab, "SessionStart");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert!(!root.join(".recall-state.json").exists());
+        for id in ["tab-a", "tab-b", "tab-live"] {
+            assert!(!root
+                .join("tabs")
+                .join(id)
+                .join(".recall-state.json")
+                .exists());
+        }
+    }
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        for (id, focus) in [
+            ("tab-a", "ALPHA"),
+            ("tab-b", "BRAVO"),
+            ("tab-live", "LIVE GUIDANCE"),
+        ] {
+            let output = invoke(root, Some(id), event);
+            assert!(output.status.success());
+            assert!(
+                output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let context = json["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert_eq!(json["hookSpecificOutput"]["hookEventName"], event);
+            for token in ["ALPHA", "BRAVO", "LIVE GUIDANCE"] {
+                assert_eq!(context.contains(token), token == focus);
+            }
+            let state: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(root.join("tabs").join(id).join(".recall-state.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["session_id"], "saved-session");
+            assert_eq!(
+                state["status"],
+                if event == "SessionStart" {
+                    "done"
+                } else {
+                    "working"
+                }
+            );
+        }
+    }
+}

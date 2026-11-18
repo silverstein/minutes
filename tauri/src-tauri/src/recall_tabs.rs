@@ -78,6 +78,32 @@ pub fn workspace(id: &str) -> Result<PathBuf, String> {
     workspace_at(&crate::context::workspace_dir(), id)
 }
 
+pub const TAB_ENV: &str = "MINUTES_RECALL_TAB";
+
+/// Shells also start at the root so a manually launched Claude shares history.
+/// Other agents still discover their instructions from the tab's AGENTS.md.
+pub(crate) fn launch_directory(root: &Path, workspace: &Path, agent: &str) -> PathBuf {
+    if crate::commands::command_is_claude(agent) || crate::commands::is_shell_command(agent) {
+        root.to_path_buf()
+    } else {
+        workspace.to_path_buf()
+    }
+}
+
+fn hook_workspace(root: &Path, tab_id: Option<&str>) -> Option<PathBuf> {
+    let dir = workspace_at(root, tab_id?).ok()?;
+    // Reject absent tabs and symlink escapes before reading context or writing status.
+    if !root.join(".recall-root").is_file()
+        || [&root.join("tabs"), &dir, &dir.join(".recall-tab")]
+            .iter()
+            .any(|path| !fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink()))
+        || !dir.join(".recall-tab").is_file()
+    {
+        return None;
+    }
+    Some(dir)
+}
+
 pub(crate) fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("Missing parent")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -208,10 +234,6 @@ impl TabStore {
                 }
                 self.active = Some("assistant".into());
             }
-            // Parent instructions must be neutral: nested tabs must not inherit a live or meeting focus.
-            for name in ["CLAUDE.md", "AGENTS.md"] {
-                private_write(&root.join(name), b"# Minutes Recall\n\nEach tab has its own instructions and context in its working directory. Only use that tab's CURRENT_MEETING.md, CURRENT_ARTIFACT.md and live guidance.\n")?;
-            }
             for name in [
                 "CURRENT_MEETING.md",
                 "CURRENT_ARTIFACT.md",
@@ -220,6 +242,11 @@ impl TabStore {
                 let _ = fs::remove_file(root.join(name));
             }
             self.save(root)?;
+        }
+        // Refresh neutral parent instructions on upgrade, too. Focus is supplied
+        // only by a resolved tab hook (Claude) or the per-tab cwd (other agents).
+        for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
+            private_write(&root.join(name), b"# Minutes Recall\n\nThis is the shared assistant root. It contains no meeting or live-call focus. Claude receives its tab folder and context from Minutes hooks using MINUTES_RECALL_TAB. Use only the folder identified by that hook; never inspect other tabs. Authored Documents belong in that tab folder. Other agents start in their own tab folder and use its instructions.\n")?;
         }
         crate::context::ensure_workspace_repository(root)?;
         self.loaded = true;
@@ -434,13 +461,23 @@ pub(crate) fn transcript_available(
     id: &str,
     reported: Option<&Path>,
 ) -> bool {
+    transcript_available_at(root, tab_id, id, reported, dirs::home_dir().as_deref())
+}
+
+fn transcript_available_at(
+    root: &Path,
+    tab_id: &str,
+    id: &str,
+    reported: Option<&Path>,
+    home: Option<&Path>,
+) -> bool {
     if !valid_id(id) {
         return false;
     }
     if reported.is_some_and(|path| transcript_file_exists(path, id)) {
         return true;
     }
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home else {
         return false;
     };
     [workspace_at(root, tab_id).ok(), Some(root.to_path_buf())]
@@ -503,10 +540,10 @@ pub fn maybe_run_hook() -> Option<i32> {
     let result = (|| -> Result<(), String> {
         let root = args.get(2).ok_or("Missing workspace")?;
         let event = args.get(3).ok_or("Missing event")?;
-        let dir = Path::new(root);
-        if !dir.join(".recall-tab").is_file() {
-            return Err("Not a Recall workspace".into());
-        }
+        let tab_id = std::env::var(TAB_ENV).ok();
+        let Some(dir) = hook_workspace(Path::new(root), tab_id.as_deref()) else {
+            return Ok(());
+        };
         let mut input = String::new();
         std::io::stdin()
             .take(1_048_577)
@@ -516,29 +553,10 @@ pub fn maybe_run_hook() -> Option<i32> {
             return Err("Hook input too large".into());
         }
         let input: serde_json::Value = serde_json::from_str(&input).map_err(|e| e.to_string())?;
-        if let Some(status) = status_for_event(event, &input) {
-            let state = HookState {
-                transcript_path: input["transcript_path"].as_str().map(PathBuf::from),
-                claude_active: event != "SessionEnd",
-                status,
-                session_id: input["session_id"]
-                    .as_str()
-                    .filter(|id| valid_id(id))
-                    .map(str::to_string),
-            };
-            private_write(
-                &dir.join(STATE),
-                &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
-            )?;
-        }
-        if event == "UserPromptSubmit" {
-            prepare_prompt_context(dir, &input)?;
-            // Preserve #1308: notices are context for the next prompt, never typed turns.
-            print!(
-                "{}",
-                crate::context::assistant_skills::take_focus_notices(dir)?
-            );
-        }
+        print!(
+            "{}",
+            run_tab_hook(&dir, event, &input, prepare_prompt_context)?
+        );
         Ok(())
     })();
     if let Err(error) = result {
@@ -548,8 +566,94 @@ pub fn maybe_run_hook() -> Option<i32> {
     Some(0)
 }
 
+/// Both focus events use the same tab-local files. SessionStart never materializes
+/// stored meetings; only a real authenticated prompt may cross that gate.
+fn run_tab_hook(
+    workspace: &Path,
+    event: &str,
+    input: &serde_json::Value,
+    prepare: impl FnOnce(&Path, &serde_json::Value) -> Result<(), String>,
+) -> Result<String, String> {
+    if let Some(status) = status_for_event(event, input) {
+        let state = HookState {
+            transcript_path: input["transcript_path"].as_str().map(PathBuf::from),
+            claude_active: event != "SessionEnd",
+            status,
+            session_id: input["session_id"]
+                .as_str()
+                .filter(|id| valid_id(id))
+                .map(str::to_string),
+        };
+        private_write(
+            &workspace.join(STATE),
+            &serde_json::to_vec(&state).map_err(|e| e.to_string())?,
+        )?;
+    }
+    if !matches!(event, "SessionStart" | "UserPromptSubmit") {
+        return Ok(String::new());
+    }
+    if event == "UserPromptSubmit" {
+        prepare(workspace, input)?;
+    }
+    let mut context = format!(
+        "Minutes Recall tab folder: `{}`. Resolve all relative paths in the following tab instructions against this folder, even though Claude starts in the shared assistant root. Save authored Documents in this tab folder. Use only this tab's focus; never read another tab's context. Files absent from this snapshot are not selected.\n",
+        workspace.display()
+    );
+    let instructions = workspace.join("CLAUDE.md");
+    if instructions.is_file() {
+        let content = String::from_utf8(read_small(&instructions)?).map_err(|e| e.to_string())?;
+        // Keep hook context small enough to be delivered inline. The complete
+        // files remain authoritative, including long (80k-character) meetings.
+        let base = content
+            .split("<!-- LIVE_TRANSCRIPT_START -->")
+            .next()
+            .unwrap_or("");
+        append_focus_preview(&mut context, &instructions, base, 1_200);
+        if workspace.join(".live-tab").is_file() {
+            if let Some((_, live)) = content.split_once("<!-- LIVE_TRANSCRIPT_START -->") {
+                if let Some((live, _)) = live.split_once("<!-- LIVE_TRANSCRIPT_END -->") {
+                    context.push_str(live);
+                }
+            }
+        }
+    }
+    for name in [
+        crate::context::ACTIVE_MEETING_FILE,
+        crate::context::ASSISTANT_CONTEXT_FILE,
+        crate::context::ACTIVE_ARTIFACT_FILE,
+    ] {
+        let path = workspace.join(name);
+        if path.is_file() {
+            let mut prefix = Vec::new();
+            fs::File::open(&path)
+                .map_err(|e| e.to_string())?
+                .take(2_048)
+                .read_to_end(&mut prefix)
+                .map_err(|e| e.to_string())?;
+            append_focus_preview(&mut context, &path, &String::from_utf8_lossy(&prefix), 500);
+        }
+    }
+    // Preserve #1308: one-shot notices are context, never typed turns.
+    context.push_str(&crate::context::assistant_skills::take_focus_notices(
+        workspace,
+    )?);
+    serde_json::to_string(&serde_json::json!({
+        "hookSpecificOutput": { "hookEventName": event, "additionalContext": context }
+    }))
+    .map_err(|e| e.to_string())
+}
+
+fn append_focus_preview(context: &mut String, path: &Path, text: &str, limit: usize) {
+    context.push_str(&format!(
+        "\n--- Tab {} ---\nRead `{}` for the complete current tab context before answering. Preview:\n{}\n",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        path.display(),
+        text.chars().take(limit).collect::<String>(),
+    ));
+}
+
 pub fn settings(workspace: &Path) -> Result<PathBuf, String> {
-    private_write(&workspace.join(".recall-tab"), b"Minutes Recall tab v1\n")?;
+    private_write(&workspace.join(".recall-root"), b"Minutes Recall root v1\n")?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut hooks = serde_json::Map::new();
     for event in [
@@ -566,9 +670,8 @@ pub fn settings(workspace: &Path) -> Result<PathBuf, String> {
         hooks.insert(event.into(), serde_json::json!([{ "hooks": [{ "type": "command", "command": executable, "args": ["--recall-hook", workspace, event], "timeout": if event == "UserPromptSubmit" { 15 } else { 5 } }] }]));
     }
     let directory = workspace.join(".claude");
-    // Shared project settings are discovered from Claude's starting directory.
-    // settings.local.json now resolves at the repository root on modern Claude,
-    // so using it here would collapse tab hooks into the shared parent.
+    // Installed once at the shared starting directory, never in individual tabs.
+    // Existing tab-local settings remain user-owned and are not rewritten.
     let path = directory.join("settings.json");
     for target in [&directory, &path] {
         if fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -1438,7 +1541,7 @@ mod migration_tests {
         }
     }
     #[test]
-    fn hook_settings_are_direct_arguments_with_tab_local_paths() {
+    fn hook_settings_are_direct_arguments_with_shared_root_path() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("Mat's tab with spaces");
         let path = settings(&dir).unwrap();
@@ -1458,6 +1561,279 @@ mod migration_tests {
             status_for_event("StopFailure", &serde_json::json!({})),
             Some(Status::Error)
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_cwd_tests {
+    use super::*;
+
+    fn tab(root: &Path, id: &str) -> PathBuf {
+        let dir = workspace_at(root, id).unwrap();
+        private_write(&dir.join(".recall-tab"), b"tab").unwrap();
+        dir
+    }
+
+    #[test]
+    fn hook_resolves_only_an_existing_valid_tab() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        settings(root).unwrap();
+        let dir = tab(root, "tab-123");
+        assert_eq!(hook_workspace(root, Some("tab-123")), Some(dir));
+        for id in [
+            None,
+            Some(""),
+            Some("missing"),
+            Some("../tab-123"),
+            Some("/tmp/tab-123"),
+            Some("tab-123/../../other"),
+            Some("tab_123"),
+            Some("tab-123\\other"),
+            Some("."),
+            Some(".."),
+        ] {
+            assert_eq!(hook_workspace(root, id), None, "{id:?}");
+        }
+        assert!(!root.join(STATE).exists());
+        assert!(!root.join("tabs/missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_refuses_a_tab_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        settings(temp.path()).unwrap();
+        fs::create_dir(temp.path().join("tabs")).unwrap();
+        fs::write(outside.path().join(".recall-tab"), "tab").unwrap();
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("tabs/tab-123")).unwrap();
+        assert!(hook_workspace(temp.path(), Some("tab-123")).is_none());
+        assert!(!outside.path().join(STATE).exists());
+    }
+
+    #[test]
+    fn claude_and_shells_share_cwd_other_agents_keep_tab_instructions() {
+        let root = Path::new("assistant");
+        let dir = root.join("tabs/tab-123");
+        for agent in [
+            "claude",
+            "/usr/local/bin/claude",
+            "claude.cmd",
+            "zsh",
+            "/bin/bash",
+            "fish",
+        ] {
+            assert_eq!(launch_directory(root, &dir, agent), root);
+        }
+        for agent in ["codex", "/usr/local/bin/codex", "gemini", "opencode"] {
+            assert_eq!(launch_directory(root, &dir, agent), dir);
+        }
+    }
+
+    #[test]
+    fn both_focus_events_isolate_two_meetings_and_a_live_tab() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        settings(root).unwrap();
+        let a = tab(root, "meeting-a");
+        let b = tab(root, "meeting-b");
+        let live = tab(root, "live-call");
+        for (dir, text) in [(&a, "ALPHA meeting"), (&b, "BRAVO meeting")] {
+            crate::context::write_deferred_assistant_context(dir).unwrap();
+            fs::write(dir.join("CURRENT_MEETING.md"), text).unwrap();
+            fs::write(dir.join("CURRENT_ARTIFACT.md"), format!("{text} artifact")).unwrap();
+            crate::context::assistant_skills::queue_focus_notice(
+                dir,
+                crate::context::assistant_skills::FocusNotice::Meeting,
+                &format!("{text} notice"),
+            )
+            .unwrap();
+        }
+        fs::write(live.join(".live-tab"), "live").unwrap();
+        for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
+            crate::commands::update_assistant_live_context_file(&live.join(name), true);
+        }
+        crate::context::write_deferred_assistant_context(&live).unwrap();
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            for (id, own, other) in [
+                ("meeting-a", "ALPHA", "BRAVO"),
+                ("meeting-b", "BRAVO", "ALPHA"),
+            ] {
+                let dir = hook_workspace(root, Some(id)).unwrap();
+                let output = run_tab_hook(
+                    &dir,
+                    event,
+                    &serde_json::json!({"session_id": id}),
+                    |_, _| Ok(()),
+                )
+                .unwrap();
+                let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+                let text = json["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap();
+                assert_eq!(json["hookSpecificOutput"]["hookEventName"], event);
+                assert!(text.contains(&format!("{own} meeting")));
+                assert!(text.contains(&format!("{own} meeting artifact")));
+                assert_eq!(
+                    text.contains(&format!("{own} meeting notice")),
+                    event == "SessionStart"
+                );
+                assert!(text.contains(&dir.display().to_string()));
+                assert!(!text.contains(other));
+                assert!(!text.contains("## Live Transcript Active"));
+                let state: HookState =
+                    serde_json::from_slice(&fs::read(dir.join(STATE)).unwrap()).unwrap();
+                assert_eq!(state.session_id.as_deref(), Some(id));
+                assert_eq!(
+                    state.status,
+                    if event == "SessionStart" {
+                        Status::Done
+                    } else {
+                        Status::Working
+                    }
+                );
+            }
+            let text = run_tab_hook(&live, event, &serde_json::json!({}), |_, _| Ok(())).unwrap();
+            assert!(text.contains("## Live Transcript Active"));
+            assert!(!text.contains("ALPHA"));
+            assert!(!text.contains("BRAVO"));
+        }
+        assert!(!root.join(STATE).exists());
+        assert!(!root.join("CURRENT_MEETING.md").exists());
+    }
+
+    #[test]
+    fn long_meetings_use_bounded_previews_and_keep_complete_live_guidance() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = tab(temp.path(), "tab-long");
+        fs::write(dir.join(".live-tab"), "live").unwrap();
+        fs::write(
+            dir.join("CLAUDE.md"),
+            format!(
+                "{}{}",
+                "base instructions ".repeat(500),
+                crate::context::live_transcript_section()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("CURRENT_MEETING.md"),
+            "Large meeting ".repeat(8_000),
+        )
+        .unwrap();
+        let output = run_tab_hook(
+            &dir,
+            "SessionStart",
+            &serde_json::json!({}),
+            |_, _| panic!(),
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let context = json["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.chars().count() < 10_000);
+        assert!(context.contains(&dir.join("CURRENT_MEETING.md").display().to_string()));
+        assert!(context.contains("Large meeting"));
+        assert!(context.contains(crate::context::LIVE_TRANSCRIPT_GUIDANCE));
+        // A stale live section cannot become guidance for a non-live tab.
+        fs::remove_file(dir.join(".live-tab")).unwrap();
+        let output = run_tab_hook(
+            &dir,
+            "SessionStart",
+            &serde_json::json!({}),
+            |_, _| panic!(),
+        )
+        .unwrap();
+        assert!(!output.contains("## Live Transcript Active"));
+    }
+
+    #[test]
+    fn session_start_never_materializes_stored_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = tab(temp.path(), "tab-123");
+        set_focus_target(&dir, Some("unread-meeting.md"), false).unwrap();
+        run_tab_hook(&dir, "SessionStart", &serde_json::json!({}), |_, _| {
+            panic!("must remain deferred")
+        })
+        .unwrap();
+        assert!(!dir.join("CURRENT_MEETING.md").exists());
+        assert!(
+            run_tab_hook(&dir, "Stop", &serde_json::json!({}), |_, _| panic!())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn upgrade_preserves_tab_settings_and_refreshes_neutral_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut store = TabStore::default();
+        let id = store.open(root, None, true).unwrap();
+        let dir = tab(root, &id);
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let custom = br#"{"model":"custom","hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}}"#;
+        fs::write(dir.join(".claude/settings.json"), custom).unwrap();
+        fs::write(root.join("CLAUDE.md"), "old neutral instructions").unwrap();
+        let mut restored = TabStore::default();
+        restored.ensure(root).unwrap();
+        settings(root).unwrap();
+        assert_eq!(fs::read(dir.join(".claude/settings.json")).unwrap(), custom);
+        for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
+            let text = fs::read_to_string(root.join(name)).unwrap();
+            assert!(text.contains("shared assistant root"));
+            assert!(!text.contains("old neutral"));
+        }
+    }
+
+    #[test]
+    fn pre_change_tab_transcript_and_new_root_history_both_resume_without_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("synthetic-home");
+        let root = temp.path().join("assistant");
+        let dir = workspace_at(&root, "tab-old").unwrap();
+        for (cwd, id) in [(&dir, "old-session"), (&root, "new-session")] {
+            let key: String = cwd
+                .to_string_lossy()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let path = home
+                .join(".claude/projects")
+                .join(key)
+                .join(format!("{id}.jsonl"));
+            private_write(&path, b"synthetic saved turn").unwrap();
+            assert!(transcript_available_at(
+                &root,
+                "tab-old",
+                id,
+                None,
+                Some(&home)
+            ));
+            assert_eq!(
+                crate::commands::recall_tab_claude_args(vec![], &dir, Some(id)),
+                vec!["--resume", id]
+            );
+            fs::write(&path, "").unwrap();
+            assert!(!transcript_available_at(
+                &root,
+                "tab-old",
+                id,
+                None,
+                Some(&home)
+            ));
+        }
+        let reported = temp.path().join("custom-claude/old-session.jsonl");
+        private_write(&reported, b"synthetic custom config history").unwrap();
+        assert!(transcript_available_at(
+            &root,
+            "tab-old",
+            "old-session",
+            Some(&reported),
+            None
+        ));
     }
 }
 

@@ -1,4 +1,4 @@
-# Recall tabs (issue #1349, design D)
+# Recall tabs (issues #1349 and #1371, design D)
 
 Recall can keep four independent interactive agent processes running. Selecting
 another meeting selects that meeting's existing tab or creates one; a new chat
@@ -11,9 +11,22 @@ status render from the same metadata snapshot.
 Claude session ID, capture identity and exact processing job ID. Each tab owns
 `tabs/<id>/`, including
 `CLAUDE.md`, `AGENTS.md`, `CURRENT_MEETING.md`, `CURRENT_ARTIFACT.md`, skills and
-focus notices. The parent instruction files are neutral so nested Claude sessions
-cannot inherit another tab's live or stored meeting focus. Newly authored tab
-artifacts also appear in Documents.
+focus notices. Claude tabs start in the shared `~/.minutes/assistant` root so
+new conversations appear together in `claude --resume` from that folder. Shell
+tabs also start there, including when the explicit Resume action launches Claude
+or the user starts it by hand. Direct launch and Open in Herdr use the same rule.
+Minutes sets `MINUTES_RECALL_TAB=<id>` in every tab process, including shells and
+Herdr handoffs; a manually launched Claude inherits it.
+
+The root `CLAUDE.md` and `AGENTS.md` remain neutral. Claude receives its own tab's
+instructions and current focus through the hooks below. Hook context identifies
+its absolute tab folder and tells it to resolve relative instruction paths there
+and save authored Documents in `tabs/<id>/`. Per-tab files remain the source of
+truth. Newly authored tab artifacts also appear in Documents.
+
+Codex and other non-Claude agents keep starting in `tabs/<id>/`: they discover
+`AGENTS.md` by folder, and Codex history is stored by date rather than project
+folder. They retain their existing per-tab instruction and context behavior.
 
 Closing a tab stops its process and removes its active metadata. Its workspace
 remains because it can hold authored Documents files or custom skills/settings;
@@ -39,7 +52,10 @@ A SessionStart ID alone is not resumable. Before direct restore or explicit shel
 resume, Minutes checks that the matching transcript file exists and is nonempty.
 The hook-reported transcript path is retained for custom Claude directories;
 legacy singleton IDs also check the parent workspace's project directory. Only
-file metadata is inspected. Missing or empty history clears the unusable ID, so
+file metadata is inspected. Pre-change tabs still check their old per-tab Claude
+project directory, while new conversations check the shared root project. Saved
+IDs resume with `claude --resume <id>` across projects; no history is moved or
+migrated. Missing or empty history clears the unusable ID, so
 a never-used tab starts fresh rather than failing with “No conversation found.”
 
 ## Hooks and status
@@ -49,19 +65,38 @@ PostToolUse, PermissionRequest, Notification, Stop, StopFailure and SessionEnd
 command hooks. They invoke the installed app executable with `--recall-hook`
 using Claude's direct argument-vector form: no shell, Python or Node dependency.
 The app exits this helper path before GUI initialization. Both directly launched
-Claude and Claude started manually inside a shell discover the hooks in the tab's
-own `.claude/settings.json`. Existing custom settings/hooks are retained and
-managed hooks are replaced idempotently; symlinked settings paths are refused.
+Claude and Claude started manually inside a shell discover the hooks in the
+shared root's `.claude/settings.json`, installed idempotently once per root.
+Hooks resolve `MINUTES_RECALL_TAB` to an existing marked `tabs/<id>/` folder.
+Missing, invalid, unknown or path-traversal IDs and symlinked tab paths add no
+context and write no status. SessionStart and UserPromptSubmit return that tab's
+instruction and focus file paths, bounded meeting/general-context and artifact
+previews, full live guidance for the live tab only, and one-shot focus notices as
+`hookSpecificOutput.additionalContext`; a notice is consumed once. The agent is
+told to read its tab files for complete context. Long meetings remain in those
+files rather than overflowing the hook's inline-context limit.
+SessionStart never materializes stored meeting context. UserPromptSubmit retains
+the real-question and provider-authentication gate before materialization.
+Live-call guidance comes only from the live tab's own instruction files.
+
+Existing root custom settings/hooks are retained and managed hooks are replaced
+idempotently; symlinked settings paths are refused. Existing per-tab
+`.claude/settings.json` files are left byte-for-byte intact, including user
+customizations and legacy managed hooks. Claude starting at the root no longer
+discovers those child settings. Users who want a customization in shared-root
+Claude sessions can deliberately move it to root settings; Minutes does not copy
+it to all tabs. Other agents continue to use their per-tab assets.
 Global Claude settings and trust decisions are untouched. User-specified CLI
 `--settings` arguments are preserved, without duplicating managed hooks.
 
 There is one git repository at the assistant root, with ordinary tab subfolders.
-No per-tab git repository is needed for instruction discovery. This lets new tabs
-inherit accepted parent trust rather than requesting it for every meeting.
+No per-tab git repository is needed for trust or other agents' instruction
+discovery. This lets new tabs inherit accepted parent trust rather than
+requesting it for every meeting.
 `settings.json` is intentional: modern Claude reads project-local
 `settings.local.json` at the repository root, but shared `settings.json` from the
-starting directory. Native QA must verify this discovery and trust inheritance
-with the installed Claude version; Minutes never preaccepts trust or adds bypass
+shared starting directory. Native QA must verify this discovery and trust
+inheritance with the installed Claude version; Minutes never preaccepts trust or adds bypass
 flags. The first Recall workspace can still need the normal trust dialog.
 
 Each hook writes only `tabs/<id>/.recall-state.json`, containing status and the
@@ -77,8 +112,8 @@ notice with an explicit Start conversation action; selecting it does not
 silently restart it. The action starts that same tab again and retains any valid
 saved history. Process-exit flags are transient and reset on app relaunch.
 
-The native hook consumes each per-tab focus notice once on UserPromptSubmit,
-preserving #1308: opening a document, dropping context or moving into debrief
+The native hook consumes each per-tab focus notice once on SessionStart or
+UserPromptSubmit, preserving #1308: opening a document, dropping context or moving into debrief
 never types an unsolicited turn into the agent's input. Configured non-Claude
 terminals retain their existing interactive behavior; Claude hook status and
 conversation resume are specific to Claude Code.

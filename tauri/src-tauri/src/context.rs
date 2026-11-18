@@ -260,8 +260,8 @@ fn create_workspace_inner(
     Ok(workspace)
 }
 
-/// One stable repository supplies Recall's trust boundary. Per-tab instructions
-/// are loaded from the starting directory without a nested repository.
+/// One stable repository supplies Recall's trust boundary. Claude receives
+/// per-tab instructions through hooks; other agents discover them in their cwd.
 pub(crate) fn ensure_workspace_repository(workspace: &Path) -> Result<(), String> {
     if !workspace.join(".git").exists() {
         let status = std::process::Command::new("git")

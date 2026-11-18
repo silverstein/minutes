@@ -1651,11 +1651,13 @@ impl BatchTranscriptionSession<'_> {
 
 /// Correlate cleanup-surviving lines back to sherpa segment timing data.
 ///
-/// `cleanup_lines` is a subsequence of `all_lines` (same order, some removed
-/// by dedup). For each surviving line we find the earliest matching entry in
-/// `all_seg_data` (which is parallel to `all_lines`) and emit a
-/// [`TranscriptSegment`] with the real start/end times.
-#[cfg(feature = "engine-sherpa")]
+/// `all_seg_data` is parallel to `all_lines`. The lines of `cleanup_lines`
+/// that cleanup left as they were are a subsequence of `all_lines`, and each
+/// gets a [`TranscriptSegment`] with the real start/end times. Cleanup also
+/// adds annotation lines and changes lines. Such a line matches no raw line.
+/// It gets no segment, and the search for the next line continues from the
+/// same place, so the lines after it keep their timing.
+#[cfg(any(feature = "engine-sherpa", test))]
 fn correlate_sherpa_segments(
     cleanup_lines: &[String],
     all_lines: &[String],
@@ -1664,19 +1666,16 @@ fn correlate_sherpa_segments(
     let mut si = 0usize;
     let mut result = Vec::new();
     for cleaned in cleanup_lines {
-        while si < all_lines.len() {
-            if &all_lines[si] == cleaned {
-                let (_, start, end, text) = &all_seg_data[si];
-                result.push(TranscriptSegment {
-                    start: *start,
-                    end: *end,
-                    text: text.clone(),
-                });
-                si += 1;
-                break;
-            }
-            si += 1;
-        }
+        let Some(found) = all_lines[si..].iter().position(|line| line == cleaned) else {
+            continue;
+        };
+        let (_, start, end, text) = &all_seg_data[si + found];
+        result.push(TranscriptSegment {
+            start: *start,
+            end: *end,
+            text: text.clone(),
+        });
+        si += found + 1;
     }
     result
 }
@@ -5940,6 +5939,77 @@ mod tests {
         assert_eq!(
             pipeline.after(TranscriptCleanupStage::TrimTrailingNoise),
             pipeline.lines.len()
+        );
+    }
+
+    /// Raw segment data as the sherpa path builds it from `(start_ms, text)`:
+    /// `(line, start_secs, end_secs, text)`, each segment ending where the
+    /// next one starts and the last one at the end of the audio.
+    fn sherpa_seg_data(raw: &[(u64, &str)], audio_secs: f64) -> Vec<(String, f64, f64, String)> {
+        raw.iter()
+            .enumerate()
+            .map(|(i, (start_ms, text))| {
+                let end_secs = raw
+                    .get(i + 1)
+                    .map_or(audio_secs, |(next_ms, _)| *next_ms as f64 / 1000.0);
+                let secs = start_ms / 1000;
+                (
+                    format!("[{}:{:02}] {}", secs / 60, secs % 60, text),
+                    *start_ms as f64 / 1000.0,
+                    end_secs,
+                    text.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sherpa_lines_after_a_cleanup_annotation_keep_their_segments() {
+        // Three identical replies, then three non-speech markers. Cleanup
+        // keeps the first line of each run and adds an annotation after it.
+        let seg_data = sherpa_seg_data(
+            &[
+                (0, "Shall we start?"),
+                (2_400, "Yeah."),
+                (4_100, "Yeah."),
+                (5_800, "Yeah."),
+                (7_250, "Okay, the agenda first."),
+                (12_000, "[Music]"),
+                (13_500, "[Applause]"),
+                (15_000, "[Laughter]"),
+                (16_750, "Then the budget."),
+            ],
+            20.0,
+        );
+        let lines: Vec<String> = seg_data.iter().map(|(line, ..)| line.clone()).collect();
+        let cleanup = run_transcript_cleanup_pipeline(lines.clone());
+        assert_eq!(cleanup.lines.len(), 7, "{:?}", cleanup.lines);
+        assert!(
+            cleanup.lines[2].contains("repeated audio removed"),
+            "{:?}",
+            cleanup.lines
+        );
+        assert!(
+            cleanup.lines[5].contains("non-speech audio removed"),
+            "{:?}",
+            cleanup.lines
+        );
+
+        // The annotations get no segment. Every line that cleanup kept gets
+        // its own, with its exact times.
+        let segments = correlate_sherpa_segments(&cleanup.lines, &lines, &seg_data);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| (s.start, s.end, s.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0.0, 2.4, "Shall we start?"),
+                (2.4, 4.1, "Yeah."),
+                (7.25, 12.0, "Okay, the agenda first."),
+                (12.0, 13.5, "[Music]"),
+                (16.75, 20.0, "Then the budget."),
+            ]
         );
     }
 

@@ -76,20 +76,25 @@ fn source_lines(source: CaptureSource, result: &TranscribeResult) -> Vec<SourceL
         lines[index].end = next.max(lines[index].start);
     }
     // Retain precise timings when the engine supplied the same cleaned text.
-    // Match occurrences in order so repeated utterances are not conflated.
-    let mut segments = result.segments.iter();
+    // Match occurrences in order so repeated utterances are not conflated. A
+    // line without a segment, such as a cleanup annotation, does not use one
+    // up, so the lines after it keep their precise timings.
+    let mut next = 0usize;
     for line in &mut lines {
-        if let Some(segment) = segments.find(|segment| {
+        let Some(found) = result.segments[next..].iter().position(|segment| {
             segment.text.trim() == line.text
                 && segment.start.is_finite()
                 && segment.end.is_finite()
                 && segment.start >= 0.0
                 && segment.end >= segment.start
                 && (segment.start - line.start).abs() < 1.0
-        }) {
-            line.start = segment.start;
-            line.end = segment.end;
-        }
+        }) else {
+            continue;
+        };
+        let segment = &result.segments[next + found];
+        line.start = segment.start;
+        line.end = segment.end;
+        next += found + 1;
     }
     lines
 }
@@ -410,6 +415,43 @@ mod tests {
         assert_eq!(
             merged.text,
             "[SYSTEM 0:02] remote\n[MICROPHONE 0:02] local\n"
+        );
+    }
+
+    #[test]
+    fn a_cleanup_annotation_does_not_take_the_precise_times_of_later_lines() {
+        // Cleanup added an annotation line to the microphone source. It has
+        // no segment. "local" starts after "remote" in the same second, and
+        // only its precise time says so.
+        let mut voice = result(
+            "[0:01] hello\n[...] [repeated audio removed - 2 identical segments collapsed]\n[0:10] local\n",
+            12.0,
+        );
+        voice.segments = vec![
+            TranscriptSegment {
+                start: 1.0,
+                end: 1.6,
+                text: "hello".into(),
+            },
+            TranscriptSegment {
+                start: 10.9,
+                end: 11.4,
+                text: "local".into(),
+            },
+        ];
+        let mut system = result("[0:10] remote\n", 12.0);
+        system.segments.push(TranscriptSegment {
+            start: 10.2,
+            end: 10.6,
+            text: "remote".into(),
+        });
+        let (merged, _) = merge_sources(voice, system);
+        assert_eq!(
+            merged.text,
+            "[MICROPHONE 0:01] hello\n\
+             [MICROPHONE] [...] [repeated audio removed - 2 identical segments collapsed]\n\
+             [SYSTEM 0:10] remote\n\
+             [MICROPHONE 0:10] local\n"
         );
     }
 

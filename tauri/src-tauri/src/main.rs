@@ -2397,11 +2397,13 @@ fn main() {
             recall_chat_turn: Arc::new(Mutex::new(None)),
             recall_chat_next_turn_id: Arc::new(AtomicU64::new(1)),
         })
+        .manage(recall_herdr::live::Sharing::default())
         .manage(Arc::new(Mutex::new(
             shortcut_manager::ShortcutManager::new(),
         )))
         .setup(move |app| {
             recall_tabs::start_observer(app.handle().clone());
+            recall_herdr::live::start_observer(app.handle().clone());
             customize_theme::apply_at_startup(app.handle());
             let initial_recording = minutes_core::pid::status().recording;
             let startup_config = minutes_core::config::Config::load();
@@ -3521,6 +3523,11 @@ fn main() {
             recall_herdr::cmd_recall_herdr_open,
             recall_herdr::cmd_recall_herdr_take_back,
             recall_herdr::cmd_recall_herdr_palette,
+            recall_herdr::live::cmd_herdr_live_view,
+            recall_herdr::live::cmd_herdr_live_options,
+            recall_herdr::live::cmd_herdr_live_pick,
+            recall_herdr::live::cmd_herdr_live_cancel,
+            recall_herdr::live::cmd_herdr_live_palette,
             recall_tabs::cmd_recall_tabs,
             recall_tabs::cmd_recall_tab_open,
             recall_tabs::cmd_recall_tab_resume,

@@ -48,7 +48,7 @@ function paletteFunction(source, name) {
   }
   throw new Error(`Unterminated ${name}`);
 }
-function paletteFixture() {
+function paletteFixture(live = null) {
   const source = readFileSync('tauri/src/palette/index.html', 'utf8');
   const calls = [], renders = [];
   let answer;
@@ -56,6 +56,7 @@ function paletteFixture() {
   const sandbox = vm.createContext({ console, calls, renders, invoke: async (name, args) => {
     calls.push({ name, args });
     if (name === 'cmd_recall_herdr_available') return availability;
+    if (name === 'cmd_herdr_live_view') return live;
     if (name === 'palette_list') return { commands: [{ id: 'ordinary', title: 'Ordinary command' }], recents: [] };
     return null;
   } });
@@ -70,6 +71,27 @@ function paletteFixture() {
   `, sandbox);
   return { calls, renders, answer, ...sandbox.fixture };
 }
+
+test('live Herdr palette entry requires a live session and delegates to the picker without sending', async () => {
+  for (const live of [{active:false}, {active:true,selected:{address:'t42'}}, {active:true,selected:null}]) {
+    const fixture = paletteFixture(live);
+    await fixture.fetch(); fixture.answer(true); await new Promise(resolve => setImmediate(resolve));
+    const command = Array.from(fixture.commands()).find(c => c.id === 'herdr-live-context');
+    assert.equal(!!command, live.active && !live.selected);
+    if (command) {
+      await fixture.execute({id:command.id});
+      assert.equal(fixture.calls.filter(c=>c.name==='cmd_herdr_live_palette').length,1);
+      assert.equal(fixture.calls.some(c=>/pick|send/.test(c.name)),false);
+    }
+  }
+});
+
+test('capture status and Stop never await optional Herdr discovery or delivery', () => {
+  const source=readFileSync('tauri/src/index.html','utf8');
+  const status=source.slice(source.indexOf('    async function checkStatus()'),source.indexOf('    function startFastPoll('));
+  assert.match(status,/void herdrLiveController\?\.refresh\(\)/);
+  assert.doesNotMatch(status,/await (?:herdrLiveController|invoke\('cmd_herdr)/);
+});
 
 test('a hung Herdr probe cannot delay the palette list or ordinary commands', { timeout: 1000 }, async () => {
   const fixture = paletteFixture();

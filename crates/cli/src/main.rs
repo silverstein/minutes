@@ -3730,30 +3730,68 @@ fn spawn_detached_minutes(args: &[&str]) -> Result<std::process::Child> {
         .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))
 }
 
-/// Spawn a detached session and confirm it actually came up. The child has no
-/// terminal, so a failure on startup (no mic, missing model) would otherwise
-/// be invisible: wait briefly for its PID file, and log the failure to
-/// `~/.minutes/logs/minutes.log` when it dies or never reports readiness.
+/// Spawn a detached session and confirm it did not die during startup. The
+/// child has no terminal, so a fast failure (no mic, missing model) would
+/// otherwise be invisible: give it a moment to write its PID file and bail
+/// only when the process actually exits. A live-but-quiet child at the
+/// deadline is still starting — meeting-mode `record` probes system audio
+/// for several seconds before writing its PID file — so it is not a failure.
+/// Real failures are logged to `~/.minutes/logs/minutes.log`.
 fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Result<()> {
     let mut child = spawn_detached_minutes(args)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    let failure = loop {
+    match wait_for_session(&mut child, pid_path, std::time::Duration::from_secs(2)) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let failure = format!("`minutes {label}`: {error}");
+            minutes_core::logging::log_error("toggle-spawn", label, &failure);
+            anyhow::bail!("{failure} — see ~/.minutes/logs/minutes.log")
+        }
+    }
+}
+
+/// How a spawned session announced itself within the startup window.
+#[derive(Debug)]
+enum SessionStart {
+    /// The session PID file went active — startup confirmed.
+    Ready,
+    /// The window elapsed with the child alive and no PID file, which means
+    /// the session is still starting (e.g. the audio probe), not failed.
+    StillStarting,
+}
+
+/// Wait for the child to write its session PID file, bail early if the
+/// process exits, and return [`SessionStart::StillStarting`] when the window
+/// elapses with the child alive.
+fn wait_for_session(
+    child: &mut impl SessionChild,
+    pid_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<SessionStart> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
         if minutes_core::pid::inspect_pid_file(pid_path).is_active() {
-            return Ok(());
+            return Ok(SessionStart::Ready);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break format!("`minutes {label}` exited during startup ({status})")
+        match child.try_exit()? {
+            Some(status) => anyhow::bail!("child exited during startup ({status})"),
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
             }
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                break format!("`minutes {label}` did not write its session file within 2s")
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(e) => break format!("`minutes {label}` could not be monitored: {e}"),
+            None => return Ok(SessionStart::StillStarting),
         }
-    };
-    minutes_core::logging::log_error("toggle-spawn", label, &failure);
-    anyhow::bail!("{failure} — see ~/.minutes/logs/minutes.log");
+    }
+}
+
+/// The slice of [`std::process::Child`] startup verification needs, so tests
+/// can stand in for a real process.
+trait SessionChild {
+    fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl SessionChild for std::process::Child {
+    fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
 }
 
 fn cmd_toggle_recording(mode: &str, config: &Config) -> Result<()> {
@@ -14271,6 +14309,57 @@ life (qmd://life/)
             assert_eq!(dictation_owner_is_cli(std::process::id()), expected);
             // PID 1 is init, never a `minutes dictate` process.
             assert!(!dictation_owner_is_cli(1));
+        }
+    }
+
+    mod session_start {
+        use super::*;
+        use std::time::Duration;
+
+        struct PendingChild;
+        impl SessionChild for PendingChild {
+            fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                Ok(None)
+            }
+        }
+
+        fn missing_pid_file() -> PathBuf {
+            std::env::temp_dir().join(format!("minutes-test-missing-{}.pid", std::process::id()))
+        }
+
+        /// `minutes record` in meeting mode probes system audio for ~5s before
+        /// writing its PID file, so a live child with no file at the deadline
+        /// must report still-starting — reporting failure here told compositor
+        /// users the toggle broke, and a retry press then stopped the session.
+        #[test]
+        fn child_alive_past_deadline_reports_still_starting() {
+            let outcome = wait_for_session(
+                &mut PendingChild,
+                &missing_pid_file(),
+                Duration::from_millis(120),
+            )
+            .unwrap();
+            assert!(matches!(outcome, SessionStart::StillStarting));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn child_exit_during_startup_is_an_error() {
+            use std::os::unix::process::ExitStatusExt;
+            struct ExitedChild;
+            impl SessionChild for ExitedChild {
+                fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                    // Raw wait status for exit code 1.
+                    Ok(Some(std::process::ExitStatus::from_raw(256)))
+                }
+            }
+            let error = wait_for_session(
+                &mut ExitedChild,
+                &missing_pid_file(),
+                Duration::from_millis(50),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("exited during startup"));
         }
     }
 }

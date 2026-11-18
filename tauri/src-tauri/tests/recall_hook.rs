@@ -38,6 +38,16 @@ fn native_hook_routes_context_and_status_by_environment_without_gui_startup() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     std::fs::write(root.join(".recall-root"), "root").unwrap();
+    let tabs = ["tab-a", "tab-b", "tab-live"].map(|id| {
+        serde_json::json!({
+            "id":id, "title":id, "meeting_path":null, "claude_session_id":null
+        })
+    });
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "active":"tab-a", "tabs":tabs
+    }))
+    .unwrap();
+    std::fs::write(root.join("recall-tabs.json"), &manifest).unwrap();
     for (id, focus) in [
         ("tab-a", "ALPHA"),
         ("tab-b", "BRAVO"),
@@ -74,6 +84,20 @@ fn native_hook_routes_context_and_status_by_environment_without_gui_startup() {
             ("tab-b", "BRAVO"),
             ("tab-live", "LIVE GUIDANCE"),
         ] {
+            if event == "UserPromptSubmit" {
+                let unchanged = invoke(root, Some(id), event);
+                assert!(unchanged.status.success());
+                assert!(
+                    unchanged.stdout.is_empty(),
+                    "unchanged prompts must not repeat context"
+                );
+                assert!(unchanged.stderr.is_empty());
+                std::fs::write(
+                    root.join("tabs").join(id).join("CLAUDE.md"),
+                    format!("{focus} changed"),
+                )
+                .unwrap();
+            }
             let output = invoke(root, Some(id), event);
             assert!(output.status.success());
             assert!(
@@ -93,6 +117,11 @@ fn native_hook_routes_context_and_status_by_environment_without_gui_startup() {
                 &std::fs::read(root.join("tabs").join(id).join(".recall-state.json")).unwrap(),
             )
             .unwrap();
+            assert_eq!(
+                std::fs::read(root.join("recall-tabs.json")).unwrap(),
+                manifest,
+                "hook helpers cannot rewrite the manifest"
+            );
             assert_eq!(state["session_id"], "saved-session");
             assert_eq!(
                 state["status"],

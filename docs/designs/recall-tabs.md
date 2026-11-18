@@ -18,9 +18,14 @@ or the user starts it by hand. Direct launch and Open in Herdr use the same rule
 Minutes sets `MINUTES_RECALL_TAB=<id>` in every tab process, including shells and
 Herdr handoffs; a manually launched Claude inherits it.
 
-The root `CLAUDE.md` and `AGENTS.md` remain neutral. Claude receives its own tab's
-instructions and current focus through the hooks below. Hook context identifies
-its absolute tab folder and tells it to resolve relative instruction paths there
+The root `CLAUDE.md` and `AGENTS.md` remain neutral. When `MINUTES_RECALL_TAB`
+contains a valid tab ID, both root files direct an agent to
+`tabs/$MINUTES_RECALL_TAB/AGENTS.md` and confine its work to that tab folder. This
+also covers Codex started by hand inside a root shell and Claude without hooks.
+With no valid environment identity or no matching folder, no tab focus is
+selected and agents must not inspect other tabs to guess one. Claude normally
+receives its own tab's instructions and current focus through the hooks below.
+Hook context identifies its absolute tab folder and tells it to resolve relative instruction paths there
 and save authored Documents in `tabs/<id>/`. Per-tab files remain the source of
 truth. Newly authored tab artifacts also appear in Documents.
 
@@ -55,8 +60,13 @@ legacy singleton IDs also check the parent workspace's project directory. Only
 file metadata is inspected. Pre-change tabs still check their old per-tab Claude
 project directory, while new conversations check the shared root project. Saved
 IDs resume with `claude --resume <id>` across projects; no history is moved or
-migrated. Missing or empty history clears the unusable ID, so
-a never-used tab starts fresh rather than failing with “No conversation found.”
+migrated. Claude can report a nonexistent root-project `transcript_path` when
+resuming an old per-tab session even though it still appends to the old file.
+`claude_transcript_path` is therefore an advisory hint, never proof of availability.
+Every resume consumer (including Herdr) must use `transcript_available`, which
+validates a nonempty matching file at the reported path or falls back to the old
+tab and root project directories. Missing or empty history clears the unusable
+ID, so a never-used tab starts fresh rather than failing with “No conversation found.”
 
 ## Hooks and status
 
@@ -69,12 +79,19 @@ Claude and Claude started manually inside a shell discover the hooks in the
 shared root's `.claude/settings.json`, installed idempotently once per root.
 Hooks resolve `MINUTES_RECALL_TAB` to an existing marked `tabs/<id>/` folder.
 Missing, invalid, unknown or path-traversal IDs and symlinked tab paths add no
-context and write no status. SessionStart and UserPromptSubmit return that tab's
-instruction and focus file paths, bounded meeting/general-context and artifact
-previews, full live guidance for the live tab only, and one-shot focus notices as
-`hookSpecificOutput.additionalContext`; a notice is consumed once. The agent is
-told to read its tab files for complete context. Long meetings remain in those
-files rather than overflowing the hook's inline-context limit.
+context and write no status. SessionStart returns that tab's instruction and
+focus file paths, bounded meeting/general-context and artifact previews, full
+live guidance for the live tab only, and one-shot notices as
+`hookSpecificOutput.additionalContext`. This also refreshes context on resume,
+compact and clear. UserPromptSubmit returns this block only when focus changed
+since the last injection or a one-shot notice is queued; unchanged prompts emit
+no context but still update status. A small private per-tab cache records the
+session ID and a fingerprint of the tab's instruction, focus and live-marker
+files. Same-size content edits and file removal invalidate it; regenerating
+identical files does not. Missing, corrupt or unwritable cache state falls back
+to reinjection. A notice is consumed once. The agent is told to read its tab files
+for complete context. Long meetings remain in those files rather than overflowing
+the hook's inline-context limit.
 SessionStart never materializes stored meeting context. UserPromptSubmit retains
 the real-question and provider-authentication gate before materialization.
 Live-call guidance comes only from the live tab's own instruction files.

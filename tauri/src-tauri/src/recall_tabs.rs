@@ -1,6 +1,7 @@
 //! Recall tab metadata and Claude hook protocol. Optional consumers never block capture.
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
@@ -28,6 +29,8 @@ pub struct Tab {
     pub meeting_path: Option<String>,
     pub claude_session_id: Option<String>,
     #[serde(default)]
+    // Advisory hook hint: cross-project resume can report a nonexistent root
+    // path. Always use transcript_available's tab/root fallbacks to validate it.
     pub claude_transcript_path: Option<PathBuf>,
     #[serde(default)]
     pub herdr_terminal: Option<String>,
@@ -246,7 +249,7 @@ impl TabStore {
         // Refresh neutral parent instructions on upgrade, too. Focus is supplied
         // only by a resolved tab hook (Claude) or the per-tab cwd (other agents).
         for name in crate::context::ASSISTANT_INSTRUCTION_FILES {
-            private_write(&root.join(name), b"# Minutes Recall\n\nThis is the shared assistant root. It contains no meeting or live-call focus. Claude receives its tab folder and context from Minutes hooks using MINUTES_RECALL_TAB. Use only the folder identified by that hook; never inspect other tabs. Authored Documents belong in that tab folder. Other agents start in their own tab folder and use its instructions.\n")?;
+            private_write(&root.join(name), b"# Minutes Recall\n\nThis is the shared assistant root. It contains no meeting or live-call focus. If MINUTES_RECALL_TAB is set to a valid tab ID (1-80 ASCII letters, digits or hyphens), your tab folder is `tabs/$MINUTES_RECALL_TAB/` relative to this root. Read that folder's AGENTS.md before working, resolve relative paths there, and use only that tab's instructions and context. Save authored Documents in that tab folder. This also applies to Codex or other agents started by hand in a shell tab, and Claude without managed hooks. Claude's managed hooks identify the same folder. If the variable is unset or invalid, or that folder is absent, no tab focus is selected: stay neutral and never inspect other tabs to guess a focus.\n")?;
         }
         crate::context::ensure_workspace_repository(root)?;
         self.loaded = true;
@@ -566,6 +569,59 @@ pub fn maybe_run_hook() -> Option<i32> {
     Some(0)
 }
 
+const INJECTED_FOCUS: &str = ".recall-injected-focus.json";
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct FocusInjection {
+    session_id: Option<String>,
+    fingerprint: String,
+}
+
+/// A bounded change token, not an authorization check. Hash complete generated
+/// context files (up to 1 MiB each) so same-size edits and atomic rewrites are
+/// handled without injecting unchanged content merely because its mtime changed.
+fn focus_fingerprint(workspace: &Path) -> Result<String, String> {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    const MAX_BYTES: u64 = 1_048_576;
+    for name in [
+        "CLAUDE.md",
+        "AGENTS.md",
+        crate::context::ACTIVE_MEETING_FILE,
+        crate::context::ASSISTANT_CONTEXT_FILE,
+        crate::context::ACTIVE_ARTIFACT_FILE,
+        ".live-tab",
+        ".recall-focus.json",
+    ] {
+        name.hash(&mut hash);
+        let file = match fs::File::open(workspace.join(name)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                false.hash(&mut hash);
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        true.hash(&mut hash);
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        metadata.len().hash(&mut hash);
+        // Oversized user-edited files still invalidate on a tail edit, while
+        // this optional consumer's reads stay bounded.
+        if metadata.len() > MAX_BYTES {
+            metadata.modified().ok().hash(&mut hash);
+        }
+        let mut reader = file.take(MAX_BYTES);
+        let mut buffer = [0; 4_096];
+        loop {
+            let size = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+            if size == 0 {
+                break;
+            }
+            hash.write(&buffer[..size]);
+        }
+    }
+    Ok(format!("v1-{:016x}", hash.finish()))
+}
+
 /// Both focus events use the same tab-local files. SessionStart never materializes
 /// stored meetings; only a real authenticated prompt may cross that gate.
 fn run_tab_hook(
@@ -594,6 +650,26 @@ fn run_tab_hook(
     }
     if event == "UserPromptSubmit" {
         prepare(workspace, input)?;
+    }
+    let injection = focus_fingerprint(workspace)
+        .ok()
+        .map(|fingerprint| FocusInjection {
+            session_id: input["session_id"].as_str().map(str::to_string),
+            fingerprint,
+        });
+    // Missing/corrupt cache or an unreadable fingerprint conservatively sends
+    // context again. SessionStart always injects, including resume/compact/clear.
+    if event == "UserPromptSubmit"
+        && !crate::context::assistant_skills::has_focus_notices(workspace)
+        && injection.as_ref().is_some_and(|current| {
+            read_small(&workspace.join(INJECTED_FOCUS))
+                .ok()
+                .and_then(|raw| serde_json::from_slice::<FocusInjection>(&raw).ok())
+                .as_ref()
+                == Some(current)
+        })
+    {
+        return Ok(String::new());
     }
     let mut context = format!(
         "Minutes Recall tab folder: `{}`. Resolve all relative paths in the following tab instructions against this folder, even though Claude starts in the shared assistant root. Save authored Documents in this tab folder. Use only this tab's focus; never read another tab's context. Files absent from this snapshot are not selected.\n",
@@ -637,10 +713,18 @@ fn run_tab_hook(
     context.push_str(&crate::context::assistant_skills::take_focus_notices(
         workspace,
     )?);
-    serde_json::to_string(&serde_json::json!({
+    let output = serde_json::to_string(&serde_json::json!({
         "hookSpecificOutput": { "hookEventName": event, "additionalContext": context }
     }))
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if let Some(injection) = injection {
+        // Deduplication is optional: a failed cache write must not suppress the
+        // prepared context or block the user's agent.
+        if let Ok(bytes) = serde_json::to_vec(&injection) {
+            let _ = private_write(&workspace.join(INJECTED_FOCUS), &bytes);
+        }
+    }
+    Ok(output)
 }
 
 fn append_focus_preview(context: &mut String, path: &Path, text: &str, limit: usize) {
@@ -1661,6 +1745,14 @@ mod shared_cwd_tests {
                 ("meeting-b", "BRAVO", "ALPHA"),
             ] {
                 let dir = hook_workspace(root, Some(id)).unwrap();
+                if event == "UserPromptSubmit" {
+                    // A changed focus is reinjected, still confined to this tab.
+                    fs::write(
+                        dir.join("CURRENT_ARTIFACT.md"),
+                        format!("{own} meeting artifact updated"),
+                    )
+                    .unwrap();
+                }
                 let output = run_tab_hook(
                     &dir,
                     event,
@@ -1694,6 +1786,9 @@ mod shared_cwd_tests {
                     }
                 );
             }
+            if event == "UserPromptSubmit" {
+                fs::write(live.join(".live-tab"), "live marker updated").unwrap();
+            }
             let text = run_tab_hook(&live, event, &serde_json::json!({}), |_, _| Ok(())).unwrap();
             assert!(text.contains("## Live Transcript Active"));
             assert!(!text.contains("ALPHA"));
@@ -1701,6 +1796,95 @@ mod shared_cwd_tests {
         }
         assert!(!root.join(STATE).exists());
         assert!(!root.join("CURRENT_MEETING.md").exists());
+    }
+
+    #[test]
+    fn unchanged_prompts_are_silent_but_focus_edits_notices_and_new_sessions_reinject() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = tab(temp.path(), "tab-a");
+        fs::write(dir.join("CLAUDE.md"), "tab instructions").unwrap();
+        fs::write(dir.join("CURRENT_MEETING.md"), "ALPHA meeting").unwrap();
+        let run = |event: &str, session: &str| {
+            run_tab_hook(
+                &dir,
+                event,
+                &serde_json::json!({"session_id": session}),
+                |_, _| Ok(()),
+            )
+            .unwrap()
+        };
+        for source in ["startup", "resume", "compact", "clear"] {
+            assert!(!run_tab_hook(
+                &dir,
+                "SessionStart",
+                &serde_json::json!({"session_id":"session-a", "source":source}),
+                |_, _| panic!()
+            )
+            .unwrap()
+            .is_empty());
+            assert!(run("UserPromptSubmit", "session-a").is_empty());
+        }
+        // Regenerating identical files is not a focus change.
+        fs::write(dir.join("CURRENT_MEETING.md"), "ALPHA meeting").unwrap();
+        assert!(run("UserPromptSubmit", "session-a").is_empty());
+        // Same-length content edits must be detected, not just file sizes.
+        fs::write(dir.join("CURRENT_MEETING.md"), "BRAVO meeting").unwrap();
+        assert!(run("UserPromptSubmit", "session-a").contains("BRAVO meeting"));
+        assert!(run("UserPromptSubmit", "session-a").is_empty());
+        for name in [
+            "CURRENT_ARTIFACT.md",
+            "ASSISTANT_CONTEXT.md",
+            "AGENTS.md",
+            ".live-tab",
+        ] {
+            fs::write(dir.join(name), "new tab focus").unwrap();
+            assert!(!run("UserPromptSubmit", "session-a").is_empty(), "{name}");
+            assert!(run("UserPromptSubmit", "session-a").is_empty());
+            fs::remove_file(dir.join(name)).unwrap();
+            assert!(
+                !run("UserPromptSubmit", "session-a").is_empty(),
+                "removed {name}"
+            );
+        }
+        crate::context::assistant_skills::queue_focus_notice(
+            &dir,
+            crate::context::assistant_skills::FocusNotice::Artifact,
+            "one-shot notice",
+        )
+        .unwrap();
+        assert!(run("UserPromptSubmit", "session-a").contains("one-shot notice"));
+        assert!(run("UserPromptSubmit", "session-a").is_empty());
+        assert!(!run("UserPromptSubmit", "session-b").is_empty());
+        assert!(run("UserPromptSubmit", "session-b").is_empty());
+        fs::write(dir.join(INJECTED_FOCUS), "corrupt cache").unwrap();
+        assert!(!run("UserPromptSubmit", "session-b").is_empty());
+        assert!(run("UserPromptSubmit", "session-b").is_empty());
+        let state: HookState = serde_json::from_slice(&fs::read(dir.join(STATE)).unwrap()).unwrap();
+        assert_eq!(
+            state.status,
+            Status::Working,
+            "silent prompts still update status"
+        );
+    }
+
+    #[test]
+    fn first_question_materializes_before_comparing_the_last_focus_injection() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = tab(temp.path(), "tab-a");
+        let input = serde_json::json!({"session_id":"session-a", "prompt":"a real question"});
+        run_tab_hook(&dir, "SessionStart", &input, |_, _| panic!()).unwrap();
+        let first = run_tab_hook(&dir, "UserPromptSubmit", &input, |workspace, _| {
+            fs::write(
+                workspace.join("CURRENT_MEETING.md"),
+                "authenticated meeting focus",
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert!(first.contains("authenticated meeting focus"));
+        let second = run_tab_hook(&dir, "UserPromptSubmit", &input, |_, _| Ok(())).unwrap();
+        assert!(second.is_empty());
     }
 
     #[test]
@@ -1785,6 +1969,9 @@ mod shared_cwd_tests {
             let text = fs::read_to_string(root.join(name)).unwrap();
             assert!(text.contains("shared assistant root"));
             assert!(!text.contains("old neutral"));
+            assert!(text.contains("tabs/$MINUTES_RECALL_TAB/"));
+            assert!(text.contains("Read that folder's AGENTS.md"));
+            assert!(text.contains("unset or invalid"));
         }
     }
 
@@ -1810,6 +1997,18 @@ mod shared_cwd_tests {
                 "tab-old",
                 id,
                 None,
+                Some(&home)
+            ));
+            let nonexistent_hint = temp
+                .path()
+                .join("reported-root-project")
+                .join(format!("{id}.jsonl"));
+            assert!(!nonexistent_hint.exists());
+            assert!(transcript_available_at(
+                &root,
+                "tab-old",
+                id,
+                Some(&nonexistent_hint),
                 Some(&home)
             ));
             assert_eq!(
@@ -2242,5 +2441,54 @@ mod capture_tests {
             !tab.capture_complete,
             "observer must be able to retry a focus-file failure"
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    fn hook_update(root: &Path, id: &str, event: &str) {
+        let transcript = root.join("probe-session.jsonl");
+        fs::write(&transcript, b"synthetic turn").unwrap();
+        let state = HookState {
+            transcript_path: Some(transcript),
+            claude_active: true,
+            status: status_for_event(event, &serde_json::json!({})).unwrap(),
+            session_id: Some("probe-session".into()),
+        };
+        private_write(
+            &workspace_at(root, id).unwrap().join(STATE),
+            &serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn new_tab_survives_first_turn_hook_change_and_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut authoritative = TabStore::default();
+        let old = authoritative.open(root, None, true).unwrap();
+        let meeting = root.join("meeting.md");
+        fs::write(&meeting, "synthetic meeting").unwrap();
+        let new = authoritative.open(root, meeting.to_str(), true).unwrap();
+        for event in ["SessionStart", "UserPromptSubmit", "Stop"] {
+            hook_update(root, &new, event);
+            authoritative.refresh(root).unwrap();
+            authoritative
+                .sync_live_capture_with(root, None, |_| None)
+                .unwrap();
+            authoritative.save(root).unwrap();
+            let persisted: TabStore =
+                serde_json::from_slice(&fs::read(root.join(MANIFEST)).unwrap()).unwrap();
+            assert_eq!(persisted.tabs.len(), 2);
+            assert_eq!(persisted.active.as_deref(), Some(new.as_str()));
+        }
+        let mut restored = TabStore::default();
+        restored.ensure(root).unwrap();
+        assert!(restored.tabs.iter().any(|tab| tab.id == old));
+        assert!(restored.tabs.iter().any(|tab| tab.id == new));
+        assert_eq!(restored.active.as_deref(), Some(new.as_str()));
     }
 }

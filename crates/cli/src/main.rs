@@ -424,7 +424,13 @@ enum Commands {
     /// transcript otherwise. Designed for compositor keybinds on Wayland,
     /// where the compositor owns global shortcuts (Hyprland `bind`, GNOME
     /// custom shortcuts, KDE shortcuts).
-    ToggleRecording,
+    ToggleRecording {
+        /// Mode to start in: "meeting" (default) or "quick-thought" spawn
+        /// `minutes record --mode <mode>`; "live" spawns `minutes live`
+        /// instead. Stopping works the same for every mode.
+        #[arg(long, default_value = "meeting", value_parser = ["meeting", "quick-thought", "live"])]
+        mode: String,
+    },
 
     /// Toggle dictation on or off from a single keybind. Starts a detached
     /// `minutes dictate` when idle; stops an active dictation session
@@ -2183,7 +2189,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::MicToggle { state } => cmd_mic_toggle(state.as_deref()),
-        Commands::ToggleRecording => cmd_toggle_recording(&config),
+        Commands::ToggleRecording { mode } => cmd_toggle_recording(&mode, &config),
         Commands::ToggleDictation => cmd_toggle_dictation(),
         Commands::ProcessQueue => cmd_process_queue(&config),
         Commands::PolicyAudit => cmd_policy_audit(),
@@ -3713,7 +3719,7 @@ fn cmd_mic_toggle(force_state: Option<&str>) -> Result<()> {
 /// Spawn a detached `minutes` subcommand. Compositor keybinds need the work
 /// to outlive the invoking command, so the child gets null stdio and is left
 /// running — same pattern as `spawn_queue_worker`.
-fn spawn_detached_minutes(args: &[&str]) -> Result<()> {
+fn spawn_detached_minutes(args: &[&str]) -> Result<std::process::Child> {
     let exe = std::env::current_exe()?;
     std::process::Command::new(exe)
         .args(args)
@@ -3721,11 +3727,36 @@ fn spawn_detached_minutes(args: &[&str]) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))?;
-    Ok(())
+        .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))
 }
 
-fn cmd_toggle_recording(config: &Config) -> Result<()> {
+/// Spawn a detached session and confirm it actually came up. The child has no
+/// terminal, so a failure on startup (no mic, missing model) would otherwise
+/// be invisible: wait briefly for its PID file, and log the failure to
+/// `~/.minutes/logs/minutes.log` when it dies or never reports readiness.
+fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Result<()> {
+    let mut child = spawn_detached_minutes(args)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let failure = loop {
+        if minutes_core::pid::inspect_pid_file(pid_path).is_active() {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break format!("`minutes {label}` exited during startup ({status})")
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                break format!("`minutes {label}` did not write its session file within 2s")
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => break format!("`minutes {label}` could not be monitored: {e}"),
+        }
+    };
+    minutes_core::logging::log_error("toggle-spawn", label, &failure);
+    anyhow::bail!("{failure} — see ~/.minutes/logs/minutes.log");
+}
+
+fn cmd_toggle_recording(mode: &str, config: &Config) -> Result<()> {
     let recording_active = matches!(minutes_core::pid::check_recording(), Ok(Some(_)));
     let live_active =
         minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
@@ -3743,8 +3774,23 @@ fn cmd_toggle_recording(config: &Config) -> Result<()> {
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;
 
-    spawn_detached_minutes(&["record"])?;
-    println!("Recording started — run `minutes toggle-recording` again to stop.");
+    if mode == "live" {
+        spawn_session(
+            &["live"],
+            &minutes_core::pid::live_transcript_pid_path(),
+            "live",
+        )?;
+        println!(
+            "Live transcript started — run `minutes toggle-recording --mode live` again to stop."
+        );
+    } else {
+        spawn_session(
+            &["record", "--mode", mode],
+            &minutes_core::pid::pid_path(),
+            "record",
+        )?;
+        println!("Recording started — run `minutes toggle-recording` again to stop.");
+    }
     Ok(())
 }
 
@@ -3772,7 +3818,11 @@ fn cmd_toggle_dictation() -> Result<()> {
         anyhow::bail!("a voice session is open — dictation can't start");
     }
 
-    spawn_detached_minutes(&["dictate"])?;
+    spawn_session(
+        &["dictate"],
+        &minutes_core::pid::dictation_pid_path(),
+        "dictate",
+    )?;
     println!("Dictation started — run `minutes toggle-dictation` again to stop.");
     Ok(())
 }
@@ -3801,33 +3851,71 @@ fn stop_running_dictation(_pid: u32) -> Result<()> {
     anyhow::bail!("a dictation session is already running — stop it where it started")
 }
 
-/// True when `pid` runs this same executable — i.e. a `minutes dictate`
-/// session, not the desktop app, which shares `dictation_pid_path()`.
+/// The dictation PID file is shared with the desktop app, and a reused PID
+/// can point at a different `minutes` subcommand (`record`, `live`) — so the
+/// owner must be a `dictate` invocation of this same binary, verified from
+/// its full command line rather than just the executable name.
 #[cfg(unix)]
 fn dictation_owner_is_cli(pid: u32) -> bool {
-    let Some(own_name) = std::env::current_exe().ok().and_then(|path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-    }) else {
+    let Some(own_name) = own_exe_name() else {
         return false;
     };
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
+    let Some(args) = process_args(pid) else {
+        return false;
+    };
+    args_indicate_dictate(&args, &own_name)
+}
+
+#[cfg(unix)]
+fn own_exe_name() -> Option<String> {
+    std::env::current_exe()
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
         .output()
-    else {
-        return false;
-    };
+        .ok()?;
     if !output.status.success() {
-        return false;
+        return None;
     }
-    let comm = String::from_utf8_lossy(&output.stdout);
-    let target = comm.trim();
-    // `comm=` reports the executable path on some platforms and just the name
-    // on others — compare against both forms.
-    target == own_name
-        || std::path::Path::new(target)
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy() == own_name)
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// `argv[0]` must be this binary and the first non-flag argument must be the
+/// `dictate` subcommand (global flags like `-v` may precede it; option values
+/// like `--title dictate` must not count).
+#[cfg(unix)]
+fn args_indicate_dictate(args: &[String], own_name: &str) -> bool {
+    let exe_matches = args
+        .first()
+        .and_then(|arg0| std::path::Path::new(arg0).file_name())
+        .is_some_and(|name| name.to_string_lossy() == own_name);
+    exe_matches
+        && args[1..]
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|arg| arg == "dictate")
 }
 
 fn cmd_stop(_config: &Config) -> Result<()> {
@@ -14119,6 +14207,71 @@ life (qmd://life/)
         .unwrap();
         assert!(called);
         assert_eq!(output, result.text.trim_end());
+    }
+
+    #[cfg(unix)]
+    mod dictate_owner {
+        use super::*;
+
+        fn args(list: &[&str]) -> Vec<String> {
+            list.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn requires_the_subcommand_after_flags() {
+            // `-v` is the only global flag and takes no value, so the first
+            // non-flag argument is always the subcommand.
+            assert!(args_indicate_dictate(
+                &args(&["minutes", "dictate"]),
+                "minutes"
+            ));
+            assert!(args_indicate_dictate(
+                &args(&[
+                    "/usr/local/bin/minutes",
+                    "-v",
+                    "dictate",
+                    "--delivery",
+                    "clipboard"
+                ]),
+                "minutes"
+            ));
+            // Other subcommands — including a `dictate` option value — and
+            // other binaries must never be signaled.
+            assert!(!args_indicate_dictate(
+                &args(&["minutes", "record"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(
+                &args(&["minutes", "record", "--title", "dictate"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(
+                &args(&["minutes-app", "dictate"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(&args(&[]), "minutes"));
+        }
+
+        #[test]
+        fn own_pid_resolves_and_init_never_matches() {
+            // The test process is our own executable: reading its cmdline
+            // proves the /proc + ps plumbing resolves argv[0] to this binary.
+            let own_name = own_exe_name().expect("current_exe must have a file name");
+            let own = process_args(std::process::id()).expect("own cmdline must be readable");
+            assert_eq!(
+                std::path::Path::new(&own[0])
+                    .file_name()
+                    .map(|name| name.to_string_lossy()),
+                Some(std::borrow::Cow::Borrowed(own_name.as_str()))
+            );
+            let expected = own[1..]
+                .iter()
+                .find(|arg| !arg.starts_with('-'))
+                .is_some_and(|arg| arg == "dictate");
+            assert_eq!(dictation_owner_is_cli(std::process::id()), expected);
+            // PID 1 is init, never a `minutes dictate` process.
+            assert!(!dictation_owner_is_cli(1));
+        }
     }
 }
 

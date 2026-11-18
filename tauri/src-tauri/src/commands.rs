@@ -21877,6 +21877,74 @@ mod tests {
         bytes.hash(&mut hasher);
         hasher.finish()
     }
+
+    /// Saves and restores the session env vars `session_is_wayland` reads, so
+    /// each test starts from a clean slate regardless of the host session.
+    #[cfg(target_os = "linux")]
+    struct SessionEnv {
+        _lock: MutexGuard<'static, ()>,
+        wayland_display: Option<std::ffi::OsString>,
+        session_type: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SessionEnv {
+        fn isolate() -> Self {
+            let lock = test_guard();
+            let saved = Self {
+                _lock: lock,
+                wayland_display: std::env::var_os("WAYLAND_DISPLAY"),
+                session_type: std::env::var_os("XDG_SESSION_TYPE"),
+            };
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("XDG_SESSION_TYPE");
+            saved
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SessionEnv {
+        fn drop(&mut self) {
+            for (key, value) in [
+                ("WAYLAND_DISPLAY", self.wayland_display.take()),
+                ("XDG_SESSION_TYPE", self.session_type.take()),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_is_wayland_detects_display_var() {
+        let _env = SessionEnv::isolate();
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+        assert!(session_is_wayland());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_is_wayland_detects_session_type() {
+        let _env = SessionEnv::isolate();
+        std::env::set_var("XDG_SESSION_TYPE", "Wayland");
+        assert!(session_is_wayland());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_is_wayland_ignores_x11_and_empty_display() {
+        let _env = SessionEnv::isolate();
+        std::env::set_var("XDG_SESSION_TYPE", "x11");
+        assert!(!session_is_wayland());
+        std::env::set_var("WAYLAND_DISPLAY", "");
+        std::env::set_var("XDG_SESSION_TYPE", "tty");
+        assert!(!session_is_wayland());
+        std::env::remove_var("XDG_SESSION_TYPE");
+        assert!(!session_is_wayland());
+    }
 }
 
 // ── Dictation commands ──────────────────────────────────────

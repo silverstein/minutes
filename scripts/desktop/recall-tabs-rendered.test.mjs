@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Production tab controller and CSS, with native metadata/PTY boundaries stubbed.
 import assert from 'node:assert/strict';
+import { herdrLiveContracts } from './herdr-live-rendered.mjs';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -37,6 +38,7 @@ if (process.env.MINUTES_RECALL_TAB_PREVIEW) {
 }
 const browser = await chromium.launch({ headless: true });
 try {
+  await herdrLiveContracts(browser, source, css);
   const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   if (process.env.MINUTES_RECALL_TEST_CPU_RATE) {
     const session = await page.context().newCDPSession(page);

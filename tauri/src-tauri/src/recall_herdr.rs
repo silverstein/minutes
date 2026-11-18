@@ -9,6 +9,9 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
+#[path = "herdr_live.rs"]
+pub(crate) mod live;
+
 static TRANSITION: Mutex<()> = Mutex::new(());
 const DEADLINE: Duration = Duration::from_secs(5);
 const HC_NOT_FOUND: &str = "hc was not found on the assistant PATH";
@@ -96,6 +99,16 @@ impl Hc {
         })
     }
     fn call(&self, args: &[String]) -> Result<(bool, serde_json::Value), String> {
+        self.call_cancellable(args, &std::sync::atomic::AtomicBool::new(false))
+    }
+    fn call_cancellable(
+        &self,
+        args: &[String],
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(bool, serde_json::Value), String> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("Herdr delivery was cancelled".into());
+        }
         // Anonymous files avoid pipe deadlocks and never expose environment values.
         let mut stdout = tempfile::tempfile().map_err(|e| e.to_string())?;
         let mut stderr = tempfile::tempfile().map_err(|e| e.to_string())?;
@@ -113,6 +126,11 @@ impl Hc {
             .map_err(|e| format!("Could not start hc: {e}"))?;
         let start = Instant::now();
         let success = loop {
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Herdr delivery was cancelled".into());
+            }
             match child.try_wait() {
                 Ok(Some(status)) => break status.success(),
                 Ok(None) if start.elapsed() < self.timeout => {

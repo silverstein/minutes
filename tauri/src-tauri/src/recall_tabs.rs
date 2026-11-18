@@ -920,7 +920,7 @@ fn recording_capture_id_at(path: &Path) -> Option<String> {
 
 // The relay ID is a producer identity, not a guessed future Markdown path.
 // Deserialize only identity fields; never copy the relay capability token.
-fn relay_capture_id() -> Option<String> {
+pub(crate) fn relay_capture_id() -> Option<String> {
     #[derive(Deserialize)]
     struct Identity {
         session_id: String,

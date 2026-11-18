@@ -15907,6 +15907,50 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn optional_herdr_failure_cannot_delay_live_controls_wav_or_processing_admission() {
+        with_temp_home(|home| {
+            crate::recall_herdr::live::assert_capture_isolation(|| {
+                let state = test_app_state();
+                let started = Instant::now();
+                try_acquire_live(&state).unwrap();
+                let audio = home.join("synthetic-live.wav");
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16_000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut writer = hound::WavWriter::create(&audio, spec).unwrap();
+                for _ in 0..320 {
+                    writer.write_sample(17_i16).unwrap();
+                }
+                assert!(request_in_app_live_stop(&state));
+                assert!(state.live_transcript_stop_flag.load(Ordering::Relaxed));
+                writer.finalize().unwrap();
+                let reader = hound::WavReader::open(&audio).unwrap();
+                assert_eq!(reader.duration(), 320);
+                let job = minutes_core::jobs::enqueue_preserved_capture_job(
+                    CaptureMode::LiveTranscript,
+                    None,
+                    &audio,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert!(minutes_core::jobs::load_job(&job.id).is_some());
+                assert!(audio.is_file());
+                assert!(started.elapsed() < Duration::from_millis(500));
+            });
+        });
+    }
+
     #[test]
     fn dictation_overlay_snapshot_advances_for_replay_ordering() {
         let mut snapshot = DictationOverlaySnapshot::default();
@@ -23737,12 +23781,23 @@ pub fn cmd_live_capture_plan() -> LiveCapturePlan {
 
 #[tauri::command]
 pub fn cmd_stop_live_transcript(state: tauri::State<AppState>) -> Result<(), String> {
+    if request_in_app_live_stop(&state) {
+        return Ok(());
+    }
+    stop_external_live_transcript()
+}
+
+fn request_in_app_live_stop(state: &AppState) -> bool {
     if state.live_transcript_active.load(Ordering::Relaxed) {
         state
             .live_transcript_stop_flag
             .store(true, Ordering::Relaxed);
-        return Ok(());
+        return true;
     }
+    false
+}
+
+fn stop_external_live_transcript() -> Result<(), String> {
     // Check for external live transcript (started from CLI or another desktop
     // app). `inspect_pid_file` so a session holding the PID under a mandatory
     // Windows lock is detected (#258). The stop sentinel, polled inline by the

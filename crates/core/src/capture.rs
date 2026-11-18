@@ -8,7 +8,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(feature = "streaming")]
-use crate::streaming::AudioStream;
+use crate::streaming::{AudioChunk, AudioStream};
+#[cfg(feature = "streaming")]
+use crossbeam_channel::{Receiver, Sender};
+#[cfg(feature = "streaming")]
+use std::collections::BTreeMap;
 
 /// Shared audio level (0–100 scale) for UI visualization.
 /// Updated ~10x per second from the cpal callback.
@@ -1223,6 +1227,9 @@ fn try_reconnect(
 const DUAL_SOURCE_SLOT_SAMPLES: usize = crate::streaming::CHUNK_SAMPLES;
 
 #[cfg(feature = "streaming")]
+const DUAL_SYSTEM_QUEUE_CAPACITY: usize = 64;
+
+#[cfg(feature = "streaming")]
 struct DualCaptureWriters {
     mixed: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     voice: hound::WavWriter<std::io::BufWriter<std::fs::File>>,
@@ -1544,7 +1551,7 @@ fn padded_slot(samples: Option<Vec<f32>>) -> Vec<f32> {
 }
 
 #[cfg(feature = "streaming")]
-fn dual_source_slot_for_chunk(base_slot: u64, chunk: &crate::streaming::AudioChunk) -> u64 {
+fn dual_source_slot_for_chunk(base_slot: u64, chunk: &AudioChunk) -> u64 {
     base_slot + chunk.index
 }
 
@@ -1618,36 +1625,112 @@ impl DualSlotStats {
 }
 
 #[cfg(feature = "streaming")]
-fn flush_dual_source_slots(
-    next_slot: &mut Option<u64>,
-    max_slot: Option<u64>,
-    pending_voice: &mut std::collections::BTreeMap<u64, Vec<f32>>,
-    pending_system: &mut std::collections::BTreeMap<u64, Vec<f32>>,
-    writers: &mut DualCaptureWriters,
-    live_tx: &Option<crate::live_audio_coverage::LiveAudioSender>,
-    slot_stats: &mut DualSlotStats,
-) -> Result<(), CaptureError> {
-    let (Some(current_slot), Some(max_slot)) = (*next_slot, max_slot) else {
-        return Ok(());
-    };
-    if current_slot > max_slot {
-        return Ok(());
+#[derive(Default)]
+struct PendingSourceSlots {
+    last: Option<u64>,
+    samples: BTreeMap<u64, Vec<f32>>,
+}
+
+#[cfg(feature = "streaming")]
+impl PendingSourceSlots {
+    fn insert(&mut self, slot: u64, samples: Vec<f32>) {
+        self.last = self.last.max(Some(slot));
+        self.samples.insert(slot, samples);
+    }
+}
+
+#[cfg(feature = "streaming")]
+#[derive(Default)]
+struct DualSourceSlots {
+    slot_base: u64,
+    next_slot: Option<u64>,
+    voice: PendingSourceSlots,
+    system: PendingSourceSlots,
+}
+
+#[cfg(feature = "streaming")]
+impl DualSourceSlots {
+    fn queue_voice(&mut self, mut chunk: AudioChunk, mic_muted: bool) {
+        // Muting preserves the slot and frame count of voice audio.
+        if mic_muted {
+            chunk.samples.fill(0.0);
+        }
+        let slot = dual_source_slot_for_chunk(self.slot_base, &chunk);
+        self.next_slot.get_or_insert(slot);
+        self.voice.insert(slot, chunk.samples);
     }
 
-    let mut slot = current_slot;
-    while slot <= max_slot {
-        let has_voice = pending_voice.contains_key(&slot);
-        let has_system = pending_system.contains_key(&slot);
-        // Counts both sources and how long each has been absent. A slot with
-        // neither source is a silence slot: both stems get padding.
-        slot_stats.record(has_voice, has_system);
-        let voice = padded_slot(pending_voice.remove(&slot));
-        let system = padded_slot(pending_system.remove(&slot));
-        writers.write_slot(&voice, &system, live_tx)?;
-        slot += 1;
+    fn queue_system(&mut self, chunk: AudioChunk) {
+        let slot = dual_source_slot_for_chunk(self.slot_base, &chunk);
+        self.next_slot.get_or_insert(slot);
+        self.system.insert(slot, chunk.samples);
     }
-    *next_slot = Some(slot);
-    Ok(())
+
+    fn drain(
+        &mut self,
+        voice_rx: &Receiver<AudioChunk>,
+        system_rx: &Receiver<AudioChunk>,
+        is_mic_muted: impl Fn() -> bool,
+    ) -> bool {
+        let mut got_any = false;
+        for chunk in voice_rx.try_iter() {
+            self.queue_voice(chunk, is_mic_muted());
+            got_any = true;
+        }
+        for chunk in system_rx.try_iter() {
+            self.queue_system(chunk);
+            got_any = true;
+        }
+        got_any
+    }
+
+    fn begin_next_generation(
+        &mut self,
+        retired_voice_rx: Receiver<AudioChunk>,
+        retired_system_rx: Receiver<AudioChunk>,
+        is_mic_muted: impl Fn() -> bool,
+    ) -> (Sender<AudioChunk>, Receiver<AudioChunk>) {
+        // The caller has stopped both producers. Queued chunks still belong
+        // to the current base, including any that arrived during teardown.
+        self.drain(&retired_voice_rx, &retired_system_rx, is_mic_muted);
+        if let Some(last) = self.last_slot() {
+            self.slot_base = last.saturating_add(1);
+        }
+        // The new producer starts its chunk index at zero. It gets its own
+        // channel, just as the replacement microphone stream does.
+        crossbeam_channel::bounded(DUAL_SYSTEM_QUEUE_CAPACITY)
+    }
+
+    fn last_slot(&self) -> Option<u64> {
+        self.voice.last.max(self.system.last)
+    }
+
+    fn safe_slot(&self) -> Option<u64> {
+        // Let both sources reach a slot before padding missing audio.
+        Some(self.voice.last?.min(self.system.last?).saturating_sub(1))
+    }
+
+    fn flush_through(
+        &mut self,
+        last_slot: Option<u64>,
+        writers: &mut DualCaptureWriters,
+        live_tx: &Option<crate::live_audio_coverage::LiveAudioSender>,
+        slot_stats: &mut DualSlotStats,
+    ) -> Result<(), CaptureError> {
+        let (Some(mut slot), Some(last_slot)) = (self.next_slot, last_slot) else {
+            return Ok(());
+        };
+        while slot <= last_slot {
+            let voice = self.voice.samples.remove(&slot);
+            let system = self.system.samples.remove(&slot);
+            // A slot with neither source pads both stems.
+            slot_stats.record(voice.is_some(), system.is_some());
+            writers.write_slot(&padded_slot(voice), &padded_slot(system), live_tx)?;
+            slot += 1;
+        }
+        self.next_slot = Some(slot);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "streaming")]
@@ -1690,12 +1773,12 @@ fn record_to_wav_dual_source(
     );
 
     let mut voice_stream = Some(AudioStream::start(plan.voice_override.as_deref())?);
-    let (system_tx, system_backend_rx) = crossbeam_channel::bounded(64);
+    let (system_tx, mut system_rx) = crossbeam_channel::bounded(DUAL_SYSTEM_QUEUE_CAPACITY);
     let mut system_backend = crate::system_audio_backend::system_audio_backend_for_config(
         config,
         plan.call_override.clone(),
     )?;
-    let mut system_stream = Some(system_backend.start(system_tx.clone())?);
+    let mut system_stream = Some(system_backend.start(system_tx)?);
     let system_device_name = system_stream
         .as_ref()
         .and_then(|stream| stream.route().device_name)
@@ -1735,12 +1818,7 @@ fn record_to_wav_dual_source(
         safety_guard = safety_guard.with_intent(intent);
     }
 
-    let mut next_slot: Option<u64> = None;
-    let mut max_voice_slot: Option<u64> = None;
-    let mut max_system_slot: Option<u64> = None;
-    let mut pending_voice = std::collections::BTreeMap::<u64, Vec<f32>>::new();
-    let mut pending_system = std::collections::BTreeMap::<u64, Vec<f32>>::new();
-    let mut slot_base: u64 = 0;
+    let mut slots = DualSourceSlots::default();
     // Mixer stats for diagnosing dual-source issues
     let mut slot_stats = DualSlotStats::default();
     let mut peak_level: u32 = 0;
@@ -1794,12 +1872,22 @@ fn record_to_wav_dual_source(
             || device_monitor.check_changes().is_some()
         {
             tracing::warn!("dual-source stream issue detected — attempting restart");
-            voice_stream.take();
-            system_stream.take();
+            let retired_voice_rx = voice_stream
+                .as_ref()
+                .expect("voice stream should stay active")
+                .receiver
+                .clone();
+            drop(voice_stream.take());
+            drop(system_stream.take());
+            let (system_tx, new_system_rx) = slots.begin_next_generation(
+                retired_voice_rx,
+                system_rx,
+                crate::streaming::is_mic_muted,
+            );
 
             match (
                 AudioStream::start(plan.voice_override.as_deref()),
-                system_backend.start(system_tx.clone()),
+                system_backend.start(system_tx),
             ) {
                 (Ok(new_voice), Ok(new_system)) => {
                     let new_system_name = new_system
@@ -1816,13 +1904,9 @@ fn record_to_wav_dual_source(
                         &new_system_name,
                         true,
                     );
-                    slot_base = max_voice_slot
-                        .into_iter()
-                        .chain(max_system_slot)
-                        .max()
-                        .map_or(slot_base, |slot| slot.saturating_add(1));
                     voice_stream = Some(new_voice);
                     system_stream = Some(new_system);
+                    system_rx = new_system_rx;
                     safety_guard.extend();
                 }
                 (voice_result, system_result) => {
@@ -1842,61 +1926,22 @@ fn record_to_wav_dual_source(
             .expect("voice stream should stay active")
             .receiver
             .clone();
-        let system_rx = system_stream
-            .as_ref()
-            .map(|_| system_backend_rx.clone())
-            .expect("system stream should stay active");
 
         // Drain all available chunks from both channels before flushing.
         // The old code used select! to grab ONE chunk per iteration, which
         // on slower machines meant one source got flushed before the other
         // source's chunk for that same slot arrived. (#118)
-        //
-        // Voice samples pass through `mute_voice_if_needed`: when the mic
-        // is muted, samples are zeroed but their length (and therefore the
-        // slot's sample count) is preserved so dual-source alignment and
-        // stem writers stay in lockstep.
-        let mute_voice_if_needed = |samples: Vec<f32>| -> Vec<f32> {
-            if crate::streaming::is_mic_muted() {
-                vec![0.0; samples.len()]
-            } else {
-                samples
-            }
-        };
-
-        let mut got_any = false;
-        while let Ok(chunk) = voice_rx.try_recv() {
-            let slot = dual_source_slot_for_chunk(slot_base, &chunk);
-            next_slot.get_or_insert(slot);
-            max_voice_slot = Some(max_voice_slot.map_or(slot, |s| s.max(slot)));
-            pending_voice.insert(slot, mute_voice_if_needed(chunk.samples));
-            got_any = true;
-        }
-        while let Ok(chunk) = system_rx.try_recv() {
-            let slot = dual_source_slot_for_chunk(slot_base, &chunk);
-            next_slot.get_or_insert(slot);
-            max_system_slot = Some(max_system_slot.map_or(slot, |s| s.max(slot)));
-            pending_system.insert(slot, chunk.samples);
-            got_any = true;
-        }
-
         // If nothing was available, block briefly for the next chunk
-        if !got_any {
+        if !slots.drain(&voice_rx, &system_rx, crate::streaming::is_mic_muted) {
             crossbeam_channel::select! {
                 recv(voice_rx) -> chunk => {
                     if let Ok(chunk) = chunk {
-                        let slot = dual_source_slot_for_chunk(slot_base, &chunk);
-                        next_slot.get_or_insert(slot);
-                        max_voice_slot = Some(max_voice_slot.map_or(slot, |s| s.max(slot)));
-                        pending_voice.insert(slot, mute_voice_if_needed(chunk.samples));
+                        slots.queue_voice(chunk, crate::streaming::is_mic_muted());
                     }
                 }
                 recv(system_rx) -> chunk => {
                     if let Ok(chunk) = chunk {
-                        let slot = dual_source_slot_for_chunk(slot_base, &chunk);
-                        next_slot.get_or_insert(slot);
-                        max_system_slot = Some(max_system_slot.map_or(slot, |s| s.max(slot)));
-                        pending_system.insert(slot, chunk.samples);
+                        slots.queue_system(chunk);
                     }
                 }
                 default(std::time::Duration::from_millis(50)) => {}
@@ -1909,40 +1954,11 @@ fn record_to_wav_dual_source(
             peak_level = current_level;
         }
 
-        // Flush only slots where BOTH sources have had a chance to deliver.
-        // Use min(max_voice, max_system) - 1 so we never flush a slot before
-        // both sources have reached it.
-        let safe_slot = match (max_voice_slot, max_system_slot) {
-            (Some(v), Some(s)) => Some(v.min(s).saturating_sub(1)),
-            _ => None,
-        };
-        flush_dual_source_slots(
-            &mut next_slot,
-            safe_slot,
-            &mut pending_voice,
-            &mut pending_system,
-            &mut writers,
-            &live_tx,
-            &mut slot_stats,
-        )?;
+        slots.flush_through(slots.safe_slot(), &mut writers, &live_tx, &mut slot_stats)?;
     }
 
     // Final flush: write any remaining slots (pad with silence for missing sources)
-    let final_max = match (max_voice_slot, max_system_slot) {
-        (Some(v), Some(s)) => Some(v.max(s)),
-        (Some(v), None) => Some(v),
-        (None, Some(s)) => Some(s),
-        (None, None) => None,
-    };
-    flush_dual_source_slots(
-        &mut next_slot,
-        final_max,
-        &mut pending_voice,
-        &mut pending_system,
-        &mut writers,
-        &live_tx,
-        &mut slot_stats,
-    )?;
+    slots.flush_through(slots.last_slot(), &mut writers, &live_tx, &mut slot_stats)?;
 
     // Stop optional recognition before publication. Keep OS teardown after
     // mixed WAV/stem sealing, just as in the single-source capture path.
@@ -4632,6 +4648,111 @@ mod tests {
 
         assert_eq!(dual_source_slot_for_chunk(base, &first), 47);
         assert_eq!(dual_source_slot_for_chunk(base, &delayed), 47);
+    }
+
+    #[cfg(feature = "streaming")]
+    fn assert_dual_source_restart_preserves_stems(generation_lengths: &[u64]) {
+        use crate::streaming::SourceRole;
+        use std::time::Duration;
+
+        // Vary samples by slot and source so a moved, dropped, or duplicated
+        // chunk fails the test even if the final duration happens to be right.
+        let sample = |slot: u64, source| {
+            let magnitude = (slot % 16 + 1) as f32 / 32.0;
+            match source {
+                SourceRole::Voice => magnitude,
+                SourceRole::Call => -magnitude,
+                SourceRole::Default => unreachable!(),
+            }
+        };
+        let recording_start = Instant::now();
+        let make_chunk = |index, slot, source| AudioChunk {
+            samples: vec![sample(slot, source); DUAL_SOURCE_SLOT_SAMPLES],
+            rms: sample(slot, source).abs(),
+            timestamp: recording_start + Duration::from_millis((slot + 1) * 100),
+            index,
+            source,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mixed.wav");
+        let mut writers = DualCaptureWriters::new(&path).unwrap();
+        let mut stats = DualSlotStats::default();
+        let mut slots = DualSourceSlots::default();
+        let (mut voice_tx, mut voice_rx) = crossbeam_channel::bounded(64);
+        let (mut system_tx, mut system_rx) = crossbeam_channel::bounded(DUAL_SYSTEM_QUEUE_CAPACITY);
+        let mut elapsed = 0;
+
+        for (generation, &length) in generation_lengths.iter().enumerate() {
+            let restarting = generation + 1 < generation_lengths.len();
+            for index in 0..length {
+                voice_tx
+                    .try_send(make_chunk(index, elapsed + index, SourceRole::Voice))
+                    .unwrap();
+                if index + 1 == length && restarting {
+                    // At the first restart only system audio is queued. At the
+                    // second, both retired receivers hold a chunk.
+                    if generation == 0 {
+                        slots.drain(&voice_rx, &system_rx, || false);
+                    }
+                    system_tx
+                        .try_send(make_chunk(index, elapsed + index, SourceRole::Call))
+                        .unwrap();
+                } else {
+                    system_tx
+                        .try_send(make_chunk(index, elapsed + index, SourceRole::Call))
+                        .unwrap();
+                    assert!(slots.drain(&voice_rx, &system_rx, || false));
+                }
+                slots
+                    .flush_through(slots.safe_slot(), &mut writers, &None, &mut stats)
+                    .unwrap();
+            }
+            elapsed += length;
+
+            if restarting {
+                drop(voice_tx);
+                drop(system_tx);
+                let retired_system_rx = system_rx.clone();
+                (system_tx, system_rx) = slots.begin_next_generation(voice_rx, system_rx, || false);
+                assert!(retired_system_rx.is_empty());
+                assert!(!system_rx.same_channel(&retired_system_rx));
+                (voice_tx, voice_rx) = crossbeam_channel::bounded(64);
+            }
+        }
+
+        slots
+            .flush_through(slots.last_slot(), &mut writers, &None, &mut stats)
+            .unwrap();
+        let (written, _) = writers.finalize().unwrap();
+        let expected = elapsed * DUAL_SOURCE_SLOT_SAMPLES as u64;
+        assert_eq!(written, expected);
+        assert_eq!(stats.both, elapsed);
+        assert!(stats.faults().is_empty());
+
+        let paths = stem_paths_for(&path).unwrap();
+        for (path, source) in [
+            (paths.voice, SourceRole::Voice),
+            (paths.system, SourceRole::Call),
+        ] {
+            let mut reader = hound::WavReader::open(path).unwrap();
+            assert_eq!(u64::from(reader.duration()), expected);
+            for (frame, actual) in reader.samples::<i16>().enumerate() {
+                let slot = (frame / DUAL_SOURCE_SLOT_SAMPLES) as u64;
+                assert_eq!(actual.unwrap(), (sample(slot, source) * 32767.0) as i16);
+            }
+        }
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn dual_source_restart_does_not_pad_both_stems_from_a_queued_old_system_chunk() {
+        assert_dual_source_restart_preserves_stems(&[400, 50]);
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn dual_source_restart_twice_does_not_pad_the_middle_of_either_stem() {
+        assert_dual_source_restart_preserves_stems(&[400, 50, 25]);
     }
 
     fn test_config() -> crate::config::RecordingConfig {

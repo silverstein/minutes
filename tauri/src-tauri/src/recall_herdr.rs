@@ -248,6 +248,7 @@ impl Hc {
                 .into_iter()
                 .map(|(k, v)| format!("{k}={v}")),
         );
+        argv.push(format!("{}={}", crate::recall_tabs::TAB_ENV, tab.id));
         argv.push(agent.to_string_lossy().into_owned());
         argv.extend(args);
         let (ok, json) = self.call(&argv).map_err(|message| LaunchError {
@@ -504,10 +505,13 @@ fn open(app: &tauri::AppHandle, id: &str, confirmed: bool) -> Result<TabStore, S
         let (agent_name, args) = launch_spec(&config, &latest, &root, &workspace);
         let agent =
             crate::commands::resolve_agent_binary(&agent_name).map_err(|e| e.user_message())?;
-        Ok((latest, agent, args))
+        let cwd = crate::recall_tabs::launch_directory(&root, &workspace, &agent_name);
+        crate::recall_tabs::settings(&root)?;
+        Ok((latest, agent, args, cwd))
     })();
-    let (latest, agent, args) = finish_preparation(prepared, || restore_local(app, id, theme))?;
-    match hc.run(&name, &latest, &workspace, &agent, args) {
+    let (latest, agent, args, cwd) =
+        finish_preparation(prepared, || restore_local(app, id, theme))?;
+    match hc.run(&name, &latest, &cwd, &agent, args) {
         Ok(address) => set_owner(app, id, Some(address)),
         Err(error) => {
             match reconcile_launch(&hc, &name, &error) {
@@ -1165,6 +1169,7 @@ printf '%s\n' "$@" > '{}'
             "--outlive-parent",
             "minutes.tab=tab-123",
             "minutes.meeting=board",
+            "MINUTES_RECALL_TAB=tab-123",
             "env\n-u\nCLAUDECODE",
         ] {
             assert!(argv.contains(flag), "{flag}");
@@ -1173,6 +1178,37 @@ printf '%s\n' "$@" > '{}'
         assert!(terminal_name(&"a".repeat(80)).len() <= 32);
         assert_eq!(terminal_name("tab-123"), "minutes-tab-123");
     }
+    #[test]
+    fn claude_handoff_uses_shared_root_and_explicit_tab_identity() {
+        let (dir, hc) = fake(
+            r#"
+if [ "$1" = run ]; then
+  printf '%s\n' "$@" > "$0.args"
+  echo '{"address":"t42","state":"live"}'
+fi
+"#,
+        );
+        let root = dir.path().join("assistant");
+        let workspace = root.join("tabs/tab-123");
+        let mut config = Config::default();
+        config.assistant.agent = "claude".into();
+        let (agent, args) = launch_spec(&config, &tab(), &root, &workspace);
+        let cwd = crate::recall_tabs::launch_directory(&root, &workspace, &agent);
+        assert_eq!(cwd, root);
+        hc.run("minutes-tab-123", &tab(), &cwd, Path::new(&agent), args)
+            .unwrap();
+        let argv = std::fs::read_to_string(dir.path().join("hc.args")).unwrap();
+        assert!(argv.contains(&format!("--cwd\n{}\n", root.display())));
+        assert!(argv.contains("MINUTES_RECALL_TAB=tab-123\n"));
+        assert!(!argv.contains("--dangerously-skip-permissions"));
+        config.assistant.agent = "codex".into();
+        let (agent, _) = launch_spec(&config, &tab(), &root, &workspace);
+        assert_eq!(
+            crate::recall_tabs::launch_directory(&root, &workspace, &agent),
+            workspace
+        );
+    }
+
     #[test]
     fn recovery_restarts_only_a_rejected_launch_with_confirmed_no_owner() {
         let rejected = LaunchError {

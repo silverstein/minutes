@@ -236,6 +236,8 @@ impl PtyManager {
         for name in INHERITED_SESSION_MARKERS {
             cmd.env_remove(name);
         }
+        // Override any parent Recall identity; shells pass this on to Claude.
+        cmd.env(crate::recall_tabs::TAB_ENV, &cfg.session_id);
         // Identify the host the way real terminals do. Codex's terminal
         // detection keys on TERM_PROGRAM (Ghostty, iTerm, Warp, kitty, ...)
         // and consults COLORFGBG; with neither set it fell back to a light

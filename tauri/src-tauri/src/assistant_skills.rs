@@ -215,6 +215,14 @@ pub(crate) fn queue_focus_notice(
     fs::rename(&staging, &target).map_err(|e| e.to_string())
 }
 
+/// A queued notice invalidates the prompt hook's previous focus injection even
+/// when the materialized files are byte-identical (for example an explicit drop).
+pub(crate) fn has_focus_notices(workspace: &Path) -> bool {
+    FocusNotice::ALL
+        .iter()
+        .any(|kind| focus_dir(workspace).join(kind.file_name()).is_file())
+}
+
 /// Consume focus context once for a tab's next real prompt, on every platform.
 pub(crate) fn take_focus_notices(workspace: &Path) -> Result<String, String> {
     let dir = focus_dir(workspace);

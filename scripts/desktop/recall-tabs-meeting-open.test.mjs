@@ -44,7 +44,7 @@ export async function testMeetingOpen(page, url) {
 
     await discuss();
     await page.getByRole('button', { name: 'Close Chat 1 and continue', exact: true }).click();
-    await page.getByRole('button', { name: 'Close conversation', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Confirm close for Chat 1', exact: true }).waitFor();
     await assertOriginalConversation();
     // Cancelling the saved-conversation confirmation also leaves the original
     // request unapplied and all four conversations present.
@@ -52,8 +52,11 @@ export async function testMeetingOpen(page, url) {
     await assertOriginalConversation();
 
     await discuss();
-    await page.getByRole('button', { name: 'Close Chat 1 and continue', exact: true }).click();
-    await page.getByRole('button', { name: 'Close conversation', exact: true }).click();
+    const close = intent === 'discuss'
+      ? page.getByRole('button', { name: 'Close Chat 1 and continue', exact: true })
+      : page.locator('#recall-close-one');
+    await close.click();
+    await close.or(page.getByRole('button', { name: 'Confirm close for Chat 1', exact: true })).click();
     await page.waitForFunction(path => fixture.model.tabs.find(tab => tab.id === fixture.model.active)?.meeting_path === path, meeting.path);
     const phase = intent === 'prep' ? 'prep' : 'debrief';
     assert.equal(await page.getByRole('tab', { selected: true }).innerText(), meeting.title);

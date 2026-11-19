@@ -4730,6 +4730,6 @@ mod recall_menu_tests {
         assert!(!menu.contains(".close_window()"));
         let panel = include_str!("../../src/index.html");
         assert!(panel.contains("minutes://close-context"));
-        assert!(panel.contains("await closeRecallTab(SESSION_ID)"));
+        assert!(panel.contains("await recallTabsController.closeFromShortcut()"));
     }
 }

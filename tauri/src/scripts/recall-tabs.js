@@ -26,7 +26,7 @@
     if (event.key.toLowerCase() === 'w') return { type: 'close' };
     return null;
   }
-  function create({ strip, prompt, invoke, select, create: createTab, close, resume, isRecording, openInHerdr, takeBack, copyAddress }) {
+  function create({ strip, prompt, invoke, select, create: createTab, close, endButton, resume, isRecording, openInHerdr, takeBack, copyAddress }) {
     let model = snapshot;
     let herdrAvailable = false;
     const handoff = document.createElement('div');
@@ -35,11 +35,119 @@
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const keyHint = index => mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`;
     let chooser = null, pendingLive = null, returnFocus = null, pendingClose = null;
+    let recallEndArmTimer = null, closing = false;
+    const closeDescription = document.createElement('span');
+    closeDescription.id = 'recall-close-description';
+    closeDescription.textContent = 'Its process stops and its saved conversation leaves Recall. Your agent keeps the transcript.';
+    closeDescription.hidden = true;
+    prompt.after(closeDescription);
+    const tabCloseButton = id => document.getElementById(`recall-close-${id}`);
     function revealActiveTab() {
-      if (!strip.hidden && strip.clientWidth) strip.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      if (strip.hidden || !strip.clientWidth) return;
+      const armedButton = pendingClose?.button;
+      const selected = strip.querySelector('[aria-selected="true"]');
+      const control = strip.contains(armedButton) ? armedButton : selected;
+      const tab = control?.closest('.recall-tab');
+      const target = tab?.offsetWidth > strip.clientWidth ? control : tab;
+      target?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
     }
     if (typeof ResizeObserver !== 'undefined') new ResizeObserver(revealActiveTab).observe(strip);
-    function dismiss() { chooser = null; pendingClose = null; returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
+
+    function showCloseConfirmation(attempt) {
+      const { button, id } = attempt;
+      const tab = model.tabs.find(tab => tab.id === id);
+      attempt.label = button.textContent;
+      attempt.name = button.getAttribute('aria-label');
+      attempt.title = button.getAttribute('title');
+      const isEnd = button === endButton;
+      button.textContent = isEnd ? 'End Session?' : 'Close?';
+      button.setAttribute('aria-label', `Confirm ${isEnd ? 'End Session' : 'close'} for ${tab.title}`);
+      button.setAttribute('aria-describedby', closeDescription.id);
+      const shortcutHint = tab.live ? '' : ` Press ${mac ? '⌘W' : 'Ctrl+W'} again to close the selected tab.`;
+      button.title = closeDescription.textContent + (id === model.active ? shortcutHint : '');
+      button.dataset.closeArmed = '';
+    }
+
+    function cancelClose(restoreFocus = false) {
+      const attempt = pendingClose;
+      pendingClose = null;
+      clearTimeout(recallEndArmTimer);
+      recallEndArmTimer = null;
+      if (!attempt) return;
+      const { button, opener, label, name, title } = attempt;
+      if (button?.hasAttribute('data-close-armed')) {
+        button.textContent = label;
+        for (const [attribute, value] of [['aria-label', name], ['title', title]]) {
+          if (value === null) button.removeAttribute(attribute);
+          else button.setAttribute(attribute, value);
+        }
+        button.removeAttribute('aria-describedby');
+        delete button.dataset.closeArmed;
+      }
+      if (restoreFocus) (opener?.isConnected ? opener : button)?.focus();
+    }
+
+    async function finishClose(attempt, confirmed) {
+      if (confirmed) {
+        cancelClose();
+        if (attempt.chooser && chooser === attempt.chooser) dismiss();
+      }
+      closing = true;
+      let result;
+      try {
+        result = await close(attempt.id, confirmed);
+      } finally {
+        closing = false;
+      }
+      if (result === 'confirm' && pendingClose === attempt && attempt.button?.isConnected) {
+        showCloseConfirmation(attempt);
+        attempt.button.focus({ preventScroll: true });
+        revealActiveTab();
+        if (attempt.button === endButton) recallEndArmTimer = setTimeout(cancelClose, 4000);
+        return;
+      }
+      if (pendingClose === attempt) cancelClose();
+      if (result === true && attempt.chooser) {
+        if (chooser === attempt.chooser) dismiss();
+        await attempt.chooser.afterClose(attempt.id);
+      }
+    }
+
+    function requestClose(id, button, cap = null, opener = button) {
+      if (closing) return;
+      if (pendingClose?.id === id && pendingClose.button === button) {
+        if (button?.hasAttribute('data-close-armed')) return finishClose(pendingClose, true);
+        return;
+      }
+      cancelClose();
+      if (!id || !button) return;
+      const attempt = { id, button, opener, chooser: cap };
+      pendingClose = attempt;
+      return finishClose(attempt, false);
+    }
+
+    function closeFromShortcut() {
+      if (closing) return;
+      const active = model.tabs.find(tab => tab.id === model.active);
+      if (!active) return;
+      if (pendingClose?.id === active.id) {
+        if (!active.live && pendingClose.button?.hasAttribute('data-close-armed')) return finishClose(pendingClose, true);
+        return;
+      }
+      return requestClose(active.id, tabCloseButton(active.id), null, document.activeElement);
+    }
+
+    endButton?.addEventListener('click', () => requestClose(model.active, endButton));
+    document.addEventListener('pointerdown', event => {
+      if (pendingClose && !pendingClose.button?.contains(event.target)) cancelClose();
+    }, true);
+    document.addEventListener('focusout', event => {
+      if (pendingClose?.button === event.target
+        || (pendingClose?.opener === event.target && event.relatedTarget !== pendingClose.button)) cancelClose();
+    });
+    global.addEventListener('blur', () => cancelClose());
+
+    function dismiss() { chooser = null; cancelClose(); returnFocus = null; prompt.replaceChildren(); prompt.hidden = true; markStrip(); }
     // Cancel puts the keyboard back where the person was typing: the element
     // focused before the prompt opened, else the visible tab's terminal, else
     // the selected tab. Without this, focus falls to the page and keys vanish.
@@ -63,7 +171,7 @@
         wrapper.classList.toggle('recall-tab-closable', !!(chooser && tab && closable(tab)));
       }
     }
-    function show(text, actions, hint = '') {
+    function show(text, actions, hint = '', keepOpen = false) {
       // A refresh of an open prompt keeps the focus target from when it opened.
       const opener = prompt.hidden ? document.activeElement : returnFocus;
       dismiss(); prompt.hidden = false; returnFocus = opener;
@@ -74,7 +182,7 @@
         const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-secondary btn-sm';
         button.textContent = label; button.title = label;
         if (accessibleName) button.setAttribute('aria-label', accessibleName);
-        button.addEventListener('click', () => { dismiss(); action(); }); prompt.append(button);
+        button.addEventListener('click', () => { if (!keepOpen) dismiss(); action(button); }); prompt.append(button);
       }
       const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'btn btn-ghost btn-sm';
       cancel.textContent = 'Cancel'; cancel.addEventListener('click', cancelPrompt); prompt.append(cancel);
@@ -83,23 +191,35 @@
     // At the cap, offer one finished tab (an inactive one first, so the
     // conversation on screen stays put) and let the strip's highlighted ×
     // buttons pick any other. Closing through the strip continues the open.
-    function chooseFinished(action, liveId = null) {
+    function chooseFinished(afterClose, liveId = null) {
       const finished = model.tabs.filter(closable);
       const suggestion = finished.find(tab => tab.id !== model.active) || finished[0];
       const lead = liveId ? 'Recording. The live meeting needs a tab, and all four are in use.' : 'All four tabs are in use.';
       if (suggestion) {
         const label = `Close ${shortTitle(suggestion)}`;
-        show(lead, [[label, () => action(suggestion.id), `${label} and continue`]], finished.length > 1 ? 'Or close another highlighted tab.' : '');
+        show(lead, [[label, button => requestClose(suggestion.id, button, chooser), `${label} and continue`]], finished.length > 1 ? 'Or close another highlighted tab.' : '', true);
       } else {
         show(liveId ? 'Recording. The live meeting needs a tab, and all four are busy.' : 'All four tabs are busy.', [], 'Close one with its × to continue; it asks first.');
       }
-      chooser = { action, liveId, signature: chooserSignature() };
+      chooser = { afterClose, liveId, signature: chooserSignature() };
       markStrip();
     }
     prompt.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); cancelPrompt(); } });
     function update(next) {
+      const previousActive = model.active;
       snapshot = model = next;
-      const focus = strip.contains(document.activeElement) ? document.activeElement?.dataset?.tabId : null;
+      if (pendingClose) {
+        const tab = next.tabs.find(tab => tab.id === pendingClose.id);
+        if (previousActive !== next.active || !tab || (pendingClose.chooser && tab.live)) cancelClose();
+      }
+      const focused = document.activeElement;
+      const focus = strip.contains(focused) ? focused.dataset.tabId : null;
+      const closeFocus = strip.contains(focused) ? focused.dataset.closeTab : null;
+      const rebuildClose = pendingClose && strip.contains(pendingClose.button) ? pendingClose : null;
+      const wasArmed = rebuildClose?.button.hasAttribute('data-close-armed');
+      const replaceOpener = rebuildClose && rebuildClose.opener === rebuildClose.button;
+      // Rebuilding the strip must not interpret removal of its old button as blur.
+      if (rebuildClose) rebuildClose.button = null;
       strip.replaceChildren();
       strip.hidden = false;
       for (const [index, tab] of model.tabs.entries()) {
@@ -120,12 +240,9 @@
           select(model.tabs[target].id);
         });
         const end = document.createElement('button'); end.type = 'button'; end.className = 'recall-tab-close'; end.textContent = '×';
+        end.id = `recall-close-${tab.id}`; end.dataset.closeTab = tab.id;
         end.setAttribute('aria-label', `Close ${tab.title}`);
-        end.addEventListener('click', () => {
-          // While the cap chooser waits, closing a tab here continues the open it blocked.
-          const pending = chooser;
-          if (pending && !tab.live) { dismiss(); pending.action(tab.id); } else close(tab.id);
-        });
+        end.addEventListener('click', () => requestClose(tab.id, end, tab.live ? null : chooser));
         wrapper.append(button);
         if (herdrAvailable || tab.herdr_terminal) {
           const menu = document.createElement('button'); menu.type = 'button'; menu.className = 'recall-tab-close'; menu.textContent = '⋯';
@@ -172,16 +289,27 @@
         resumeButton.onclick = () => resume?.(model.active);
       }
       for (const node of document.querySelectorAll('[data-recall-meeting]')) renderMeetingStatus(node, node.dataset.recallMeeting);
-      if (focus) strip.querySelector(`[role="tab"][data-tab-id="${focus}"]`)?.focus();
+      if (rebuildClose) {
+        rebuildClose.button = tabCloseButton(rebuildClose.id);
+        if (replaceOpener) rebuildClose.opener = rebuildClose.button;
+        if (wasArmed) showCloseConfirmation(rebuildClose);
+      }
+      if (closeFocus) tabCloseButton(closeFocus)?.focus();
+      else if (focus) document.getElementById(`recall-tab-${focus}`)?.focus();
       revealActiveTab();
-      if (chooser && chooser.signature !== chooserSignature()) chooseFinished(chooser.action, chooser.liveId);
+      if (!closing && !pendingClose && chooser && chooser.signature !== chooserSignature()) chooseFinished(chooser.afterClose, chooser.liveId);
       markStrip();
 
     }
     document.addEventListener('keydown', event => {
       const panel = document.getElementById('recall-panel');
       if (!panel?.classList.contains('expanded')) return;
-      const action = shortcut(event, /Mac|iPhone|iPad/.test(navigator.platform));
+      if (pendingClose && (event.key === 'Escape' || (event.repeat && event.key === 'Enter' && event.target === pendingClose.button))) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        if (event.key === 'Escape') cancelClose(true);
+        return;
+      }
+      const action = shortcut(event, mac);
       if (!action || (!model.tabs.length && action.type !== 'create')) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (action.type === 'select' && model.tabs[action.index]) select(model.tabs[action.index].id);
@@ -190,12 +318,7 @@
         select(model.tabs[(index + action.direction + model.tabs.length) % model.tabs.length].id);
       }
       if (action.type === 'create') createTab();
-      if (action.type === 'close' && model.active) {
-        // The confirmation is open for this tab: a second ⌘W confirms, as in
-        // Terminal. A live meeting still needs the button.
-        const confirm = pendingClose?.id === model.active && !model.tabs.find(t => t.id === model.active)?.live ? pendingClose.action : null;
-        if (confirm) { dismiss(); confirm(); } else close(model.active);
-      }
+      if (action.type === 'close' && !event.repeat) closeFromShortcut();
     }, true);
     function confirmOpen(id) {
       if (!herdrAvailable || model.tabs.find(t => t.id === id)?.herdr_terminal) return;
@@ -209,21 +332,16 @@
       confirmOpen,
       confirmMissing: id => show("Herdr has no record of this terminal. If it isn't running anywhere, take the conversation back?", [['Take conversation back', () => takeBack?.(id, false, true)]]),
       confirmTakeBack: id => show('End this Herdr terminal and take the conversation back? Minutes will wait for it to exit before resuming.', [['End terminal and take back', () => takeBack?.(id, true)]]),
-      confirmClose: (id, action = () => close(id, true)) => {
-        const tab = model.tabs.find(t => t.id === id);
-        const name = tab ? shortTitle(tab) : 'this conversation';
-        const again = tab && !tab.live ? `Press ${mac ? '⌘W' : 'Ctrl+W'} again to close.` : '';
-        show(`Close ${name}? Its process stops and its saved conversation leaves Recall. Your agent keeps the transcript.`, [['Close conversation', action]], again);
-        pendingClose = { id, action };
-      },
+      closeFromShortcut,
+      cancelClose,
       chooseFinished,
-      syncPendingLive: (id, action) => {
+      syncPendingLive: (id, afterClose) => {
         if (!id) {
           pendingLive = null;
           if (chooser?.liveId) dismiss();
         } else if (id !== pendingLive) {
           pendingLive = id;
-          chooseFinished(action, id);
+          chooseFinished(afterClose, id);
         }
       },
       dismiss,

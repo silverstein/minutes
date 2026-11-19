@@ -19,10 +19,12 @@ function productionFunction(source, name) {
 }
 
 export function gridFixture(source, css, controller, { meetingOpen = false } = {}) {
-  return `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/vendor/xterm/xterm.css"><style>${css}</style></head><body>
+  const header = source.slice(source.indexOf('    <div class="recall-header"'), source.indexOf('    <div class="recall-context-chips"'));
+  const closeMenuHandler = source.match(/    currentWindow.listen\('minutes:\/\/close-context',[\s\S]+?^    \}\);/m)[0];
+  return `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles/ui-zoom-tokens.css"><link rel="stylesheet" href="/vendor/xterm/xterm.css"><style>${css}</style></head><body>
 <div id="fixture-meetings" style="position:absolute;left:780px;top:0;width:180px"></div>
 <div id="recall-panel" class="recall-panel expanded" style="position:relative;width:750px;height:540px;transform:none">
-<div id="recall-tabs" class="recall-tabs" role="tablist"></div><div id="recall-tab-prompt" class="recall-tab-prompt" hidden></div>
+${header}
 <span id="fixture-header"></span><div id="recall-provider-notice" class="recall-provider-notice"></div>
 <div id="recall-terminal-container" class="recall-terminal"></div></div>
 <script src="/vendor/xterm/xterm.js"></script><script src="/vendor/xterm/xterm-addon-fit.js"></script>
@@ -34,13 +36,22 @@ const RECALL_READY_NOTICE_SEEN_KEY='fixture-ready-notice',recallProviderNotice=d
 const recallTabStates=new Map(),recallTerminalContainer=document.getElementById('recall-terminal-container');
 const recallLoading=document.createElement('div');
 recallLoading.innerHTML='<span></span>';
-const recallExitBanner=document.createElement('div'),recallEndBtn=document.createElement('button'),syncRecallModeControls=()=>{},expandRecallPanel=async()=>{};
+const recallExitBanner=document.createElement('div'),recallEndBtn=document.getElementById('btn-recall-end'),syncRecallModeControls=()=>{},expandRecallPanel=async()=>{};
 recallExitBanner.id='fixture-exit';recallExitBanner.textContent='Conversation process ended.';document.body.append(recallExitBanner);
 let recallTabsModel={active:null,tabs:${JSON.stringify(meetingOpen ? ['one','two','three','four'] : ['one','two','three'])}.map((id,index)=>({id,title:'Chat '+(index+1),status:'done',shell:true}))};
 const calls=[],grids=new Map(),getTerminalFontSize=()=>13,isEffectiveDarkTheme=()=>true;
 window.MINUTES_XTERM_THEME_QUERY=matchMedia('(prefers-color-scheme:dark)');
 const applyRecallTerminalTheme=()=>({background:'#171717',foreground:'#fafafa'}),refreshRecallContextChips=()=>{},renderRecallContextChips=()=>{};
-const setRecallPhase=(phase,title)=>{recallPhase=phase;document.getElementById('fixture-header').textContent=phase+' — '+(title||'');};
+const recallHeaderInfo=document.getElementById('recall-header-info'),recallPhaseLabel=document.getElementById('recall-phase-label');
+const recallContextLabel=document.getElementById('recall-context-label');
+${productionFunction(source, 'setRecallContextLabel')}
+const setRecallPhase=(phase,title)=>{
+  recallPhase=phase;
+  document.getElementById('fixture-header').textContent=phase+' — '+(title||'');
+  recallHeaderInfo.classList.toggle('default-phase',phase==='recall');
+  recallPhaseLabel.textContent=phase[0].toUpperCase()+phase.slice(1);
+  setRecallContextLabel(title);
+};
 const registerPtyListeners=async()=>{},registerRecallTerminalFileDrop=async()=>{};
 const activeSearchQuery='',meetingRowsState=null,setHighlightedText=(node,text)=>{node.textContent=text;},formatTime=()=> '12:00';
 const refreshes=[],scheduleMeetingsRefresh=delay=>refreshes.push(delay);
@@ -65,7 +76,7 @@ const invoke=async(command,args)=>{
   }
   if(command==='cmd_recall_tab_close'){
     const tab=recallTabsModel.tabs.find(tab=>tab.id===args.tabId);
-    if(tab.claude_session_id&&!args.confirmed)throw new Error('RECALL_CLOSE_CONFIRM');
+    if((tab.claude_session_id||tab.claude_active||tab.live||tab.status==='working')&&!args.confirmed)throw new Error('RECALL_CLOSE_CONFIRM');
     recallTabsModel.tabs=recallTabsModel.tabs.filter(tab=>tab.id!==args.tabId);
     if(recallTabsModel.active===args.tabId)recallTabsModel.active=recallTabsModel.tabs[0]?.id;
     return structuredClone(recallTabsModel);
@@ -82,9 +93,11 @@ const terminalNoticeForReadiness=()=>'';
 ${['openRecall','chooseRecallExperience','recallSpawnSize','markRecallPtyAlive','disposeRecallTerminal','restartRecallTab','closeRecallTab','discussMeetingWithAgent'].map(name => productionFunction(source, name)).join('\n')}
 recallTabsModel.tabs[0].claude_session_id='saved-conversation';
 ` : `const openRecall=(...args)=>opens.push(args);`}
-const recallTabsController=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke,select:id=>activateRecallTab(id,recallTabsModel),create:openNewRecallChat,close:${meetingOpen ? 'closeRecallTab' : '()=>{}'}});
+const recallTabsController=MinutesRecallTabs.create({strip:document.getElementById('recall-tabs'),prompt:document.getElementById('recall-tab-prompt'),invoke,select:id=>activateRecallTab(id,recallTabsModel),create:openNewRecallChat,endButton:recallEndBtn,close:${meetingOpen ? 'closeRecallTab' : '()=>{}'}});
+const events=new Map(),currentWindow={listen:(event,handler)=>events.set(event,handler)},isOverlayActive=()=>false;
+${closeMenuHandler}
 for(const metadata of recallTabsModel.tabs){const tab=recallStateFor(metadata.id);initRecallTerminal(tab);tab.alive=true;tab.untouched=true;tab.terminal.resize(10,4);grids.set(tab.id,{cols:10,rows:4});}
-window.fixture={calls,opens,grids,tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,end:id=>markRecallPtyEnded(recallStateFor(id)),activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),applyModel:applyRecallTabsModel,ensureProcesses:ensureRecallTabProcesses,buildRow:buildMeetingRow,afterCapture:refreshRecallAfterCapture,refreshes,
+window.fixture={calls,opens,grids,setPhase:setRecallPhase,emit:event=>events.get(event)(),tabs:recallTabStates,get model(){return recallTabsModel;},inventory:lastMeetingInventory,resume:resumeRecallTab,notice:setRecallProviderNotice,end:id=>markRecallPtyEnded(recallStateFor(id)),activate:id=>activateRecallTab(id,recallTabsModel),fit:fitRecallTerminal,newChat:openNewRecallChat,openAtCap:()=>openRecallImpl('assistant',null,{newTab:true}),applyModel:applyRecallTabsModel,ensureProcesses:ensureRecallTabProcesses,buildRow:buildMeetingRow,afterCapture:refreshRecallAfterCapture,refreshes,
 ${meetingOpen ? 'discuss:discussMeetingWithAgent,restart:restartRecallTab,open:openRecall,boundary,' : ''}
 snapshot:id=>{const tab=recallTabStates.get(id);return {terminal:{cols:tab.terminal.cols,rows:tab.terminal.rows},pty:grids.get(id)};}};
 setTimeout(()=>{window.fixture.ready=true;},150);

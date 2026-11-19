@@ -1919,6 +1919,9 @@ fn main() {
     // Tauri runs its event loop on the thread that calls `run`: this one.
     let _ = EVENT_LOOP_THREAD.set(std::thread::current().id());
     let app_context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    minutes_core::assistant_workspace::AssistantWorkspace::configure_desktop(
+        &app_context.config().identifier,
+    );
     #[cfg(target_os = "macos")]
     if std::env::args_os().any(|arg| arg == "--capture-recovery-test-root") {
         // LaunchServices can supply arguments, but not a per-launch environment.

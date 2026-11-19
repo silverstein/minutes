@@ -217,12 +217,20 @@ pub const CURRENT_SESSION_FILE: &str = "CURRENT_SESSION.md";
 pub fn write_current_session_status(
     status: &crate::context_store::ScreenContextStatus,
 ) -> std::io::Result<PathBuf> {
-    let workspace = crate::config::Config::minutes_dir().join("assistant");
-    std::fs::create_dir_all(&workspace)?;
+    let workspace = crate::assistant_workspace::AssistantWorkspace::current()
+        .root(&crate::Config::minutes_dir());
+    write_current_session_status_at(&workspace, status)
+}
+
+fn write_current_session_status_at(
+    workspace: &Path,
+    status: &crate::context_store::ScreenContextStatus,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(workspace)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(workspace, std::fs::Permissions::from_mode(0o700))?;
     }
 
     let path = workspace.join(CURRENT_SESSION_FILE);
@@ -469,6 +477,36 @@ mod tests {
         );
         assert!(!external_stop.load(Ordering::Relaxed));
         assert!(list_screenshots(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn dev_screen_breadcrumb_leaves_the_production_file_unchanged() {
+        use crate::assistant_workspace::AssistantWorkspace;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let production = AssistantWorkspace::Production.root(data_dir.path());
+        let dev = AssistantWorkspace::Dev.root(data_dir.path());
+        let status = crate::context_store::ScreenContextStatus::default();
+        let production_file = write_current_session_status_at(&production, &status).unwrap();
+        assert_eq!(
+            production_file,
+            data_dir.path().join("assistant/CURRENT_SESSION.md")
+        );
+        let original = std::fs::read(&production_file).unwrap();
+
+        let dev_status = crate::context_store::ScreenContextStatus {
+            context_session_id: Some("dev-session".into()),
+            ..status
+        };
+        let dev_file = write_current_session_status_at(&dev, &dev_status).unwrap();
+        assert_eq!(
+            dev_file,
+            data_dir.path().join("assistant-dev/CURRENT_SESSION.md")
+        );
+        assert!(std::fs::read_to_string(dev_file)
+            .unwrap()
+            .contains("dev-session"));
+        assert_eq!(std::fs::read(production_file).unwrap(), original);
     }
 
     #[test]

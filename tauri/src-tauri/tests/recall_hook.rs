@@ -134,3 +134,44 @@ fn native_hook_routes_context_and_status_by_environment_without_gui_startup() {
         }
     }
 }
+
+#[test]
+fn native_hook_uses_the_explicit_dev_root_with_a_matching_production_tab() {
+    use minutes_core::assistant_workspace::AssistantWorkspace;
+    use std::fs;
+
+    let home = tempfile::tempdir().unwrap();
+    let data_dir = home.path().join(".minutes");
+    let production = AssistantWorkspace::Production.root(&data_dir);
+    let dev = AssistantWorkspace::Dev.root(&data_dir);
+    let tab_id = "same-tab-id";
+    let original = b"production-only focus";
+    for (root, instructions) in [(&production, &original[..]), (&dev, b"dev-only focus")] {
+        let tab = root.join("tabs").join(tab_id);
+        fs::create_dir_all(&tab).unwrap();
+        fs::write(root.join(".recall-root"), "root").unwrap();
+        fs::write(tab.join(".recall-tab"), "tab").unwrap();
+        fs::write(tab.join("CLAUDE.md"), instructions).unwrap();
+    }
+    let production_tab = production.join("tabs").join(tab_id);
+    let production_state = production_tab.join(".recall-state.json");
+    fs::write(&production_state, b"production state").unwrap();
+
+    let output = invoke(&dev, Some(tab_id), "SessionStart");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let context = String::from_utf8(output.stdout).unwrap();
+    assert!(context.contains("dev-only focus"));
+    assert!(!context.contains("production-only focus"));
+    assert!(dev
+        .join("tabs")
+        .join(tab_id)
+        .join(".recall-state.json")
+        .is_file());
+    assert_eq!(fs::read(production_state).unwrap(), b"production state");
+    assert_eq!(
+        fs::read(production_tab.join("CLAUDE.md")).unwrap(),
+        original
+    );
+    assert!(!production_tab.join(".recall-injected-focus.json").exists());
+}

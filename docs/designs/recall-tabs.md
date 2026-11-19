@@ -7,14 +7,16 @@ status render from the same metadata snapshot.
 
 ## Workspace and migration
 
-`~/.minutes/assistant/recall-tabs.json` holds tab order, active tab, meeting path,
-Claude session ID, capture identity and exact processing job ID. Each tab owns
-`tabs/<id>/`, including
-`CLAUDE.md`, `AGENTS.md`, `CURRENT_MEETING.md`, `CURRENT_ARTIFACT.md`, skills and
-focus notices. Claude tabs start in the shared `~/.minutes/assistant` root so
-new conversations appear together in `claude --resume` from that folder. Shell
-tabs also start there, including when the explicit Resume action launches Claude
-or the user starts it by hand. Direct launch and Open in Herdr use the same rule.
+The production desktop app uses `~/.minutes/assistant`. The Minutes Dev
+bundle (`com.useminutes.desktop.dev`) uses `~/.minutes/assistant-dev` and starts
+with a fresh tab list. Each root's `recall-tabs.json` holds tab order, active tab,
+meeting path, Claude session ID, capture identity and exact processing job ID.
+Each tab owns `tabs/<id>/`, including `CLAUDE.md`, `AGENTS.md`,
+`CURRENT_MEETING.md`, `CURRENT_ARTIFACT.md`, skills and focus notices. Claude
+tabs start in their app's root so new conversations appear together in
+`claude --resume` from that folder. Shell tabs also start there, including
+when the explicit Resume action launches Claude or the user starts it by hand.
+Direct launch and Open in Herdr use the same rule.
 Minutes sets `MINUTES_RECALL_TAB=<id>` in every tab process, including shells and
 Herdr handoffs; a manually launched Claude inherits it.
 
@@ -38,13 +40,18 @@ remains because it can hold authored Documents files or custom skills/settings;
 closing a conversation must not erase those files. Safe cleanup of unchanged
 generated-only closed workspaces is a separate lifecycle follow-up.
 
-The first load copies legacy singleton context into an `assistant` tab. Its
-Claude conversation is located using the old project directory's most recent
+On first load, production copies legacy singleton context into an
+`assistant` tab. Minutes locates the Claude conversation using the old project
+directory's most recent
 transcript filename and modification time, without reading transcript contents or
 moving user-owned Claude history. The saved desktop focus supplies the meeting
 path. With `[assistant] agent = "claude"`, a saved Claude ID is passed through
 `--resume`, and configured `agent_args` retain the user's choices. Claude searches
 projects for an explicit ID. No unqualified `--continue` is shared across new tabs.
+Dev skips the legacy import. It stores its desktop Recall state and recent
+artifact list in its own assistant root, and uses the separate neutral
+`~/.minutes/chat-dev` directory for Private Chat.
+
 With a shell such as `agent = "zsh"`, restoration starts only that shell. The
 **Resume** action in the Recall header (accessible name "Resume previous conversation") submits `claude --resume <id>`
 only when clicked, preserving shell aliases. It refuses a nonempty/uncertain
@@ -72,8 +79,10 @@ ID, so a never-used tab starts fresh rather than failing with “No conversation
 
 Managed Claude settings install SessionStart, UserPromptSubmit, PreToolUse,
 PostToolUse, PermissionRequest, Notification, Stop, StopFailure and SessionEnd
-command hooks. They invoke the installed app executable with `--recall-hook`
-using Claude's direct argument-vector form: no shell, Python or Node dependency.
+command hooks. They invoke the installed app executable with
+`--recall-hook <workspace-root> <event>` using Claude's direct argument-vector
+form, which requires only the app executable. The generated root argument
+binds the helper to the workspace that installed the hooks.
 The app exits this helper path before GUI initialization. Both directly launched
 Claude and Claude started manually inside a shell discover the hooks in the
 shared root's `.claude/settings.json`, installed idempotently once per root.
@@ -95,6 +104,11 @@ the hook's inline-context limit.
 SessionStart never materializes stored meeting context. UserPromptSubmit retains
 the real-question and provider-authentication gate before materialization.
 Live-call guidance comes only from the live tab's own instruction files.
+The desktop app and its processing worker also write the screen-context
+breadcrumb, `CURRENT_SESSION.md`, in their own assistant root. When standalone
+CLI capture or processing writes that breadcrumb, it continues to use the
+production root. Dev can still use the CLI and MCP live readers for bounded
+reads of shared capture status and transcript data.
 
 Existing root custom settings/hooks are retained and managed hooks are replaced
 idempotently; symlinked settings paths are refused. Existing per-tab
@@ -114,7 +128,8 @@ requesting it for every meeting.
 `settings.local.json` at the repository root, but shared `settings.json` from the
 shared starting directory. Native QA must verify this discovery and trust
 inheritance with the installed Claude version; Minutes never preaccepts trust or adds bypass
-flags. The first Recall workspace can still need the normal trust dialog.
+flags. Each app's workspace can show the normal Claude trust dialog on first
+use, including the first Dev tab.
 
 Each hook writes only `tabs/<id>/.recall-state.json`, containing status and the
 Claude session ID and whether Claude is active inside a shell. Prompt/tool work is working; permission/question/idle events

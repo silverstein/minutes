@@ -1,4 +1,5 @@
 //! Recall tab metadata and Claude hook protocol. Optional consumers never block capture.
+use minutes_core::assistant_workspace::AssistantWorkspace;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -168,6 +169,10 @@ fn legacy_session(root: &Path, home: &Path) -> Option<String> {
 
 impl TabStore {
     pub fn ensure(&mut self, root: &Path) -> Result<(), String> {
+        self.ensure_for(root, AssistantWorkspace::current())
+    }
+
+    fn ensure_for(&mut self, root: &Path, identity: AssistantWorkspace) -> Result<(), String> {
         if self.loaded {
             return Ok(());
         }
@@ -182,8 +187,15 @@ impl TabStore {
                 return Err("Invalid saved Recall tabs".into());
             }
         } else {
-            let legacy = dirs::home_dir().and_then(|home| legacy_session(root, &home));
-            if root.join("CLAUDE.md").exists() || legacy.is_some() {
+            let legacy = match identity {
+                AssistantWorkspace::Production => {
+                    dirs::home_dir().and_then(|home| legacy_session(root, &home))
+                }
+                AssistantWorkspace::Dev => None,
+            };
+            if identity == AssistantWorkspace::Production
+                && (root.join("CLAUDE.md").exists() || legacy.is_some())
+            {
                 let dir = workspace_at(root, "assistant")?;
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 for name in [
@@ -1581,6 +1593,61 @@ mod migration_tests {
         restored.ensure(&root).unwrap();
         assert_eq!(restored.tabs.len(), 1);
     }
+    #[test]
+    fn dev_recall_ignores_production_tabs_and_legacy_focus() {
+        let home = tempfile::tempdir().unwrap();
+        let data_dir = home.path().join(".minutes");
+        let production = AssistantWorkspace::Production.root(&data_dir);
+        let dev = AssistantWorkspace::Dev.root(&data_dir);
+        fs::create_dir_all(production.join("tabs/tab-production")).unwrap();
+        // A read through TabStore::ensure would fail with this manifest.
+        let production_manifest = b"production manifest, kept byte-for-byte";
+        let production_focus = b"production meeting context";
+        fs::write(production.join(MANIFEST), production_manifest).unwrap();
+        fs::write(
+            production.join("tabs/tab-production/CURRENT_MEETING.md"),
+            production_focus,
+        )
+        .unwrap();
+        let legacy = br#"{"currentMeetingPath":"/production/legacy.md"}"#;
+        fs::write(data_dir.join("recall-workspace.json"), legacy).unwrap();
+
+        // Startup can leave neutral root instructions even when there is no manifest.
+        fs::create_dir_all(&dev).unwrap();
+        fs::write(dev.join("CLAUDE.md"), "Dev root instructions").unwrap();
+        let mut store = TabStore::default();
+        store.ensure_for(&dev, AssistantWorkspace::Dev).unwrap();
+        assert!(store.tabs.is_empty());
+        assert_eq!(store.active, None);
+        assert!(!dev.join("tabs/assistant").exists());
+
+        let id = store.open(&dev, None, true).unwrap();
+        let workspace = workspace_at(&dev, &id).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        crate::context::write_deferred_assistant_context(&workspace).unwrap();
+        let settings_path = settings(&dev).unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(settings_path).unwrap()).unwrap();
+        for hooks in settings["hooks"].as_object().unwrap().values() {
+            assert_eq!(hooks[0]["hooks"][0]["args"][1].as_str(), dev.to_str(),);
+        }
+        assert!(workspace.join("CLAUDE.md").is_file());
+        assert!(workspace.join("AGENTS.md").is_file());
+        assert!(dev.join(MANIFEST).is_file());
+        assert_eq!(
+            fs::read(production.join(MANIFEST)).unwrap(),
+            production_manifest
+        );
+        assert_eq!(
+            fs::read(production.join("tabs/tab-production/CURRENT_MEETING.md")).unwrap(),
+            production_focus,
+        );
+        assert_eq!(
+            fs::read(data_dir.join("recall-workspace.json")).unwrap(),
+            legacy
+        );
+    }
+
     #[test]
     fn legacy_conversation_uses_transcript_filename_without_reading_content() {
         let temp = tempfile::tempdir().unwrap();

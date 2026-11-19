@@ -419,6 +419,25 @@ enum Commands {
         state: Option<String>,
     },
 
+    /// Toggle recording on or off from a single keybind. Starts a detached
+    /// `minutes record` when idle; stops the active recording or live
+    /// transcript otherwise. Designed for compositor keybinds on Wayland,
+    /// where the compositor owns global shortcuts (Hyprland `bind`, GNOME
+    /// custom shortcuts, KDE shortcuts).
+    ToggleRecording {
+        /// Mode to start in: "meeting" (default) or "quick-thought" spawn
+        /// `minutes record --mode <mode>`; "live" spawns `minutes live`
+        /// instead. Stopping works the same for every mode.
+        #[arg(long, default_value = "meeting", value_parser = ["meeting", "quick-thought", "live"])]
+        mode: String,
+    },
+
+    /// Toggle dictation on or off from a single keybind. Starts a detached
+    /// `minutes dictate` when idle; stops an active dictation session
+    /// otherwise. Designed for compositor keybinds on Wayland, where the
+    /// compositor owns global shortcuts.
+    ToggleDictation,
+
     /// Add a note to the current recording
     Note {
         /// The note text
@@ -2170,6 +2189,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::MicToggle { state } => cmd_mic_toggle(state.as_deref()),
+        Commands::ToggleRecording { mode } => cmd_toggle_recording(&mode, &config),
+        Commands::ToggleDictation => cmd_toggle_dictation(),
         Commands::ProcessQueue => cmd_process_queue(&config),
         Commands::PolicyAudit => cmd_policy_audit(),
         Commands::ParakeetHelper {
@@ -3693,6 +3714,246 @@ fn cmd_mic_toggle(force_state: Option<&str>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Spawn a detached `minutes` subcommand. Compositor keybinds need the work
+/// to outlive the invoking command, so the child gets null stdio and is left
+/// running — same pattern as `spawn_queue_worker`.
+fn spawn_detached_minutes(args: &[&str]) -> Result<std::process::Child> {
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))
+}
+
+/// Spawn a detached session and confirm it did not die during startup. The
+/// child has no terminal, so a fast failure (no mic, missing model) would
+/// otherwise be invisible: give it a moment to write its PID file and bail
+/// only when the process actually exits. A live-but-quiet child at the
+/// deadline is still starting — meeting-mode `record` probes system audio
+/// for several seconds before writing its PID file — so it is not a failure.
+/// Real failures are logged to `~/.minutes/logs/minutes.log`.
+fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Result<()> {
+    let mut child = spawn_detached_minutes(args)?;
+    match wait_for_session(&mut child, pid_path, std::time::Duration::from_secs(2)) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let failure = format!("`minutes {label}`: {error}");
+            minutes_core::logging::log_error("toggle-spawn", label, &failure);
+            anyhow::bail!("{failure} — see ~/.minutes/logs/minutes.log")
+        }
+    }
+}
+
+/// How a spawned session announced itself within the startup window.
+#[derive(Debug)]
+enum SessionStart {
+    /// The session PID file went active — startup confirmed.
+    Ready,
+    /// The window elapsed with the child alive and no PID file, which means
+    /// the session is still starting (e.g. the audio probe), not failed.
+    StillStarting,
+}
+
+/// Wait for the child to write its session PID file, bail early if the
+/// process exits, and return [`SessionStart::StillStarting`] when the window
+/// elapses with the child alive.
+fn wait_for_session(
+    child: &mut impl SessionChild,
+    pid_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<SessionStart> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if minutes_core::pid::inspect_pid_file(pid_path).is_active() {
+            return Ok(SessionStart::Ready);
+        }
+        match child.try_exit()? {
+            Some(status) => anyhow::bail!("child exited during startup ({status})"),
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            None => return Ok(SessionStart::StillStarting),
+        }
+    }
+}
+
+/// The slice of [`std::process::Child`] startup verification needs, so tests
+/// can stand in for a real process.
+trait SessionChild {
+    fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl SessionChild for std::process::Child {
+    fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+}
+
+fn cmd_toggle_recording(mode: &str, config: &Config) -> Result<()> {
+    let recording_active = matches!(minutes_core::pid::check_recording(), Ok(Some(_)));
+    let live_active =
+        minutes_core::pid::inspect_pid_file(&minutes_core::pid::live_transcript_pid_path())
+            .is_active();
+    if recording_active || live_active {
+        return cmd_stop(config);
+    }
+
+    // Fail loudly instead of spawning a `record` that immediately exits: from
+    // a keybind there is no terminal to show the child's own error.
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — close it before recording");
+    }
+    minutes_core::sensitive::ensure_inactive_for_recording()
+        .map_err(|error| anyhow::anyhow!("{}", error))?;
+
+    if mode == "live" {
+        spawn_session(
+            &["live"],
+            &minutes_core::pid::live_transcript_pid_path(),
+            "live",
+        )?;
+        println!(
+            "Live transcript started — run `minutes toggle-recording --mode live` again to stop."
+        );
+    } else {
+        spawn_session(
+            &["record", "--mode", mode],
+            &minutes_core::pid::pid_path(),
+            "record",
+        )?;
+        println!("Recording started — run `minutes toggle-recording` again to stop.");
+    }
+    Ok(())
+}
+
+fn cmd_toggle_dictation() -> Result<()> {
+    let dict_state = minutes_core::pid::inspect_pid_file(&minutes_core::pid::dictation_pid_path());
+    match dict_state.pid() {
+        Some(pid) => return stop_running_dictation(pid),
+        None if dict_state.is_active() => {
+            anyhow::bail!("a dictation session is already running — stop it where it started")
+        }
+        None => {}
+    }
+
+    // Same conflicts the spawned `dictate` would report — surface them here,
+    // where the caller can see them.
+    if matches!(minutes_core::pid::check_recording(), Ok(Some(_))) {
+        anyhow::bail!("a recording is in progress — dictation can't start");
+    }
+    let lt_pid = minutes_core::pid::live_transcript_pid_path();
+    if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
+        anyhow::bail!("a live transcript is in progress — dictation can't start");
+    }
+    let voice_pid = minutes_core::pid::voice_pid_path();
+    if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+        anyhow::bail!("a voice session is open — dictation can't start");
+    }
+
+    spawn_session(
+        &["dictate"],
+        &minutes_core::pid::dictation_pid_path(),
+        "dictate",
+    )?;
+    println!("Dictation started — run `minutes toggle-dictation` again to stop.");
+    Ok(())
+}
+
+/// Stop a running dictation session. The dictation PID file is shared with
+/// the desktop app, whose process must never receive SIGINT — signal the
+/// owner only after confirming it runs this same CLI binary.
+#[cfg(unix)]
+fn stop_running_dictation(pid: u32) -> Result<()> {
+    if dictation_owner_is_cli(pid) {
+        // `minutes dictate` installs a ctrlc handler, so SIGINT takes the same
+        // graceful path as Ctrl-C in its terminal.
+        let rc = unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        if rc != 0 {
+            anyhow::bail!("failed to stop dictation process {pid}");
+        }
+        println!("Stopping dictation (PID {pid})...");
+        return Ok(());
+    }
+    eprintln!("A dictation session is already running in the app — stop it there.");
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn stop_running_dictation(_pid: u32) -> Result<()> {
+    anyhow::bail!("a dictation session is already running — stop it where it started")
+}
+
+/// The dictation PID file is shared with the desktop app, and a reused PID
+/// can point at a different `minutes` subcommand (`record`, `live`) — so the
+/// owner must be a `dictate` invocation of this same binary, verified from
+/// its full command line rather than just the executable name.
+#[cfg(unix)]
+fn dictation_owner_is_cli(pid: u32) -> bool {
+    let Some(own_name) = own_exe_name() else {
+        return false;
+    };
+    let Some(args) = process_args(pid) else {
+        return false;
+    };
+    args_indicate_dictate(&args, &own_name)
+}
+
+#[cfg(unix)]
+fn own_exe_name() -> Option<String> {
+    std::env::current_exe()
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_args(pid: u32) -> Option<Vec<String>> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// `argv[0]` must be this binary and the first non-flag argument must be the
+/// `dictate` subcommand (global flags like `-v` may precede it; option values
+/// like `--title dictate` must not count).
+#[cfg(unix)]
+fn args_indicate_dictate(args: &[String], own_name: &str) -> bool {
+    let exe_matches = args
+        .first()
+        .and_then(|arg0| std::path::Path::new(arg0).file_name())
+        .is_some_and(|name| name.to_string_lossy() == own_name);
+    exe_matches
+        && args[1..]
+            .iter()
+            .find(|arg| !arg.starts_with('-'))
+            .is_some_and(|arg| arg == "dictate")
 }
 
 fn cmd_stop(_config: &Config) -> Result<()> {
@@ -13984,6 +14245,122 @@ life (qmd://life/)
         .unwrap();
         assert!(called);
         assert_eq!(output, result.text.trim_end());
+    }
+
+    #[cfg(unix)]
+    mod dictate_owner {
+        use super::*;
+
+        fn args(list: &[&str]) -> Vec<String> {
+            list.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn requires_the_subcommand_after_flags() {
+            // `-v` is the only global flag and takes no value, so the first
+            // non-flag argument is always the subcommand.
+            assert!(args_indicate_dictate(
+                &args(&["minutes", "dictate"]),
+                "minutes"
+            ));
+            assert!(args_indicate_dictate(
+                &args(&[
+                    "/usr/local/bin/minutes",
+                    "-v",
+                    "dictate",
+                    "--delivery",
+                    "clipboard"
+                ]),
+                "minutes"
+            ));
+            // Other subcommands — including a `dictate` option value — and
+            // other binaries must never be signaled.
+            assert!(!args_indicate_dictate(
+                &args(&["minutes", "record"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(
+                &args(&["minutes", "record", "--title", "dictate"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(
+                &args(&["minutes-app", "dictate"]),
+                "minutes"
+            ));
+            assert!(!args_indicate_dictate(&args(&[]), "minutes"));
+        }
+
+        #[test]
+        fn own_pid_resolves_and_init_never_matches() {
+            // The test process is our own executable: reading its cmdline
+            // proves the /proc + ps plumbing resolves argv[0] to this binary.
+            let own_name = own_exe_name().expect("current_exe must have a file name");
+            let own = process_args(std::process::id()).expect("own cmdline must be readable");
+            assert_eq!(
+                std::path::Path::new(&own[0])
+                    .file_name()
+                    .map(|name| name.to_string_lossy()),
+                Some(std::borrow::Cow::Borrowed(own_name.as_str()))
+            );
+            let expected = own[1..]
+                .iter()
+                .find(|arg| !arg.starts_with('-'))
+                .is_some_and(|arg| arg == "dictate");
+            assert_eq!(dictation_owner_is_cli(std::process::id()), expected);
+            // PID 1 is init, never a `minutes dictate` process.
+            assert!(!dictation_owner_is_cli(1));
+        }
+    }
+
+    mod session_start {
+        use super::*;
+        use std::time::Duration;
+
+        struct PendingChild;
+        impl SessionChild for PendingChild {
+            fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                Ok(None)
+            }
+        }
+
+        fn missing_pid_file() -> PathBuf {
+            std::env::temp_dir().join(format!("minutes-test-missing-{}.pid", std::process::id()))
+        }
+
+        /// `minutes record` in meeting mode probes system audio for ~5s before
+        /// writing its PID file, so a live child with no file at the deadline
+        /// must report still-starting — reporting failure here told compositor
+        /// users the toggle broke, and a retry press then stopped the session.
+        #[test]
+        fn child_alive_past_deadline_reports_still_starting() {
+            let outcome = wait_for_session(
+                &mut PendingChild,
+                &missing_pid_file(),
+                Duration::from_millis(120),
+            )
+            .unwrap();
+            assert!(matches!(outcome, SessionStart::StillStarting));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn child_exit_during_startup_is_an_error() {
+            use std::os::unix::process::ExitStatusExt;
+            struct ExitedChild;
+            impl SessionChild for ExitedChild {
+                fn try_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+                    // Raw wait status for exit code 1.
+                    Ok(Some(std::process::ExitStatus::from_raw(256)))
+                }
+            }
+            let error = wait_for_session(
+                &mut ExitedChild,
+                &missing_pid_file(),
+                Duration::from_millis(50),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("exited during startup"));
+        }
     }
 }
 

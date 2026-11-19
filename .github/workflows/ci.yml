@@ -1097,6 +1097,9 @@ jobs:
           node scripts/test_dictation_overlay.mjs
           node scripts/test_dictation_history.mjs
 
+      - name: Verify Wayland shortcut picker swap
+        run: node --test scripts/test_wayland_shortcuts.mjs
+
   skills_compiler:
     name: Skills Compiler
     runs-on: ubuntu-latest

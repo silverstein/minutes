@@ -5924,6 +5924,26 @@
       cursor: pointer;
     }
 
+    /* Wayland: the compositor owns global shortcuts, so pickers swap to
+       CLI/compositor instructions (see applyWaylandShortcutUI). */
+    [data-global-shortcut].on-wayland .settings-section-inline,
+    [data-global-shortcut].on-wayland .shortcut-select,
+    [data-global-shortcut].on-wayland>.toggle-btn,
+    [data-global-shortcut].on-wayland .about-controls-meta:not(.wayland-shortcut-note),
+    .dictation-line.on-wayland> :not(.wayland-shortcut-note),
+    .dictation-line.on-wayland+.dictation-note,
+    [data-wayland-hide].on-wayland {
+      display: none;
+    }
+
+    .wayland-shortcut-note code {
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      background: var(--bg-hover);
+      border-radius: 4px;
+      padding: 0.1em 0.35em;
+    }
+
     .settings-color-row {
       display: flex;
       align-items: center;
@@ -7195,7 +7215,7 @@
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-autostart">Off</button>
         </div>
         <!-- Quick Thought shortcut (unified recorder) -->
-        <div class="about-controls">
+        <div class="about-controls" data-global-shortcut>
           <div class="about-controls-group">
             <div class="about-controls-copy">Quick Thought shortcut</div>
             <div class="settings-section-inline">
@@ -7205,6 +7225,10 @@
               <span class="special-key-link settings-hint-link" data-slot="quick_thought">or <u>Caps Lock</u> /
                 <u>fn</u></span>
             </div>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland. Bind <code>minutes toggle-recording --mode quick-thought</code> instead — Hyprland:
+              <code>bind = SUPER, R, exec, minutes toggle-recording --mode quick-thought</code>. GNOME: Settings &rarr;
+              Keyboard &rarr; Custom Shortcuts. KDE: System Settings &rarr; Shortcuts.</div>
             <div class="about-controls-meta" id="shortcut-status-quick_thought">Hold to record a quick thought, or tap
               to lock and tap again to stop.</div>
           </div>
@@ -7230,7 +7254,7 @@
             <div class="about-controls-meta" id="settings-live-backend-detail">Standalone live transcript currently inherits your main transcription engine.</div>
           </div>
         </div>
-        <div class="about-controls">
+        <div class="about-controls" data-global-shortcut>
           <div class="about-controls-group">
             <div class="about-controls-copy">Keyboard shortcut</div>
             <select class="shortcut-select settings-field" id="settings-live-shortcut-select">
@@ -7238,6 +7262,10 @@
               <option value="CmdOrCtrl+Alt+L">Cmd+Option+L</option>
               <option value="CmdOrCtrl+Shift+T">Cmd+Shift+T</option>
             </select>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland. Bind <code>minutes toggle-recording --mode live</code> instead — Hyprland:
+              <code>bind = SUPER, L, exec, minutes toggle-recording --mode live</code>. GNOME: Settings &rarr; Keyboard
+              &rarr; Custom Shortcuts. KDE: System Settings &rarr; Shortcuts.</div>
             <div class="about-controls-meta">Toggle live transcript on/off from any app.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-live-shortcut">Off</button>
@@ -7247,7 +7275,7 @@
       <!-- Command Palette -->
       <div class="settings-section">
         <div class="about-item-title">COMMAND PALETTE</div>
-        <div class="about-controls">
+        <div class="about-controls" data-global-shortcut>
           <div class="about-controls-group">
             <div class="about-controls-copy">Keyboard shortcut</div>
             <select class="shortcut-select settings-field" id="settings-palette-shortcut-select">
@@ -7255,6 +7283,8 @@
               <option value="CmdOrCtrl+Shift+O">Cmd+Shift+O</option>
               <option value="CmdOrCtrl+Shift+U">Cmd+Shift+U</option>
             </select>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland, and there is no CLI command for the palette — open it from the Minutes window instead.</div>
             <div class="about-controls-meta" id="settings-palette-shortcut-status">Open the Minutes command palette from any app.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="settings-palette-shortcut">Off</button>
@@ -7451,7 +7481,7 @@
       <div class="settings-section">
         <h3>Speak with your shortcut</h3>
         <!-- Dictation shortcut (unified recorder) -->
-        <div class="about-controls">
+        <div class="about-controls" data-global-shortcut>
           <div class="about-controls-group">
             <div class="about-controls-copy">Dictation shortcut</div>
             <div class="settings-section-inline">
@@ -7461,13 +7491,17 @@
               <span class="special-key-link settings-hint-link" data-slot="dictation">or <button type="button" class="dictation-key-choice">Caps Lock</button> /
                 <button type="button" class="dictation-key-choice">fn</button></span>
             </div>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland. Bind <code>minutes toggle-dictation</code> instead — Hyprland:
+              <code>bind = SUPER, D, exec, minutes toggle-dictation</code>. GNOME: Settings &rarr; Keyboard &rarr;
+              Custom Shortcuts. KDE: System Settings &rarr; Shortcuts.</div>
             <div class="about-controls-meta" id="shortcut-status-dictation">Hold to dictate, or tap to lock and tap
               again to stop.</div>
           </div>
           <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-dictation">Off</button>
         </div>
-        <div class="dictation-gestures" aria-label="How to dictate"><p><strong>Hold</strong> to speak. Release to finish.</p><p><strong>Tap</strong> to keep listening. Tap again or choose Finish.</p><p><strong>Escape</strong> cancels without inserting.</p></div>
-        <details class="dictation-disclosure" id="dictation-practice"><summary>Try your shortcut here</summary><label for="dictation-practice-text" id="dictation-practice-label" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Dictated text appears here. Try saying: “Let’s meet on Thursday at ten.”" spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
+        <div class="dictation-gestures" aria-label="How to dictate" data-wayland-hide><p><strong>Hold</strong> to speak. Release to finish.</p><p><strong>Tap</strong> to keep listening. Tap again or choose Finish.</p><p><strong>Escape</strong> cancels without inserting.</p></div>
+        <details class="dictation-disclosure" id="dictation-practice" data-wayland-hide><summary>Try your shortcut here</summary><label for="dictation-practice-text" id="dictation-practice-label" class="dictation-note">Click below, then use your dictation shortcut.</label><textarea id="dictation-practice-text" class="settings-field dictation-editor" placeholder="Dictated text appears here. Try saying: “Let’s meet on Thursday at ten.”" spellcheck="true"></textarea><div class="dictation-line"><p class="dictation-note" id="dictation-practice-note">Dictations follow your normal history settings. If delivery is set to clipboard, paste here yourself.</p><button id="dictation-practice-clear" type="button" class="btn btn-secondary btn-sm">Clear practice text</button></div></details>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Where dictated text goes</div>
@@ -7567,8 +7601,8 @@
           <div class="about-controls-meta" id="settings-hooks-post-dictation-status"></div>
         </section>
 <details class="dictation-disclosure" id="dictation-recovery-settings"><summary>Delivery and recovery shortcuts</summary>        <section class="dictation-block"><div class="dictation-line"><label for="dictation-clipboard-delay">Restore clipboard after pasting recent text</label><select id="dictation-clipboard-delay" class="settings-field"><option value="500">Half a second</option><option value="1000">One second — slow apps</option><option value="5000">Five seconds — remote desktops</option></select></div><p class="dictation-note">Applies when you paste recent or recovered text. Routine dictation keeps your final words on the clipboard. A longer wait helps apps that read pasted text slowly. It also delays the next dictation. Anything you copy after a paste takes priority.</p></section><section class="dictation-block"><h3>Recovery shortcuts</h3><p class="dictation-note">Paste Last works in your destination app. Open Recent Dictations there to keep that destination for reviewed text.</p>
-          <div class="dictation-line"><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
-          <div class="dictation-line"><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
+          <div class="dictation-line" data-global-shortcut><label><input id="dictation-paste-enabled" type="checkbox"> Paste Last</label><button id="shortcut-recorder-dictation_paste_last" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Paste Last shortcut">Command Option V</button><span class="dictation-note wayland-shortcut-note" hidden>Paste Last can't be bound on Wayland — your compositor owns global shortcuts.</span></div><p id="shortcut-status-dictation_paste_last" class="dictation-note" role="status"></p>
+          <div class="dictation-line" data-global-shortcut><label><input id="dictation-history-enabled" type="checkbox"> Recent Dictations</label><button id="shortcut-recorder-dictation_history" type="button" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" aria-label="Change Recent Dictations shortcut">Command Option D</button><span class="dictation-note wayland-shortcut-note" hidden>Recent Dictations can't be bound on Wayland — your compositor owns global shortcuts.</span></div><p id="shortcut-status-dictation_history" class="dictation-note" role="status"></p>
         </section>
 </details>
 </div><div id="dictation-pane-words" class="dictation-pane" role="tabpanel" aria-labelledby="dictation-nav-words" hidden>
@@ -8558,6 +8592,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       supportsCallDetection: false,
       supportsTrayArtifactCopy: false,
       supportsDictationHotkey: false,
+      waylandSession: false,
     };
     const NUM_BARS = 32;
     const audioViz = document.getElementById('audio-viz');
@@ -8610,6 +8645,21 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           ? 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. Power-user tray actions copy the latest summary or transcript and try to paste it into your previous app when macOS automation allows it.'
           : 'Minutes is open source, markdown-backed, and designed so the artifact remains valuable even outside this app. This desktop build focuses on recording, transcription, search, and Recall today; tray copy/paste automation remains macOS-only for now.';
       }
+
+      applyWaylandShortcutUI();
+    }
+
+    // Wayland compositors own global keybindings; apps cannot register
+    // shortcuts that fire while another window is focused. Tagged picker rows
+    // (`data-global-shortcut`) hide their controls and reveal a note pointing
+    // at the compositor-bound CLI commands instead.
+    function applyWaylandShortcutUI() {
+      if (!desktopCapabilities.waylandSession) return;
+      document.querySelectorAll('[data-global-shortcut], [data-wayland-hide]').forEach((el) => {
+        el.classList.add('on-wayland');
+        const note = el.querySelector('.wayland-shortcut-note');
+        if (note) note.hidden = false;
+      });
     }
 
     async function markActivationNudgeShown(kind) {

@@ -3885,6 +3885,28 @@ fn cmd_toggle_dictation() -> Result<()> {
     Ok(())
 }
 
+/// Liveness via `kill(pid, 0)`: success and EPERM both mean the process
+/// exists; only ESRCH means it is gone.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    if unsafe { libc::kill(pid as i32, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Wait for a signaled session to actually exit. A quick re-toggle must not
+/// meet a session that is dying but still holds its PID file and reports a
+/// misleading "stop it where it started".
+#[cfg(unix)]
+fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline && process_alive(pid) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    !process_alive(pid)
+}
+
 /// Stop a running dictation session. The dictation PID file is shared with
 /// the desktop app, whose process must never receive SIGINT — signal the
 /// owner only after confirming it runs this same CLI binary.
@@ -3897,7 +3919,14 @@ fn stop_running_dictation(pid: u32) -> Result<()> {
         if rc != 0 {
             anyhow::bail!("failed to stop dictation process {pid}");
         }
-        println!("Stopping dictation (PID {pid})...");
+        if wait_for_exit(pid, std::time::Duration::from_secs(2)) {
+            println!("Dictation stopped.");
+        } else {
+            // The graceful path flushes audio and writes the note before
+            // dying, which can outlive the wait — report the signal was
+            // delivered, not that the session is gone.
+            println!("Sent stop signal to dictation (PID {pid}) — still finishing.");
+        }
         return Ok(());
     }
     eprintln!("A dictation session is already running in the app — stop it there.");
@@ -14347,6 +14376,41 @@ life (qmd://life/)
             assert_eq!(pgid, child.id() as i32);
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    mod signal_stop {
+        use super::*;
+        use std::time::Duration;
+
+        #[test]
+        fn process_alive_distinguishes_running_from_dead() {
+            assert!(process_alive(std::process::id()));
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep");
+            assert!(process_alive(child.id()));
+            child.kill().expect("kill sleep");
+            child.wait().expect("reap sleep");
+            assert!(!process_alive(child.id()));
+        }
+
+        #[test]
+        fn wait_for_exit_returns_for_dead_pid_and_times_out_for_live() {
+            let mut child = std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep");
+            child.kill().expect("kill sleep");
+            child.wait().expect("reap sleep");
+            // A reaped pid is already gone — no need to wait the full window.
+            assert!(wait_for_exit(child.id(), Duration::from_millis(10)));
+            assert!(!wait_for_exit(
+                std::process::id(),
+                Duration::from_millis(60)
+            ));
         }
     }
 

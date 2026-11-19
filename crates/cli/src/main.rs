@@ -3721,13 +3721,33 @@ fn cmd_mic_toggle(force_state: Option<&str>) -> Result<()> {
 /// running — same pattern as `spawn_queue_worker`.
 fn spawn_detached_minutes(args: &[&str]) -> Result<std::process::Child> {
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
+    spawn_detached(&exe, args)
+}
+
+/// Spawn `exe args` detached from the caller: null stdio and, on Unix, its
+/// own process group. Null stdio alone is not enough — a kill of the caller's
+/// process group (compositor exec wrappers reaping keybind jobs, session
+/// teardown) takes a group-member child down with it.
+fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> Result<std::process::Child> {
+    let mut command = std::process::Command::new(exe);
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to launch `minutes {}`: {}", args.join(" "), e))
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to launch `{} {}`: {}",
+            exe.display(),
+            args.join(" "),
+            e
+        )
+    })
 }
 
 /// Spawn a detached session and confirm it did not die during startup. The
@@ -14309,6 +14329,24 @@ life (qmd://life/)
             assert_eq!(dictation_owner_is_cli(std::process::id()), expected);
             // PID 1 is init, never a `minutes dictate` process.
             assert!(!dictation_owner_is_cli(1));
+        }
+    }
+
+    #[cfg(unix)]
+    mod detached_spawn {
+        use super::*;
+
+        /// A "detached" child must outlive a kill of the caller's process
+        /// group — the whole point of `spawn_detached` is surviving the
+        /// invoking keybind job, so the child leads its own group.
+        #[test]
+        fn child_leads_its_own_process_group() {
+            let mut child =
+                spawn_detached(std::path::Path::new("/bin/sleep"), &["30"]).expect("spawn sleep");
+            let pgid = unsafe { libc::getpgid(child.id() as i32) };
+            assert_eq!(pgid, child.id() as i32);
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 

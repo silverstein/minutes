@@ -125,6 +125,7 @@ mod exit_teardown_tests {
         }
     }
 }
+pub mod assistant_workspace;
 #[cfg(any(test, all(feature = "streaming", feature = "whisper")))]
 pub(crate) mod bounded_inference;
 pub mod calendar;

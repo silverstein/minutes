@@ -1,3 +1,4 @@
+use minutes_core::assistant_workspace::AssistantWorkspace;
 use minutes_core::config::Config;
 use minutes_core::markdown::{split_frontmatter, Frontmatter, IntentKind};
 use minutes_core::search::{self, SearchFilters};
@@ -111,9 +112,18 @@ fn intent_label(kind: IntentKind) -> &'static str {
     }
 }
 
-/// Shared assistant asset root containing independent per-tab workspaces.
+/// Assistant asset root for this desktop identity, containing per-tab workspaces.
 pub fn workspace_dir() -> PathBuf {
-    Config::minutes_dir().join("assistant")
+    AssistantWorkspace::current().root(&Config::minutes_dir())
+}
+
+/// Recall stored these files beside the production root before Dev had its own.
+pub(crate) fn workspace_state_dir() -> PathBuf {
+    let minutes_dir = Config::minutes_dir();
+    match AssistantWorkspace::current() {
+        AssistantWorkspace::Production => minutes_dir,
+        AssistantWorkspace::Dev => AssistantWorkspace::Dev.root(&minutes_dir),
+    }
 }
 
 impl AssistantSkillBundle {

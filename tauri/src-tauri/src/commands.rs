@@ -1852,11 +1852,11 @@ fn activation_state_path() -> PathBuf {
 }
 
 fn recent_artifacts_state_path() -> PathBuf {
-    Config::minutes_dir().join("recent-artifacts.json")
+    crate::context::workspace_state_dir().join("recent-artifacts.json")
 }
 
 fn recall_workspace_state_path() -> PathBuf {
-    Config::minutes_dir().join("recall-workspace.json")
+    crate::context::workspace_state_dir().join("recall-workspace.json")
 }
 
 fn now_rfc3339() -> String {
@@ -11552,11 +11552,11 @@ fn codex_executable_read_roots(agent_bin: &Path) -> Vec<PathBuf> {
 }
 
 fn recall_chat_cwd() -> PathBuf {
-    let workspace = crate::context::workspace_dir();
-    workspace
-        .parent()
-        .map(|parent| parent.join("chat"))
-        .unwrap_or(workspace)
+    use minutes_core::assistant_workspace::AssistantWorkspace;
+    Config::minutes_dir().join(match AssistantWorkspace::current() {
+        AssistantWorkspace::Production => "chat",
+        AssistantWorkspace::Dev => "chat-dev",
+    })
 }
 
 fn prepare_recall_chat_cwd() -> Result<PathBuf, String> {
@@ -26338,7 +26338,7 @@ fn finalize_palette_open(app: &tauri::AppHandle) {
 /// **Side-effect-free**: this command intentionally does NOT call
 /// `crate::context::create_workspace` because that function does
 /// `create_dir_all`, creates a `meetings` symlink, and runs `git init`.
-/// Just opening the palette must not mutate `~/.minutes/assistant`.
+/// Just opening the palette must not mutate the assistant workspace.
 /// Instead we use `workspace_dir()` (a pure path computation) and only
 /// read the marker file if the workspace already exists. See codex
 /// pass 2 P2 #3.

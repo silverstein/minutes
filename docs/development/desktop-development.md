@@ -22,6 +22,18 @@ The split is intentional. macOS TCC permissions such as Microphone, Screen
 Recording, Accessibility, Apple Events, and Input Monitoring attach to the
 app identity macOS sees, not just to "the code in this repo."
 
+## Recall workspaces
+
+Minutes Dev uses `~/.minutes/assistant-dev` for Recall tabs, project hooks,
+assistant instructions, and live-call context. Production continues to use
+`~/.minutes/assistant`. Dev starts with a fresh tab list and its first Claude
+tab may show the normal project-trust prompt. Continue only if you trust the
+Dev workspace.
+
+The workspace split covers Recall state. Both apps still use the configured
+meeting library and the existing shared capture data and coordination. The
+standalone CLI and MCP server retain their existing behavior.
+
 ## Why this matters
 
 Testing TCC-sensitive features from multiple app paths or signatures leads to

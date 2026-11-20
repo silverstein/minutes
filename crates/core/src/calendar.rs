@@ -22,8 +22,6 @@ use chrono::{Datelike, Timelike};
 /// 3s is generous enough for slow CalDAV syncs but doesn't freeze the app.
 #[cfg(any(test, target_os = "macos"))]
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(target_os = "macos")]
-const ACCESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(any(test, target_os = "macos"))]
 const EVENTKIT_OVERLAP_LOOKAHEAD_MINUTES: u32 = 120;
 #[cfg(any(test, target_os = "macos"))]
@@ -313,22 +311,6 @@ pub fn calendar_access_status() -> CalendarAccess {
             return CalendarAccess::Unknown;
         }
         parse_calendar_access(&String::from_utf8_lossy(&output.stdout))
-    }
-}
-
-/// Request initial Calendar consent on a desktop background thread.
-#[cfg(target_os = "macos")]
-pub fn request_calendar_access_if_needed() {
-    if !calendar_integration_enabled() || calendar_access_status() != CalendarAccess::NotDetermined
-    {
-        return;
-    }
-    if let Some(helper) = find_calendar_helper() {
-        let mut command = crate::engine_process::command(&helper);
-        command
-            .arg("--request-access")
-            .arg(ACCESS_REQUEST_TIMEOUT.as_secs().to_string());
-        let _ = output_with_timeout(command, ACCESS_REQUEST_TIMEOUT);
     }
 }
 

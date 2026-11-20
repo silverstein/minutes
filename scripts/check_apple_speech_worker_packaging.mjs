@@ -10,7 +10,7 @@ const EXPECTED_SOURCE_SHA256 = {
   worker: "b6aed9092e0d34194a4b252b036f092d5adafc0821a583a6ef876f83d45a153c",
   xpc: "bfe9dfc1f015e6825adc02212305af52efe0f2faeff0d79c736cdce4e4c4d2aa",
   swift: "77310730cfa46ac8301c1a65622681005ebf00f0c699f24fdca757e2e02fcef4",
-  main: "16affea8f942e5afa6a89e495bced2329824825134f7a379bc649e98a3254d76",
+  main: "c08d3709b912d6e9c0cbc2ca363183038f70269781ab9db250ecf6cb7ee35324",
   acceptanceWorkflow:
     "16340f6b0a1aa4002e3c9f449c40b7212f4122f94a57c4174a58f756f671a217",
   acceptanceHarness:

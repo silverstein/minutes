@@ -1686,6 +1686,11 @@ fn get_top_right_position(width: f64, height: f64) -> (f64, f64) {
     (x, y)
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn minutes_request_calendar_access();
+}
+
 /// Rebuilds the calendar block. Returns how long the calendar query took, the
 /// signal for the caller's back-off (menu edits wait on the main thread and
 /// would otherwise read as a hung Calendar).
@@ -3300,13 +3305,17 @@ fn main() {
             // Delay first refresh so the app window is interactive before
             // osascript Calendar queries block the main-thread menu updates.
             if commands::supports_calendar_integration() && startup_config.calendar.enabled {
-                #[cfg(target_os = "macos")]
-                std::thread::spawn(minutes_core::calendar::request_calendar_access_if_needed);
                 let app_cal = app.handle().clone();
                 let menu_cal = menu.clone();
                 let cal_timer = cal_state.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    #[cfg(target_os = "macos")]
+                    let _ = app_cal.run_on_main_thread(|| {
+                        // Safety: Swift expects the app's main thread and
+                        // owns the EventKit request through its completion.
+                        unsafe { minutes_request_calendar_access() };
+                    });
                     let mut consecutive_timeouts: u32 = 0;
                     let mut backoff_secs: u64 = 300; // starts at 5 min
                     loop {

@@ -38,30 +38,10 @@ func printAccessStatus() {
     print("{\"calendar_access\":\"\(label)\"}")
 }
 
-// Status and event reads are non-interactive. The desktop asks for consent
-// separately, with enough time for someone to respond to the native prompt.
-switch CommandLine.arguments.dropFirst().first {
-case "--status":
+// The desktop app requests consent. Status and event reads never prompt.
+if CommandLine.arguments.dropFirst().first == "--status" {
     printAccessStatus()
     exit(0)
-case "--request-access":
-    guard EKEventStore.authorizationStatus(for: .event) == .notDetermined else {
-        printAccessStatus()
-        exit(0)
-    }
-    let timeout = Int(CommandLine.arguments.dropFirst(2).first ?? "") ?? 120
-    DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeout)) {
-        exit(3)
-    }
-    Task { @MainActor in
-        let store = EKEventStore()
-        _ = try? await store.requestFullAccessToEvents()
-        printAccessStatus()
-        exit(0)
-    }
-    dispatchMain()
-default:
-    break
 }
 
 guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {

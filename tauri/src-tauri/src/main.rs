@@ -3300,6 +3300,8 @@ fn main() {
             // Delay first refresh so the app window is interactive before
             // osascript Calendar queries block the main-thread menu updates.
             if commands::supports_calendar_integration() && startup_config.calendar.enabled {
+                #[cfg(target_os = "macos")]
+                std::thread::spawn(minutes_core::calendar::request_calendar_access_if_needed);
                 let app_cal = app.handle().clone();
                 let menu_cal = menu.clone();
                 let cal_timer = cal_state.clone();

@@ -25,13 +25,9 @@ struct EventOutput: Codable {
     let uid: String?
 }
 
-// `--status` prints the current authorization state WITHOUT prompting, so
-// Settings/readiness can be truthful without triggering a permission dialog.
-// States: full-access | write-only | denied | restricted | not-determined
-if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--status" {
-    let status = EKEventStore.authorizationStatus(for: .event)
+func printAccessStatus() {
     let label: String
-    switch status {
+    switch EKEventStore.authorizationStatus(for: .event) {
     case .fullAccess: label = "full-access"
     case .writeOnly: label = "write-only"
     case .denied: label = "denied"
@@ -40,28 +36,47 @@ if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--status" {
     @unknown default: label = "unknown"
     }
     print("{\"calendar_access\":\"\(label)\"}")
+}
+
+// Status and event reads are non-interactive. The desktop asks for consent
+// separately, with enough time for someone to respond to the native prompt.
+switch CommandLine.arguments.dropFirst().first {
+case "--status":
+    printAccessStatus()
     exit(0)
+case "--request-access":
+    guard EKEventStore.authorizationStatus(for: .event) == .notDetermined else {
+        printAccessStatus()
+        exit(0)
+    }
+    let timeout = Int(CommandLine.arguments.dropFirst(2).first ?? "") ?? 120
+    DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeout)) {
+        exit(3)
+    }
+    Task { @MainActor in
+        let store = EKEventStore()
+        _ = try? await store.requestFullAccessToEvents()
+        printAccessStatus()
+        exit(0)
+    }
+    dispatchMain()
+default:
+    break
+}
+
+guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
+    FileHandle.standardError.write("calendar-events: full calendar access is required\n".data(using: .utf8)!)
+    exit(2)
 }
 
 let lookaheadMinutes = Int(CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "240") ?? 240
 let lookbackMinutes = Int(CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "0") ?? 0
 let referenceEpochSeconds = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) : nil
 let store = EKEventStore()
-let semaphore = DispatchSemaphore(value: 0)
-
 let encoder = JSONEncoder()
 encoder.outputFormatting = [] // compact, single-line
 
-var accessDenied = false
-store.requestFullAccessToEvents { granted, error in
-    defer { semaphore.signal() }
-    guard granted else {
-        // Distinguish denied/write-only from "no events": empty-success here
-        // made dead reminders unreadable from the outside (#300).
-        accessDenied = true
-        return
-    }
-
+func printEvents() {
     let now = referenceEpochSeconds.map(Date.init(timeIntervalSince1970:)) ?? Date()
     guard let end = Calendar.current.date(byAdding: .minute, value: lookaheadMinutes, to: now) else { return }
     let start: Date
@@ -114,8 +129,4 @@ store.requestFullAccessToEvents { granted, error in
     }
 }
 
-semaphore.wait()
-if accessDenied {
-    FileHandle.standardError.write("calendar-events: access not granted (full access required)\n".data(using: .utf8)!)
-    exit(2)
-}
+printEvents()

@@ -22,6 +22,8 @@ use chrono::{Datelike, Timelike};
 /// 3s is generous enough for slow CalDAV syncs but doesn't freeze the app.
 #[cfg(any(test, target_os = "macos"))]
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(target_os = "macos")]
+const ACCESS_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(any(test, target_os = "macos"))]
 const EVENTKIT_OVERLAP_LOOKAHEAD_MINUTES: u32 = 120;
 #[cfg(any(test, target_os = "macos"))]
@@ -311,6 +313,22 @@ pub fn calendar_access_status() -> CalendarAccess {
             return CalendarAccess::Unknown;
         }
         parse_calendar_access(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+/// Request initial Calendar consent on a desktop background thread.
+#[cfg(target_os = "macos")]
+pub fn request_calendar_access_if_needed() {
+    if !calendar_integration_enabled() || calendar_access_status() != CalendarAccess::NotDetermined
+    {
+        return;
+    }
+    if let Some(helper) = find_calendar_helper() {
+        let mut command = crate::engine_process::command(&helper);
+        command
+            .arg("--request-access")
+            .arg(ACCESS_REQUEST_TIMEOUT.as_secs().to_string());
+        let _ = output_with_timeout(command, ACCESS_REQUEST_TIMEOUT);
     }
 }
 
@@ -723,9 +741,10 @@ fn query_via_eventkit_window(
         if output.status.code() == Some(2) {
             // Helper signals access-not-granted distinctly so dead reminders
             // are observable instead of reading as "no events" (#300).
-            tracing::warn!(
-                "calendar read access not granted (write-only or denied); meeting reminders are off"
-            );
+            tracing::warn!("calendar read access not granted; meeting reminders are off");
+            // The helper is available, but Calendar access was withheld.
+            // Avoid a second permission request through AppleScript.
+            return Some(Vec::new());
         }
         return None;
     }
@@ -762,6 +781,9 @@ fn query_overlap_via_eventkit_with_helper(
     }
     let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
+    if output.status.code() == Some(2) {
+        return Some(Vec::new());
+    }
     if !output.status.success() {
         return None;
     }

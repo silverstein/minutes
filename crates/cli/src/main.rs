@@ -3756,10 +3756,10 @@ fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> Result<std::process::
 /// deadline is still starting — meeting-mode `record` probes system audio
 /// for several seconds before writing its PID file — so it is not a failure.
 /// Real failures are logged to `~/.minutes/logs/minutes.log`.
-fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Result<()> {
+fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Result<SessionStart> {
     let mut child = spawn_detached_minutes(args)?;
     match wait_for_session(&mut child, pid_path, std::time::Duration::from_secs(2)) {
-        Ok(_) => Ok(()),
+        Ok(state) => Ok(state),
         Err(error) => {
             let failure = format!("`minutes {label}`: {error}");
             minutes_core::logging::log_error("toggle-spawn", label, &failure);
@@ -3773,9 +3773,17 @@ fn spawn_session(args: &[&str], pid_path: &std::path::Path, label: &str) -> Resu
 enum SessionStart {
     /// The session PID file went active — startup confirmed.
     Ready,
-    /// The window elapsed with the child alive and no PID file, which means
-    /// the session is still starting (e.g. the audio probe), not failed.
+    /// The child is alive, but its ownership of the PID file is unconfirmed.
     StillStarting,
+}
+
+impl SessionStart {
+    fn message(&self, session: &str, toggle: &str) -> String {
+        match self {
+            Self::Ready => format!("{session} started — run `{toggle}` again to stop."),
+            Self::StillStarting => format!("{session} is still starting."),
+        }
+    }
 }
 
 /// Wait for the child to write its session PID file, bail early if the
@@ -3796,10 +3804,9 @@ fn wait_for_session(
             PidFileState::Active(other) => {
                 anyhow::bail!("another session (PID {other}) started first")
             }
-            // The lock proves a live owner but hides the PID — most likely our
-            // child, since conflicts were checked before spawning.
-            PidFileState::LockedAlive => return Ok(SessionStart::Ready),
-            PidFileState::Inactive => {}
+            // A Windows lock proves liveness, but the owner could have won a
+            // race after preflight. Keep watching our child for an early exit.
+            PidFileState::LockedAlive | PidFileState::Inactive => {}
         }
         match child.try_exit()? {
             Some(status) => anyhow::bail!("child exited during startup ({status})"),
@@ -3847,21 +3854,22 @@ fn cmd_toggle_recording(mode: &str, config: &Config) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("{}", error))?;
 
     if mode == "live" {
-        spawn_session(
+        let state = spawn_session(
             &["live"],
             &minutes_core::pid::live_transcript_pid_path(),
             "live",
         )?;
         println!(
-            "Live transcript started — run `minutes toggle-recording --mode live` again to stop."
+            "{}",
+            state.message("Live transcript", "minutes toggle-recording --mode live")
         );
     } else {
-        spawn_session(
+        let state = spawn_session(
             &["record", "--mode", mode],
             &minutes_core::pid::pid_path(),
             "record",
         )?;
-        println!("Recording started — run `minutes toggle-recording` again to stop.");
+        println!("{}", state.message("Recording", "minutes toggle-recording"));
     }
     Ok(())
 }
@@ -3890,12 +3898,12 @@ fn cmd_toggle_dictation() -> Result<()> {
         anyhow::bail!("a voice session is open — dictation can't start");
     }
 
-    spawn_session(
+    let state = spawn_session(
         &["dictate"],
         &minutes_core::pid::dictation_pid_path(),
         "dictate",
     )?;
-    println!("Dictation started — run `minutes toggle-dictation` again to stop.");
+    println!("{}", state.message("Dictation", "minutes toggle-dictation"));
     Ok(())
 }
 
@@ -14460,6 +14468,10 @@ life (qmd://life/)
             )
             .unwrap();
             assert!(matches!(outcome, SessionStart::StillStarting));
+            assert_eq!(
+                outcome.message("Recording", "minutes toggle-recording"),
+                "Recording is still starting."
+            );
         }
 
         /// An active PID file owned by our child confirms startup; one owned
@@ -14482,6 +14494,10 @@ life (qmd://life/)
             )
             .unwrap();
             assert!(matches!(outcome, SessionStart::Ready));
+            assert_eq!(
+                outcome.message("Recording", "minutes toggle-recording"),
+                "Recording started — run `minutes toggle-recording` again to stop."
+            );
 
             let error = wait_for_session(
                 &mut PendingChild(std::process::id()),
@@ -14494,6 +14510,24 @@ life (qmd://life/)
             let _ = owner.kill();
             let _ = owner.wait();
             std::fs::remove_file(&pid_path).ok();
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn locked_pid_without_an_owner_is_still_starting() {
+            let pid_path = test_pid_file("locked");
+            let _guard = minutes_core::pid::create_pid_guard(&pid_path).unwrap();
+            assert_eq!(
+                minutes_core::pid::inspect_pid_file(&pid_path),
+                minutes_core::pid::PidFileState::LockedAlive
+            );
+            let state = wait_for_session(
+                &mut PendingChild(std::process::id()),
+                &pid_path,
+                Duration::ZERO,
+            )
+            .unwrap();
+            assert!(matches!(state, SessionStart::StillStarting));
         }
 
         #[cfg(unix)]

@@ -3683,17 +3683,12 @@ fn spawn_queue_worker() -> Result<()> {
     }
 
     let exe = std::env::current_exe()?;
-    let child = std::process::Command::new(exe)
-        .arg("process-queue")
+    detached_command(&exe, &["process-queue"])
         .env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         )
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .spawn()?;
-    let _ = child.id();
     Ok(())
 }
 
@@ -3724,11 +3719,11 @@ fn spawn_detached_minutes(args: &[&str]) -> Result<std::process::Child> {
     spawn_detached(&exe, args)
 }
 
-/// Spawn `exe args` detached from the caller: null stdio and, on Unix, its
-/// own process group. Null stdio alone is not enough — a kill of the caller's
+/// A Command for a detached helper process: null stdio and, on Unix, its own
+/// process group. Null stdio alone is not enough — a kill of the caller's
 /// process group (compositor exec wrappers reaping keybind jobs, session
 /// teardown) takes a group-member child down with it.
-fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> Result<std::process::Child> {
+fn detached_command(exe: &std::path::Path, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(exe);
     command
         .args(args)
@@ -3740,7 +3735,11 @@ fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> Result<std::process::
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    command.spawn().map_err(|e| {
+    command
+}
+
+fn spawn_detached(exe: &std::path::Path, args: &[&str]) -> Result<std::process::Child> {
+    detached_command(exe, args).spawn().map_err(|e| {
         anyhow::anyhow!(
             "failed to launch `{} {}`: {}",
             exe.display(),

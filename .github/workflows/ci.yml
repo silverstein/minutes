@@ -487,6 +487,10 @@ jobs:
         run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
         timeout-minutes: 4
 
+      - name: CLI toggle session startup contracts
+        run: cargo test -p minutes-cli --no-default-features --bin minutes session_start -- --test-threads=1
+        timeout-minutes: 4
+
       - name: CLI transcription renderer contracts
         # Core attribution tests do not execute this independent CLI renderer.
         # Exercise both formats, overlap/turn-crossing abstention, and absent

@@ -6237,7 +6237,7 @@ fn calendar_status(config: &Config) -> ReadinessItem {
             ),
             CalendarAccess::NotDetermined => (
                 "attention",
-                "Calendar access has not been requested yet. The first calendar feature use will prompt; grant Full Calendar access to enable meeting reminders.".into(),
+                "Choose Manage Calendar Access in Minutes settings to request access and enable meeting reminders.".into(),
             ),
             CalendarAccess::Unknown => (
                 "attention",

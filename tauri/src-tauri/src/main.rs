@@ -1688,7 +1688,32 @@ fn get_top_right_position(width: f64, height: f64) -> (f64, f64) {
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
-    fn minutes_request_calendar_access();
+    fn minutes_request_calendar_access() -> bool;
+}
+
+#[tauri::command]
+fn cmd_manage_calendar_access(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !minutes_core::config::Config::load().calendar.enabled {
+            return Err("Calendar integration is disabled.".into());
+        }
+        app.run_on_main_thread(|| {
+            // Safety: the Swift bridge runs only on the app's main thread.
+            if !unsafe { minutes_request_calendar_access() } {
+                let _ = minutes_core::spawn_reaped(std::process::Command::new("open").arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+                ));
+            }
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Calendar access is available only on macOS.".into())
+    }
 }
 
 /// Rebuilds the calendar block. Returns how long the calendar query took, the
@@ -2129,9 +2154,7 @@ fn main() {
                 let _ = app.emit("minutes://show-whats-new", ());
             }
             "calendar-access-warning" => {
-                let _ = minutes_core::spawn_reaped(std::process::Command::new("open").arg(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
-                ));
+                let _ = cmd_manage_calendar_access(app.clone());
             }
             "app-open-settings" => {
                 show_main_window(app);
@@ -3310,12 +3333,6 @@ fn main() {
                 let cal_timer = cal_state.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(3));
-                    #[cfg(target_os = "macos")]
-                    let _ = app_cal.run_on_main_thread(|| {
-                        // Safety: Swift expects the app's main thread and
-                        // owns the EventKit request through its completion.
-                        unsafe { minutes_request_calendar_access() };
-                    });
                     let mut consecutive_timeouts: u32 = 0;
                     let mut backoff_secs: u64 = 300; // starts at 5 min
                     loop {
@@ -3524,6 +3541,7 @@ fn main() {
             cmd_apply_recall_window_layout,
             cmd_scale_window,
             commands::cmd_upcoming_meetings,
+            cmd_manage_calendar_access,
             commands::cmd_recall_chat_send,
             commands::cmd_recall_chat_cancel,
             commands::cmd_recall_chat_clear,

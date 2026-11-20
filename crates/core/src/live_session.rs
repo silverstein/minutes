@@ -183,7 +183,34 @@ where
         });
     }
 
-    let meeting = crate::process(&preserved_wav, ContentType::Meeting, None, config)?;
+    // Inline CLI promotion has no policy-bearing job. Keep it local rather
+    // than authorizing an archived WAV from mutable stop-time session state.
+    let mut processing_config = config.clone();
+    if crate::transcribe::effective_transcription_engine(config) == "openai-compatible" {
+        processing_config.transcription.engine = "whisper".into();
+        processing_config.transcription.model = if config.live_transcript.model.is_empty() {
+            config.dictation.model.clone()
+        } else {
+            config.live_transcript.model.clone()
+        };
+        #[cfg(feature = "whisper")]
+        {
+            // Reuse Live's installed model, including its dictation fallback.
+            processing_config.transcription.model = crate::transcribe::resolve_model_path_by_name(
+                &processing_config.transcription.model,
+                config,
+            )?
+            .display()
+            .to_string();
+        }
+        eprintln!("[minutes] CLI Live stop processing uses local Whisper; remote batch settings remain saved");
+    }
+    let meeting = crate::process(
+        &preserved_wav,
+        ContentType::Meeting,
+        None,
+        &processing_config,
+    )?;
     tracing::info!(
         meeting = %meeting.path.display(),
         wav = %preserved_wav.display(),
@@ -309,6 +336,36 @@ mod tests {
         assert!(wav_path.starts_with(wav.parent().unwrap().join(LIVE_SESSIONS_DIR)));
         assert!(!wav.exists());
         assert!(!jsonl.exists());
+    }
+
+    #[test]
+    #[cfg(not(feature = "whisper"))]
+    fn stopped_live_remote_batch_processes_locally_without_upload() {
+        crate::test_support::with_temp_home(|_| {
+            let (_temp, wav, jsonl, mut config) = stopped_session();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            config.live_transcript.promote_on_stop = LiveTranscriptPromoteOnStop::Process;
+            config.transcription.engine = "openai-compatible".into();
+            config.transcription.openai_compatible_base_url =
+                format!("http://{}/v1", listener.local_addr().unwrap());
+            config.transcription.openai_compatible_api_key_env.clear();
+            config.transcription.openai_compatible_model = "test-model".into();
+
+            let result = finalize_stopped_live_session(&config, &wav, &jsonl)
+                .expect("CLI live promotion must complete locally even with remote batch selected");
+
+            assert!(result.meeting_path().unwrap().exists());
+            assert!(result.wav_path().unwrap().exists());
+            assert!(result.jsonl_path().exists());
+            assert!(!wav.exists());
+            assert!(!jsonl.exists());
+            assert_eq!(config.transcription.engine, "openai-compatible");
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
     }
 
     #[test]

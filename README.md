@@ -9,7 +9,7 @@
 
 Minutes is a free, open-source conversation memory app for the AI you already use. Record and transcribe meetings, calls, voice memos, and dictation on your device, then let Claude Code, Codex, Cursor, or another MCP client search the history you choose to share. Your records are Markdown files you own in `~/meetings/`.
 
-Capture, transcription, and storage run locally. If you choose a cloud AI assistant or summarizer, the meeting context you authorize is sent to that provider.
+Capture and storage run locally, and transcription is local by default. [Explicitly opting in to remote batch transcription](docs/configuration/openai-compatible-transcription.md) sends policy-authorized audio to your configured host. If you choose a cloud AI assistant or summarizer, the meeting context you authorize is sent to that provider.
 
 **Your conversations. Your memory. Ready for the AI you use.**
 

@@ -3692,12 +3692,25 @@ fn spawn_queue_worker() -> Result<()> {
     }
 
     let exe = std::env::current_exe()?;
-    detached_command(&exe, &["process-queue"])
+    let mut child = detached_command(&exe, &["process-queue"])
         .env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         )
         .spawn()?;
+    // Same verification the session toggles use: the child has null stdio, so
+    // a worker that dies at startup was invisible — the job sat queued with
+    // nothing draining it. The job is already safely queued, so a failed or
+    // foreign-pid startup is logged, not raised.
+    if let Err(error) = wait_for_session(
+        &mut child,
+        &minutes_core::jobs::worker_pid_path(),
+        std::time::Duration::from_secs(2),
+    ) {
+        let failure = format!("`minutes process-queue`: {error}");
+        minutes_core::logging::log_error("queue-worker", "process-queue", &failure);
+        eprintln!("{failure} — job stays queued; `minutes process-queue` retries");
+    }
     Ok(())
 }
 

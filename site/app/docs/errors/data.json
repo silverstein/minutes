@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-11-16",
-  "visibleCount": 71,
+  "generatedAt": "2026-11-21",
+  "visibleCount": 73,
   "hiddenCount": 17,
   "groups": [
     {
@@ -609,7 +609,7 @@
     },
     {
       "enumName": "DictationError",
-      "count": 8,
+      "count": 9,
       "entries": [
         {
           "id": "dictationerror-recordingactive",
@@ -654,6 +654,17 @@
           "hidden": false,
           "anchorId": "error-dictationerror-alreadyactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-alreadyactive"
+        },
+        {
+          "id": "dictationerror-sensitivemeeting",
+          "enumName": "DictationError",
+          "variant": "SensitiveMeeting",
+          "cfg": null,
+          "message": "{0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-dictationerror-sensitivemeeting",
+          "docsUrl": "https://useminutes.app/docs/errors#error-dictationerror-sensitivemeeting"
         },
         {
           "id": "dictationerror-clipboardfailed",
@@ -703,7 +714,7 @@
     },
     {
       "enumName": "LiveTranscriptError",
-      "count": 6,
+      "count": 7,
       "entries": [
         {
           "id": "livetranscripterror-recordingactive",
@@ -737,6 +748,17 @@
           "hidden": false,
           "anchorId": "error-livetranscripterror-voiceactive",
           "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-voiceactive"
+        },
+        {
+          "id": "livetranscripterror-sensitivemeeting",
+          "enumName": "LiveTranscriptError",
+          "variant": "SensitiveMeeting",
+          "cfg": null,
+          "message": "{0}",
+          "sourceFile": "crates/core/src/error.rs",
+          "hidden": false,
+          "anchorId": "error-livetranscripterror-sensitivemeeting",
+          "docsUrl": "https://useminutes.app/docs/errors#error-livetranscripterror-sensitivemeeting"
         },
         {
           "id": "livetranscripterror-alreadyactive",

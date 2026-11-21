@@ -2,11 +2,11 @@
 
 > Generated file. Do not edit by hand.
 > Source: crates/core thiserror definitions
-> Last generated: 2026-11-16
+> Last generated: 2026-11-21
 
 This is the generated public catalog of stable Minutes core errors. It intentionally favors actionable, user-facing errors over generic wrapper variants.
 
-- Visible actionable errors: 71
+- Visible actionable errors: 73
 - Hidden low-signal wrappers: 17
 
 # CaptureError
@@ -689,6 +689,18 @@ Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-dictationerror-alreadyactive
 
+<a id="error-dictationerror-sensitivemeeting"></a>
+
+## `DictationError::SensitiveMeeting`
+
+Exact message:
+
+> {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-dictationerror-sensitivemeeting
+
 <a id="error-dictationerror-clipboardfailed"></a>
 
 ## `DictationError::ClipboardFailed`
@@ -774,6 +786,18 @@ Exact message:
 Source: `crates/core/src/error.rs`
 
 Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-voiceactive
+
+<a id="error-livetranscripterror-sensitivemeeting"></a>
+
+## `LiveTranscriptError::SensitiveMeeting`
+
+Exact message:
+
+> {0}
+
+Source: `crates/core/src/error.rs`
+
+Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-sensitivemeeting
 
 <a id="error-livetranscripterror-alreadyactive"></a>
 

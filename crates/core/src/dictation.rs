@@ -422,6 +422,13 @@ where
         return Err(DictationError::VoiceActive.into());
     }
 
+    // Check for conflicts: a sensitive meeting is a no-capture session, and
+    // dictation captures the microphone the meeting is happening into — same
+    // reason `minutes record` refuses.
+    if let Err(error) = crate::sensitive::ensure_inactive_for_recording() {
+        return Err(DictationError::SensitiveMeeting(error.to_string()).into());
+    }
+
     // Check for conflicts: another dictation must not be active
     let dict_pid = pid::dictation_pid_path();
     if let Ok(Some(existing)) = pid::check_pid_file(&dict_pid) {

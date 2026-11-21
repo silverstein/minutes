@@ -1098,6 +1098,15 @@ fn run_with_partials_internal(
         return Err(error);
     }
 
+    // Check conflicts: a sensitive meeting is a no-capture session; live
+    // transcript would stream the meeting it was declared for.
+    if let Err(sensitive_error) = crate::sensitive::ensure_inactive_for_recording() {
+        let error: MinutesError =
+            LiveTranscriptError::SensitiveMeeting(sensitive_error.to_string()).into();
+        mark_precreated_session_failed(&error);
+        return Err(error);
+    }
+
     // Clear any stale stop sentinel from a previous session
     pid::check_and_clear_sentinel();
 

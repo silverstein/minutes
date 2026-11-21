@@ -3946,6 +3946,8 @@ fn cmd_toggle_dictation() -> Result<()> {
     if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
         anyhow::bail!("a voice session is open — dictation can't start");
     }
+    minutes_core::sensitive::ensure_inactive_for_recording()
+        .map_err(|error| anyhow::anyhow!("{}", error))?;
 
     let state = spawn_session(
         &["dictate"],

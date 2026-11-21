@@ -63,6 +63,9 @@ pub struct CheckpointSpan {
     pub pcm_sha256: String,
     /// `[m:ss] text` lines on the source clock, before transcript cleanup.
     pub lines: Vec<String>,
+    /// Whisper completed audio in this span after a Sherpa dispatch failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sherpa_fell_back_to_whisper: bool,
 }
 
 /// The spans a host transcribed while recording. Order does not matter.
@@ -311,10 +314,9 @@ impl SpanTranscriber {
             TranscribeError::UnsupportedFormat("span starts past the audio budget".into())
         })?;
         let had_model = self.decoder.model_loaded();
-        let lines = self
-            .decoder
-            .transcribe(samples, plan.groups(), clock_offset, &config, &hints)?
-            .lines;
+        let result =
+            self.decoder
+                .transcribe(samples, plan.groups(), clock_offset, &config, &hints)?;
         if !had_model && self.decoder.model_loaded() {
             tracing::info!("checkpoint whisper context loaded; reusing for remaining spans");
             crate::logging::log_step(
@@ -330,7 +332,8 @@ impl SpanTranscriber {
             end_sample: start_sample + samples.len() as u64,
             settings: settings_fingerprint(&config, &hints),
             pcm_sha256: pcm_digest(samples),
-            lines,
+            lines: result.lines,
+            sherpa_fell_back_to_whisper: result.stats.sherpa_fell_back_to_whisper,
         })
     }
 }
@@ -503,7 +506,7 @@ impl<'a> SourcePass<'a> {
             &self.plan,
             accepted,
             decode,
-            |range, lines| {
+            |range, lines, sherpa_fell_back_to_whisper| {
                 let Some(file) = progress.as_mut() else {
                     return;
                 };
@@ -514,6 +517,7 @@ impl<'a> SourcePass<'a> {
                     settings: self.settings.clone(),
                     pcm_sha256: pcm_digest(&self.samples[range.clone()]),
                     lines,
+                    sherpa_fell_back_to_whisper,
                 };
                 match file.add(span) {
                     Ok(()) => {
@@ -575,7 +579,7 @@ fn assemble_source(
         &[DecodeGroup],
         &mut dyn FnMut(usize, &transcribe::ChunkLines),
     ) -> Result<transcribe::ChunkLines, TranscribeError>,
-    mut finished: impl FnMut(std::ops::Range<usize>, Vec<String>),
+    mut finished: impl FnMut(std::ops::Range<usize>, Vec<String>, bool),
 ) -> Result<transcribe::ChunkLines, TranscribeError> {
     let mut out = transcribe::ChunkLines {
         lines: Vec::new(),
@@ -599,12 +603,18 @@ fn assemble_source(
             let last = next - 1;
             let mut from = if first == 0 { 0 } else { cuts[first - 1] }.max(covered);
             let mut lines = Vec::new();
+            let mut sherpa_fell_back_to_whisper = false;
             let gap = decode(&groups[first..next], &mut |index, group| {
                 let g = first + index;
                 lines.extend(group.lines.iter().cloned());
+                sherpa_fell_back_to_whisper |= group.stats.sherpa_fell_back_to_whisper;
                 let to = cuts[g].min(gap_end);
                 if to.saturating_sub(from) >= SAVE_EVERY_SAMPLES || g == last {
-                    finished(from..to, std::mem::take(&mut lines));
+                    finished(
+                        from..to,
+                        std::mem::take(&mut lines),
+                        std::mem::take(&mut sherpa_fell_back_to_whisper),
+                    );
                     from = to;
                 }
             })?;
@@ -613,6 +623,7 @@ fn assemble_source(
         }
         if let Some(span) = span {
             out.lines.extend(span.lines.iter().cloned());
+            out.stats.sherpa_fell_back_to_whisper |= span.sherpa_fell_back_to_whisper;
             covered = span.end_sample as usize;
             while next < groups.len() && groups[next].start() < span.end_sample as usize {
                 next += 1;
@@ -734,6 +745,7 @@ mod tests {
             settings: settings.into(),
             pcm_sha256: pcm_digest(samples),
             lines: vec![format!("[0:{:02}] span at {start}", start / SAMPLE_RATE)],
+            sherpa_fell_back_to_whisper: false,
         }
     }
 
@@ -874,6 +886,7 @@ mod tests {
         };
         let json = serde_json::to_string(&checkpoint).unwrap();
         assert!(json.contains("\"source\":\"recording\""));
+        assert!(!json.contains("sherpa_fell_back_to_whisper"));
         let back: TranscriptCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(back, checkpoint);
     }
@@ -983,6 +996,9 @@ mod tests {
         assert!(c.len() > 2 && c[1] < samples.len(), "{c:?}");
         let mut first = voice(&samples, 0, c[1], &settings);
         first.lines = vec!["[0:00] first piece".into()];
+        first.sherpa_fell_back_to_whisper = true;
+        let first: CheckpointSpan =
+            serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
         let mut second = voice(&samples, c[1], samples.len(), &settings);
         second.lines = vec!["[0:01] second piece".into()];
 
@@ -995,6 +1011,7 @@ mod tests {
             None,
         )
         .unwrap();
+        assert!(result.stats.sherpa_fell_back_to_whisper);
 
         assert_eq!(result.text, "[0:00] first piece\n[0:01] second piece\n");
         assert_eq!(result.stats.audio_duration_secs, 60.0);

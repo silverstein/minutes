@@ -97,6 +97,7 @@ fn meeting_reuses_model_preserves_text_and_timestamps_and_releases_on_failure() 
     assert_eq!(result.text, "[0:00] Bonjour les amis de Montréal.\n[0:04] Zażółć gęślą jaźń podczas spotkania.\n[0:08] We will review the project tomorrow.\n");
     assert_eq!(result.stats.raw_segments, 3);
     assert_eq!(result.stats.audio_duration_secs, 12.0);
+    assert!(!result.stats.sherpa_fell_back_to_whisper);
     assert!(result.stats.samples_after_silence_strip > 0);
     assert!(!result.stats.diagnosis().contains("removed ALL audio"));
 

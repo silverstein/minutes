@@ -2281,6 +2281,7 @@ mod tests {
                     settings: "fixture".into(),
                     pcm_sha256: "fixture".into(),
                     lines: vec!["[0:00] said while recording".into()],
+                    sherpa_fell_back_to_whisper: false,
                 }],
                 ..Default::default()
             };
@@ -2416,6 +2417,7 @@ mod tests {
                         settings: "first attempt".into(),
                         pcm_sha256: "digest".into(),
                         lines: vec!["[0:00] finished before the crash".into()],
+                        sherpa_fell_back_to_whisper: false,
                     }],
                     ..Default::default()
                 };

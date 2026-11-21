@@ -555,6 +555,7 @@ mod tests {
             settings: "test".into(),
             pcm_sha256: "test".into(),
             lines: vec!["[0:00] fixture".into()],
+            sherpa_fell_back_to_whisper: false,
         }
     }
 

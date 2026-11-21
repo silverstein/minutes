@@ -64,6 +64,8 @@ pub struct FilterStats {
     pub final_words: usize,
     /// Microphone lines removed as high-confidence echoes of system speech.
     pub cross_source_echo_suppressed: usize,
+    /// Whisper decoded audio after Sherpa could not complete dispatch.
+    pub sherpa_fell_back_to_whisper: bool,
 }
 
 impl FilterStats {
@@ -669,29 +671,26 @@ impl<'a> BatchTranscriptionSession<'a> {
                         reason = sherpa_unavailable_reason(config),
                         "engine = \"sherpa\" selected but unavailable; falling back to whisper"
                     );
-                    return transcribe_whisper_dispatch(audio_path, config, hints);
-                }
-                // Passing the preflight is not the same as succeeding. The model
-                // files clear a size floor rather than a hash, so a corrupt or
-                // incompatible model loads the plugin fine and then fails inside
-                // it, and an individual decode window can fail too. Those used to
-                // surface as a failed transcription, which loses a recording; the
-                // rule here is that whisper answers whenever sherpa cannot.
-                match self.transcribe_sherpa(audio_path, hints) {
-                    Ok(result) => Ok(result),
-                    Err(error) => {
-                        #[cfg(feature = "engine-sherpa")]
-                        {
-                            self.sherpa = None;
+                } else {
+                    // A corrupt model or a decode error can still fail after preflight.
+                    match self.transcribe_sherpa(audio_path, hints) {
+                        Ok(result) => return Ok(result),
+                        Err(error) => {
+                            #[cfg(feature = "engine-sherpa")]
+                            {
+                                self.sherpa = None;
+                            }
+                            tracing::warn!(
+                                model_dir = %model_dir.display(),
+                                %error,
+                                "sherpa transcription failed after loading; falling back to whisper"
+                            );
                         }
-                        tracing::warn!(
-                            model_dir = %model_dir.display(),
-                            %error,
-                            "sherpa transcription failed after loading; falling back to whisper"
-                        );
-                        transcribe_whisper_dispatch(audio_path, config, hints)
                     }
                 }
+                let mut result = transcribe_whisper_dispatch(audio_path, config, hints)?;
+                result.stats.sherpa_fell_back_to_whisper = true;
+                Ok(result)
             }
             "apple-speech" => {
                 tracing::warn!(
@@ -749,7 +748,7 @@ pub struct TranscriptionEngineResolution<'a> {
     pub reason: &'static str,
 }
 
-fn resolve_auto_transcription_engine(
+pub(crate) fn resolve_auto_transcription_engine(
     sherpa_compiled: bool,
     apple_silicon: bool,
     plugin_present: bool,
@@ -945,6 +944,7 @@ impl ChunkLines {
         self.stats.skipped_no_speech += other.skipped_no_speech;
         self.stats.after_no_speech_filter += other.after_no_speech_filter;
         self.stats.rescued_no_speech += other.rescued_no_speech;
+        self.stats.sherpa_fell_back_to_whisper |= other.sherpa_fell_back_to_whisper;
     }
 }
 
@@ -6613,6 +6613,7 @@ Hello there.
             rescued_no_speech: 1,
             final_words: 5,
             cross_source_echo_suppressed: 0,
+            sherpa_fell_back_to_whisper: false,
         };
         let d = stats.diagnosis();
         assert!(
@@ -6648,6 +6649,7 @@ Hello there.
             rescued_no_speech: 0,
             final_words: 500,
             cross_source_echo_suppressed: 0,
+            sherpa_fell_back_to_whisper: false,
         };
         let d = stats.diagnosis();
         assert!(

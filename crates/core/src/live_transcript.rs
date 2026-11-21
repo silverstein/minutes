@@ -1098,8 +1098,14 @@ fn run_with_partials_internal(
         return Err(error);
     }
 
-    // Clear any stale stop sentinel from a previous session
-    pid::check_and_clear_sentinel();
+    // Check conflicts: a sensitive meeting is a no-capture session; live
+    // transcript would stream the meeting it was declared for.
+    if let Err(sensitive_error) = crate::sensitive::ensure_inactive_for_recording() {
+        let error: MinutesError =
+            LiveTranscriptError::SensitiveMeeting(sensitive_error.to_string()).into();
+        mark_precreated_session_failed(&error);
+        return Err(error);
+    }
 
     // Acquire PID with flock held for session lifetime (prevents concurrent starts)
     let lt_pid = pid::live_transcript_pid_path();
@@ -1116,6 +1122,14 @@ fn run_with_partials_internal(
             return Err(error);
         }
     };
+    if let Err(sensitive_error) = crate::sensitive::ensure_inactive_for_recording() {
+        let error: MinutesError =
+            LiveTranscriptError::SensitiveMeeting(sensitive_error.to_string()).into();
+        mark_precreated_session_failed(&error);
+        return Err(error);
+    }
+    // Clear any stale stop sentinel after this session owns capture.
+    pid::check_and_clear_sentinel();
 
     // Guard holds the flock — dropped when this function returns, cleaning up the PID file
     write_live_status_transition(LiveStatusState::Starting, None);

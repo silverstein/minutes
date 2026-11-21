@@ -488,7 +488,9 @@ jobs:
         timeout-minutes: 4
 
       - name: CLI toggle session startup contracts
-        run: cargo test -p minutes-cli --no-default-features --bin minutes session_start -- --test-threads=1
+        run: |
+          cargo test -p minutes-cli --no-default-features --bin minutes session_start -- --test-threads=1
+          cargo test -p minutes-cli --no-default-features --test sensitive_capture -- --test-threads=1
         timeout-minutes: 4
 
       - name: CLI transcription renderer contracts

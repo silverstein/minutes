@@ -429,7 +429,6 @@ where
 {
     super::preflight(config)?;
     let api_key = super::api_key(config)?;
-    super::refuse_if_microphone_busy()?;
 
     // Claim the cross-process marker here, before connecting or opening the
     // microphone, so the window between "nobody else is capturing" and "this
@@ -450,6 +449,7 @@ where
             }
             other => VoiceLiveError::Audio(format!("voice session lock: {other}")),
         })?;
+    crate::sensitive::ensure_inactive_for_recording()?;
     let on_event: Arc<dyn Fn(VoiceLiveEvent) + Send + Sync> = Arc::new(on_event);
     let emit = |e: VoiceLiveEvent| on_event(e);
     emit(VoiceLiveEvent::State {

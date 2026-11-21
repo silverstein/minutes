@@ -68,6 +68,8 @@ pub enum VoiceLiveError {
     RecordingActive,
     #[error("{0} is active; voice live will not share the microphone with it")]
     MicrophoneBusy(&'static str),
+    #[error(transparent)]
+    SensitiveMeeting(#[from] crate::sensitive::SensitiveError),
     #[error("connect: {0}")]
     Connect(String),
     #[error("audio: {0}")]
@@ -131,6 +133,9 @@ pub fn refuse_if_microphone_busy() -> Result<(), VoiceLiveError> {
     if crate::pid::inspect_pid_file(&crate::pid::voice_pid_path()).is_active() {
         return Err(VoiceLiveError::MicrophoneBusy("another voice session"));
     }
+    // A sensitive meeting is a declared no-capture session — voice sends mic
+    // audio to the provider, so it must refuse the same way recording does.
+    crate::sensitive::ensure_inactive_for_recording()?;
     Ok(())
 }
 

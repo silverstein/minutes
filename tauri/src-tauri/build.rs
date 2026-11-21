@@ -7,6 +7,7 @@ fn main() {
     compile_mic_check_helper();
     compile_system_audio_helper();
     compile_calendar_helper();
+    compile_calendar_permission_bridge();
     stage_rust_sidecars();
     stage_assistant_skill_bundle();
     stage_msvc_runtime();
@@ -482,6 +483,34 @@ fn compile_calendar_helper() {
     // base filename. Matches `compile_system_audio_helper` above.
     fs::copy(&binary, &target_binary)
         .expect("failed to copy target-specific calendar-events helper");
+}
+
+fn compile_calendar_permission_bridge() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+
+    let source = Path::new("src/calendar_permission.swift");
+    let output_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR should be set"));
+    let archive = output_dir.join("libminutes_calendar_permission.a");
+    println!("cargo:rerun-if-changed={}", source.display());
+
+    let output = Command::new("swiftc")
+        .args(["-parse-as-library", "-O", "-emit-library", "-static"])
+        .args(["-target", &swift_deployment_target("11.0")])
+        .arg(source)
+        .arg("-o")
+        .arg(archive)
+        .output()
+        .expect("failed to run swiftc for Calendar permission bridge");
+    assert!(
+        output.status.success(),
+        "failed to compile Calendar permission bridge: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("cargo:rustc-link-search=native={}", output_dir.display());
+    println!("cargo:rustc-link-lib=static=minutes_calendar_permission");
+    println!("cargo:rustc-link-lib=framework=EventKit");
 }
 
 fn stage_assistant_skill_bundle() {

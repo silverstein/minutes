@@ -723,9 +723,10 @@ fn query_via_eventkit_window(
         if output.status.code() == Some(2) {
             // Helper signals access-not-granted distinctly so dead reminders
             // are observable instead of reading as "no events" (#300).
-            tracing::warn!(
-                "calendar read access not granted (write-only or denied); meeting reminders are off"
-            );
+            tracing::warn!("calendar read access not granted; meeting reminders are off");
+            // The helper is available, but Calendar access was withheld.
+            // Avoid a second permission request through AppleScript.
+            return Some(Vec::new());
         }
         return None;
     }
@@ -762,6 +763,9 @@ fn query_overlap_via_eventkit_with_helper(
     }
     let output = output_with_timeout(cmd, SUBPROCESS_TIMEOUT)?;
 
+    if output.status.code() == Some(2) {
+        return Some(Vec::new());
+    }
     if !output.status.success() {
         return None;
     }

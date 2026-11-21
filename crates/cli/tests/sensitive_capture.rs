@@ -1,12 +1,12 @@
 use std::fs;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Output};
 
-#[test]
-fn the_cli_sensitive_meeting_blocks_capture_until_explicitly_stopped() {
-    let dir = tempfile::tempdir().unwrap();
-    let data_dir = dir.path().join("state");
-    let config = dir.path().join("config.toml");
-    let output_dir = dir.path().join("meetings");
+fn isolated_minutes(dir: &Path) -> impl Fn(&[&str]) -> Output {
+    let data_dir = dir.join("state");
+    let config = dir.join("config.toml");
+    let output_dir = dir.join("meetings");
+    let home = dir.join("home");
     fs::create_dir(&data_dir).unwrap();
     fs::write(
         &config,
@@ -16,16 +16,22 @@ fn the_cli_sensitive_meeting_blocks_capture_until_explicitly_stopped() {
         ),
     )
     .unwrap();
-    let minutes = |args: &[&str]| {
+    move |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_minutes"))
             .args(args)
             .env("MINUTES_CONFIG_PATH", &config)
             .env("MINUTES_DATA_DIR", &data_dir)
-            .env("MINUTES_HOME", dir.path().join("home"))
+            .env("MINUTES_HOME", &home)
             .output()
             .unwrap()
-    };
+    }
+}
 
+#[test]
+fn the_cli_sensitive_meeting_blocks_capture_until_explicitly_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let minutes = isolated_minutes(dir.path());
+    let data_dir = dir.path().join("state");
     let owner = std::process::id().to_string();
     let state_file = data_dir.join("sensitive-session.json");
     for (file, mode) in [
@@ -81,4 +87,29 @@ fn the_cli_sensitive_meeting_blocks_capture_until_explicitly_stopped() {
         String::from_utf8_lossy(&stopped.stderr)
     );
     assert!(!state_file.exists());
+}
+
+#[test]
+fn stop_requires_an_explicit_flag_for_dictation() {
+    let dir = tempfile::tempdir().unwrap();
+    let minutes = isolated_minutes(dir.path());
+    let data_dir = dir.path().join("state");
+
+    let idle = minutes(&["stop", "--dictation"]);
+    assert!(!idle.status.success());
+    assert!(String::from_utf8_lossy(&idle.stderr).contains("No dictation in progress."));
+
+    let pid_file = data_dir.join("dictation.pid");
+    fs::write(&pid_file, std::process::id().to_string()).unwrap();
+    let recording_stop = minutes(&["stop"]);
+    assert!(!recording_stop.status.success());
+    assert!(String::from_utf8_lossy(&recording_stop.stderr).contains("minutes stop --dictation"));
+
+    let dictation_stop = minutes(&["stop", "--dictation"]);
+    let error = String::from_utf8_lossy(&dictation_stop.stderr);
+    assert!(
+        error.contains("stop it there") || error.contains("stop it where it started"),
+        "{error}"
+    );
+    assert!(pid_file.exists());
 }

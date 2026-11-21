@@ -6,12 +6,12 @@
     "url": "https://github.com/silverstein/minutes",
     "source": "github"
   },
-  "version": "0.34.0",
+  "version": "0.34.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "minutes-mcp",
-      "version": "0.34.0",
+      "version": "0.34.1",
       "transport": {
         "type": "stdio"
       },

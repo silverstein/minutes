@@ -4166,6 +4166,29 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                 eprintln!("Live transcript stopped.");
                 Ok(())
             } else {
+                // Dictation counts as a capture session too: `stop` from a
+                // keybind or muscle memory should end it, not claim nothing is
+                // running. stop_running_dictation already refuses a dictation
+                // owned by the desktop app.
+                let dict_state =
+                    minutes_core::pid::inspect_pid_file(&minutes_core::pid::dictation_pid_path());
+                match dict_state.pid() {
+                    Some(pid) => return stop_running_dictation(pid),
+                    None if dict_state.is_active() => {
+                        anyhow::bail!("dictation in progress — stop it where it started");
+                    }
+                    None => {}
+                }
+                let voice_pid = minutes_core::pid::voice_pid_path();
+                if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+                    anyhow::bail!("a voice session is open — close it where it started");
+                }
+                if let Some(session) = minutes_core::sensitive::active_session() {
+                    anyhow::bail!(
+                        "sensitive meeting in progress ({}) — end it with `minutes sensitive stop`",
+                        session.title
+                    );
+                }
                 eprintln!("No recording or live transcript in progress.");
                 Ok(())
             }

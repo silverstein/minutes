@@ -483,7 +483,11 @@ enum Commands {
     },
 
     /// Stop recording and process the audio
-    Stop,
+    Stop {
+        /// Stop a CLI-owned dictation instead of stopping a recording.
+        #[arg(long)]
+        dictation: bool,
+    },
 
     /// Start or stop a no-capture sensitive meeting
     Sensitive {
@@ -2177,7 +2181,8 @@ fn main() -> Result<()> {
                 cmd_talk(&config, ptt, open_mic, device, mute, json)
             }
         }
-        Commands::Stop => cmd_stop(&config),
+        Commands::Stop { dictation: true } => cmd_stop_dictation(),
+        Commands::Stop { dictation: false } => cmd_stop(&config),
         Commands::Sensitive { action } => cmd_sensitive(action, &config),
         Commands::Extend => {
             if !minutes_core::pid::status().recording {
@@ -4166,11 +4171,43 @@ fn cmd_stop(_config: &Config) -> Result<()> {
                 eprintln!("Live transcript stopped.");
                 Ok(())
             } else {
+                // The recording shortcut and MCP stop_recording tool use this
+                // path. Keep dictation shutdown an explicit operator action.
+                if minutes_core::pid::inspect_pid_file(&minutes_core::pid::dictation_pid_path())
+                    .is_active()
+                {
+                    anyhow::bail!(
+                        "dictation in progress — run `minutes stop --dictation` for CLI dictation or stop it in the app"
+                    );
+                }
+                let voice_pid = minutes_core::pid::voice_pid_path();
+                if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
+                    anyhow::bail!("a voice session is open — close it where it started");
+                }
+                if let Some(session) = minutes_core::sensitive::active_session() {
+                    anyhow::bail!(
+                        "sensitive meeting in progress ({}) — end it with `minutes sensitive stop`",
+                        session.title
+                    );
+                }
                 eprintln!("No recording or live transcript in progress.");
                 Ok(())
             }
         }
         Err(e) => Err(anyhow::anyhow!("{}", e)),
+    }
+}
+
+fn cmd_stop_dictation() -> Result<()> {
+    let state = minutes_core::pid::inspect_pid_file(&minutes_core::pid::dictation_pid_path());
+    match state {
+        minutes_core::pid::PidFileState::Active(pid) => stop_running_dictation(pid),
+        minutes_core::pid::PidFileState::LockedAlive => {
+            anyhow::bail!("dictation in progress — stop it where it started");
+        }
+        minutes_core::pid::PidFileState::Inactive => {
+            anyhow::bail!("No dictation in progress.");
+        }
     }
 }
 

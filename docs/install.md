@@ -131,6 +131,42 @@ if a package name is wrong for your distro.
 - **Fedora/RHEL**: `sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config clang clang-devel alsa-lib-devel pipewire-devel ffmpeg-free`
 - **Arch**: `sudo pacman -S --needed base-devel cmake clang alsa-lib pipewire ffmpeg`
 
+#### Global shortcuts on Wayland
+
+On Wayland the compositor owns global keybindings — apps can't register their
+own while another window has focus, so Minutes doesn't ship an in-app shortcut
+picker there (the desktop app's Settings shows these same instructions on a
+Wayland session). Bind the toggle commands in your compositor instead:
+
+| Action | Command |
+| --- | --- |
+| Toggle meeting recording | `minutes toggle-recording` |
+| Toggle quick thought | `minutes toggle-recording --mode quick-thought` |
+| Toggle live transcript | `minutes toggle-recording --mode live` |
+| Toggle dictation | `minutes toggle-dictation` |
+
+Press once to start, again to stop. Each toggle is conflict-aware: pressing it
+during a sensitive meeting, a voice session, or a conflicting capture mode
+refuses instead of clobbering the active session.
+
+**Hyprland** (`~/.config/hyprland/hyprland.conf`):
+
+```ini
+bind = SUPER, R, exec, minutes toggle-recording
+bind = SUPER, T, exec, minutes toggle-recording --mode quick-thought
+bind = SUPER, L, exec, minutes toggle-recording --mode live
+bind = SUPER, D, exec, minutes toggle-dictation
+```
+
+**GNOME**: Settings → Keyboard → Custom Shortcuts, add each command above with
+the keys you want.
+
+**KDE**: System Settings → Shortcuts → Custom Shortcuts, add each command as a
+new Global Shortcut → Command/URL.
+
+X11 sessions can use the desktop app's in-app shortcut picker instead; Wayland
+is the only session type that needs compositor-level bindings.
+
 ### Chromebook (Crostini)
 
 Yes, Minutes runs on a Chromebook via the Linux development environment (Crostini). The CLI is the supported path — there's no native ChromeOS build and the Tauri desktop app isn't exercised there, but the core engine, folder watcher, and MCP server all work.

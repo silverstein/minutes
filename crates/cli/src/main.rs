@@ -3649,7 +3649,7 @@ fn cmd_record(
         )
         .ok();
 
-        spawn_queue_worker()?;
+        spawn_queue_worker();
         Ok((job, queued_result))
     })();
 
@@ -3686,11 +3686,19 @@ fn cmd_record(
     Ok(())
 }
 
-fn spawn_queue_worker() -> Result<()> {
+fn spawn_queue_worker() {
     if minutes_core::jobs::worker_active() {
-        return Ok(());
+        return;
     }
 
+    if let Err(error) = start_queue_worker() {
+        let failure = format!("`minutes process-queue`: {error}");
+        minutes_core::logging::log_error("queue-worker", "process-queue", &failure);
+        eprintln!("{failure} — capture saved; run `minutes process-queue` to retry pending jobs");
+    }
+}
+
+fn start_queue_worker() -> Result<()> {
     let exe = std::env::current_exe()?;
     let mut child = detached_command(&exe, &["process-queue"])
         .env(
@@ -3698,20 +3706,35 @@ fn spawn_queue_worker() -> Result<()> {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         )
         .spawn()?;
-    // Same verification the session toggles use: the child has null stdio, so
-    // a worker that dies at startup was invisible — the job sat queued with
-    // nothing draining it. The job is already safely queued, so a failed or
-    // foreign-pid startup is logged, not raised.
-    if let Err(error) = wait_for_session(
+    wait_for_queue_worker(
         &mut child,
         &minutes_core::jobs::worker_pid_path(),
         std::time::Duration::from_secs(2),
-    ) {
-        let failure = format!("`minutes process-queue`: {error}");
-        minutes_core::logging::log_error("queue-worker", "process-queue", &failure);
-        eprintln!("{failure} — job stays queued; `minutes process-queue` retries");
+    )
+}
+
+fn wait_for_queue_worker(
+    child: &mut impl SessionChild,
+    pid_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let exit_status = child.try_exit()?;
+        // Any live owner is sufficient. On Windows the lock can hide its PID.
+        if minutes_core::pid::inspect_pid_file(pid_path).is_active() {
+            return Ok(());
+        }
+        match exit_status {
+            // The worker can drain the queue and release the lock before polling.
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => anyhow::bail!("queue worker exited during startup ({status})"),
+            None if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            None => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 fn cmd_mic_toggle(force_state: Option<&str>) -> Result<()> {
@@ -14479,6 +14502,50 @@ life (qmd://life/)
 
         fn test_pid_file(tag: &str) -> PathBuf {
             std::env::temp_dir().join(format!("minutes-test-{tag}-{}.pid", std::process::id()))
+        }
+
+        #[cfg(any(unix, windows))]
+        #[test]
+        fn queue_worker_startup_accepts_a_live_worker_or_clean_exit() {
+            #[cfg(unix)]
+            use std::os::unix::process::ExitStatusExt;
+            #[cfg(windows)]
+            use std::os::windows::process::ExitStatusExt;
+            use std::process::ExitStatus;
+
+            struct ExitedChild(ExitStatus);
+            impl SessionChild for ExitedChild {
+                fn try_exit(&mut self) -> std::io::Result<Option<ExitStatus>> {
+                    Ok(Some(self.0))
+                }
+
+                fn id(&self) -> u32 {
+                    std::process::id().wrapping_add(1)
+                }
+            }
+
+            let dir = tempfile::tempdir().unwrap();
+            let pid_path = dir.path().join("worker.pid");
+            let timeout = Duration::ZERO;
+            #[cfg(unix)]
+            let failure = ExitStatus::from_raw(1 << 8);
+            #[cfg(windows)]
+            let failure = ExitStatus::from_raw(1);
+
+            wait_for_queue_worker(
+                &mut ExitedChild(ExitStatus::from_raw(0)),
+                &pid_path,
+                timeout,
+            )
+            .unwrap();
+            let error =
+                wait_for_queue_worker(&mut ExitedChild(failure), &pid_path, timeout).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("queue worker exited during startup"));
+
+            let _worker = minutes_core::pid::create_pid_guard(&pid_path).unwrap();
+            wait_for_queue_worker(&mut ExitedChild(failure), &pid_path, timeout).unwrap();
         }
 
         /// `minutes record` in meeting mode probes system audio for ~5s before

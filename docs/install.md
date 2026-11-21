@@ -131,6 +131,59 @@ if a package name is wrong for your distro.
 - **Fedora/RHEL**: `sudo dnf install -y gcc-c++ cmake pkgconf-pkg-config clang clang-devel alsa-lib-devel pipewire-devel ffmpeg-free`
 - **Arch**: `sudo pacman -S --needed base-devel cmake clang alsa-lib pipewire ffmpeg`
 
+#### Global shortcuts on Wayland
+
+On Wayland, set up Minutes global shortcuts in your compositor or desktop
+environment. Minutes Settings shows the commands to bind. Check your CLI with
+`minutes toggle-recording --help` and `minutes toggle-dictation --help`.
+For older builds, use `cargo install --path crates/cli` from a current
+Minutes checkout.
+
+| Action | Command |
+| --- | --- |
+| Toggle meeting recording | `minutes toggle-recording` |
+| Toggle quick thought | `minutes toggle-recording --mode quick-thought` |
+| Toggle live transcript | `minutes toggle-recording --mode live` |
+| Toggle dictation | `minutes toggle-dictation` |
+
+Press once to start and again to stop. All three recording shortcuts stop the
+current recording or live transcript if one is running. The mode controls
+what starts when recording is idle. A sensitive meeting or Voice Live blocks
+new starts. Dictation and recording also block each other from starting.
+
+If your desktop session can't find `minutes`, run `command -v minutes`
+in your terminal and use the resulting absolute path in each shortcut.
+
+**Hyprland 0.55 and newer** with Lua configuration. Add bindings like these
+to `~/.config/hypr/hyprland.lua` and choose keys that are free in your setup.
+[Hyprland Lua bindings](https://wiki.hypr.land/configuring/core/binds/)
+
+```lua
+hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd("minutes toggle-recording"))
+hl.bind("SUPER + SHIFT + T", hl.dsp.exec_cmd("minutes toggle-recording --mode quick-thought"))
+hl.bind("SUPER + SHIFT + L", hl.dsp.exec_cmd("minutes toggle-recording --mode live"))
+hl.bind("SUPER + SHIFT + D", hl.dsp.exec_cmd("minutes toggle-dictation"))
+```
+
+For a Hyprland setup that uses `~/.config/hypr/hyprland.conf`, use these
+bindings. [Hyprland hyprlang bindings](https://wiki.hypr.land/0.54.0/configuring/binds/)
+
+```ini
+bind = SUPER_SHIFT, R, exec, minutes toggle-recording
+bind = SUPER_SHIFT, T, exec, minutes toggle-recording --mode quick-thought
+bind = SUPER_SHIFT, L, exec, minutes toggle-recording --mode live
+bind = SUPER_SHIFT, D, exec, minutes toggle-dictation
+```
+
+**GNOME**. Open **Settings → Keyboard → View and Customize Shortcuts →
+Custom Shortcuts** and add each command with the keys you want.
+[GNOME shortcut guide](https://help.gnome.org/gnome-help/keyboard-shortcuts-set.html)
+
+**KDE Plasma 6**. Open **System Settings → Keyboard → Shortcuts**. Choose
+**Add New → Command or Script** for each command, then assign the keys.
+
+On X11, use the shortcut picker in the Minutes desktop app.
+
 ### Chromebook (Crostini)
 
 Yes, Minutes runs on a Chromebook via the Linux development environment (Crostini). The CLI is the supported path — there's no native ChromeOS build and the Tauri desktop app isn't exercised there, but the core engine, folder watcher, and MCP server all work.

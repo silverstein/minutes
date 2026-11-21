@@ -233,9 +233,22 @@ fn detect_summary_coverage_warning(
 /// `tracing_subscriber`, so the event is dropped and the substitution is
 /// invisible there. The engine materially changes the transcript, so the file
 /// itself carries the record and stays greppable after the fact (#633).
-fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> {
-    let requested = config.transcription.engine.trim();
-    if requested.eq_ignore_ascii_case("auto") {
+fn detect_engine_fallback_warning(
+    config: &Config,
+    sherpa_fell_back_to_whisper: bool,
+) -> Option<ProcessingWarning> {
+    if sherpa_fell_back_to_whisper {
+        let model = whisper_model_suffix(config);
+        return Some(ProcessingWarning {
+            step: "transcribe".to_string(),
+            reason: "engine_fallback".to_string(),
+            timeout_secs: None,
+            message: Some(format!(
+                "Sherpa could not complete transcription. Whisper transcribed some or all of the audio{model}."
+            )),
+        });
+    }
+    if config.transcription.engine.eq_ignore_ascii_case("auto") {
         let resolution = crate::transcribe::auto_transcription_engine_resolution(config);
         return detect_engine_fallback_warning_with(
             config,
@@ -283,12 +296,7 @@ fn detect_engine_fallback_warning_with(
     // ran (#940). Whisper is the only engine whose model is configured here, so
     // it is the only one this can name honestly.
     let model = if effective.eq_ignore_ascii_case("whisper") {
-        let name = config.transcription.model.trim();
-        if name.is_empty() {
-            String::new()
-        } else {
-            format!(" using model `{name}`")
-        }
+        whisper_model_suffix(config)
     } else {
         String::new()
     };
@@ -300,6 +308,15 @@ fn detect_engine_fallback_warning_with(
             "Requested transcription engine `{requested}` did not run ({detail}); this transcript was produced by `{effective}`{model}."
         )),
     })
+}
+
+fn whisper_model_suffix(config: &Config) -> String {
+    let name = config.transcription.model.trim();
+    if name.is_empty() {
+        String::new()
+    } else {
+        format!(" using model `{name}`")
+    }
 }
 
 /// Strip the leading `engine: ` from an auto-resolution reason.
@@ -5398,7 +5415,12 @@ fn write_transcript_artifact_with_authority(
         recording_health: context.recording_health.clone(),
         speaker_mapping: None,
         summarization: None,
-        processing_warnings: Vec::new(),
+        processing_warnings: detect_engine_fallback_warning(
+            config,
+            filter_stats.sherpa_fell_back_to_whisper,
+        )
+        .into_iter()
+        .collect(),
         template: context.template.as_ref().map(|t| t.slug().to_string()),
         filter_diagnosis: if status == Some(OutputStatus::NoSpeech) {
             // Prefer the all-noise-suppression diagnosis when it fired; it
@@ -6007,9 +6029,7 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
-    if let Some(warning) = detect_engine_fallback_warning(config) {
-        summarization_warnings.push(warning);
-    }
+    summarization_warnings.extend(artifact.frontmatter.processing_warnings.iter().cloned());
     if let Some(warning) = detect_diarization_warning(diarization_unavailable.as_ref()) {
         summarization_warnings.push(warning);
     }
@@ -6785,7 +6805,9 @@ where
     if let Some(warning) = collapse_warning {
         summarization_warnings.push(warning);
     }
-    if let Some(warning) = detect_engine_fallback_warning(config) {
+    if let Some(warning) =
+        detect_engine_fallback_warning(config, filter_stats.sherpa_fell_back_to_whisper)
+    {
         summarization_warnings.push(warning);
     }
     if let Some(warning) = detect_silent_remote_stem_warning(
@@ -9755,7 +9777,7 @@ mod tests {
     fn engine_fallback_warning_absent_when_requested_engine_runs() {
         let mut config = Config::default();
         config.transcription.engine = "whisper".into();
-        assert!(detect_engine_fallback_warning(&config).is_none());
+        assert!(detect_engine_fallback_warning(&config, false).is_none());
     }
 
     #[test]
@@ -9772,7 +9794,7 @@ mod tests {
         // what runs here regardless of build features.
         let mut config = Config::default();
         config.transcription.engine = "sherpa".into();
-        let warning = detect_engine_fallback_warning(&config)
+        let warning = detect_engine_fallback_warning(&config, false)
             .expect("an unavailable sherpa selection must be recorded");
         assert_eq!(warning.step, "transcribe");
         assert_eq!(warning.reason, "engine_fallback");
@@ -9795,7 +9817,7 @@ mod tests {
         let mut config = Config::default();
         config.transcription.engine = "parakeet".into();
         config.transcription.model = "large-v3".into();
-        let message = detect_engine_fallback_warning(&config)
+        let message = detect_engine_fallback_warning(&config, false)
             .expect("a substitution must be recorded")
             .message
             .expect("the warning carries a message");
@@ -9813,7 +9835,7 @@ mod tests {
         // useful part, which is why auto landed on whisper here.
         let mut config = Config::default();
         config.transcription.engine = "auto".into();
-        let message = detect_engine_fallback_warning(&config)
+        let message = detect_engine_fallback_warning(&config, false)
             .expect("an auto substitution must be recorded")
             .message
             .expect("the warning carries a message");
@@ -9855,6 +9877,61 @@ mod tests {
     }
 
     #[test]
+    fn engine_fallback_warning_reports_whisper_after_sherpa_dispatch_fails() {
+        let mut config = Config::default();
+        config.transcription.model = "large-v3".into();
+        for engine in ["auto", "sherpa"] {
+            config.transcription.engine = engine.into();
+            let warning = detect_engine_fallback_warning(&config, true).unwrap();
+            assert_eq!(warning.reason, "engine_fallback");
+            let message = warning.message.unwrap();
+            assert!(message.contains("Sherpa could not complete"), "{message}");
+            assert!(message.contains("Whisper transcribed"), "{message}");
+            assert!(message.contains("`large-v3`"), "{message}");
+        }
+    }
+
+    #[test]
+    fn engine_fallback_warning_survives_transcript_enrichment() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio_path = dir.path().join("memo.wav");
+        std::fs::write(&audio_path, []).unwrap();
+        let mut config = Config {
+            output_dir: dir.path().join("output"),
+            ..Config::default()
+        };
+        config.transcription.min_words = 1;
+        config.transcription.engine = "auto".into();
+        config.summarization.engine = "none".into();
+        let context = BackgroundPipelineContext::default();
+        let artifact = write_transcript_artifact(
+            &audio_path,
+            ContentType::Memo,
+            None,
+            &config,
+            &context,
+            None,
+            "[0:00] Synthetic transcription for the warning test.\n".into(),
+            crate::transcribe::FilterStats {
+                sherpa_fell_back_to_whisper: true,
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.frontmatter.processing_warnings[0].reason,
+            "engine_fallback"
+        );
+        let result =
+            enrich_transcript_artifact(&audio_path, &artifact, &config, &context, |_| {}).unwrap();
+        let written = std::fs::read_to_string(result.path).unwrap();
+        assert!(written.contains("status: degraded"));
+        assert!(written.contains("Whisper transcribed"));
+        assert_eq!(written.matches("reason: engine_fallback").count(), 1);
+    }
+
+    #[test]
     fn engine_fallback_warning_records_retained_parakeet_selection() {
         // A retained `parakeet` preference resolves to Whisper until the
         // secure byte transport ships. The desktop app installs no tracing
@@ -9862,7 +9939,7 @@ mod tests {
         // which engine actually ran (#633).
         let mut config = Config::default();
         config.transcription.engine = "parakeet".into();
-        let warning = detect_engine_fallback_warning(&config)
+        let warning = detect_engine_fallback_warning(&config, false)
             .expect("retained parakeet selection must be recorded");
         assert_eq!(warning.step, "transcribe");
         assert_eq!(warning.reason, "engine_fallback");
@@ -9878,7 +9955,7 @@ mod tests {
     fn engine_fallback_warning_records_retained_apple_speech_selection() {
         let mut config = Config::default();
         config.transcription.engine = "apple-speech".into();
-        let warning = detect_engine_fallback_warning(&config)
+        let warning = detect_engine_fallback_warning(&config, false)
             .expect("retained apple-speech selection must be recorded");
         assert_eq!(warning.step, "transcribe");
         assert_eq!(warning.reason, "engine_fallback");

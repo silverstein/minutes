@@ -247,6 +247,7 @@ pub(crate) fn merge_sources(
         rescued_no_speech: a.rescued_no_speech + b.rescued_no_speech,
         final_words,
         cross_source_echo_suppressed,
+        sherpa_fell_back_to_whisper: a.sherpa_fell_back_to_whisper || b.sherpa_fell_back_to_whisper,
     };
     let detected_language = match (voice.detected_language, system.detected_language) {
         (Some(a), Some(b)) if a == b => Some(a),

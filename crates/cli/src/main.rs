@@ -3448,6 +3448,15 @@ fn cmd_record(
     if minutes_core::pid::inspect_pid_file(&lt_pid).is_active() {
         anyhow::bail!("live transcript in progress — run `minutes stop` first");
     }
+
+    // Dictation holds the microphone for a continuous utterance; `dictate`
+    // refuses to start during a recording, so recording must refuse during
+    // dictation — otherwise a keybind press mid-dictation starts a capture
+    // fighting for the mic the user is actively speaking into.
+    let dict_pid = minutes_core::pid::dictation_pid_path();
+    if minutes_core::pid::inspect_pid_file(&dict_pid).is_active() {
+        anyhow::bail!("dictation in progress — stop it where it started");
+    }
     // Same reason for a voice session: it holds the microphone for a live
     // conversation, and `minutes talk` can be running in another terminal or
     // inside the menu-bar app.
@@ -3849,6 +3858,10 @@ fn cmd_toggle_recording(mode: &str, config: &Config) -> Result<()> {
     let voice_pid = minutes_core::pid::voice_pid_path();
     if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
         anyhow::bail!("a voice session is open — close it before recording");
+    }
+    let dict_pid = minutes_core::pid::dictation_pid_path();
+    if minutes_core::pid::inspect_pid_file(&dict_pid).is_active() {
+        anyhow::bail!("dictation in progress — stop it where it started");
     }
     minutes_core::sensitive::ensure_inactive_for_recording()
         .map_err(|error| anyhow::anyhow!("{}", error))?;

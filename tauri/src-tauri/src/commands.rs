@@ -23728,6 +23728,7 @@ fn try_acquire_voice(state: &AppState) -> Result<(), String> {
 /// `start_dictation_session`, `store` after overlay setup), and rolls back
 /// the flag on subsequent failure cases.
 fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
+    minutes_core::sensitive::ensure_inactive_for_recording().map_err(|error| error.to_string())?;
     if recording_active(&state.recording) {
         return Err("Recording in progress — stop recording before dictating".into());
     }
@@ -23752,6 +23753,7 @@ fn try_acquire_dictation(state: &AppState) -> Result<(), String> {
 }
 
 fn try_acquire_live(state: &AppState) -> Result<(), String> {
+    minutes_core::sensitive::ensure_inactive_for_recording().map_err(|error| error.to_string())?;
     crate::dictation_experience::stop_mic_test();
     if state.voice_active.load(Ordering::Relaxed) {
         return Err("Voice is running — close it before starting a live transcript".into());

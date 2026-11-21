@@ -695,7 +695,7 @@ Reference URL: https://useminutes.app/docs/errors#error-dictationerror-alreadyac
 
 Exact message:
 
-> {0}
+> cannot start dictation: {0}
 
 Source: `crates/core/src/error.rs`
 
@@ -793,7 +793,7 @@ Reference URL: https://useminutes.app/docs/errors#error-livetranscripterror-voic
 
 Exact message:
 
-> {0}
+> cannot start live transcript: {0}
 
 Source: `crates/core/src/error.rs`
 

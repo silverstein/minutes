@@ -38,9 +38,8 @@ pub struct SensitiveSession {
     pub title: String,
     /// Session start timestamp.
     pub started_at: DateTime<Local>,
-    /// PID of the process that started the session. A session whose owner
-    /// is no longer alive is stale (crash leftover) and is recovered rather
-    /// than blocking recording forever (review F4).
+    /// PID of a long-lived owner, or zero for a session ended explicitly.
+    /// A nonzero owner that is no longer alive indicates a stale session.
     #[serde(default)]
     pub owner_pid: u32,
     /// User-authored markers collected during the session.
@@ -65,6 +64,9 @@ pub enum SensitiveError {
     /// A normal recording is already active.
     #[error("recording in progress - stop it before starting a sensitive meeting")]
     RecordingActive,
+    /// Another capture mode already holds the microphone.
+    #[error("{0} in progress - stop it before starting a sensitive meeting")]
+    CaptureActive(&'static str),
     /// A sensitive session is already active.
     #[error("sensitive meeting already active: {title}")]
     AlreadyActive {
@@ -119,31 +121,48 @@ pub fn is_active() -> bool {
 ///
 /// A session whose owning process is dead is a crash leftover: it is logged,
 /// removed, and reported as no-session, so a crashed sensitive session can
-/// never permanently block recording (review F4). Sessions persisted before
-/// `owner_pid` existed (field defaults to 0) are treated as live to stay
-/// conservative.
+/// never permanently block recording. A zero owner covers explicit-stop
+/// sessions and legacy session files.
 pub fn active_session() -> Option<SensitiveSession> {
-    let path = session_path();
-    let session = fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<SensitiveSession>(&raw).ok())?;
+    with_lock(active_session_locked).ok().flatten()
+}
+
+fn active_session_locked() -> Result<Option<SensitiveSession>, SensitiveError> {
+    let raw = match fs::read_to_string(session_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let session: SensitiveSession = serde_json::from_str(&raw)?;
     if session.owner_pid != 0 && !crate::pid::is_process_alive(session.owner_pid) {
         tracing::warn!(
             session_id = %session.id,
             owner_pid = session.owner_pid,
             "removing stale sensitive session left by a dead process"
         );
-        let _ = fs::remove_file(&path);
-        return None;
+        remove_session_file()?;
+        return Ok(None);
     }
-    Some(session)
+    Ok(Some(session))
 }
 
-/// Start a no-capture sensitive meeting session.
+/// Start a no-capture session owned by the running desktop app.
 pub fn start(title: Option<&str>) -> Result<SensitiveSession, SensitiveError> {
+    start_with_owner(title, std::process::id())
+}
+
+/// Start a session that persists until the user stops it in a later invocation.
+pub fn start_until_stopped(title: Option<&str>) -> Result<SensitiveSession, SensitiveError> {
+    start_with_owner(title, 0)
+}
+
+fn start_with_owner(
+    title: Option<&str>,
+    owner_pid: u32,
+) -> Result<SensitiveSession, SensitiveError> {
     with_lock(|| {
-        ensure_recording_inactive()?;
-        if let Some(existing) = active_session() {
+        ensure_capture_inactive()?;
+        if let Some(existing) = active_session_locked()? {
             return Err(SensitiveError::AlreadyActive {
                 title: existing.title,
             });
@@ -162,7 +181,7 @@ pub fn start(title: Option<&str>) -> Result<SensitiveSession, SensitiveError> {
                 .unwrap_or("Sensitive meeting")
                 .to_string(),
             started_at: now,
-            owner_pid: std::process::id(),
+            owner_pid,
             markers: Vec::new(),
         };
         write_session(&session)?;
@@ -173,7 +192,7 @@ pub fn start(title: Option<&str>) -> Result<SensitiveSession, SensitiveError> {
 /// Append a typed marker to the active sensitive session.
 pub fn add_marker(text: &str) -> Result<String, SensitiveError> {
     with_lock(|| {
-        let mut session = active_session().ok_or(SensitiveError::NotActive)?;
+        let mut session = active_session_locked()?.ok_or(SensitiveError::NotActive)?;
         let text = text.trim();
         if text.is_empty() {
             return Err(SensitiveError::EmptyMarker);
@@ -209,21 +228,30 @@ pub fn stop(
     config: &Config,
 ) -> Result<WriteResult, SensitiveError> {
     with_lock(|| {
-        let session = active_session().ok_or(SensitiveError::NotActive)?;
+        let session = active_session_locked()?.ok_or(SensitiveError::NotActive)?;
         let result = write_artifact(&session, debrief, config)?;
         remove_session_file()?;
         Ok(result)
     })
 }
 
-/// Return an error if a sensitive session is active.
+/// Serialize the check with sensitive start and stop. Capture callers check
+/// again after publishing their PID, before opening the microphone.
 pub fn ensure_inactive_for_recording() -> Result<(), SensitiveError> {
-    if let Some(existing) = active_session() {
-        return Err(SensitiveError::AlreadyActive {
+    with_inactive_for_recording(|| Ok(()))
+}
+
+/// Hold the sensitive-session lock while a startup audio probe runs, before
+/// the recording has published its PID.
+pub fn with_inactive_for_recording<T, E: From<SensitiveError>>(
+    action: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    with_lock(|| match active_session_locked()? {
+        Some(existing) => Err(SensitiveError::AlreadyActive {
             title: existing.title,
-        });
-    }
-    Ok(())
+        }),
+        None => Ok(action()),
+    })?
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T, SensitiveError>) -> Result<T, SensitiveError> {
@@ -271,9 +299,18 @@ fn remove_session_file() -> Result<(), SensitiveError> {
     }
 }
 
-fn ensure_recording_inactive() -> Result<(), SensitiveError> {
+fn ensure_capture_inactive() -> Result<(), SensitiveError> {
     if pid::inspect_pid_file(&pid::pid_path()).is_active() {
         return Err(SensitiveError::RecordingActive);
+    }
+    for (path, mode) in [
+        (pid::dictation_pid_path(), "dictation"),
+        (pid::live_transcript_pid_path(), "live transcript"),
+        (pid::voice_pid_path(), "voice session"),
+    ] {
+        if pid::inspect_pid_file(&path).is_active() {
+            return Err(SensitiveError::CaptureActive(mode));
+        }
     }
     Ok(())
 }
@@ -488,6 +525,13 @@ mod tests {
             start(Some("Board sync")).unwrap();
             let error = ensure_inactive_for_recording().unwrap_err();
             assert!(matches!(error, SensitiveError::AlreadyActive { .. }));
+            #[cfg(feature = "voice-live")]
+            assert!(matches!(
+                crate::voice_live::refuse_if_microphone_busy(),
+                Err(crate::voice_live::VoiceLiveError::SensitiveMeeting(
+                    SensitiveError::AlreadyActive { .. }
+                ))
+            ));
         });
     }
 }

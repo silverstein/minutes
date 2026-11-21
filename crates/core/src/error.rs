@@ -286,7 +286,7 @@ pub enum DictationError {
     #[error("dictation already active (PID: {0})")]
     AlreadyActive(u32),
 
-    #[error("{0}")]
+    #[error("cannot start dictation: {0}")]
     SensitiveMeeting(String),
 
     #[error("clipboard write failed: {0}")]
@@ -316,7 +316,7 @@ pub enum LiveTranscriptError {
     #[error("a voice session is open — close it before starting live transcript")]
     VoiceActive,
 
-    #[error("{0}")]
+    #[error("cannot start live transcript: {0}")]
     SensitiveMeeting(String),
 
     #[error("live transcript already active (PID: {0})")]

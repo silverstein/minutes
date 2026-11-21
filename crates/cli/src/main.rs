@@ -3120,7 +3120,7 @@ fn cmd_note(text: &str, meeting: Option<&Path>, config: &Config) -> Result<()> {
 fn cmd_sensitive(action: SensitiveAction, config: &Config) -> Result<()> {
     match action {
         SensitiveAction::Start { title } => {
-            let session = minutes_core::sensitive::start(title.as_deref())
+            let session = minutes_core::sensitive::start_until_stopped(title.as_deref())
                 .map_err(|error| anyhow::anyhow!("{}", error))?;
             eprintln!(
                 "Sensitive meeting started: {}. Add markers with `minutes note \"...\"`.",
@@ -3423,6 +3423,7 @@ fn cmd_record(
     let capture_mode = capture_mode_from_str(mode)?;
     let requested_intent = parse_recording_intent(intent)?;
 
+    minutes_core::sensitive::ensure_inactive_for_recording()?;
     let preflight = minutes_core::capture::preflight_recording(
         capture_mode,
         requested_intent,
@@ -3437,8 +3438,9 @@ fn cmd_record(
         eprintln!("[minutes] {}", warning);
     }
 
-    let startup_recording_health =
-        check_meeting_system_audio_probe(capture_mode, skip_audio_probe, config)?;
+    let startup_recording_health = minutes_core::sensitive::with_inactive_for_recording(|| {
+        check_meeting_system_audio_probe(capture_mode, skip_audio_probe, config)
+    })?;
 
     // Check for conflicting live transcript session. `inspect_pid_file` so a
     // standalone session holding the PID under a mandatory Windows lock is seen —
@@ -3464,8 +3466,6 @@ fn cmd_record(
     if minutes_core::pid::inspect_pid_file(&voice_pid).is_active() {
         anyhow::bail!("a voice session is open — close it before recording");
     }
-    minutes_core::sensitive::ensure_inactive_for_recording()
-        .map_err(|error| anyhow::anyhow!("{}", error))?;
 
     let recording_consent = if capture_mode == CaptureMode::Meeting {
         eprintln!("Recording + transcribing locally — audio stays on your device.");
@@ -19201,6 +19201,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    minutes_core::sensitive::ensure_inactive_for_recording()?;
     cmd_dictate_preflight(config)?;
 
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
@@ -19777,6 +19778,7 @@ fn cmd_live(config: &Config) -> Result<()> {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    minutes_core::sensitive::ensure_inactive_for_recording()?;
     let permission_preflight = minutes_core::capture::preflight_microphone_only();
     if let Some(reason) = &permission_preflight.blocking_reason {
         anyhow::bail!("{}", reason);

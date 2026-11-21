@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-07",
+  "plugin": "minutes@minutes",
+  "plugin_version": "0.2.5",
+  "plugin_source_sha": "804468e9e554ee5b4318badb76c2811fac3e6acf",
+  "mcp_runtime": "0.28.1",
+  "engine_version": "0.28.1",
+  "engine_sha256": "af6418b2a8485d5b45498e8611f1b4e5d3bac70ebbea93ec5ec67a57cc5b9031",
+  "engine_source": "Published macOS arm64 CLI, digest verified against release metadata and SHA256SUMS",
+  "release_tag": "v0.28.1",
+  "release_target": "8e1f1318fc4f6aca848af5c1e96880f0c02d003b",
+  "surface": "ChatGPT desktop, ChatGPT Work",
+  "chatgpt_version": "26.930.51102",
+  "bundled_codex_version": "0.160.0",
+  "ui_discovery": {
+    "plugin_version_visible": "0.2.5",
+    "canonical_skills": 25,
+    "mcp_servers": 1,
+    "method": "Plugins Refresh and Minutes detail page; app was not restarted"
+  },
+  "status_conversation": {
+    "status": "passed",
+    "tool": "get_status",
+    "tool_attribution_visible": "Minutes / Get status",
+    "tool_result": "No recording in progress.",
+    "answer": "Minutes is connected and responding. No recording is in progress.",
+    "meeting_reads": 0,
+    "recording_started": false,
+    "engine_version_in_tool_result": false
+  },
+  "sourced_answer": {
+    "status": "passed",
+    "prompt": "Using Minutes, what changed about pricing between February and March? Cite both meetings and distinguish the decision from unfinished work. Use Minutes tools for the sources; do not read local files through shell commands.",
+    "tools_verified_in_ui": ["search_meetings", "get_meeting"],
+    "tool_attribution_visible": ["Minutes / Search meetings", "Minutes / Opened View Meeting"],
+    "search_result_paths": ["2026-02-28-pricing-strategy.md", "2026-03-25-pricing-reversal.md"],
+    "answer_correctly_identifies": {
+      "february": "Limited monthly billing experiment for three consultant signups, annual default for enterprise",
+      "march": "Annual-only billing across all segments, explicitly superseding February",
+      "unfinished": "Landing copy, Stripe setup and removal of monthly billing remain open; completion is not established"
+    },
+    "citations_visible": ["February pricing meeting, 0:00 to 1:02", "March pricing follow-up, 0:00 to 0:47"],
+    "demo_disclosure_visible": true,
+    "meeting_widget_rendered": "March 25 pricing reversal, transcript and summary",
+    "shell_file_retrieval_used": false,
+    "real_meeting_contents_read": false,
+    "recording_started": false,
+    "screenshot_evidence": "Private release artifacts cua-337, cua-348, cua-351 and cua-355"
+  },
+  "sample_isolation": {
+    "public_synthetic_meetings": 5,
+    "isolated_selectors": ["MINUTES_HOME", "MINUTES_DATA_DIR", "MINUTES_CONFIG_PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "QMD_CONFIG_DIR", "INDEX_PATH", "MEETINGS_DIR"],
+    "real_qmd_registrations_removed": false,
+    "readiness_bypass_used": false
+  },
+  "normal_profile_restoration": {
+    "plugin_version": "0.2.5",
+    "sample_library": false,
+    "published_engine_version": "0.28.1",
+    "engine_digest_verified": true,
+    "host_discovery": "passed",
+    "canonical_tools": 34,
+    "model_turns": 0,
+    "meeting_reads": 0,
+    "prior_installations_retained": true,
+    "normal_native_app_changed": false
+  },
+  "validation": {
+    "plugin_source_ci": "All checks passed at804468e9",
+    "compiler_tests": 41,
+    "published_mcp_and_linux_cli_fixture_qualification": "34 tools, 5 meetings, both pricing sources, reversal and outside-corpus denial passed"
+  },
+  "limits": {
+    "historical_failed_receipt_preserved": "chatgpt-conversation-qualification-2026-10-07.json",
+    "native_gui": "Signed Minutes Dev 0.28.1 saved microphone audio and inserted verified text in TextEdit; final fixture words omitted, tracked as minutes-w1s9",
+    "chatgpt_capture_tools": "Not accepted; truthful microphone startup, selected-profile graceful dictation stop and desktop delegation require separate qualification",
+    "full_plugin_acceptance": "Retrieval passed; capture, live and optional workflows remain open",
+    "widget_host_copy": "Widget still says Send to Claude in ChatGPT; presentation follow-up required",
+    "public_directory_submitted": false,
+    "remote_mcp_deployed": false
+  }
+}

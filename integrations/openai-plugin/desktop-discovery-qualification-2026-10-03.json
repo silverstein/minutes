@@ -1,0 +1,61 @@
+{
+  "date": "2026-10-03",
+  "plugin": "minutes@minutes",
+  "plugin_version": "0.2.2",
+  "chatgpt_version": "26.928.31416",
+  "bundled_codex_version": "0.159.2",
+  "native_cua": "Existing CuaDriver 0.28.1 on Silverbook; no new daemon, host enrollment or OS permission grant",
+  "original_in_app_test": {
+    "plugin_version": "0.2.0",
+    "discovered_skills": 25,
+    "surface": "ChatGPT desktop Personal catalog, Try now opens Work",
+    "thread_id": "01a0ffdf-7446-7e83-be69-afd6bd646318",
+    "prompt": "Check the Minutes connection using its get_status tool. Report the engine version and active capture modes. Do not read meetings, change configuration, run setup, or start recording.",
+    "result": "ChatGPT reports get_status unavailable; no Minutes MCP tool call",
+    "model_turns": 1,
+    "meeting_reads": 0,
+    "recording_started": false
+  },
+  "isolated_manifest_comparison": {
+    "operation": "plugin/read through the actual bundled app-server; unregistered owned copies",
+    "portable_plus_compatibility_mcp_servers": [],
+    "portable_with_inline_mcp_declaration_mcp_servers": [],
+    "portable_without_inline_extension_mcp_servers": [],
+    "compatibility_only_mcp_servers": ["minutes"],
+    "canonical_skills_in_each_layout": 25,
+    "model_turns": 0,
+    "meeting_reads": 0
+  },
+  "repair": {
+    "portable_source_package_preserved": true,
+    "desktop_install_layout": "codex-compatibility",
+    "portable_manifest_retained_outside_installed_plugin_root": true,
+    "mcp_entrypoint": "absolute Node and pinned minutes-mcp@0.27.1",
+    "auto_setup": false,
+    "owned_upgrade_verified": true,
+    "previous_installations_retained": true,
+    "native_minutes_app_changed": false
+  },
+  "desktop_runtime_qualification": {
+    "script": "integrations/openai-plugin/qualify-host.mjs",
+    "status": "passed",
+    "transport": "actual bundled Codex app-server JSON-RPC",
+    "operation": "mcpServerStatus/list",
+    "minutes_plugin_server_count": 1,
+    "canonical_tool_count": 34,
+    "tool_surface_matches_manifest": true,
+    "model_turns": 0,
+    "meeting_reads": 0
+  },
+  "compiler_tests_passed": 37,
+  "installer_tests_passed": 2,
+  "post_repair_in_app_execution": "Pending: Silverbook locked again during the repair; fresh get_window_state has no accessible ChatGPT controls and IORegistry explicitly reports screen locked",
+  "remaining_acceptance": [
+    "Reloaded ChatGPT conversation invokes Minutes get_status",
+    "Real-library retrieval through ChatGPT",
+    "Recording, call capture, live transcript, copilot and dictation through ChatGPT",
+    "Optional X1, video and repository workflows with their required dependencies"
+  ],
+  "public_directory_submitted": false,
+  "remote_mcp_deployed": false
+}

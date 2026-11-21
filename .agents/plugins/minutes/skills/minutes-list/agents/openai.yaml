@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes List"
+  short_description: "List recent meetings and voice memos."
+  default_prompt: "Use Minutes List for this task."

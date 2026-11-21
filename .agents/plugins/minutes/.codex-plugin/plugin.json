@@ -1,0 +1,24 @@
+{
+  "name": "minutes",
+  "version": "0.2.5",
+  "description": "Record conversations, search your local Minutes library, prepare meetings, and follow up. Includes the full Minutes skill set and MCP tools; local capabilities require the Minutes engine and OS permissions.",
+  "author": {
+    "name": "Mat Silverstein",
+    "url": "https://github.com/silverstein"
+  },
+  "homepage": "https://useminutes.app",
+  "repository": "https://github.com/silverstein/minutes",
+  "license": "MIT",
+  "keywords": [
+    "meetings",
+    "conversation-memory",
+    "local-first",
+    "minutes"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "interface": {
+    "displayName": "Minutes",
+    "shortDescription": "Recording, conversation search, meeting prep, and follow-up with local Minutes."
+  }
+}

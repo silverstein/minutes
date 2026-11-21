@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minutes Graph"
+  short_description: "Bounded policy-safe relationship intelligence from owned meeting history."
+  default_prompt: "Use Minutes Graph for this task."

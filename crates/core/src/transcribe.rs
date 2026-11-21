@@ -749,7 +749,7 @@ pub struct TranscriptionEngineResolution<'a> {
     pub reason: &'static str,
 }
 
-fn resolve_auto_transcription_engine(
+pub(crate) fn resolve_auto_transcription_engine(
     sherpa_compiled: bool,
     apple_silicon: bool,
     plugin_present: bool,

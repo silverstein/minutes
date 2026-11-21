@@ -235,8 +235,29 @@ fn detect_summary_coverage_warning(
 /// itself carries the record and stays greppable after the fact (#633).
 fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> {
     let requested = config.transcription.engine.trim();
+    if requested.eq_ignore_ascii_case("auto") {
+        let resolution = crate::transcribe::auto_transcription_engine_resolution(config);
+        return detect_engine_fallback_warning_with(
+            config,
+            resolution.engine,
+            Some(resolution.reason),
+        );
+    }
     let effective = crate::transcribe::effective_batch_engine(config);
-    if requested.eq_ignore_ascii_case(effective) {
+    detect_engine_fallback_warning_with(config, effective, None)
+}
+
+fn detect_engine_fallback_warning_with(
+    config: &Config,
+    effective: &str,
+    auto_reason: Option<&'static str>,
+) -> Option<ProcessingWarning> {
+    let requested = config.transcription.engine.trim();
+    // `auto` resolving to `sherpa` means the primary local engine ran as intended,
+    // not that a fallback occurred (#1334).
+    if requested.eq_ignore_ascii_case(effective)
+        || (requested.eq_ignore_ascii_case("auto") && effective.eq_ignore_ascii_case("sherpa"))
+    {
         return None;
     }
     let detail = if requested.eq_ignore_ascii_case("parakeet") {
@@ -250,9 +271,9 @@ fn detect_engine_fallback_warning(config: &Config) -> Option<ProcessingWarning> 
         // "it is unavailable in this build" asserted something untrue and
         // withheld the only thing the reader needs: why auto landed here. That
         // reason already exists and simply was not reaching the artifact.
-        auto_resolution_detail(
-            crate::transcribe::auto_transcription_engine_resolution(config).reason,
-        )
+        auto_resolution_detail(auto_reason.unwrap_or_else(|| {
+            crate::transcribe::auto_transcription_engine_resolution(config).reason
+        }))
     } else {
         "it is unavailable in this build"
     };
@@ -9812,6 +9833,24 @@ mod tests {
         assert!(
             !message.contains("whisper: "),
             "does not stutter the engine name: {message}"
+        );
+    }
+
+    #[test]
+    fn engine_fallback_warning_absent_when_auto_selects_sherpa() {
+        let mut config = Config::default();
+        config.transcription.engine = "auto".into();
+        let resolution =
+            crate::transcribe::resolve_auto_transcription_engine(true, true, true, true);
+        assert_eq!(resolution.engine, "sherpa");
+        assert!(
+            detect_engine_fallback_warning_with(
+                &config,
+                resolution.engine,
+                Some(resolution.reason)
+            )
+            .is_none(),
+            "auto selecting sherpa as intended must not emit an engine_fallback warning"
         );
     }
 

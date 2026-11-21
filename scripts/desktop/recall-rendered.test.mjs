@@ -187,6 +187,7 @@ try {
     const persistRecallWorkspaceState = () => {};
     const recallDevMode = false;
     const recallTabsModel = { tabs: [] }, SESSION_ID = null;
+    const recallTabsController = { cancelClose: () => {} };
     const applyRecallMode = () => {};
     const registerChatListeners = async () => {};
     const syncNarrowLayout = () => window.fixture.syncLayout?.();

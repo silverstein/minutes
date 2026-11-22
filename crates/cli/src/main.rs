@@ -10173,6 +10173,23 @@ mod input_meter_tests {
 #[allow(clippy::items_after_test_module)]
 mod tests {
 
+    /// Issue #884: the `Commands` enum (60+ variants) builds large clap parser
+    /// temporaries in debug builds; a single added bool once pushed the Windows
+    /// test thread over its 1 MiB stack. Guard the payload so the next flag
+    /// addition bumps into this test instead of a stack overflow — box a
+    /// variant's fields (`Box<…Args>`) rather than letting the enum grow.
+    ///
+    /// The budget is 1 KiB: over 3× today's 296 bytes, far below the point
+    /// where debug-build clap temporaries threaten small stacks.
+    #[test]
+    fn commands_enum_stays_within_the_parse_stack_budget() {
+        let size = std::mem::size_of::<Commands>();
+        assert!(
+            size <= 1024,
+            "Commands grew to {size} bytes — box the large variant payloads instead of letting the clap enum grow (see #884)"
+        );
+    }
+
     /// Issue #1000: `--sherpa` must not spend 639 MB and rewrite the engine on a
     /// build that cannot run sherpa. This asserts the guard exists and refuses
     /// before either side effect, rather than warning after both.

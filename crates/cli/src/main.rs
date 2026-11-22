@@ -12946,6 +12946,10 @@ life (qmd://life/)
             pid: Some(123),
             duration_secs: Some(42.0),
             wav_path: Some("/private/PRIVATE_STATUS_WAV_CANARY.wav".into()),
+            dictation: true,
+            live_transcript: true,
+            voice_session: true,
+            sensitive_meeting: true,
         };
         let status_wire = assistant_safe_status(&status).to_string();
         assert_eq!(

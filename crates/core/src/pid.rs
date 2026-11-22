@@ -769,6 +769,15 @@ pub struct RecordingStatus {
     pub pid: Option<u32>,
     pub duration_secs: Option<f64>,
     pub wav_path: Option<String>,
+    /// A dictation session is capturing, owned by the CLI or the desktop app.
+    pub dictation: bool,
+    /// A live transcript session is capturing.
+    pub live_transcript: bool,
+    /// A voice live session is open.
+    pub voice_session: bool,
+    /// A no-capture sensitive meeting is in progress (title withheld — session
+    /// state only, same class as `recording`).
+    pub sensitive_meeting: bool,
 }
 
 /// Get current recording status. Convenience wrapper that fetches its own
@@ -814,6 +823,17 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
             job_count,
         })
         .unwrap_or_else(read_processing_status);
+
+    // The rest of the session lattice: `minutes stop` and the conflict
+    // guards read these same pid files and session markers, so `status`
+    // answers "is anything capturing?" instead of only "is a meeting
+    // recording?". `inspect_pid_file` also cleans stale pid files as a
+    // side effect, matching the conflict-check paths.
+    let dictation = inspect_pid_file(&dictation_pid_path()).is_active();
+    let live_transcript = inspect_pid_file(&live_transcript_pid_path()).is_active();
+    let voice_session = inspect_pid_file(&voice_pid_path()).is_active();
+    let sensitive_meeting = crate::sensitive::active_session().is_some();
+
     match check_recording() {
         Ok(Some(pid)) => {
             let wav = current_wav_path();
@@ -841,6 +861,10 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
                 // The record process writes continuously, so this is close.
                 duration_secs: duration,
                 wav_path: Some(wav.display().to_string()),
+                dictation,
+                live_transcript,
+                voice_session,
+                sensitive_meeting,
             }
         }
         _ => RecordingStatus {
@@ -854,6 +878,10 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
             pid: None,
             duration_secs: None,
             wav_path: None,
+            dictation,
+            live_transcript,
+            voice_session,
+            sensitive_meeting,
         },
     }
 }

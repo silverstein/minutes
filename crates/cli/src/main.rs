@@ -4232,9 +4232,27 @@ fn cmd_policy_audit() -> Result<()> {
 }
 
 fn cmd_status() -> Result<()> {
-    let status = minutes_core::pid::status();
+    use minutes_core::pid;
+
+    #[derive(serde::Serialize)]
+    struct CliStatus {
+        #[serde(flatten)]
+        recording: pid::RecordingStatus,
+        dictation: bool,
+        live_transcript: bool,
+        voice_session: bool,
+        sensitive_meeting: bool,
+    }
+
+    let status = pid::status();
     let json = if assistant_policy_allows_restricted_content() {
-        serde_json::to_string_pretty(&status)?
+        serde_json::to_string_pretty(&CliStatus {
+            recording: status,
+            dictation: pid::pid_file_is_active(&pid::dictation_pid_path()),
+            live_transcript: pid::pid_file_is_active(&pid::live_transcript_pid_path()),
+            voice_session: pid::pid_file_is_active(&pid::voice_pid_path()),
+            sensitive_meeting: minutes_core::sensitive::status_is_active(),
+        })?
     } else {
         serde_json::to_string_pretty(&assistant_safe_status(&status))?
     };
@@ -12946,10 +12964,6 @@ life (qmd://life/)
             pid: Some(123),
             duration_secs: Some(42.0),
             wav_path: Some("/private/PRIVATE_STATUS_WAV_CANARY.wav".into()),
-            dictation: true,
-            live_transcript: true,
-            voice_session: true,
-            sensitive_meeting: true,
         };
         let status_wire = assistant_safe_status(&status).to_string();
         assert_eq!(

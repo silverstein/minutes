@@ -279,7 +279,7 @@ pub enum PidFileState {
     /// PID file present but unreadable because the owner holds an exclusive lock
     /// (Windows mandatory lock). The owner is alive; the PID value is unknown.
     LockedAlive,
-    /// PID file absent, stale (dead PID — cleaned up), or unreadable for any
+    /// PID file absent, stale, or unreadable for any
     /// reason other than a lock/sharing violation.
     Inactive,
 }
@@ -308,6 +308,15 @@ impl PidFileState {
 /// reader is not fooled by Windows file locking. Stale PID files (dead PID) are
 /// cleaned up automatically, mirroring [`check_pid_file`].
 pub fn inspect_pid_file(path: &Path) -> PidFileState {
+    read_pid_file_state(path, true)
+}
+
+/// Check for a live session without cleaning up its PID file.
+pub fn pid_file_is_active(path: &Path) -> bool {
+    read_pid_file_state(path, false).is_active()
+}
+
+fn read_pid_file_state(path: &Path, clean_stale: bool) -> PidFileState {
     if !path.exists() {
         return PidFileState::Inactive;
     }
@@ -315,7 +324,7 @@ pub fn inspect_pid_file(path: &Path) -> PidFileState {
     match fs::read_to_string(path) {
         Ok(contents) => match contents.trim().parse::<u32>() {
             Ok(pid) if is_process_alive(pid) => PidFileState::Active(pid),
-            Ok(pid) => {
+            Ok(pid) if clean_stale => {
                 tracing::warn!(
                     "stale PID file found at {} (PID {pid} is dead). Cleaning up.",
                     path.display()
@@ -325,7 +334,7 @@ pub fn inspect_pid_file(path: &Path) -> PidFileState {
             }
             // Present but unparseable (empty/corrupt): treat as not active rather
             // than guessing a PID.
-            Err(_) => PidFileState::Inactive,
+            _ => PidFileState::Inactive,
         },
         // The read failed. On Windows a mandatory-lock violation means the owner
         // is alive and holding the lock; any other error is treated conservatively
@@ -769,15 +778,6 @@ pub struct RecordingStatus {
     pub pid: Option<u32>,
     pub duration_secs: Option<f64>,
     pub wav_path: Option<String>,
-    /// A dictation session is capturing, owned by the CLI or the desktop app.
-    pub dictation: bool,
-    /// A live transcript session is capturing.
-    pub live_transcript: bool,
-    /// A voice live session is open.
-    pub voice_session: bool,
-    /// A no-capture sensitive meeting is in progress (title withheld — session
-    /// state only, same class as `recording`).
-    pub sensitive_meeting: bool,
 }
 
 /// Get current recording status. Convenience wrapper that fetches its own
@@ -823,17 +823,6 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
             job_count,
         })
         .unwrap_or_else(read_processing_status);
-
-    // The rest of the session lattice: `minutes stop` and the conflict
-    // guards read these same pid files and session markers, so `status`
-    // answers "is anything capturing?" instead of only "is a meeting
-    // recording?". `inspect_pid_file` also cleans stale pid files as a
-    // side effect, matching the conflict-check paths.
-    let dictation = inspect_pid_file(&dictation_pid_path()).is_active();
-    let live_transcript = inspect_pid_file(&live_transcript_pid_path()).is_active();
-    let voice_session = inspect_pid_file(&voice_pid_path()).is_active();
-    let sensitive_meeting = crate::sensitive::active_session().is_some();
-
     match check_recording() {
         Ok(Some(pid)) => {
             let wav = current_wav_path();
@@ -861,10 +850,6 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
                 // The record process writes continuously, so this is close.
                 duration_secs: duration,
                 wav_path: Some(wav.display().to_string()),
-                dictation,
-                live_transcript,
-                voice_session,
-                sensitive_meeting,
             }
         }
         _ => RecordingStatus {
@@ -878,10 +863,6 @@ pub fn status_with_active_jobs(active_jobs: &[crate::jobs::ProcessingJob]) -> Re
             pid: None,
             duration_secs: None,
             wav_path: None,
-            dictation,
-            live_transcript,
-            voice_session,
-            sensitive_meeting,
         },
     }
 }

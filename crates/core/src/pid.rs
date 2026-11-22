@@ -279,7 +279,7 @@ pub enum PidFileState {
     /// PID file present but unreadable because the owner holds an exclusive lock
     /// (Windows mandatory lock). The owner is alive; the PID value is unknown.
     LockedAlive,
-    /// PID file absent, stale (dead PID — cleaned up), or unreadable for any
+    /// PID file absent, stale, or unreadable for any
     /// reason other than a lock/sharing violation.
     Inactive,
 }
@@ -308,6 +308,15 @@ impl PidFileState {
 /// reader is not fooled by Windows file locking. Stale PID files (dead PID) are
 /// cleaned up automatically, mirroring [`check_pid_file`].
 pub fn inspect_pid_file(path: &Path) -> PidFileState {
+    read_pid_file_state(path, true)
+}
+
+/// Check for a live session without cleaning up its PID file.
+pub fn pid_file_is_active(path: &Path) -> bool {
+    read_pid_file_state(path, false).is_active()
+}
+
+fn read_pid_file_state(path: &Path, clean_stale: bool) -> PidFileState {
     if !path.exists() {
         return PidFileState::Inactive;
     }
@@ -315,7 +324,7 @@ pub fn inspect_pid_file(path: &Path) -> PidFileState {
     match fs::read_to_string(path) {
         Ok(contents) => match contents.trim().parse::<u32>() {
             Ok(pid) if is_process_alive(pid) => PidFileState::Active(pid),
-            Ok(pid) => {
+            Ok(pid) if clean_stale => {
                 tracing::warn!(
                     "stale PID file found at {} (PID {pid} is dead). Cleaning up.",
                     path.display()
@@ -325,7 +334,7 @@ pub fn inspect_pid_file(path: &Path) -> PidFileState {
             }
             // Present but unparseable (empty/corrupt): treat as not active rather
             // than guessing a PID.
-            Err(_) => PidFileState::Inactive,
+            _ => PidFileState::Inactive,
         },
         // The read failed. On Windows a mandatory-lock violation means the owner
         // is alive and holding the lock; any other error is treated conservatively

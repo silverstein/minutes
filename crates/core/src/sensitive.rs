@@ -128,13 +128,10 @@ pub fn active_session() -> Option<SensitiveSession> {
 }
 
 fn active_session_locked() -> Result<Option<SensitiveSession>, SensitiveError> {
-    let raw = match fs::read_to_string(session_path()) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let Some(session) = read_session()? else {
+        return Ok(None);
     };
-    let session: SensitiveSession = serde_json::from_str(&raw)?;
-    if session.owner_pid != 0 && !crate::pid::is_process_alive(session.owner_pid) {
+    if !session_owner_is_alive(&session) {
         tracing::warn!(
             session_id = %session.id,
             owner_pid = session.owner_pid,
@@ -144,6 +141,40 @@ fn active_session_locked() -> Result<Option<SensitiveSession>, SensitiveError> {
         return Ok(None);
     }
     Ok(Some(session))
+}
+
+/// Report session activity without waiting for the capture or mutation lock.
+pub fn status_is_active() -> bool {
+    if !session_path().exists() {
+        return false;
+    }
+    let lock = fs::File::open(lock_path()).ok();
+    if lock
+        .as_ref()
+        .is_some_and(|file| FileExt::try_lock_shared(file).is_err())
+    {
+        // A concurrent update can temporarily leave the session file unreadable.
+        // Treat the visible marker as active until the writer finishes.
+        return true;
+    }
+    read_session()
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(session_owner_is_alive)
+}
+
+fn session_owner_is_alive(session: &SensitiveSession) -> bool {
+    session.owner_pid == 0 || crate::pid::is_process_alive(session.owner_pid)
+}
+
+fn read_session() -> Result<Option<SensitiveSession>, SensitiveError> {
+    let raw = match fs::read_to_string(session_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(serde_json::from_str(&raw)?))
 }
 
 /// Start a no-capture session owned by the running desktop app.

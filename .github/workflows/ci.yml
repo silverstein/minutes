@@ -487,6 +487,10 @@ jobs:
         run: cargo test -p minutes-cli --no-default-features -- copilot --test-threads=1
         timeout-minutes: 4
 
+      - name: CLI command enum size guard
+        run: cargo test -p minutes-cli --no-default-features --bin minutes commands_enum_stays_within_its_size_budget -- --test-threads=1
+        timeout-minutes: 4
+
       - name: CLI toggle session startup contracts
         run: |
           cargo test -p minutes-cli --no-default-features --bin minutes session_start -- --test-threads=1

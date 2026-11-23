@@ -10173,6 +10173,19 @@ mod input_meter_tests {
 #[allow(clippy::items_after_test_module)]
 mod tests {
 
+    /// Issue #884: debug clap parsing once exhausted a Windows test thread's
+    /// stack. Parser tests still use the larger stack in `parse_cli`.
+    /// This 1 KiB budget catches large enum payloads. Debug parser stack use
+    /// also depends on clap's generated code and the compiler.
+    #[test]
+    fn commands_enum_stays_within_its_size_budget() {
+        let size = std::mem::size_of::<Commands>();
+        assert!(
+            size <= 1024,
+            "Commands grew to {size} bytes — box the large variant payloads instead of letting the clap enum grow (see #884)"
+        );
+    }
+
     /// Issue #1000: `--sherpa` must not spend 639 MB and rewrite the engine on a
     /// build that cannot run sherpa. This asserts the guard exists and refuses
     /// before either side effect, rather than warning after both.

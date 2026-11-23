@@ -12,20 +12,20 @@
   "dependencies": {
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.2",
-    "@remotion/player": "4.0.543",
+    "@remotion/player": "4.0.545",
     "@types/three": "^0.187.0",
     "geist": "^1.9.2",
     "next": "^16.4.6",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "remotion": "4.0.543",
+    "remotion": "4.0.545",
     "three": "^0.187.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "postcss": "^8.5.32",
+    "postcss": "^8.5.33",
     "tailwindcss": "^3.4.17",
     "typescript": "^6.0.3"
   }

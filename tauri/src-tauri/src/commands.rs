@@ -13,6 +13,7 @@ use minutes_core::config::{
 };
 use minutes_core::copilot::COACH_DEVICE_NAME;
 use minutes_core::markdown::ConsentBasis;
+use minutes_core::system_audio_backend::{configured_capture_backend, CaptureBackendKind};
 use minutes_core::{CaptureMode, Config, ContentType};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use std::cmp::Reverse;
@@ -4816,18 +4817,26 @@ fn configured_call_source(config: &Config) -> Option<&str> {
 fn arm_desktop_call_capture_route(
     config: &mut Config,
     requested_intent: Option<RecordingIntent>,
-    loopback_device: Option<String>,
+    detect_loopback_device: impl FnOnce() -> Option<String>,
 ) -> bool {
     if requested_intent != Some(RecordingIntent::Call) || configured_call_source(config).is_some() {
         return false;
     }
 
-    let Some(loopback_device) = loopback_device.map(|value| value.trim().to_string()) else {
-        return false;
+    // A Process Tap captures the default output. Supplying a detected loopback
+    // here would make capture reject the route before recording starts.
+    let call = if configured_capture_backend(config) == Ok(CaptureBackendKind::CoreAudioTap) {
+        "auto".to_owned()
+    } else {
+        let Some(loopback_device) = detect_loopback_device().map(|value| value.trim().to_owned())
+        else {
+            return false;
+        };
+        if loopback_device.is_empty() {
+            return false;
+        }
+        loopback_device
     };
-    if loopback_device.is_empty() {
-        return false;
-    }
 
     let voice = config
         .recording
@@ -4837,7 +4846,7 @@ fn arm_desktop_call_capture_route(
         .or_else(|| config.recording.device.clone());
     config.recording.sources = Some(minutes_core::config::SourcesConfig {
         voice,
-        call: Some(loopback_device),
+        call: Some(call),
     });
     config.recording.device = None;
     true
@@ -6903,12 +6912,11 @@ pub fn start_recording(
     // startup-side persistence stays in main.rs so users keep their
     // pin for when the device reconnects on a future launch.
     minutes_core::capture::auto_heal_missing_recording_device(&mut config);
-    let desktop_call_loopback = if requested_intent == Some(RecordingIntent::Call) {
-        minutes_core::capture::detect_loopback_device()
-    } else {
-        None
-    };
-    arm_desktop_call_capture_route(&mut config, requested_intent, desktop_call_loopback);
+    arm_desktop_call_capture_route(
+        &mut config,
+        requested_intent,
+        minutes_core::capture::detect_loopback_device,
+    );
     let native_route_allowed =
         crate::recording_audio::native_route_allowed(&config, automatic_app.is_some());
     let preflight = match minutes_core::capture::preflight_recording_with_native_call_capture(
@@ -19879,17 +19887,49 @@ mod tests {
         let mut config = Config::default();
         config.recording.device = Some("MacBook Pro Microphone".into());
 
-        let armed = arm_desktop_call_capture_route(
-            &mut config,
-            Some(RecordingIntent::Call),
-            Some("MMAudio Device".into()),
-        );
+        let armed =
+            arm_desktop_call_capture_route(&mut config, Some(RecordingIntent::Call), || {
+                Some("MMAudio Device".into())
+            });
 
         assert!(armed);
         assert!(config.recording.device.is_none());
         let sources = config.recording.sources.unwrap();
         assert_eq!(sources.voice.as_deref(), Some("MacBook Pro Microphone"));
         assert_eq!(sources.call.as_deref(), Some("MMAudio Device"));
+    }
+
+    #[test]
+    fn desktop_call_capture_route_uses_default_output_for_core_audio_tap() {
+        for backend in ["core-audio-tap", "process-tap"] {
+            let mut config = Config::default();
+            config.recording.capture_backend = backend.into();
+            config.recording.device = Some("MacBook Pro Microphone".into());
+            let intent = crate::recording_audio::prepare(
+                &mut config,
+                CaptureMode::LiveTranscript,
+                Some(RecordingIntent::Call),
+            )
+            .unwrap();
+
+            let armed = arm_desktop_call_capture_route(&mut config, Some(intent), || {
+                panic!("Core Audio Tap must not search for a named loopback")
+            });
+
+            assert!(armed);
+            assert!(!crate::recording_audio::native_route_allowed(
+                &config, false
+            ));
+            assert_eq!(
+                minutes_core::capture::resolve_system_audio_probe_device(&config)
+                    .unwrap()
+                    .as_deref(),
+                Some(CaptureBackendKind::CoreAudioTap.as_str())
+            );
+            let sources = config.recording.sources.unwrap();
+            assert_eq!(sources.voice.as_deref(), Some("MacBook Pro Microphone"));
+            assert_eq!(sources.call.as_deref(), Some("auto"));
+        }
     }
 
     #[test]
@@ -19901,11 +19941,10 @@ mod tests {
             call: Some("BlackHole 2ch".into()),
         });
 
-        let armed = arm_desktop_call_capture_route(
-            &mut config,
-            Some(RecordingIntent::Call),
-            Some("MMAudio Device".into()),
-        );
+        let armed =
+            arm_desktop_call_capture_route(&mut config, Some(RecordingIntent::Call), || {
+                panic!("desktop capture must honor the configured call source")
+            });
 
         assert!(!armed);
         assert_eq!(

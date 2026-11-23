@@ -10173,16 +10173,12 @@ mod input_meter_tests {
 #[allow(clippy::items_after_test_module)]
 mod tests {
 
-    /// Issue #884: the `Commands` enum (60+ variants) builds large clap parser
-    /// temporaries in debug builds; a single added bool once pushed the Windows
-    /// test thread over its 1 MiB stack. Guard the payload so the next flag
-    /// addition bumps into this test instead of a stack overflow — box a
-    /// variant's fields (`Box<…Args>`) rather than letting the enum grow.
-    ///
-    /// The budget is 1 KiB: over 3× today's 296 bytes, far below the point
-    /// where debug-build clap temporaries threaten small stacks.
+    /// Issue #884: debug clap parsing once exhausted a Windows test thread's
+    /// stack. Parser tests still use the larger stack in `parse_cli`.
+    /// This 1 KiB budget catches large enum payloads. Debug parser stack use
+    /// also depends on clap's generated code and the compiler.
     #[test]
-    fn commands_enum_stays_within_the_parse_stack_budget() {
+    fn commands_enum_stays_within_its_size_budget() {
         let size = std::mem::size_of::<Commands>();
         assert!(
             size <= 1024,

@@ -80,10 +80,10 @@ jobs:
         if: runner.os == 'macOS'
         run: echo "CXXFLAGS=-I$(xcrun --show-sdk-path)/usr/include/c++/v1" >> "$GITHUB_ENV"
 
-      - name: Configure portable Windows CPU baseline
-        if: runner.os == 'Windows'
+      - name: Configure portable x64 Whisper CPU baseline
+        if: runner.os == 'Windows' || matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
-        run: .github/scripts/export-windows-cpu-baseline.sh
+        run: .github/scripts/export-x64-cpu-baseline.sh "${{ runner.os }}"
 
       - name: Resolve runner image for cache scope
         id: runner-image
@@ -100,7 +100,8 @@ jobs:
           # Scope by runner image so a runner-image rotation does not restore a stale
           # target/ cache with toolchain paths the new image no longer ships
           # (e.g. macOS 15 -> macOS 26 Xcode change). See ci.yml.
-          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          # A changed native CPU contract must rebuild whisper-rs-sys.
+          key: ${{ runner.os }}-${{ steps.runner-image.outputs.scope }}-cargo-release-${{ hashFiles('**/Cargo.lock', '.github/scripts/export-x64-cpu-baseline.sh') }}
 
       - name: Clean stale Windows native build cache
         if: runner.os == 'Windows'

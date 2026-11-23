@@ -110,9 +110,9 @@ jobs:
               # without this a PR editing lint policy skipped every Rust job and
               # reported green. crates/core/clippy.toml is covered by crates/**.
               - 'clippy.toml'
-              # Shared by the standalone and desktop Windows release builds;
+              # Shared by the Linux and Windows x64 builds;
               # changing the CPU ceiling must exercise the Windows artifact.
-              - '.github/scripts/export-windows-cpu-baseline.sh'
+              - '.github/scripts/export-x64-cpu-baseline.sh'
               # Sets rustflags and build env per target, so it changes how every
               # Rust target compiles. Omitting it meant a change that statically
               # linked the Windows CRT skipped every Rust job and reported green
@@ -682,7 +682,7 @@ jobs:
 
       - name: Configure portable Windows CPU baseline
         shell: bash
-        run: .github/scripts/export-windows-cpu-baseline.sh
+        run: .github/scripts/export-x64-cpu-baseline.sh Windows
 
       - name: Check Windows desktop capture-relay + window contract
         # Compiles Tauri's owner side against the Windows named-pipe relay
@@ -1029,8 +1029,8 @@ jobs:
       - name: Test local and published SDK install policies
         run: node --test scripts/install_mcp_dependencies.test.mjs
 
-      - name: Test Windows CPU-baseline release guard
-        run: node --test scripts/check_windows_cpu_baseline.test.mjs
+      - name: Test x64 CPU-baseline release guard
+        run: node --test scripts/check_x64_cpu_baseline.test.mjs
 
       - name: Test transactional version bump
         run: node --test scripts/bump_version.test.mjs

@@ -107,7 +107,7 @@ jobs:
 
       - name: Configure portable Windows CPU baseline
         shell: bash
-        run: .github/scripts/export-windows-cpu-baseline.sh
+        run: .github/scripts/export-x64-cpu-baseline.sh Windows
 
       - name: Build desktop installer (unsigned)
         working-directory: tauri/src-tauri

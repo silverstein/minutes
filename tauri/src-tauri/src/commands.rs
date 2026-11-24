@@ -25591,6 +25591,10 @@ pub fn cmd_set_shortcut(
                     config.dictation.hotkey_enabled = false;
                 }
             }
+            ShortcutSlot::Voice => {
+                config.voice_live.shortcut_enabled = true;
+                config.voice_live.shortcut = status.shortcut.clone();
+            }
             ShortcutSlot::QuickThought => {
                 config.global_hotkey.shortcut_enabled = true;
                 config.global_hotkey.shortcut = status.shortcut.clone();
@@ -25623,6 +25627,12 @@ pub fn cmd_set_shortcut(
                     } else {
                         config.dictation.shortcut = shortcut;
                     }
+                }
+            }
+            ShortcutSlot::Voice => {
+                config.voice_live.shortcut_enabled = false;
+                if !shortcut.is_empty() {
+                    config.voice_live.shortcut = shortcut;
                 }
             }
             ShortcutSlot::QuickThought => {

@@ -5989,6 +5989,16 @@
       opacity: 1;
     }
 
+    .voice-consent-dialog {
+      width: min(440px, calc(100vw - 32px));
+      padding: 20px; border: 1px solid var(--border-mid); border-radius: 16px;
+      background: var(--bg-elevated); color: var(--text);
+    }
+    .voice-consent-dialog::backdrop { background: var(--shadow-stronger); }
+    .voice-consent-dialog h2 { margin-top: 0; }
+    .voice-consent-dialog form { display: flex; gap: 8px; justify-content: flex-end; }
+    #settings-voice-section[hidden] { display: none; }
+
     .settings-secret-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto auto;
@@ -7291,6 +7301,59 @@
         </div>
       </div>
 
+      <section class="settings-section" id="settings-voice-section" hidden>
+        <div class="about-item-title">VOICE</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Voice</div>
+            <div class="about-controls-meta">Start a spoken conversation from the Minutes menu bar.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-voice-enabled" type="button" role="switch" aria-label="Voice" aria-checked="false">Off</button>
+        </div>
+        <div class="about-controls" data-global-shortcut>
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Voice shortcut</div>
+            <button id="shortcut-recorder-voice" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" type="button" aria-label="Change Voice shortcut">Command Option Shift V</button>
+            <div class="about-controls-meta" id="shortcut-status-voice" role="status">Press the shortcut to start or end Voice.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-voice" type="button" aria-label="Enable Voice shortcut">Off</button>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-voice-key">Gemini API key</label>
+            <div class="settings-secret-row">
+              <input id="settings-voice-key" class="settings-field" type="password" autocomplete="off" spellcheck="false">
+              <button class="btn btn-secondary btn-sm" id="settings-voice-key-save" type="button">Save</button>
+              <button class="btn btn-secondary btn-sm" id="settings-voice-key-clear" type="button">Remove</button>
+            </div>
+            <div class="about-controls-meta" id="settings-voice-key-status" role="status"></div>
+          </div>
+        </div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <label class="about-controls-copy" for="settings-voice-name">Speaking voice</label>
+            <select class="settings-field" id="settings-voice-name">
+              <option value="">Google default</option>
+              <option>Aoede</option>
+              <option>Charon</option>
+              <option>Kore</option>
+              <option>Puck</option>
+              <option>Zephyr</option>
+            </select>
+            <div class="about-controls-meta" id="settings-voice-status" role="status"></div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="settings-voice-test" type="button" disabled>Test voice</button>
+        </div>
+        <dialog class="voice-consent-dialog" id="settings-voice-consent" aria-labelledby="settings-voice-consent-title">
+          <h2 id="settings-voice-consent-title">Turn on Voice?</h2>
+          <p>Your microphone audio and the answers Minutes looks up go to <span id="settings-voice-provider">Google</span> during Voice sessions.</p>
+          <form method="dialog">
+            <button class="btn btn-secondary btn-sm" type="submit" autofocus>Cancel</button>
+            <button class="btn btn-primary btn-sm" id="settings-voice-consent-accept" type="button">Turn on Voice</button>
+          </form>
+        </dialog>
+      </section>
+
       </div><!-- /panel-capture -->
 
       <div class="settings-tab-panel" role="tabpanel" id="panel-transcription" data-panel="transcription" aria-labelledby="tab-transcription">
@@ -8365,6 +8428,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
   <script src="vendor/marked.min.js"></script>
 
   <script src="scripts/shortcut-recorder.js"></script>
+  <script src="scripts/voice-settings.js"></script>
   <script src="scripts/recall-contract.js"></script>
   <script src="scripts/update-offer.js"></script>
   <script src="scripts/recording-audio.js"></script>
@@ -14047,6 +14111,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     settingsTabs.forEach(tab => {
       tab.addEventListener('click', () => {
         const name = tab.dataset.tab;
+        if (name === "capture") window.MinutesVoiceSettings.refresh();
         settingsTabs.forEach(t => {
           t.classList.toggle('is-active', t === tab);
           t.setAttribute('aria-selected', t === tab ? 'true' : 'false');
@@ -15801,10 +15866,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     // Replaces the old 3-system approach (dropdown, dropdown, raw-key capture)
     // with a single "click to record" button per slot.
 
-    const UNIFIED_SLOTS = ['quick_thought', 'dictation', 'dictation_paste_last', 'dictation_history'];
+    const UNIFIED_SLOTS = ['quick_thought', 'dictation', 'voice', 'dictation_paste_last', 'dictation_history'];
     const RECOVERY_SLOTS = ['dictation_paste_last', 'dictation_history'];
     const recoveryToggleIds = { dictation_paste_last: 'dictation-paste-enabled', dictation_history: 'dictation-history-enabled' };
     const SLOT_DEFAULTS = {
+      voice: { shortcut: 'CmdOrCtrl+Alt+Shift+V', keycode: -1 },
       quick_thought: { shortcut: 'CmdOrCtrl+Shift+M', keycode: -1 },
       dictation: { shortcut: 'CmdOrCtrl+Shift+Space', keycode: -1 },
       dictation_paste_last: { shortcut: 'CmdOrCtrl+Alt+V', keycode: -1 },
@@ -15866,9 +15932,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         statusEl.textContent = slot === 'dictation' ? `Hold ${shortcutDisplayLabel(status.shortcut, status.keycode)} to speak, or tap for hands-free. Escape cancels.` : status.message;
         statusEl.classList.remove('error');
       } else {
-        const defaultMsg = slot === 'dictation'
-          ? 'Hold to dictate, or tap to lock and tap again to stop.'
-          : 'Hold to record a quick thought, or tap to lock and tap again to stop.';
+        const defaultMsg = {
+          dictation: 'Hold to dictate, or tap to lock and tap again to stop.',
+          quick_thought: 'Hold to record a quick thought, or tap to lock and tap again to stop.',
+          voice: 'Press the shortcut to start or end Voice.',
+        }[slot] || 'Off.';
         statusEl.textContent = status.message === 'Off.' ? defaultMsg : status.message;
         statusEl.classList.toggle('error', status.message !== 'Off.' && !status.enabled);
       }
@@ -15957,7 +16025,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         label: shortcutDisplayLabel,
         invoke,
         update: status => updateSlotUI(slot, status),
-        standardOnly: RECOVERY_SLOTS.includes(slot),
+        standardOnly: slot === "voice" || RECOVERY_SLOTS.includes(slot),
         status: message => {
           const node = document.getElementById('shortcut-status-' + slot);
           if (node) { node.textContent = message; node.classList.add('error'); }
@@ -16317,6 +16385,10 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       closeAbout();
       closeSettings();
       await openWhatsNewManually();
+    });
+
+    currentWindow.listen('voice:open-settings', () => {
+      openSettings({ tab: 'capture', section: 'settings-voice-section' });
     });
 
     currentWindow.listen('minutes://show-settings', () => {

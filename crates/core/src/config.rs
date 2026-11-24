@@ -1163,6 +1163,8 @@ impl Default for RecordingConfig {
 pub struct VoiceLiveConfig {
     /// Master switch for the feature surfaces (CLI command, shortcut slot).
     pub enabled: bool,
+    pub shortcut_enabled: bool,
+    pub shortcut: String,
     /// Realtime provider. Phase 1 supports only "gemini".
     pub provider: String,
     /// Model id, e.g. "gemini-3.8-live".
@@ -1301,6 +1303,8 @@ impl Default for VoiceLiveConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            shortcut_enabled: false,
+            shortcut: "CmdOrCtrl+Alt+Shift+V".into(),
             provider: "gemini".into(),
             model: "gemini-3.8-live".into(),
             thinking_level: "medium".into(),

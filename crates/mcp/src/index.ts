@@ -67,6 +67,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   statSync,
 } from "fs";
@@ -2182,6 +2183,62 @@ if (isExtensionRuntime) {
   );
 }
 
+// ── Stale sibling extension warning (#1220) ─────────────────
+// A manual `minutes-mcp` or the desktop app's bundled server can run next to
+// an older Claude Desktop extension of Minutes that is still installed and
+// acting — #940 traced repeated config resets to exactly that pairing (a
+// 0.25.x extension beside a newer server), and nothing told the user the old
+// copy existed. When this server is NOT itself the extension, scan Claude's
+// extension store for a Minutes manifest older than this server and say so on
+// stderr, where the host's MCP logs surface it.
+export function staleExtensionGuidance(extensionVersion: string): string {
+  return (
+    `An outdated Minutes extension (v${extensionVersion}) is installed in ` +
+    `Claude Desktop alongside this server (v${MCP_SERVER_VERSION}). Old ` +
+    `extension builds can reset your model and settings — remove or update ` +
+    `it in Claude Desktop → Settings → Extensions.`
+  );
+}
+
+export function findStaleMinutesExtension(
+  roots: string[] = [],
+  serverVersion: string = MCP_SERVER_VERSION
+): { version: string } | null {
+  const searchRoots =
+    roots.length > 0
+      ? roots
+      : process.platform === "darwin"
+        ? [join(homedir(), "Library", "Application Support", "Claude", "Claude Extensions")]
+        : process.platform === "win32"
+          ? [join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "Claude", "Claude Extensions")]
+          : [];
+  for (const root of searchRoots) {
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      try {
+        const manifest = JSON.parse(
+          readFileSync(join(root, entry, "manifest.json"), "utf8")
+        );
+        if (
+          manifest?.name === "minutes" &&
+          typeof manifest?.version === "string" &&
+          isOlderVersion(manifest.version, serverVersion)
+        ) {
+          return { version: manifest.version };
+        }
+      } catch {
+        // Not a manifest-bearing extension directory — keep scanning.
+      }
+    }
+  }
+  return null;
+}
+
 // ── Find the minutes binary ─────────────────────────────────
 
 function findMinutesBinary(): string {
@@ -2260,6 +2317,13 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // against CLIs with different minor/patch numbers within the same
 // major; that is explicitly supported.
 const MCP_SERVER_VERSION = "0.34.2";
+
+if (!isExtensionRuntime) {
+  const stale = findStaleMinutesExtension();
+  if (stale) {
+    console.error(`[Minutes] ${staleExtensionGuidance(stale.version)}`);
+  }
+}
 
 export function parseKnowledgeConfig(configContent: string): KnowledgeConfigStatus | null {
   const knowledgeMatch = configContent.match(/\[knowledge\][\s\S]*?(?=\n\[|$)/);

@@ -2164,11 +2164,18 @@ export function shouldRunMainEntry(argv1: string | null | undefined, moduleFilen
 // Support, and Claude Desktop sets MCP_EXTENSION_ID for extension servers.
 // This is macOS-specific — Windows/Linux don't have TCC, so their extension
 // runtimes can spawn child processes with mic access normally.
-const isExtensionRuntime: boolean =
-  process.platform === "darwin" &&
-  (!!process.env.MCP_EXTENSION_ID ||
-   __dirname.includes("Claude Extensions") ||
-   __dirname.includes("claude-extensions"));
+export function isClaudeDesktopExtension(
+  extensionId: string | undefined,
+  directory: string
+): boolean {
+  return Boolean(extensionId) || directory.split(/[\\/]+/).some((component) => {
+    const name = component.toLowerCase();
+    return name === "claude extensions" || name === "claude-extensions";
+  });
+}
+
+const isClaudeExtension = isClaudeDesktopExtension(process.env.MCP_EXTENSION_ID, __dirname);
+const isExtensionRuntime = process.platform === "darwin" && isClaudeExtension;
 
 if (isExtensionRuntime) {
   console.error(
@@ -2226,6 +2233,8 @@ export function findStaleMinutesExtension(
         );
         if (
           manifest?.name === "minutes" &&
+          typeof manifest.repository?.url === "string" &&
+          /^https:\/\/github\.com\/silverstein\/minutes(?:\.git)?\/?$/i.test(manifest.repository.url) &&
           typeof manifest?.version === "string" &&
           isOlderVersion(manifest.version, serverVersion)
         ) {
@@ -2318,7 +2327,7 @@ const COPILOT_SUPPORTED = hasFeature(CLI_CAPABILITIES, "copilot_realtime");
 // major; that is explicitly supported.
 const MCP_SERVER_VERSION = "0.34.2";
 
-if (!isExtensionRuntime) {
+if (!isClaudeExtension) {
   const stale = findStaleMinutesExtension();
   if (stale) {
     console.error(`[Minutes] ${staleExtensionGuidance(stale.version)}`);

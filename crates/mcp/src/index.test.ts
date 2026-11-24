@@ -53,6 +53,7 @@ import {
   enrichWithFrontmatter,
   extractMarkdownSection,
   findStaleMinutesExtension,
+  isClaudeDesktopExtension,
   getEffectiveMeetingsDir,
   getReleaseBinaryName,
   handleMcpProcessAudioRequest,
@@ -6906,6 +6907,7 @@ describe("missing engine guidance (#774)", () => {
 
 describe("stale Claude Desktop extension detection (#1220)", () => {
   const tmpRoots: string[] = [];
+  const repository = { url: "https://github.com/silverstein/minutes" };
 
   function extensionRoot(): string {
     const root = mkdtempSync(join(tmpdir(), "minutes-ext-"));
@@ -6931,6 +6933,7 @@ describe("stale Claude Desktop extension detection (#1220)", () => {
     writeExtension(root, "ant.dir.gh.silverstein.minutes", {
       name: "minutes",
       version: "0.25.1",
+      repository,
     });
     expect(findStaleMinutesExtension([root], "0.34.2")).toEqual({
       version: "0.25.1",
@@ -6942,9 +6945,27 @@ describe("stale Claude Desktop extension detection (#1220)", () => {
     writeExtension(root, "ant.dir.gh.silverstein.minutes", {
       name: "minutes",
       version: "0.34.2",
+      repository,
     });
     writeExtension(root, "org.other.tool", { name: "other", version: "0.1.0" });
     expect(findStaleMinutesExtension([root], "0.34.2")).toBeNull();
+  });
+
+  it("ignores another project's extension called minutes", () => {
+    const root = extensionRoot();
+    writeExtension(root, "org.other.minutes", {
+      name: "minutes",
+      version: "0.25.1",
+      repository: { url: "https://github.com/someone-else/minutes" },
+    });
+    expect(findStaleMinutesExtension([root], "0.34.2")).toBeNull();
+  });
+
+  it("identifies bundled servers on Windows as well as macOS", () => {
+    expect(isClaudeDesktopExtension(undefined, String.raw`C:\Users\Test\AppData\Roaming\Claude\Claude Extensions\minutes`)).toBe(true);
+    expect(isClaudeDesktopExtension(undefined, "/Users/test/Claude/claude-extensions/minutes")).toBe(true);
+    expect(isClaudeDesktopExtension("minutes", "/another/extension/location")).toBe(true);
+    expect(isClaudeDesktopExtension(undefined, "/tmp/Claude Extensions backup/minutes")).toBe(false);
   });
 
   it("tolerates missing roots and malformed manifests", () => {

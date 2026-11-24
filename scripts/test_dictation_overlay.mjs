@@ -152,7 +152,7 @@ test('waveform has a 16px basis, measured dynamic range, finite bounds and no fa
 
 test('dictation sound control writes the shared preference and synchronizes both settings views', () => {
   const elements = new Map(['settings-cues', 'dictation-cues'].map((id) => [id, {
-    style: {}, textContent: '', attributes: {},
+    style: {}, textContent: '', attributes: {}, classList: { contains: () => false },
     setAttribute(name, value) { this.attributes[name] = value; },
   }]));
   const saved = new Map();

@@ -3611,6 +3611,7 @@ fn main() {
             voice_settings::cmd_set_voice_enabled,
             voice_settings::cmd_set_voice_name,
             voice_settings::cmd_test_voice,
+            voice_settings::cmd_toggle_desktop_voice,
             commands::cmd_start_dictation,
             commands::cmd_show_dictation_permission_help,
             commands::cmd_stop_dictation,

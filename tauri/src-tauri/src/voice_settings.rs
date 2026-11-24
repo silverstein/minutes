@@ -6,6 +6,14 @@ pub(crate) fn available() -> bool {
     cfg!(all(feature = "voice-live", target_os = "macos"))
 }
 
+pub(crate) fn desktop_voice_name(configured: &str) -> &str {
+    if configured.trim().is_empty() {
+        "Aoede"
+    } else {
+        configured.trim()
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VoiceSettings {
@@ -26,7 +34,7 @@ fn settings(config: VoiceLiveConfig) -> VoiceSettings {
         } else {
             config.provider
         },
-        voice_name: config.voice_name,
+        voice_name: desktop_voice_name(&config.voice_name).into(),
     }
 }
 
@@ -111,6 +119,11 @@ pub(crate) fn toggle(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub(crate) fn cmd_toggle_desktop_voice(app: tauri::AppHandle) -> Result<(), String> {
+    toggle(&app)
+}
+
+#[tauri::command]
 pub(crate) async fn cmd_test_voice() -> Result<String, String> {
     if !available() {
         return Err("Desktop Voice is unavailable in this build.".into());
@@ -150,7 +163,7 @@ fn preview() -> Result<String, String> {
             "You are demonstrating a voice. Speak only the supplied sample sentence.".into(),
         function_declarations: Vec::new(),
         language: voice.language.clone(),
-        voice_name: voice.voice_name.clone(),
+        voice_name: desktop_voice_name(&voice.voice_name).into(),
         manual_activity: true,
         proactive_audio: voice.proactive_audio,
         start_sensitivity: String::new(),

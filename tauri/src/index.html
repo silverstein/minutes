@@ -6003,7 +6003,42 @@
     }
     .voice-consent-card h2 { margin: 0 0 8px; }
     .voice-consent-card form { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
-    #settings-voice-section[hidden] { display: none; }
+    #settings-voice-section[hidden], .header-actions #btn-voice[hidden] { display: none; }
+    .header-actions #btn-voice[aria-pressed="true"] { color: var(--capture); border-color: var(--capture); }
+    .about-controls .capture-switch {
+      position: relative; width: 40px; min-width: 40px; height: 23px;
+      padding: 0; border: 1px solid var(--border-mid); border-radius: 100px;
+      background: var(--bg-hover); color: transparent; font-size: 0;
+    }
+    .about-controls .capture-switch::after {
+      content: ""; position: absolute; inset: 3px auto 3px 3px; width: 15px;
+      border-radius: 100px; background: var(--text-secondary);
+      transition: transform 150ms ease, background-color 150ms ease;
+    }
+    .about-controls .capture-switch:is([aria-checked="true"], [aria-pressed="true"]) {
+      background: var(--accent);
+    }
+    .about-controls .capture-switch:is([aria-checked="true"], [aria-pressed="true"])::after {
+      transform: translateX(16px); background: var(--on-accent);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .about-controls .capture-switch::after { transition: none; }
+    }
+    .capture-shortcut-key { font-family: var(--font-mono, monospace); }
+    select.capture-shortcut-key { width: auto; min-width: 100px; }
+    .voice-key-mask, .voice-picker-row, .voice-meet-actions {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px;
+    }
+    .voice-picker-row .settings-field, .voice-key-mask .about-controls-meta { flex: 1; margin: 0; }
+    .voice-picker-row .settings-field { min-width: 175px; }
+    .voice-meet-card {
+      border: 1px solid var(--border-mid); border-radius: 13px;
+      padding: 13px; margin: 10px 0 0; background: var(--bg-elevated);
+    }
+    .voice-meet-card h3 { margin: 0 0 4px; }
+    .voice-meet-card p + p { margin-top: 5px; }
+    #settings-voice-key-mask[hidden], #settings-voice-key-editor[hidden] { display: none; }
+    .voice-consent-card form .btn { text-transform: none; letter-spacing: normal; }
 
     .settings-secret-row {
       display: grid;
@@ -6455,6 +6490,7 @@
       </div>
       <div class="header-actions">
         <button class="header-chip" id="btn-dictation" type="button">Dictation</button>
+        <button class="header-chip" id="btn-voice" type="button" aria-pressed="false" hidden>Voice</button>
         <button class="btn btn-icon" id="btn-settings">⚙</button>
         <button class="header-chip readiness" id="btn-readiness">Readiness</button>
         <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
@@ -7255,100 +7291,63 @@
       </div><!-- /panel-general -->
 
       <div class="settings-tab-panel" role="tabpanel" id="panel-capture" data-panel="capture" aria-labelledby="tab-capture">
-      <!-- Live Transcript -->
-      <div class="settings-section">
-        <div class="about-item-title">LIVE TRANSCRIPT</div>
-        <div class="about-controls">
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Backend</div>
-            <select id="settings-live-backend" class="settings-field">
-              <option value="inherit">Inherit main transcription engine</option>
-              <option value="whisper">Whisper — built-in, broad language support</option>
-              <option value="parakeet" disabled>Parakeet — unavailable</option>
-              <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
-            </select>
-            <div class="about-controls-meta" id="settings-live-backend-detail">Standalone live transcript currently inherits your main transcription engine.</div>
-          </div>
-        </div>
-        <div class="about-controls" data-global-shortcut>
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Keyboard shortcut</div>
-            <select class="shortcut-select settings-field" id="settings-live-shortcut-select">
-              <option value="CmdOrCtrl+Shift+L">Cmd+Shift+L</option>
-              <option value="CmdOrCtrl+Alt+L">Cmd+Option+L</option>
-              <option value="CmdOrCtrl+Shift+T">Cmd+Shift+T</option>
-            </select>
-            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
-              Wayland. Bind <code>minutes toggle-recording --mode live</code> instead — Hyprland:
-              <code>bind = SUPER, L, exec, minutes toggle-recording --mode live</code>. GNOME: Settings &rarr; Keyboard
-              &rarr; Custom Shortcuts. KDE: System Settings &rarr; Shortcuts.</div>
-            <div class="about-controls-meta">Toggle live transcript on/off from any app.</div>
-          </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-live-shortcut">Off</button>
-        </div>
-      </div>
-
-      <!-- Command Palette -->
-      <div class="settings-section">
-        <div class="about-item-title">COMMAND PALETTE</div>
-        <div class="about-controls" data-global-shortcut>
-          <div class="about-controls-group">
-            <div class="about-controls-copy">Keyboard shortcut</div>
-            <select class="shortcut-select settings-field" id="settings-palette-shortcut-select">
-              <option value="CmdOrCtrl+Shift+K">Cmd+Shift+K</option>
-              <option value="CmdOrCtrl+Shift+O">Cmd+Shift+O</option>
-              <option value="CmdOrCtrl+Shift+U">Cmd+Shift+U</option>
-            </select>
-            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
-              Wayland, and there is no CLI command for the palette — open it from the Minutes window instead.</div>
-            <div class="about-controls-meta" id="settings-palette-shortcut-status">Open the Minutes command palette from any app.</div>
-          </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-palette-shortcut">Off</button>
-        </div>
-      </div>
-
       <section class="settings-section" id="settings-voice-section" hidden>
         <div class="about-item-title">VOICE</div>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Voice</div>
-            <div class="about-controls-meta">Start a spoken conversation from the Minutes menu bar.</div>
+            <div class="about-controls-meta">Talk with Minutes about your meetings.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-voice-enabled" type="button" role="switch" aria-label="Voice" aria-checked="false">OFF</button>
+          <button class="btn btn-secondary btn-sm capture-switch" id="settings-voice-enabled" type="button" role="switch" aria-label="Voice" aria-checked="false">OFF</button>
+        </div>
+        <div class="voice-meet-card" id="settings-voice-meet" hidden>
+          <h3 id="settings-voice-meet-title" tabindex="-1">Meet Voice</h3>
+          <p class="about-controls-meta">Try asking “What did I commit to this week?”</p>
+          <p class="about-controls-meta">The panel opens at the top by default. Drag it where you want it, then use the shortcut again or choose End Voice to finish.</p>
+          <div class="voice-meet-actions">
+            <span class="about-controls-meta" id="settings-voice-meet-shortcut"></span>
+            <button class="btn btn-primary btn-sm" id="settings-voice-meet-enable" type="button">Enable shortcut</button>
+            <button class="btn btn-secondary btn-sm" id="settings-voice-meet-dismiss" type="button">Done</button>
+          </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Voice shortcut</div>
-            <button id="shortcut-recorder-voice" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" type="button" aria-label="Change Voice shortcut">Command Option Shift V</button>
+            <button id="shortcut-recorder-voice" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key capture-shortcut-key" type="button" aria-label="Change Voice shortcut">⌘⌥⇧V</button>
             <div class="about-controls-meta" id="shortcut-status-voice" role="status">Press the shortcut to start or end Voice.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-voice" type="button" aria-label="Voice shortcut" aria-pressed="false">Off</button>
+          <button class="btn btn-secondary btn-sm capture-switch" id="shortcut-toggle-voice" type="button" aria-label="Voice shortcut" aria-pressed="false">OFF</button>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
-            <label class="about-controls-copy" for="settings-voice-key">Gemini API key</label>
-            <div class="settings-secret-row">
-              <input id="settings-voice-key" class="settings-field" type="password" autocomplete="off" spellcheck="false">
-              <button class="btn btn-secondary btn-sm" id="settings-voice-key-save" type="button">Save</button>
+            <div class="about-controls-copy" id="settings-voice-key-label">Gemini API key</div>
+            <div class="voice-key-mask" id="settings-voice-key-mask" hidden>
+              <div class="about-controls-meta" id="settings-voice-key-status" role="status"></div>
+              <button class="btn btn-secondary btn-sm" id="settings-voice-key-replace" type="button">Replace</button>
               <button class="btn btn-secondary btn-sm" id="settings-voice-key-clear" type="button">Remove</button>
             </div>
-            <div class="about-controls-meta" id="settings-voice-key-status" role="status"></div>
+            <div class="settings-secret-row" id="settings-voice-key-editor" hidden>
+              <input id="settings-voice-key" class="settings-field" type="password" aria-labelledby="settings-voice-key-label" autocomplete="off" spellcheck="false">
+              <button class="btn btn-secondary btn-sm" id="settings-voice-key-save" type="button">Save</button>
+              <button class="btn btn-secondary btn-sm" id="settings-voice-key-cancel" type="button" hidden>Cancel</button>
+            </div>
           </div>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
             <label class="about-controls-copy" for="settings-voice-name">Speaking voice</label>
-            <select class="settings-field" id="settings-voice-name">
-              <option value="">Google default</option>
-              <option>Aoede</option>
-              <option>Charon</option>
-              <option>Kore</option>
-              <option>Puck</option>
-              <option>Zephyr</option>
-            </select>
+            <div class="voice-picker-row">
+              <select class="settings-field" id="settings-voice-name">
+                <option value="Aoede">Aoede · Breezy (default)</option>
+                <option value="Charon">Charon · Informative</option>
+                <option value="Kore">Kore · Firm</option>
+                <option value="Puck">Puck · Upbeat</option>
+                <option value="Zephyr">Zephyr · Bright</option>
+              </select>
+              <button class="btn btn-secondary btn-sm" id="settings-voice-test" type="button" disabled>Test voice</button>
+            </div>
             <div class="about-controls-meta" id="settings-voice-status" role="status"></div>
           </div>
-          <button class="btn btn-secondary btn-sm" id="settings-voice-test" type="button" disabled>Test voice</button>
         </div>
         <dialog class="voice-consent-dialog" id="settings-voice-consent" aria-labelledby="settings-voice-consent-title" aria-describedby="settings-voice-consent-description">
           <div class="voice-consent-card">
@@ -7361,6 +7360,60 @@
           </div>
         </dialog>
       </section>
+
+      <!-- Live Transcript -->
+      <div class="settings-section">
+        <div class="about-item-title">LIVE TRANSCRIPT</div>
+        <div class="about-controls">
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Backend</div>
+            <select id="settings-live-backend" class="settings-field">
+              <option value="inherit">Inherit main transcription engine</option>
+              <option value="whisper">Whisper — built-in, broad language support</option>
+              <option value="parakeet" disabled>Parakeet — unavailable</option>
+              <option value="apple-speech" disabled>Apple Speech — unavailable, using Whisper</option>
+            </select>
+            <div class="about-controls-meta" id="settings-live-backend-detail">Uses your main transcription engine by default.</div>
+          </div>
+        </div>
+        <div class="about-controls" data-global-shortcut>
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Keyboard shortcut</div>
+            <select class="shortcut-select settings-field capture-shortcut-key" id="settings-live-shortcut-select">
+              <option value="CmdOrCtrl+Shift+L">Cmd+Shift+L</option>
+              <option value="CmdOrCtrl+Alt+L">Cmd+Option+L</option>
+              <option value="CmdOrCtrl+Shift+T">Cmd+Shift+T</option>
+            </select>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland. Bind <code>minutes toggle-recording --mode live</code> instead — Hyprland:
+              <code>bind = SUPER, L, exec, minutes toggle-recording --mode live</code>. GNOME: Settings &rarr; Keyboard
+              &rarr; Custom Shortcuts. KDE: System Settings &rarr; Shortcuts.</div>
+            <div class="about-controls-meta">Toggle live transcript on/off from any app.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn capture-switch" id="settings-live-shortcut" type="button" role="switch" aria-label="Live transcript shortcut" aria-checked="false">Off</button>
+        </div>
+      </div>
+
+      <!-- Command Palette -->
+      <div class="settings-section">
+        <div class="about-item-title">COMMAND PALETTE</div>
+        <div class="about-controls" data-global-shortcut>
+          <div class="about-controls-group">
+            <div class="about-controls-copy">Keyboard shortcut</div>
+            <select class="shortcut-select settings-field capture-shortcut-key" id="settings-palette-shortcut-select">
+              <option value="CmdOrCtrl+Shift+K">Cmd+Shift+K</option>
+              <option value="CmdOrCtrl+Shift+O">Cmd+Shift+O</option>
+              <option value="CmdOrCtrl+Shift+U">Cmd+Shift+U</option>
+            </select>
+            <div class="about-controls-meta wayland-shortcut-note" hidden>Your compositor owns global shortcuts on
+              Wayland, and there is no CLI command for the palette — open it from the Minutes window instead.</div>
+            <div class="about-controls-meta" id="settings-palette-shortcut-status">Open the Minutes command palette from any app.</div>
+          </div>
+          <button class="btn btn-secondary btn-sm toggle-btn capture-switch" id="settings-palette-shortcut" type="button" role="switch" aria-label="Command Palette shortcut" aria-checked="false">Off</button>
+        </div>
+      </div>
+
+
 
       </div><!-- /panel-capture -->
 
@@ -8949,11 +9002,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
     function describeLiveBackendSelection(selectedBackend, resolvedBackend, fallbackOrder, batchEngine, appleSpeechSelectable = false) {
       const fallbackText = fallbackOrderLabel(fallbackOrder);
       const batchLabel = backendLabel(batchEngine);
-      const appleHint = appleSpeechSelectable && resolvedBackend !== 'apple-speech'
-        ? ' Apple Speech is available on this Mac and is recommended for live transcript.'
-        : '';
       if (selectedBackend === 'inherit') {
-        return `Standalone live transcript currently inherits ${backendLabel(resolvedBackend)} from the main transcription engine. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription stay on ${batchLabel}.${appleHint}`;
+        const appleHint = appleSpeechSelectable && resolvedBackend !== 'apple-speech'
+          ? ' Apple Speech is recommended on this Mac.'
+          : '';
+        return `Uses your main engine (${backendLabel(resolvedBackend)}) for Live Transcript.${appleHint}`;
       }
       if (selectedBackend === 'apple-speech') {
         if (resolvedBackend === 'apple-speech') {
@@ -8965,9 +9018,9 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         if (resolvedBackend !== 'parakeet') {
           return `The retained Parakeet preference is unavailable, so standalone live transcript resolves to ${backendLabel(resolvedBackend)}. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.`;
         }
-        return `Standalone live transcript uses Parakeet. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.${appleHint}`;
+        return `Uses Parakeet for Live Transcript. Falls back to ${fallbackText}.`;
       }
-      return `Standalone live transcript will use Whisper. Fallback order: ${fallbackText}. Recording-sidecar live and batch transcription remain on ${batchLabel}.${appleHint}`;
+      return 'Uses Whisper for Live Transcript.';
     }
 
     function currentModeLabel(mode) {
@@ -14779,7 +14832,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return false;
       }
       b.textContent = on ? 'On' : 'Off';
-      b.style.opacity = on ? '1' : '0.5';
+      if (b.classList.contains('capture-switch')) b.setAttribute('aria-checked', String(on));
+      else b.style.opacity = on ? '1' : '0.5';
       return true;
     }
     function desktopContextStateLabel(state, filtered = false, limited = false) {
@@ -15834,7 +15888,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         setSettingsToggle('settings-palette-shortcut', settings.enabled);
         setPaletteShortcutStatus(
           settings.enabled
-            ? `Active - ${settings.shortcut}. Open the Minutes command palette from any app.`
+            ? `Press ${voiceShortcutDisplayLabel(settings.shortcut, -1)} to open the command palette from any app.`
             : 'Open the Minutes command palette from any app.',
           false,
         );
@@ -15846,7 +15900,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const enabled = document.getElementById('settings-palette-shortcut').textContent === 'On';
       if (!enabled) {
         // Not enabled yet — don't try to register, just remember the choice.
-        setPaletteShortcutStatus(`${e.target.value} selected. Toggle the palette shortcut on when you're ready to use it.`, false);
+        setPaletteShortcutStatus(`${voiceShortcutDisplayLabel(e.target.value, -1)} selected. Turn on the shortcut to use it.`, false);
         return;
       }
       try {
@@ -15855,7 +15909,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
           shortcut: e.target.value,
         });
         setSettingsToggle('settings-palette-shortcut', settings.enabled);
-        setPaletteShortcutStatus(`Active - ${settings.shortcut}. Open the Minutes command palette from any app.`, false);
+        setPaletteShortcutStatus(`Press ${voiceShortcutDisplayLabel(settings.shortcut, -1)} to open the command palette from any app.`, false);
       } catch (err) {
         setPaletteShortcutStatus(String(err), true);
       }
@@ -15866,7 +15920,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const select = document.getElementById('settings-palette-shortcut-select');
       if (select && settings.shortcut) select.value = settings.shortcut;
       if (settings.enabled) {
-        setPaletteShortcutStatus(`Active - ${settings.shortcut}. Open the Minutes command palette from any app.`, false);
+        setPaletteShortcutStatus(`Press ${voiceShortcutDisplayLabel(settings.shortcut, -1)} to open the command palette from any app.`, false);
       }
     }).catch(() => { });
 
@@ -15907,6 +15961,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const glyphs = { CmdOrCtrl: '⌘', Command: '⌘', Cmd: '⌘', Ctrl: '⌃', Control: '⌃', Alt: '⌥', Option: '⌥', Shift: '⇧' };
       return shortcut.split('+').map(key => glyphs[key] || key).join('');
     }
+    for (const id of ['settings-live-shortcut-select', 'settings-palette-shortcut-select']) {
+      for (const option of document.getElementById(id).options) {
+        option.textContent = voiceShortcutDisplayLabel(option.value, -1);
+      }
+    }
     function updateSlotUI(slot, status) {
       unifiedSlotState[slot] = status;
 
@@ -15931,7 +15990,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       window.dispatchEvent(new CustomEvent('minutes:shortcut-changed', { detail: status }));
       if (toggle.type === 'checkbox') toggle.checked = isOn;
       else {
-        toggle.textContent = isOn ? 'On' : 'Off';
+        toggle.textContent = slot === 'voice' ? (isOn ? 'ON' : 'OFF') : (isOn ? 'On' : 'Off');
         if (slot === 'voice') toggle.setAttribute('aria-pressed', String(isOn));
         toggle.classList.toggle('btn-primary', isOn);
         toggle.classList.toggle('btn-secondary', !isOn);
@@ -16118,7 +16177,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       initSpecialKeyPicker(slot);
     }
 
-    window.MinutesShortcuts = { refreshRecovery: () => Promise.all(RECOVERY_SLOTS.map(loadSlotStatus)) };
+    window.MinutesShortcuts = {
+      refreshRecovery: () => Promise.all(RECOVERY_SLOTS.map(loadSlotStatus)),
+      voiceLabel: () => voiceShortcutDisplayLabel(unifiedSlotState.voice?.shortcut || SLOT_DEFAULTS.voice.shortcut, -1),
+      enableVoice: async () => {
+        await loadSlotStatus('voice');
+        if (!unifiedSlotState.voice?.enabled) await toggleSlot('voice');
+        return Boolean(unifiedSlotState.voice?.enabled);
+      },
+    };
     // Listen for status updates from the backend (native monitor lifecycle)
     window.__TAURI__.event.listen('shortcut:status', (event) => {
       const status = event.payload;
@@ -16407,6 +16474,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       closeAbout();
       closeSettings();
       await openWhatsNewManually();
+    });
+
+    window.addEventListener('minutes:voice-error', ({ detail }) => {
+      openSettings({ tab: 'capture', section: 'settings-voice-section' });
+      const status = document.getElementById('settings-voice-status');
+      status.textContent = detail;
+      status.classList.add('error');
     });
 
     currentWindow.listen('voice:open-settings', () => {

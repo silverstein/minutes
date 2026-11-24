@@ -9,7 +9,8 @@
       color-scheme: light dark;
       --capture: #62BCE9;
       --capture-surface: #28231F;
-      --capture-edge: rgba(229, 201, 174, .14);
+      --capture-edge: rgba(229, 201, 174, 0.14);
+      --panel-shadow: rgba(0, 0, 0, 0.16);
       --text: #E8E4DA;
       --text-secondary: #AAA49A;
       --text-tertiary: #716C64;
@@ -18,7 +19,7 @@
       :root {
         --capture: #2F6F8F;
         --capture-surface: #EFE6D8;
-        --capture-edge: rgba(113, 79, 52, .16);
+        --capture-edge: rgba(113, 79, 52, 0.16);
         --text: #1A1916;
         --text-secondary: #6F6A62;
         --text-tertiary: #958F85;
@@ -29,7 +30,7 @@
     main {
       padding: 10px 11px; border: 1px solid var(--capture-edge);
       border-radius: 16px; background: var(--capture-surface);
-      box-shadow: 0 2px 6px #0003; transition: opacity 150ms ease;
+      box-shadow: 0 2px 6px var(--panel-shadow); transition: opacity 150ms ease;
     }
     header { display: flex; align-items: center; gap: 8px; cursor: grab; min-height: 28px; }
     .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--capture); flex: none; }

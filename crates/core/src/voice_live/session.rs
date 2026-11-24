@@ -93,6 +93,9 @@ pub enum VoiceLiveEvent {
     PlaybackLevel {
         rms: f32,
     },
+    OutputDevice {
+        name: String,
+    },
     Closed {
         reason: String,
     },
@@ -312,6 +315,7 @@ fn open_audio(
                         io.input_name, io.output_name
                     ),
                 });
+                emit(VoiceLiveEvent::OutputDevice { name: io.output_name.clone() });
                 return Ok(AudioIo::Processed(io));
             }
             Err(e) => emit(VoiceLiveEvent::Status {
@@ -340,6 +344,9 @@ fn open_audio(
             Ok(p) => {
                 emit(VoiceLiveEvent::Status {
                     text: format!("speaker: {}", p.device_name),
+                });
+                emit(VoiceLiveEvent::OutputDevice {
+                    name: p.device_name.clone(),
                 });
                 Some(p)
             }
@@ -607,29 +614,125 @@ struct Runner {
 /// out of a click or a breath.
 const PTT_MIN_CHUNKS: usize = 3;
 
-// Keep the local OpenMic indication alive across quiet syllables and silence
-// between capture chunks. This is presentation only; Gemini still owns VAD.
-const OPEN_MIC_SIGNAL_HANGOVER: Duration = Duration::from_millis(350);
+// Presentation only. Local audio provides immediate feedback; the provider
+// still decides when a turn starts, whether to answer, and when to interrupt.
+const OPEN_MIC_SPEECH_PAUSE: Duration = Duration::from_millis(1500);
+const OPEN_MIC_UNCONFIRMED_INPUT: Duration = Duration::from_secs(4);
+const OPEN_MIC_SILENT_COMPLETION: Duration = Duration::from_millis(1800);
 
-fn state_after_playback(
-    current: VoiceLiveState,
-    mode: TalkMode,
-    provider_idle: bool,
-    last_open_mic_signal: Option<Instant>,
-    now: Instant,
-) -> VoiceLiveState {
-    let listening = mode == TalkMode::OpenMic && current == VoiceLiveState::Listening;
-    if listening
-        && last_open_mic_signal
-            .is_some_and(|at| now.saturating_duration_since(at) < OPEN_MIC_SIGNAL_HANGOVER)
-    {
-        VoiceLiveState::Listening
-    } else if provider_idle {
-        VoiceLiveState::Ready
-    } else if listening || current == VoiceLiveState::Speaking {
-        VoiceLiveState::Thinking
-    } else {
-        current
+#[derive(Clone, Copy, Default)]
+enum OpenMicTurn {
+    #[default]
+    Idle,
+    Local,
+    Provider,
+    Playback,
+}
+
+struct OpenMicPresentation {
+    turn: OpenMicTurn,
+    last_signal: Option<Instant>,
+    completion: Option<Instant>,
+    noise_floor: f32,
+}
+
+impl Default for OpenMicPresentation {
+    fn default() -> Self {
+        Self {
+            turn: OpenMicTurn::Idle,
+            last_signal: None,
+            completion: None,
+            noise_floor: 0.003,
+        }
+    }
+}
+
+impl OpenMicPresentation {
+    fn mic(&mut self, level: f32, time: Instant, state: VoiceLiveState) -> bool {
+        let listening = matches!(state, VoiceLiveState::Ready | VoiceLiveState::Listening)
+            || (state == VoiceLiveState::Thinking && matches!(self.turn, OpenMicTurn::Local));
+        if !listening || !level.is_finite() {
+            return false;
+        }
+        let threshold = (self.noise_floor * 3.0).clamp(0.004, 0.03);
+        if level <= threshold {
+            // Learn slowly from background-level frames without letting a
+            // loud utterance raise the threshold for the following one.
+            self.noise_floor = 0.96 * self.noise_floor + 0.04 * level;
+            return false;
+        }
+        if matches!(self.turn, OpenMicTurn::Idle) {
+            self.turn = OpenMicTurn::Local;
+        }
+        self.last_signal = Some(time);
+        self.completion = None;
+        true
+    }
+
+    fn provider_work(&mut self) {
+        self.turn = OpenMicTurn::Provider;
+        self.completion = None;
+    }
+
+    fn provider_complete(&mut self, time: Instant) {
+        if matches!(self.turn, OpenMicTurn::Provider) && self.completion.is_none() {
+            self.completion = Some(time);
+        }
+    }
+
+    fn playback(&mut self) {
+        self.turn = OpenMicTurn::Playback;
+    }
+
+    fn interrupted(&mut self, time: Instant) {
+        self.turn = OpenMicTurn::Local;
+        self.last_signal = Some(time);
+        self.completion = None;
+    }
+
+    fn reset(&mut self) {
+        self.turn = OpenMicTurn::Idle;
+        self.last_signal = None;
+        self.completion = None;
+    }
+
+    fn quiet_state(
+        &mut self,
+        current: VoiceLiveState,
+        provider_idle: bool,
+        now: Instant,
+    ) -> VoiceLiveState {
+        let elapsed = |at| now.saturating_duration_since(at);
+        let ready = match self.turn {
+            OpenMicTurn::Idle | OpenMicTurn::Playback => provider_idle,
+            OpenMicTurn::Local => {
+                provider_idle
+                    && self
+                        .last_signal
+                        .is_some_and(|at| elapsed(at) >= OPEN_MIC_UNCONFIRMED_INPUT)
+            }
+            OpenMicTurn::Provider => {
+                // Standard Live can send turnComplete between tool calls or
+                // just before audio. Let a late continuation supersede it.
+                provider_idle
+                    && self
+                        .completion
+                        .is_some_and(|at| elapsed(at) >= OPEN_MIC_SILENT_COMPLETION)
+            }
+        };
+        if ready {
+            self.reset();
+            VoiceLiveState::Ready
+        } else if current == VoiceLiveState::Speaking
+            || (current == VoiceLiveState::Listening
+                && self
+                    .last_signal
+                    .is_none_or(|at| elapsed(at) >= OPEN_MIC_SPEECH_PAUSE))
+        {
+            VoiceLiveState::Thinking
+        } else {
+            current
+        }
     }
 }
 
@@ -958,7 +1061,7 @@ impl Runner {
         let mut me = String::new();
         let mut last_audio = Instant::now();
         let mut last_microphone_chunk = Instant::now();
-        let mut last_open_mic_signal = None;
+        let mut open_mic = OpenMicPresentation::default();
         let mut last_context_check = Instant::now();
         let mut sharing_window = false;
         let mut response_audio_started = false;
@@ -1027,13 +1130,15 @@ impl Runner {
                 activity.playback_stopped();
                 let provider_idle = activity.ready()
                     && calls.lock().unwrap_or_else(|p| p.into_inner()).active() == 0;
-                let next = state_after_playback(
-                    state,
-                    self.mode,
-                    provider_idle,
-                    last_open_mic_signal,
-                    Instant::now(),
-                );
+                let next = if self.mode == TalkMode::OpenMic {
+                    open_mic.quiet_state(state, provider_idle, Instant::now())
+                } else if provider_idle {
+                    VoiceLiveState::Ready
+                } else if state == VoiceLiveState::Speaking {
+                    VoiceLiveState::Thinking
+                } else {
+                    state
+                };
                 set_state(&self, &mut state, next);
             }
             select! {
@@ -1046,8 +1151,12 @@ impl Runner {
                         ServerEvent::InteractionStatus(status) => {
                             self.log_line(serde_json::json!({"event":"provider_activity","state":format!("{status:?}")}).to_string());
                             activity.provider_status(status);
+                            if status == ProviderActivity::Idle {
+                                open_mic.provider_complete(Instant::now());
+                            }
                         }
                         ServerEvent::Audio(bytes) => {
+                            open_mic.playback();
                             if !response_audio_started {
                                 self.audio.mark_response();
                                 self.log_line(serde_json::json!({"event":"first_response_audio_received","scope":"received and queued for local playback, not acoustic confirmation"}).to_string());
@@ -1068,11 +1177,13 @@ impl Runner {
                         ServerEvent::InputTranscript(t) => {
                             self.log_line(serde_json::json!({"event":"input_transcript_chunk","characters":t.chars().count(),"playback_pending":playback_pending}).to_string());
                             activity.provider_status(ProviderActivity::InProgress);
-                            if self.mode == TalkMode::OpenMic
-                                && state == VoiceLiveState::Ready
-                                && !t.trim().is_empty()
-                            {
-                                set_state(&self, &mut state, VoiceLiveState::Thinking);
+                            if self.mode == TalkMode::OpenMic && !t.trim().is_empty() {
+                                if state != VoiceLiveState::Speaking {
+                                    open_mic.provider_work();
+                                }
+                                if state == VoiceLiveState::Ready {
+                                    set_state(&self, &mut state, VoiceLiveState::Thinking);
+                                }
                             }
                             // The user's voice, as it arrives. The confirmation
                             // gate needs to know a person spoke and when, and a
@@ -1108,6 +1219,7 @@ impl Runner {
                             self.audio.flush();
                             self.flush_transcripts(&mut you, &mut me);
                             activity.playback_stopped();
+                            open_mic.interrupted(Instant::now());
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         ServerEvent::TurnComplete => {
@@ -1119,8 +1231,10 @@ impl Runner {
                             self.tools.desktop.finished_speaking();
                             self.flush_transcripts(&mut you, &mut me);
                             activity.turn_complete();
+                            open_mic.provider_complete(Instant::now());
                         }
                         ServerEvent::ToolCall(incoming_calls) => {
+                            open_mic.provider_work();
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                             for call in incoming_calls {
                                 let visible_args = super::text_transfer::visible_args(&call.name, &call.args);
@@ -1207,6 +1321,7 @@ impl Runner {
                                 if let Some(fresh) = self.resume(&handle) {
                                     inbox = fresh;
                                     activity.disconnected();
+                                    open_mic.reset();
                                     resumes += 1;
                                     set_state(&self, &mut state, VoiceLiveState::Connecting);
                                     self.emit(VoiceLiveEvent::Status {
@@ -1260,10 +1375,8 @@ impl Runner {
                     if send {
                         if self.client().send_audio(&pcm).is_err() { break; }
                         if self.mode == TalkMode::OpenMic
-                            && matches!(state, VoiceLiveState::Ready | VoiceLiveState::Listening)
-                            && chunk.rms > 0.02
+                            && open_mic.mic(chunk.rms, chunk.timestamp, state)
                         {
-                            last_open_mic_signal = Some(chunk.timestamp);
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
                     }
@@ -1391,6 +1504,7 @@ impl Runner {
                             self.emit(VoiceLiveEvent::UserTranscript { text: text.clone(), partial: false });
                             if self.client().send_text_turn(&text).is_err() { break; }
                             self.tools.delegation_context.typed_user(&text);
+                            open_mic.provider_work();
                             set_state(&self, &mut state, VoiceLiveState::Thinking);
                         }
                         Ok(Control::Stop) | Err(_) => break,
@@ -1708,56 +1822,49 @@ mod tests {
     }
 
     #[test]
-    fn open_mic_listening_survives_provider_idle_until_the_local_signal_fades() {
-        let signal = Instant::now();
-        for provider_idle in [true, false] {
-            assert_eq!(
-                state_after_playback(
-                    VoiceLiveState::Listening,
-                    TalkMode::OpenMic,
-                    provider_idle,
-                    Some(signal),
-                    signal + Duration::from_millis(200),
-                ),
-                VoiceLiveState::Listening
-            );
-            let after_silence = state_after_playback(
-                VoiceLiveState::Listening,
-                TalkMode::OpenMic,
-                provider_idle,
-                Some(signal),
-                signal + OPEN_MIC_SIGNAL_HANGOVER,
-            );
-            assert_eq!(
-                after_silence,
-                if provider_idle {
-                    VoiceLiveState::Ready
-                } else {
-                    VoiceLiveState::Thinking
-                }
-            );
-        }
-        let now = signal + Duration::from_millis(50);
+    fn open_mic_holds_one_turn_through_pauses_tools_and_playback() {
+        use VoiceLiveState::{Listening, Ready, Speaking, Thinking};
+        let mut hud = OpenMicPresentation::default();
+        let start = Instant::now();
+        let time = |ms| start + Duration::from_millis(ms);
+
+        assert!(!hud.mic(0.002, start, Ready));
+        assert!(hud.mic(0.012, time(10), Ready));
+        assert_eq!(hud.quiet_state(Listening, true, time(1400)), Listening);
+        assert!(hud.mic(0.012, time(1410), Listening));
+        assert_eq!(hud.quiet_state(Listening, true, time(2909)), Listening);
+        assert_eq!(hud.quiet_state(Listening, true, time(2910)), Thinking);
+        hud.provider_work();
+        hud.provider_complete(time(3060));
+        assert_eq!(hud.quiet_state(Thinking, true, time(3170)), Thinking);
+        hud.provider_work();
+        hud.provider_complete(time(3370));
+        assert_eq!(hud.quiet_state(Thinking, true, time(4170)), Thinking);
+        hud.playback();
+        assert_eq!(hud.quiet_state(Speaking, true, time(5500)), Ready);
+    }
+
+    #[test]
+    fn open_mic_recovers_after_noise_or_a_completed_turn_without_audio() {
+        use VoiceLiveState::{Listening, Ready, Thinking};
+        let mut hud = OpenMicPresentation::default();
+        let start = Instant::now();
+
+        assert!(hud.mic(0.012, start, Ready));
         assert_eq!(
-            state_after_playback(
-                VoiceLiveState::Speaking,
-                TalkMode::OpenMic,
-                false,
-                Some(signal),
-                now,
-            ),
-            VoiceLiveState::Thinking
+            hud.quiet_state(Listening, true, start + OPEN_MIC_SPEECH_PAUSE),
+            Thinking
         );
         assert_eq!(
-            state_after_playback(
-                VoiceLiveState::Listening,
-                TalkMode::PushToTalk,
-                true,
-                None,
-                now,
-            ),
-            VoiceLiveState::Ready
+            hud.quiet_state(Thinking, true, start + OPEN_MIC_UNCONFIRMED_INPUT),
+            Ready
         );
+
+        hud.provider_work();
+        hud.provider_complete(start);
+        let after_completion = start + OPEN_MIC_SILENT_COMPLETION;
+        assert_eq!(hud.quiet_state(Thinking, false, after_completion), Thinking);
+        assert_eq!(hud.quiet_state(Thinking, true, after_completion), Ready);
     }
 
     #[test]

@@ -2884,7 +2884,10 @@ fn cmd_talk(
                 }
                 return;
             }
-            if matches!(event, VoiceLiveEvent::PlaybackLevel { .. }) {
+            if matches!(
+                event,
+                VoiceLiveEvent::PlaybackLevel { .. } | VoiceLiveEvent::OutputDevice { .. }
+            ) {
                 return;
             }
             if json {
@@ -3090,7 +3093,9 @@ fn print_voice_event(
             let flag = if *error { " (error)" } else { "" };
             println!("  <- {name} {ms} ms, {chars} chars{flag}");
         }
-        VoiceLiveEvent::Level { .. } | VoiceLiveEvent::PlaybackLevel { .. } => {}
+        VoiceLiveEvent::Level { .. }
+        | VoiceLiveEvent::PlaybackLevel { .. }
+        | VoiceLiveEvent::OutputDevice { .. } => {}
         VoiceLiveEvent::Closed { reason } => println!("[closed] {reason}"),
     }
 }

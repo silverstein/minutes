@@ -6,7 +6,8 @@ use tauri::Emitter;
 use tauri::Manager;
 
 pub(crate) const LABEL: &str = "voice-hud";
-pub(crate) const SIZE: (f64, f64) = (320.0, 88.0);
+pub(crate) const SIZE: (f64, f64) = (320.0, 52.0);
+const PREVIEW_HEIGHT: f64 = 94.0;
 const EXPANDED_HEIGHT: f64 = 244.0;
 
 #[derive(Clone, Serialize)]
@@ -19,6 +20,8 @@ pub(crate) struct Snapshot {
     reply: String,
     detail: String,
     tool_started_ms: Option<i64>,
+    output_device: Option<String>,
+    virtual_output: bool,
 }
 
 impl Default for Snapshot {
@@ -31,6 +34,8 @@ impl Default for Snapshot {
             reply: String::new(),
             detail: String::new(),
             tool_started_ms: None,
+            output_device: None,
+            virtual_output: false,
         }
     }
 }
@@ -136,7 +141,8 @@ pub(crate) fn event(
         Event::Level { rms } | Event::PlaybackLevel { rms } => {
             let displaying_stream = matches!(
                 (event, session.snapshot.state),
-                (Event::Level { .. }, "listening") | (Event::PlaybackLevel { .. }, "speaking")
+                (Event::Level { .. }, "ready" | "listening")
+                    | (Event::PlaybackLevel { .. }, "speaking")
             );
             if displaying_stream {
                 if let Some(window) = app.get_webview_window(LABEL) {
@@ -156,7 +162,15 @@ pub(crate) fn event(
             finish(app, &mut session, detail);
             return true;
         }
+        Event::OutputDevice { name } => {
+            session.snapshot.virtual_output = is_virtual_output(name);
+            session.snapshot.output_device = Some(name.clone());
+        }
         Event::State { state } => {
+            if *state == State::Listening && session.snapshot.state == "ready" {
+                session.snapshot.user.clear();
+                session.snapshot.reply.clear();
+            }
             session.snapshot.state = match state {
                 State::Connecting => "connecting",
                 State::Ready => "ready",
@@ -168,6 +182,9 @@ pub(crate) fn event(
         }
         Event::UserTranscript { text, partial } => {
             let was_partial = session.user_partial;
+            if !was_partial {
+                session.snapshot.reply.clear();
+            }
             transcript(&mut session.snapshot.user, text, *partial, was_partial);
             session.user_partial = *partial;
         }
@@ -195,6 +212,21 @@ pub(crate) fn event(
     }
     publish(app, &mut session.snapshot);
     true
+}
+
+#[cfg(feature = "voice-live")]
+fn is_virtual_output(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "jump desktop audio",
+        "blackhole",
+        "soundflower",
+        "loopback",
+        "vb-audio",
+        "virtual",
+    ]
+    .iter()
+    .any(|label| name.contains(label))
 }
 
 #[cfg(feature = "voice-live")]
@@ -263,9 +295,14 @@ pub(crate) fn cmd_voice_hud_ready(hud: tauri::State<VoiceHud>) -> Snapshot {
 }
 
 #[tauri::command]
-pub(crate) fn cmd_voice_hud_resize(app: tauri::AppHandle, expanded: bool) -> Result<(), String> {
+pub(crate) fn cmd_voice_hud_resize(app: tauri::AppHandle, layout: &str) -> Result<(), String> {
     let window = app.get_webview_window(LABEL).ok_or("Voice HUD is closed")?;
-    let height = if expanded { EXPANDED_HEIGHT } else { SIZE.1 };
+    let height = match layout {
+        "compact" => SIZE.1,
+        "preview" => PREVIEW_HEIGHT,
+        "expanded" => EXPANDED_HEIGHT,
+        _ => return Err("Unknown Voice HUD layout".into()),
+    };
     window
         .set_size(tauri::LogicalSize::new(SIZE.0, height))
         .map_err(|e| e.to_string())?;
@@ -287,6 +324,14 @@ pub(crate) fn cmd_remember_voice_hud_position(app: tauri::AppHandle) -> Result<(
 #[cfg(all(test, feature = "voice-live"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_known_virtual_output_names() {
+        assert!(is_virtual_output("Jump Desktop Audio"));
+        assert!(is_virtual_output("BlackHole 2ch"));
+        assert!(!is_virtual_output("MacBook Pro Speakers"));
+        assert!(!is_virtual_output("AirPods Pro"));
+    }
 
     #[test]
     fn transcript_chunks_reconcile_with_final_and_roll_over() {

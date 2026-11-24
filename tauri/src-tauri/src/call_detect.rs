@@ -397,7 +397,14 @@ enum BrowserMeetProbe {
     PermissionDenied {
         browser_app: String,
     },
-    Error,
+    /// A browser holding input could not be read: its tab query failed, or
+    /// an earlier failure put it in backoff. That says nothing about whether
+    /// a meeting tab is open, so it must not end a call that is already
+    /// being tracked. A Chrome window closing while the AppleScript walks
+    /// `windows` was enough to stop a live recording mid-call.
+    Inconclusive {
+        browser: &'static BrowserSpec,
+    },
     NoBrowserProcesses,
     NoMatch,
 }
@@ -1128,9 +1135,32 @@ impl CallDetector {
                     BrowserMeetProbe::PermissionDenied { browser_app } => {
                         return DetectActiveCallResult::PermissionWarning { browser_app };
                     }
-                    BrowserMeetProbe::Error
-                    | BrowserMeetProbe::NoBrowserProcesses
-                    | BrowserMeetProbe::NoMatch => {}
+                    BrowserMeetProbe::Inconclusive { browser } => {
+                        // An unreadable browser cannot prove a tracked browser
+                        // call ended. Keep it while that browser still holds
+                        // input; hanging up releases the mic, which ends the
+                        // call through the normal path.
+                        if let Some(provider) =
+                            self.tracked_browser_provider(has_google_meet, has_teams_web)
+                        {
+                            if browser_hit_has_active_input(
+                                browser,
+                                mic_live,
+                                processes,
+                                active_input_pids,
+                            ) {
+                                log_call_detect_event(
+                                    "info",
+                                    "browser_probe_inconclusive_kept_call",
+                                    Some(provider.names().0),
+                                    Some(browser.app_name),
+                                    serde_json::json!({}),
+                                );
+                                return detected_for(provider);
+                            }
+                        }
+                    }
+                    BrowserMeetProbe::NoBrowserProcesses | BrowserMeetProbe::NoMatch => {}
                 }
             }
         }
@@ -1231,6 +1261,21 @@ impl CallDetector {
         })
     }
 
+    /// The browser meeting provider of the call being tracked, if any and if
+    /// that provider is still enabled.
+    fn tracked_browser_provider(
+        &self,
+        has_google_meet: bool,
+        has_teams_web: bool,
+    ) -> Option<MeetingProvider> {
+        let active = self.active_call.lock().unwrap();
+        match active.as_ref()?.process_name.as_str() {
+            "google-meet" if has_google_meet => Some(MeetingProvider::GoogleMeet),
+            "teams-web" if has_teams_web => Some(MeetingProvider::TeamsWeb),
+            _ => None,
+        }
+    }
+
     fn mark_call_end_fired(&self) {
         if let Some(state) = self.active_call.lock().unwrap().as_mut() {
             state.call_end_fired = true;
@@ -1313,10 +1358,16 @@ impl CallDetector {
         let running_lower: Vec<String> = running.iter().map(|s| s.to_lowercase()).collect();
         let matched = browsers_to_probe(&running_lower);
         let saw_browser = !matched.is_empty();
+        let mut unreadable: Option<&'static BrowserSpec> = None;
 
         for spec in matched {
             let app_name = spec.app_name;
             if !self.browser_probe_allowed_for(app_name) {
+                // Backed off after an earlier failure: its tabs are unknown,
+                // not empty. Only a browser that still holds input counts.
+                if unreadable.is_none() && browser_has_input(spec) {
+                    unreadable = Some(spec);
+                }
                 continue;
             }
             if !browser_has_input(spec) {
@@ -1361,11 +1412,18 @@ impl CallDetector {
                         format!("browser_probe_error: {snippet}")
                     };
                     self.defer_browser_probe_for(app_name, &reason);
-                    return BrowserMeetProbe::Error;
+                    // Keep probing the other browsers: one unreadable browser
+                    // should not hide a meeting in the next one.
+                    if unreadable.is_none() {
+                        unreadable = Some(spec);
+                    }
                 }
             }
         }
 
+        if let Some(browser) = unreadable {
+            return BrowserMeetProbe::Inconclusive { browser };
+        }
         if saw_browser {
             BrowserMeetProbe::NoMatch
         } else {
@@ -1505,6 +1563,9 @@ enum AppleScriptProbe {
 fn query_browser_tabs(app_name: &str, kind: BrowserKind) -> AppleScriptProbe {
     // Chromium tabs expose `title`; Safari tabs expose `name`. The output is
     // line-pairs of URL + title, parsed by `run_applescript_tabs` below.
+    // `windows` is resolved by index as the loop runs, so a window that
+    // closes mid-walk raises -1719 ("Can't get item N of every window").
+    // The per-window `try` skips that window instead of failing the probe.
     let title_property = match kind {
         BrowserKind::ChromeLike => "title",
         BrowserKind::Safari => "name",
@@ -1513,17 +1574,19 @@ fn query_browser_tabs(app_name: &str, kind: BrowserKind) -> AppleScriptProbe {
         r#"tell application "{app_name}"
 set output to ""
 repeat with w in windows
-  repeat with t in tabs of w
-    set tabUrl to ""
-    set tabTitle to ""
-    try
-      set tabUrl to (URL of t as text)
-    end try
-    try
-      set tabTitle to ({title_property} of t as text)
-    end try
-    set output to output & tabUrl & linefeed & tabTitle & linefeed
-  end repeat
+  try
+    repeat with t in tabs of w
+      set tabUrl to ""
+      set tabTitle to ""
+      try
+        set tabUrl to (URL of t as text)
+      end try
+      try
+        set tabTitle to ({title_property} of t as text)
+      end try
+      set output to output & tabUrl & linefeed & tabTitle & linefeed
+    end repeat
+  end try
 end repeat
 return output
 end tell"#
@@ -2736,9 +2799,14 @@ mod tests {
 
         // "Arc" (the browser) must be recognised; "searchpartyd" must not
         // accidentally satisfy the check on its own.
+        // A backed-off Arc holding input is unreadable, not absent.
         let running: Vec<String> = vec!["searchpartyd".into(), "Arc".into()];
         assert!(matches!(
             detector.detect_browser_meeting(&running, true, false, |_| true),
+            BrowserMeetProbe::Inconclusive { browser } if browser.app_name == "Arc"
+        ));
+        assert!(matches!(
+            detector.detect_browser_meeting(&running, true, false, |_| false),
             BrowserMeetProbe::NoMatch
         ));
     }
@@ -3781,5 +3849,97 @@ mod tests {
 
         assert!(matches!(result, BrowserMeetProbe::NoMatch));
         assert_eq!(offered.into_inner(), vec!["Google Chrome", "Arc"]);
+    }
+
+    fn inconclusive_from(
+        browser: &'static BrowserSpec,
+    ) -> impl FnMut(&CallDetector, &[String], bool, bool) -> Option<BrowserMeetProbe> {
+        move |_detector, _running, _want_meet, _want_teams| {
+            Some(BrowserMeetProbe::Inconclusive { browser })
+        }
+    }
+
+    /// 2026-11-24: a Meet call recorded for 25 minutes was auto-stopped
+    /// because one Chrome tab probe failed with -1719 while a window closed.
+    /// The failure was read as "no meeting tab" and armed the call-end
+    /// countdown; the 300 s probe backoff then hid the call past the 30 s
+    /// countdown.
+    #[test]
+    fn unreadable_browser_keeps_a_tracked_meet_call() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        detector.note_active_call("google-meet", "Google Meet");
+        let processes = chrome_and_dictation_tool();
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([110])),
+            true,
+            inconclusive_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, detected_for(MeetingProvider::GoogleMeet));
+    }
+
+    #[test]
+    fn unreadable_browser_does_not_keep_a_call_after_it_releases_input() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        detector.note_active_call("google-meet", "Google Meet");
+        let processes = chrome_and_dictation_tool();
+
+        // Hanging up releases Chrome's input; only the dictation tool holds it.
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([200])),
+            true,
+            inconclusive_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn unreadable_browser_never_starts_a_call() {
+        let detector = CallDetector::new(test_call_detection_config(vec!["google-meet".into()]));
+        let config = detector.current_config();
+        let processes = chrome_and_dictation_tool();
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([110])),
+            true,
+            inconclusive_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
+    }
+
+    #[test]
+    fn unreadable_browser_does_not_keep_a_tracked_native_call() {
+        let detector = CallDetector::new(test_call_detection_config(vec![
+            "zoom.us".into(),
+            "google-meet".into(),
+        ]));
+        let config = detector.current_config();
+        detector.note_active_call("zoom.us", "Zoom");
+        let processes = chrome_and_dictation_tool();
+
+        let result = detector.detect_active_call_from_process_snapshot(
+            &config,
+            true,
+            &processes,
+            Some(&HashSet::from([110])),
+            true,
+            inconclusive_from(browser_spec("Google Chrome")),
+        );
+
+        assert_eq!(result, DetectActiveCallResult::None);
     }
 }

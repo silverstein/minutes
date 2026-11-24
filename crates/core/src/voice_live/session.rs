@@ -607,6 +607,32 @@ struct Runner {
 /// out of a click or a breath.
 const PTT_MIN_CHUNKS: usize = 3;
 
+// Keep the local OpenMic indication alive across quiet syllables and silence
+// between capture chunks. This is presentation only; Gemini still owns VAD.
+const OPEN_MIC_SIGNAL_HANGOVER: Duration = Duration::from_millis(350);
+
+fn state_after_playback(
+    current: VoiceLiveState,
+    mode: TalkMode,
+    provider_idle: bool,
+    last_open_mic_signal: Option<Instant>,
+    now: Instant,
+) -> VoiceLiveState {
+    let listening = mode == TalkMode::OpenMic && current == VoiceLiveState::Listening;
+    if listening
+        && last_open_mic_signal
+            .is_some_and(|at| now.saturating_duration_since(at) < OPEN_MIC_SIGNAL_HANGOVER)
+    {
+        VoiceLiveState::Listening
+    } else if provider_idle {
+        VoiceLiveState::Ready
+    } else if listening || current == VoiceLiveState::Speaking {
+        VoiceLiveState::Thinking
+    } else {
+        current
+    }
+}
+
 #[derive(Debug)]
 enum DispatchOrigin {
     Model,
@@ -932,6 +958,7 @@ impl Runner {
         let mut me = String::new();
         let mut last_audio = Instant::now();
         let mut last_microphone_chunk = Instant::now();
+        let mut last_open_mic_signal = None;
         let mut last_context_check = Instant::now();
         let mut sharing_window = false;
         let mut response_audio_started = false;
@@ -939,6 +966,11 @@ impl Runner {
         let set_state = |runner: &Runner, current: &mut VoiceLiveState, next: VoiceLiveState| {
             if *current != next {
                 *current = next;
+                if runner.log.is_some() {
+                    runner.log_line(
+                        serde_json::json!({"event":"voice_state","state":next}).to_string(),
+                    );
+                }
                 runner.emit(VoiceLiveEvent::State { state: next });
             }
         };
@@ -993,12 +1025,16 @@ impl Runner {
                     playback_pending = false;
                 }
                 activity.playback_stopped();
-                if activity.ready() && calls.lock().unwrap_or_else(|p| p.into_inner()).active() == 0
-                {
-                    set_state(&self, &mut state, VoiceLiveState::Ready);
-                } else if state == VoiceLiveState::Speaking {
-                    set_state(&self, &mut state, VoiceLiveState::Thinking);
-                }
+                let provider_idle = activity.ready()
+                    && calls.lock().unwrap_or_else(|p| p.into_inner()).active() == 0;
+                let next = state_after_playback(
+                    state,
+                    self.mode,
+                    provider_idle,
+                    last_open_mic_signal,
+                    Instant::now(),
+                );
+                set_state(&self, &mut state, next);
             }
             select! {
                 recv(inbox) -> msg => {
@@ -1032,6 +1068,12 @@ impl Runner {
                         ServerEvent::InputTranscript(t) => {
                             self.log_line(serde_json::json!({"event":"input_transcript_chunk","characters":t.chars().count(),"playback_pending":playback_pending}).to_string());
                             activity.provider_status(ProviderActivity::InProgress);
+                            if self.mode == TalkMode::OpenMic
+                                && state == VoiceLiveState::Ready
+                                && !t.trim().is_empty()
+                            {
+                                set_state(&self, &mut state, VoiceLiveState::Thinking);
+                            }
                             // The user's voice, as it arrives. The confirmation
                             // gate needs to know a person spoke and when, and a
                             // flush at a turn boundary is too late and can
@@ -1181,7 +1223,6 @@ impl Runner {
                 recv(self.audio.receiver()) -> chunk => {
                     let Ok(chunk) = chunk else { self.emit(VoiceLiveEvent::Closed { reason: "microphone stream ended".into() }); break; };
                     last_microphone_chunk = chunk.timestamp;
-                    self.emit(VoiceLiveEvent::Level { rms: chunk.rms });
                     let pcm: Vec<u8> = chunk.samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
                     let send = match self.mode {
                         TalkMode::OpenMic => true,
@@ -1218,10 +1259,15 @@ impl Runner {
                     };
                     if send {
                         if self.client().send_audio(&pcm).is_err() { break; }
-                        if self.mode == TalkMode::OpenMic && chunk.rms > 0.02 && state == VoiceLiveState::Ready {
+                        if self.mode == TalkMode::OpenMic
+                            && matches!(state, VoiceLiveState::Ready | VoiceLiveState::Listening)
+                            && chunk.rms > 0.02
+                        {
+                            last_open_mic_signal = Some(chunk.timestamp);
                             set_state(&self, &mut state, VoiceLiveState::Listening);
                         }
                     }
+                    self.emit(VoiceLiveEvent::Level { rms: chunk.rms });
                 }
                 // Audio a tool produced, queued for the speaker on this thread
                 // because the playback handle lives here.
@@ -1659,6 +1705,59 @@ mod tests {
         assert!(value["bytes"].as_u64().unwrap() > 0);
         assert!(!receipt.contains("private correction"));
         assert!(!receipt.contains("private evidence"));
+    }
+
+    #[test]
+    fn open_mic_listening_survives_provider_idle_until_the_local_signal_fades() {
+        let signal = Instant::now();
+        for provider_idle in [true, false] {
+            assert_eq!(
+                state_after_playback(
+                    VoiceLiveState::Listening,
+                    TalkMode::OpenMic,
+                    provider_idle,
+                    Some(signal),
+                    signal + Duration::from_millis(200),
+                ),
+                VoiceLiveState::Listening
+            );
+            let after_silence = state_after_playback(
+                VoiceLiveState::Listening,
+                TalkMode::OpenMic,
+                provider_idle,
+                Some(signal),
+                signal + OPEN_MIC_SIGNAL_HANGOVER,
+            );
+            assert_eq!(
+                after_silence,
+                if provider_idle {
+                    VoiceLiveState::Ready
+                } else {
+                    VoiceLiveState::Thinking
+                }
+            );
+        }
+        let now = signal + Duration::from_millis(50);
+        assert_eq!(
+            state_after_playback(
+                VoiceLiveState::Speaking,
+                TalkMode::OpenMic,
+                false,
+                Some(signal),
+                now,
+            ),
+            VoiceLiveState::Thinking
+        );
+        assert_eq!(
+            state_after_playback(
+                VoiceLiveState::Listening,
+                TalkMode::PushToTalk,
+                true,
+                None,
+                now,
+            ),
+            VoiceLiveState::Ready
+        );
     }
 
     #[test]

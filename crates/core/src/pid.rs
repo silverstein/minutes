@@ -3,6 +3,7 @@ use crate::error::PidError;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 // ──────────────────────────────────────────────────────────────
 // PID file state machine:
@@ -305,8 +306,9 @@ impl PidFileState {
 /// lock) from a genuinely absent or stale file. Use this instead of
 /// [`check_pid_file`] for any reader of a PID file held under a persistent
 /// [`create_pid_guard`] lock (e.g. the live-transcript or worker PID), so the
-/// reader is not fooled by Windows file locking. Stale PID files (dead PID) are
-/// cleaned up automatically, mirroring [`check_pid_file`].
+/// reader is not fooled by Windows file locking. Generic stale PID files are
+/// cleaned up automatically. A stale recording marker is replaced by the next
+/// recorder under its write lock.
 pub fn inspect_pid_file(path: &Path) -> PidFileState {
     read_pid_file_state(path, true)
 }
@@ -319,6 +321,13 @@ pub fn pid_file_is_active(path: &Path) -> bool {
 fn read_pid_file_state(path: &Path, clean_stale: bool) -> PidFileState {
     if !path.exists() {
         return PidFileState::Inactive;
+    }
+
+    if path.file_name().is_some_and(|name| name == "recording.pid") {
+        return match recording_pid_file_state(path) {
+            Ok(state) => state,
+            Err(_) => PidFileState::Inactive,
+        };
     }
 
     match fs::read_to_string(path) {
@@ -507,96 +516,353 @@ pub fn remove_pid_file(path: &Path) -> Result<(), PidError> {
     Ok(())
 }
 
-/// Check if a recording is currently in progress.
-/// Returns Ok(Some(pid)) if recording, Ok(None) if not.
-/// Cleans up stale PID files automatically.
-pub fn check_recording() -> Result<Option<u32>, PidError> {
-    let path = pid_path();
-    if !path.exists() {
-        return Ok(None);
+/// A separate owner stamp keeps the numeric PID file readable by older clients.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecordingOwnerStamp {
+    pid: u32,
+    marker_modified: SystemTime,
+    process_started: String,
+}
+
+fn recording_owner_path(pid_path: &Path) -> PathBuf {
+    pid_path.with_extension("owner.json")
+}
+
+fn read_recording_pid(file: &mut fs::File) -> Result<Option<u32>, PidError> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut contents = String::new();
+    (&mut *file).take(64).read_to_string(&mut contents)?;
+    Ok(contents.trim().parse::<u32>().ok().filter(|pid| *pid != 0))
+}
+
+fn recording_owner_is_active(path: &Path, file: &fs::File, pid: u32) -> bool {
+    if pid > i32::MAX as u32 || !is_process_alive(pid) {
+        return false;
     }
 
-    let pid_str = fs::read_to_string(&path)?;
-    let pid: u32 = pid_str.trim().parse().map_err(|_| PidError::StalePid(0))?;
+    let modified = file
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let stamp = fs::read(recording_owner_path(path))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RecordingOwnerStamp>(&bytes).ok())
+        .filter(|stamp| stamp.pid == pid && Some(stamp.marker_modified) == modified);
+    if let Some(stamp) = stamp {
+        // If the OS cannot inspect a live process, preserve the recording.
+        return process_start_identity(pid).map_or_else(
+            || is_process_alive(pid),
+            |start| start == stamp.process_started,
+        );
+    }
 
-    if is_process_alive(pid) {
-        Ok(Some(pid))
-    } else {
-        // Stale PID — process is dead. Clean up.
-        tracing::warn!("stale PID file found (PID {pid} is dead). Cleaning up.");
-        cleanup_stale()?;
-        Ok(None)
+    // PID-only markers were written by older versions. A known unrelated
+    // executable cannot own one. Preserve the marker when inspection is denied.
+    pid == std::process::id()
+        || process_executable(pid).is_none_or(|path| is_minutes_executable(&path))
+}
+
+fn is_minutes_executable(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    matches!(
+        name.strip_suffix(".exe").unwrap_or(&name),
+        "minutes"
+            | "minutes-cli"
+            | "minutes-app"
+            | "minutes-linux-x64"
+            | "minutes-macos-arm64"
+            | "minutes-windows-x64"
+    ) || std::env::current_exe().is_ok_and(|current| current == path)
+}
+
+#[cfg(target_os = "linux")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    let path = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    // Linux appends this suffix when an executable is updated in place.
+    let text = path.to_string_lossy();
+    Some(
+        text.strip_suffix(" (deleted)")
+            .map_or(path.clone(), PathBuf::from),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_identity(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    // After the parenthesized name the fields start at number 3. The
+    // process start tick is field 22 and can repeat after a reboot.
+    let start = fields.split_whitespace().nth(19)?;
+    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(format!("{}:{start}", boot.trim()))
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut path = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // proc_pidpath writes up to the provided buffer capacity.
+    let length =
+        unsafe { libc::proc_pidpath(pid as i32, path.as_mut_ptr().cast(), path.len() as u32) };
+    if length <= 0 {
+        return None;
+    }
+    let end = path.iter().position(|byte| *byte == 0)?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&path[..end])))
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_identity(pid: u32) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // The full-sized result guarantees the struct was initialized by the OS.
+    let length = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if length != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(format!(
+        "{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
+#[cfg(windows)]
+fn with_query_process<T>(
+    pid: u32,
+    query: impl FnOnce(windows_sys::Win32::Foundation::HANDLE) -> Option<T>,
+) -> Option<T> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // This handle is only used to query the specified process.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let value = query(handle);
+    unsafe { CloseHandle(handle) };
+    value
+}
+
+#[cfg(windows)]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+    with_query_process(pid, |handle| {
+        let mut path = vec![0u16; 32_768];
+        let mut length = path.len() as u32;
+        // The returned length excludes the terminating NUL.
+        let ok = unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut length) };
+        (ok != 0).then(|| PathBuf::from(std::ffi::OsString::from_wide(&path[..length as usize])))
+    })
+}
+
+#[cfg(windows)]
+fn process_start_identity(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    with_query_process(pid, |handle| {
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut exited, mut kernel, mut user) = (created, created, created);
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+        (ok != 0).then(|| format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime))
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_executable(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn process_start_identity(_pid: u32) -> Option<String> {
+    None
+}
+
+fn recording_pid_file_state(path: &Path) -> Result<PidFileState, PidError> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PidFileState::Inactive)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    match read_recording_pid(&mut file) {
+        Ok(Some(pid)) if recording_owner_is_active(path, &file, pid) => {
+            Ok(PidFileState::Active(pid))
+        }
+        Err(PidError::Io(error)) if is_lock_violation(&error) => Ok(PidFileState::LockedAlive),
+        Ok(_) => {
+            #[cfg(unix)]
+            if fs2::FileExt::try_lock_shared(&file)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+            {
+                return Ok(PidFileState::LockedAlive);
+            }
+            Ok(PidFileState::Inactive)
+        }
+        Err(error) => Err(error),
     }
 }
 
-/// Create PID file for current process with exclusive file lock.
-/// Uses flock to make the check-and-write atomic, preventing TOCTOU races
-/// when two `minutes record` invocations start simultaneously.
-pub fn create() -> Result<(), PidError> {
+/// Check if a recording is in progress. A stale marker is left for the next
+/// writer to replace under its lock, so a status poll cannot unlink a new owner.
+pub fn check_recording() -> Result<Option<u32>, PidError> {
+    Ok(recording_pid_file_state(&pid_path())?.pid())
+}
+
+fn lock_inactive_recording_marker(path: &Path) -> Result<fs::File, PidError> {
     use fs2::FileExt;
 
-    // Clean up stale sentinel from a previous crashed recording
-    check_and_clear_sentinel();
-
-    let path = pid_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-
-    // Open/create the PID file and acquire an exclusive lock.
-    // This is atomic: if another process holds the lock, we block briefly then check.
     let mut file = fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)?;
-
-    // Try non-blocking lock — if we can't get it, another recorder is running
+        .open(path)?;
     if file.try_lock_exclusive().is_err() {
-        // Read the existing PID to report which process holds it
-        let existing_pid = fs::read_to_string(&path)
+        let owner = fs::read_to_string(path)
             .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
+            .and_then(|value| value.trim().parse().ok())
             .unwrap_or(0);
-        return Err(PidError::AlreadyRecording(existing_pid));
+        return Err(PidError::AlreadyRecording(owner));
     }
-
-    // We hold the lock. Check if there's a stale PID from a crashed process.
-    if let Some(old_pid) = read_locked_pid(&mut file)? {
-        if old_pid != 0 && is_process_alive(old_pid) {
-            file.unlock().ok();
-            return Err(PidError::AlreadyRecording(old_pid));
+    if let Some(pid) = read_recording_pid(&mut file)? {
+        if recording_owner_is_active(path, &file, pid) {
+            return Err(PidError::AlreadyRecording(pid));
         }
     }
+    Ok(file)
+}
 
-    // Write our PID (we still hold the lock)
+/// Claim the recording marker, replacing stale ownership under the write lock.
+pub fn create() -> Result<(), PidError> {
+    let path = pid_path();
+    let mut file = lock_inactive_recording_marker(&path)?;
+
     let pid = std::process::id();
+    // Clear only after establishing that there is no active owner. A competing
+    // start must not delete the sentinel meant for the current recorder.
+    check_and_clear_sentinel();
     write_locked_pid(&mut file, pid)?;
-
+    let owner_path = recording_owner_path(&path);
+    if let (Some(process_started), Ok(marker_modified)) = (
+        process_start_identity(pid),
+        file.metadata().and_then(|metadata| metadata.modified()),
+    ) {
+        let stamp = RecordingOwnerStamp {
+            pid,
+            marker_modified,
+            process_started,
+        };
+        if let Err(error) = write_owner_stamp(&owner_path, &stamp) {
+            tracing::warn!("Could not write recording owner stamp: {error}");
+        }
+    }
     tracing::debug!("PID file created: {} (PID {})", path.display(), pid);
     Ok(())
 }
 
-/// Remove PID file. Called on graceful shutdown.
-pub fn remove() -> Result<(), PidError> {
-    let path = pid_path();
-    if path.exists() {
-        fs::remove_file(&path)?;
-        tracing::debug!("PID file removed: {}", path.display());
-    }
+fn write_owner_stamp(path: &Path, stamp: &RecordingOwnerStamp) -> std::io::Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(path.parent().expect("owner stamp parent"))?;
+    serde_json::to_writer(&mut file, stamp)?;
+    file.as_file().sync_data()?;
+    file.persist(path)?;
     Ok(())
 }
 
-/// Clean up stale recording artifacts.
-fn cleanup_stale() -> Result<(), PidError> {
-    let path = pid_path();
-    if path.exists() {
-        fs::remove_file(&path)?;
+/// Archive any remaining batch capture files together under a unique stem in
+/// the private data directory. Hold the same marker lock as recording startup
+/// and exact-file locks until the names have been moved.
+pub fn archive_interrupted_recording() -> Result<Option<PathBuf>, PidError> {
+    use crate::policy_fs::BoundRecoveryDirectory;
+    use std::ffi::OsStr;
+    use std::io::{Error, ErrorKind};
+
+    let _marker = lock_inactive_recording_marker(&pid_path())?;
+    let data = Config::minutes_dir().canonicalize()?;
+    let directory = BoundRecoveryDirectory::bind_existing(&data)?;
+    let jobs = crate::jobs::active_jobs();
+    let mut sources = Vec::new();
+    for (name, suffix) in [
+        ("current.voice.wav", ".voice.wav"),
+        ("current.system.wav", ".system.wav"),
+        ("current.wav", ".wav"),
+    ] {
+        let name = OsStr::new(name);
+        if !directory.entry_exists(name)? {
+            continue;
+        }
+        let source = directory.bind_exact_file(name)?;
+        if jobs.iter().any(|job| {
+            Path::new(&job.audio_path) == source.display_path()
+                || Path::new(&job.audio_path) == Config::minutes_dir().join(name)
+        }) || !source.try_lock_exclusive()?
+        {
+            return Err(Error::new(
+                ErrorKind::WouldBlock,
+                format!("{} is in use", source.display_path().display()),
+            )
+            .into());
+        }
+        sources.push((source, name, suffix));
     }
-    clear_recording_metadata().ok();
-    // Don't delete current.wav — it may contain recoverable audio
-    Ok(())
+    if sources.is_empty() {
+        return Ok(None);
+    }
+
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(Error::other)?;
+    let prefix = format!("recovered-{:032x}", u128::from_ne_bytes(nonce));
+    let archive_base = data.join(&prefix);
+    let mut moved = Vec::new();
+    for (source, name, suffix) in sources {
+        let filename = format!("{prefix}{suffix}");
+        match directory.rename_bound_no_replace(source, OsStr::new(&filename)) {
+            Ok(archived) => moved.push((archived, name)),
+            Err(error) => {
+                for (archived, original) in moved.into_iter().rev() {
+                    // If the original name has been taken, leave the archived
+                    // file intact rather than overwriting the new occupant.
+                    let _ = directory.rename_bound_no_replace(archived, original);
+                }
+                return Err(Error::new(error.kind(), format!(
+                    "Could not archive the interrupted recording: {error}. Check {} and any files beginning with {}.",
+                    data.display(), archive_base.display()
+                )).into());
+            }
+        }
+    }
+    Ok(Some(archive_base))
+}
+
+/// Remove the recording marker on graceful shutdown.
+pub fn remove() -> Result<(), PidError> {
+    let path = pid_path();
+    fs::remove_file(recording_owner_path(&path)).ok();
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Check if a process with the given PID is alive.
@@ -882,6 +1148,33 @@ mod tests {
         let _guard = crate::test_support::home_env_lock();
         // PID 99999999 almost certainly doesn't exist
         assert!(!is_process_alive(99_999_999));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn recording_owner_stamp_distinguishes_process_instances_and_preserves_audio() {
+        crate::test_support::with_temp_home(|_| {
+            create().unwrap();
+            let pid = std::process::id();
+            let path = pid_path();
+            assert_eq!(fs::read_to_string(&path).unwrap(), pid.to_string());
+            assert_eq!(check_recording().unwrap(), Some(pid));
+            assert!(matches!(create(), Err(PidError::AlreadyRecording(owner)) if owner == pid));
+
+            let owner_path = recording_owner_path(&path);
+            let mut stamp: RecordingOwnerStamp =
+                serde_json::from_slice(&fs::read(&owner_path).unwrap()).unwrap();
+            stamp.process_started.push_str(":old");
+            write_owner_stamp(&owner_path, &stamp).unwrap();
+            fs::write(current_wav_path(), b"recoverable audio").unwrap();
+
+            assert_eq!(check_recording().unwrap(), None);
+            assert!(!inspect_pid_file(&path).is_active());
+            assert_eq!(fs::read(current_wav_path()).unwrap(), b"recoverable audio");
+            create().unwrap();
+            assert_eq!(check_recording().unwrap(), Some(pid));
+            remove().unwrap();
+        });
     }
 
     #[test]

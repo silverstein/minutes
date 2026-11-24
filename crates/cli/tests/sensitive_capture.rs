@@ -42,13 +42,24 @@ fn the_cli_sensitive_meeting_blocks_capture_until_explicitly_stopped() {
         ("voice.pid", "voice session"),
     ] {
         let pid_file = data_dir.join(file);
-        fs::write(&pid_file, &owner).unwrap();
+        // A numeric PID from this test executable is not a recorder. Hold
+        // the same lock a live session can hold to prove it is active.
+        let recorder = if file == "recording.pid" {
+            Some(minutes_core::pid::create_pid_guard(&pid_file).unwrap())
+        } else {
+            fs::write(&pid_file, &owner).unwrap();
+            None
+        };
         let result = minutes(&["sensitive", "start"]);
         let error = String::from_utf8_lossy(&result.stderr);
         assert!(!result.status.success(), "{mode} was running");
         assert!(error.contains(&format!("{mode} in progress")), "{error}");
         assert!(!state_file.exists());
-        fs::remove_file(pid_file).unwrap();
+        if let Some(recorder) = recorder {
+            drop(recorder);
+        } else {
+            fs::remove_file(pid_file).unwrap();
+        }
     }
 
     let started = minutes(&["sensitive", "start", "--title", "Synthetic private meeting"]);
@@ -166,4 +177,53 @@ fn status_reports_session_flags_only_in_the_full_cli_payload() {
     let status: serde_json::Value = serde_json::from_slice(&minutes(&["status"]).stdout).unwrap();
     assert_eq!(status["dictation"], false);
     assert!(stale.exists(), "status should not remove stale PID files");
+}
+
+#[test]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn stop_and_recover_leave_an_unrelated_process_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let minutes = isolated_minutes(dir.path());
+    let data = dir.path().join("state");
+    let marker = data.join("recording.pid");
+    fs::write(&marker, std::process::id().to_string()).unwrap();
+
+    let status = minutes(&["status"]);
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["recording"], false);
+    let stopped = minutes(&["stop"]);
+    assert!(stopped.status.success());
+    assert!(!data.join("recording.stop").exists());
+
+    let audio = [
+        (".wav", b"mixed fixture".as_slice()),
+        (".voice.wav", b"mic fixture".as_slice()),
+        (".system.wav", b"system fixture".as_slice()),
+    ];
+    for (suffix, bytes) in audio {
+        fs::write(data.join(format!("current{suffix}")), bytes).unwrap();
+    }
+    let result = minutes(&["record", "--recover"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let mut recovered = fs::read_dir(&data).unwrap().flatten().filter_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        (name.starts_with("recovered-") && name.ends_with(".voice.wav"))
+            .then(|| name.trim_end_matches(".voice.wav").to_owned())
+    });
+    let prefix = recovered.next().unwrap();
+    assert!(recovered.next().is_none());
+    for (suffix, bytes) in audio {
+        assert!(!data.join(format!("current{suffix}")).exists());
+        assert_eq!(
+            fs::read(data.join(format!("{prefix}{suffix}"))).unwrap(),
+            bytes
+        );
+    }
+    let again = minutes(&["record", "--recover"]);
+    assert!(String::from_utf8_lossy(&again.stdout).contains("No interrupted recording files"));
+    assert!(!data.join("recording.stop").exists());
 }

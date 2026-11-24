@@ -398,6 +398,10 @@ enum Commands {
         #[arg(long, value_name = "WAV_FILE")]
         diagnose: Option<PathBuf>,
 
+        /// Preserve an interrupted recording under a new filename without starting capture.
+        #[arg(long, conflicts_with = "diagnose")]
+        recover: bool,
+
         /// Start with the microphone muted. System audio still captures.
         /// Useful for passive attendance (webinars, all-hands). Toggle
         /// mid-recording with `minutes mic-toggle`.
@@ -2097,9 +2101,17 @@ fn main() -> Result<()> {
             source,
             call,
             diagnose,
+            recover,
             mute_mic,
             template,
         } => {
+            if recover {
+                match minutes_core::pid::archive_interrupted_recording()? {
+                    Some(path) => println!("Saved interrupted recording files with prefix {}. Run minutes record again to start a new recording.", path.display()),
+                    None => println!("No interrupted recording files found."),
+                }
+                return Ok(());
+            }
             if let Some(lang) = language {
                 config.transcription.language = Some(lang);
             }
@@ -3595,7 +3607,7 @@ fn cmd_record(
     if config.live_transcript.recording_sidecar {
         capabilities.insert(1, "live.utterance.final".to_string());
     }
-    minutes_core::capture::record_to_wav_with_lifecycle(
+    if let Err(error) = minutes_core::capture::record_to_wav_with_lifecycle(
         &wav_path,
         stop_flag,
         config,
@@ -3604,8 +3616,16 @@ fn cmd_record(
             source: "capture".into(),
             capabilities,
         }),
-    )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    ) {
+        minutes_core::pid::remove().ok();
+        minutes_core::pid::clear_recording_metadata().ok();
+        if matches!(&error, minutes_core::error::CaptureError::Io(io)
+            if io.kind() == std::io::ErrorKind::AlreadyExists)
+        {
+            anyhow::bail!("{error}. Run `minutes record --recover` to preserve interrupted recording files before retrying.");
+        }
+        return Err(error.into());
+    }
     let recording_finished_at = Local::now();
     let user_notes = minutes_core::notes::read_notes();
     let pre_context = minutes_core::notes::read_context();
@@ -4094,22 +4114,20 @@ fn cmd_stop(_config: &Config) -> Result<()> {
             // The sentinel is the whole stop. Every recorder polls it; `minutes
             // record` ignores SIGTERM, and a desktop app recording in-process is
             // killed by it before the recording is finalized (#1271).
-            minutes_core::pid::write_stop_sentinel()
+            minutes_core::pid::write_stop_sentinel_for(pid)
                 .map_err(|e| anyhow::anyhow!("failed to write stop sentinel: {}", e))?;
 
             // Poll for PID file removal with progress feedback
             let timeout = std::time::Duration::from_secs(120);
             let start = std::time::Instant::now();
-            let pid_path = minutes_core::pid::pid_path();
-
             eprint!("Processing {}", capture_mode.noun());
-            while pid_path.exists() && start.elapsed() < timeout {
+            while minutes_core::pid::check_recording()? == Some(pid) && start.elapsed() < timeout {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 eprint!(".");
             }
             eprintln!();
 
-            if pid_path.exists() {
+            if minutes_core::pid::check_recording()? == Some(pid) {
                 anyhow::bail!("recording process did not stop within 120 seconds");
             }
 
@@ -19286,7 +19304,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             "[minutes] Speak naturally. Text accumulates across pauses and is written when dictation ends."
         );
     } else {
-        eprintln!("[minutes] Speak naturally. Text goes to clipboard after each pause.");
+        eprintln!("[minutes] Speak naturally and pause to finish each utterance.");
     }
 
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -19340,8 +19358,6 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     eprintln!(); // newline after partial text
                     if config.dictation.accumulate {
                         eprintln!("[minutes] Captured text");
-                    } else {
-                        eprintln!("[minutes] Done — text copied to clipboard");
                     }
                 }
                 DictationEvent::Error => eprintln!("[minutes] Transcription failed — audio saved"),
@@ -19357,29 +19373,17 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
             }
         },
         |result| {
-            if stdout {
-                println!("{}", result.text);
-                // Flush at the write, not at exit. Piped stdout is block
-                // buffered, and a force quit takes `_exit` on macOS, which
-                // discards the buffer: a completed utterance the user already
-                // saw the app finish would never reach the pipe. Flushing here
-                // also makes `minutes dictate --stdout | ...` stream per
-                // utterance instead of arriving in one lump at the end.
+            let stdout_result = (result.destination == "stdout").then(|| {
+                // Flush each utterance so piped output is available immediately.
                 use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
+                let mut output = std::io::stdout().lock();
+                writeln!(output, "{}", result.text).and_then(|()| output.flush())
+            });
+            let insertion = cli_dictation_delivery(&result, stdout_result);
+            eprintln!("[minutes] {}", insertion.message);
             if let Some(ref path) = result.file_path {
                 eprintln!("[minutes] Saved: {}", path.display());
             }
-            let (outcome, method, message) = match result.destination.as_str() {
-                "stdout" => ("printed", "stdout", "Printed dictation to stdout."),
-                "daily_note" => ("saved", "daily_note", "Saved dictation to the daily note."),
-                _ => (
-                    "copied",
-                    "clipboard_only",
-                    "Copied dictation to the clipboard.",
-                ),
-            };
             let record = minutes_core::dictation_memory::DictationMemoryRecord::new(
                 minutes_core::dictation_memory::DictationMemoryInput {
                     raw_text: result.raw_text.clone(),
@@ -19392,13 +19396,7 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
                     vocabulary_mode: None,
                     vocabulary_used: Vec::new(),
                     destination: result.destination.clone(),
-                    insertion: minutes_core::dictation_memory::DictationInsertionMemory {
-                        outcome: outcome.into(),
-                        method: method.into(),
-                        verified: true,
-                        clipboard_restored: false,
-                        message: message.into(),
-                    },
+                    insertion,
                     target_context: None,
                     file_path: result.file_path.clone(),
                     daily_note_appended: result.daily_note_appended,
@@ -19421,6 +19419,95 @@ fn cmd_dictate(stdout: bool, note_only: bool, config: &Config) -> Result<()> {
 
     outcome?;
     Ok(())
+}
+
+#[cfg(feature = "whisper")]
+fn cli_dictation_delivery(
+    result: &minutes_core::dictation::DictationResult,
+    stdout_result: Option<std::io::Result<()>>,
+) -> minutes_core::dictation_memory::DictationInsertionMemory {
+    let (method, status) = match result.destination.as_str() {
+        "stdout" => (
+            "stdout",
+            stdout_result
+                .unwrap_or_else(|| Err(std::io::Error::other("No output was written.")))
+                .map(|()| ("printed", "Printed dictation to stdout."))
+                .map_err(|error| format!("Could not write dictation to stdout: {error}")),
+        ),
+        "daily_note" if result.daily_note_appended => (
+            "daily_note",
+            Ok(("saved", "Saved dictation to the daily note.")),
+        ),
+        "daily_note" => (
+            "daily_note",
+            Err("Could not append dictation to the daily note.".into()),
+        ),
+        "clipboard" | "" => (
+            "clipboard_only",
+            match &result.clipboard_write {
+                Some(Ok(())) => Ok(("copied", "Copied dictation to the clipboard.")),
+                Some(Err(error)) => Err(format!(
+                    "Could not copy dictation to the clipboard: {error}"
+                )),
+                None => Err("No dictation clipboard write was attempted.".into()),
+            },
+        ),
+        _ if result.file_path.is_some() => ("file", Ok(("saved", "Saved dictation to a file."))),
+        _ => ("file", Err("Could not save dictation to a file.".into())),
+    };
+    let (outcome, verified, message) = match status {
+        Ok((outcome, message)) => (outcome, true, message.into()),
+        Err(message) => ("failed", false, message),
+    };
+    minutes_core::dictation_memory::DictationInsertionMemory {
+        outcome: outcome.into(),
+        method: method.into(),
+        verified,
+        clipboard_restored: false,
+        message,
+    }
+}
+
+#[cfg(all(test, feature = "whisper"))]
+#[test]
+fn cli_dictation_history_records_the_actual_destination_outcome() {
+    use minutes_core::dictation::DictationResult;
+
+    let mut result = DictationResult {
+        raw_text: "Fixture".into(),
+        text: "Fixture".into(),
+        pre_command_text: None,
+        commands_applied: Vec::new(),
+        text_mode: minutes_core::dictation_context::DictationTextMode::Unknown,
+        duration_secs: 1.0,
+        destination: "clipboard".into(),
+        file_path: Some(PathBuf::from("saved.md")),
+        daily_note_appended: false,
+        clipboard_write: Some(Err("no wl-copy".into())),
+        engine_id: "whisper".into(),
+        engine_descriptor_version: None,
+    };
+    let failure = cli_dictation_delivery(&result, None);
+    assert_eq!(failure.outcome, "failed");
+    assert!(!failure.verified);
+    assert!(failure.message.contains("no wl-copy"));
+
+    result.clipboard_write = Some(Ok(()));
+    let copied = cli_dictation_delivery(&result, None);
+    assert_eq!(copied.outcome, "copied");
+    assert!(copied.verified);
+
+    result.destination = "stdout".into();
+    let streamed = cli_dictation_delivery(&result, Some(Ok(())));
+    assert_eq!(streamed.outcome, "printed");
+    assert!(streamed.verified);
+
+    result.destination = "daily_note".into();
+    assert!(!cli_dictation_delivery(&result, None).verified);
+    result.daily_note_appended = true;
+    let saved = cli_dictation_delivery(&result, None);
+    assert_eq!(saved.outcome, "saved");
+    assert_eq!(saved.method, "daily_note");
 }
 
 #[cfg(not(feature = "whisper"))]

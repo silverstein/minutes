@@ -204,6 +204,8 @@ pub struct DictationResult {
     pub destination: String,
     pub file_path: Option<PathBuf>,
     pub daily_note_appended: bool,
+    /// Clipboard delivery result, when requested by the destination.
+    pub clipboard_write: Option<Result<(), String>>,
     /// Backend that actually produced this text, after runtime fallback.
     pub engine_id: String,
     pub engine_descriptor_version: Option<String>,
@@ -1836,6 +1838,7 @@ fn prepare_result(
         destination: config.dictation.destination.clone(),
         file_path: None,
         daily_note_appended: false,
+        clipboard_write: None,
         engine_id,
         engine_descriptor_version,
     })
@@ -1901,45 +1904,40 @@ fn load_vocab_replacements() -> Vec<(String, String)> {
 
 fn write_result_outputs(mut result: DictationResult, config: &Config) -> Option<DictationResult> {
     apply_voice_commands_to_result(&mut result, config);
-    let destination = result.destination.as_str();
-    if destination == "clipboard" || destination.is_empty() {
-        if let Err(e) = write_to_clipboard(&result.text) {
-            tracing::error!("clipboard write failed: {}", e);
-        }
-    }
-
-    result.file_path = if destination != "daily_note" {
-        write_dictation_file(&result.text, result.duration_secs, config)
-    } else {
-        None
-    };
-
-    if config.dictation.daily_note_log {
-        result.daily_note_appended = append_dictation_to_daily_note(&result.text, config);
-    }
-
-    Some(result)
+    Some(deliver_result(result, config, write_to_clipboard))
 }
 
 fn finish_session(results: &[DictationResult], config: &Config) -> Option<DictationResult> {
-    let mut combined = combine_results(results, config)?;
-    combined.file_path = if combined.destination != "daily_note" {
-        write_dictation_file(&combined.text, combined.duration_secs, config)
-    } else {
-        None
-    };
+    Some(deliver_result(
+        combine_results(results, config)?,
+        config,
+        write_to_clipboard,
+    ))
+}
 
-    if combined.destination == "clipboard" || combined.destination.is_empty() {
-        if let Err(e) = write_to_clipboard(&combined.text) {
-            tracing::error!("clipboard write failed: {}", e);
+fn deliver_result(
+    mut result: DictationResult,
+    config: &Config,
+    write_clipboard: impl FnOnce(&str) -> Result<(), String>,
+) -> DictationResult {
+    let destination = result.destination.as_str();
+    if destination == "clipboard" || destination.is_empty() {
+        let clipboard = write_clipboard(&result.text);
+        if let Err(error) = &clipboard {
+            tracing::error!("clipboard write failed: {error}");
         }
+        result.clipboard_write = Some(clipboard);
     }
 
-    if config.dictation.daily_note_log {
-        combined.daily_note_appended = append_dictation_to_daily_note(&combined.text, config);
+    if destination != "daily_note" {
+        result.file_path = write_dictation_file(&result.text, result.duration_secs, config);
     }
 
-    Some(combined)
+    if destination == "daily_note" || config.dictation.daily_note_log {
+        result.daily_note_appended = append_dictation_to_daily_note(&result.text, config);
+    }
+
+    result
 }
 
 fn combine_results(results: &[DictationResult], config: &Config) -> Option<DictationResult> {
@@ -2004,6 +2002,7 @@ fn combine_results(results: &[DictationResult], config: &Config) -> Option<Dicta
         destination: config.dictation.destination.clone(),
         file_path: None,
         daily_note_appended: false,
+        clipboard_write: None,
         engine_id: if same_engine {
             first_engine
         } else {
@@ -2499,6 +2498,7 @@ mod tests {
             destination: "daily_note".into(),
             file_path: None,
             daily_note_appended: false,
+            clipboard_write: None,
             engine_id: "whisper:small".into(),
             engine_descriptor_version: Some("small".into()),
         }];
@@ -2597,6 +2597,35 @@ mod tests {
             assert_eq!(value["id"], path.file_stem().unwrap().to_str().unwrap());
             for field in ["text", "raw_text", "title"] {
                 assert!(value.get(field).is_none(), "event must not carry {field}");
+            }
+        });
+    }
+
+    #[test]
+    fn clipboard_failure_is_reported_and_transcript_is_preserved() {
+        with_temp_home(|| {
+            for accumulate in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let mut config = test_config(dir.path());
+                config.dictation.destination = "clipboard".into();
+                config.dictation.accumulate = accumulate;
+                let result = prepare_result(
+                    "Preserve this dictation",
+                    1.0,
+                    DictationFinalBackend::Whisper,
+                    &config,
+                    DictationTextMode::Unknown,
+                )
+                .unwrap();
+                let result = if accumulate {
+                    combine_results(&[result], &config).unwrap()
+                } else {
+                    result
+                };
+                let output = deliver_result(result, &config, |_| Err("no clipboard".into()));
+                assert_eq!(output.clipboard_write, Some(Err("no clipboard".into())));
+                let saved = std::fs::read_to_string(output.file_path.unwrap()).unwrap();
+                assert!(saved.contains("Preserve this dictation"), "{saved}");
             }
         });
     }
@@ -3093,6 +3122,7 @@ mod tests {
                 destination: "clipboard".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },
@@ -3106,6 +3136,7 @@ mod tests {
                 destination: "clipboard".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },
@@ -3205,6 +3236,7 @@ mod tests {
             destination: "clipboard".into(),
             file_path: None,
             daily_note_appended: false,
+            clipboard_write: None,
             engine_id: "whisper:small".into(),
             engine_descriptor_version: Some("small".into()),
         };
@@ -3243,6 +3275,7 @@ mod tests {
                 destination: "stdout".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },
@@ -3256,6 +3289,7 @@ mod tests {
                 destination: "stdout".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },
@@ -3292,6 +3326,7 @@ mod tests {
                 destination: "daily_note".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },
@@ -3305,6 +3340,7 @@ mod tests {
                 destination: "daily_note".into(),
                 file_path: None,
                 daily_note_appended: false,
+                clipboard_write: None,
                 engine_id: "whisper:small".into(),
                 engine_descriptor_version: Some("small".into()),
             },

@@ -1296,7 +1296,10 @@ fn create_wav_writer(
             if file.metadata()?.len() != 0 && !is_header_only_wav(&file) {
                 return Err(CaptureError::Io(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
-                    "refusing to overwrite an existing recording",
+                    format!(
+                        "refusing to overwrite an existing recording at {}",
+                        output_path.display()
+                    ),
                 )));
             }
             #[cfg(unix)]

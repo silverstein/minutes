@@ -3,7 +3,7 @@
   const { invoke } = core;
   const find = id => document.getElementById('settings-voice-' + id);
   const section = find('section');
-  const entry = document.getElementById('btn-voice');
+  const entries = document.querySelectorAll('.voice-entry');
   const meet = find('meet');
   const meetEnable = find('meet-enable');
   const toggle = find('enabled');
@@ -34,9 +34,11 @@
   }
 
   function showEntry() {
-    entry.hidden = !(settings?.available && settings.enabled);
-    entry.setAttribute('aria-pressed', String(voiceActive));
-    entry.title = voiceActive ? 'End Voice' : 'Start Voice';
+    for (const entry of entries) {
+      entry.hidden = !(settings?.available && settings.enabled);
+      entry.setAttribute('aria-pressed', String(voiceActive));
+      entry.title = voiceActive ? 'End Voice' : 'Start Voice';
+    }
   }
 
   function showMeet() {
@@ -211,8 +213,8 @@
     toggle.focus();
   });
 
-  entry.addEventListener('click', async () => {
-    entry.disabled = true;
+  async function toggleEntry() {
+    for (const entry of entries) entry.disabled = true;
     try {
       await invoke('cmd_toggle_desktop_voice');
       voiceActive = (await invoke('cmd_voice_status')).active;
@@ -220,9 +222,10 @@
     } catch (error) {
       window.dispatchEvent(new CustomEvent('minutes:voice-error', { detail: String(error) }));
     } finally {
-      entry.disabled = false;
+      for (const entry of entries) entry.disabled = false;
     }
-  });
+  }
+  for (const entry of entries) entry.addEventListener('click', toggleEntry);
 
   events.listen('voice:event', ({ payload }) => {
     if (payload.type === 'state' || payload.type === 'closed') {

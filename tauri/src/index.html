@@ -6003,8 +6003,19 @@
     }
     .voice-consent-card h2 { margin: 0 0 8px; }
     .voice-consent-card form { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
-    #settings-voice-section[hidden], .header-actions #btn-voice[hidden] { display: none; }
-    .header-actions #btn-voice[aria-pressed="true"] { color: var(--capture); border-color: var(--capture); }
+    #settings-voice-section[hidden] { display: none; }
+    .header-actions .voice-entry:not([hidden]),
+    body.sidebar-collapsed .recall-header-actions .voice-entry:not([hidden]) {
+      display: inline-flex;
+    }
+    .header-chip.voice-entry {
+      flex: 0 0 auto;
+      background: var(--surface-fill-hover);
+      color: var(--text);
+      border: 1px solid var(--border-mid);
+    }
+    .voice-entry:hover { background: var(--surface-fill-strong); }
+    .voice-entry[aria-pressed="true"] { color: var(--capture); border-color: var(--capture); }
     .about-controls .capture-switch {
       position: relative; width: 40px; min-width: 40px; height: 23px;
       padding: 0; border: 1px solid var(--border-mid); border-radius: 100px;
@@ -6038,7 +6049,7 @@
     .voice-meet-card h3 { margin: 0 0 4px; }
     .voice-meet-card p + p { margin-top: 5px; }
     #settings-voice-key-mask[hidden], #settings-voice-key-editor[hidden] { display: none; }
-    .voice-consent-card form .btn { text-transform: none; letter-spacing: normal; }
+    #settings-voice-section .btn { text-transform: none; letter-spacing: normal; }
 
     .settings-secret-row {
       display: grid;
@@ -6490,7 +6501,7 @@
       </div>
       <div class="header-actions">
         <button class="header-chip" id="btn-dictation" type="button">Dictation</button>
-        <button class="header-chip" id="btn-voice" type="button" aria-pressed="false" hidden>Voice</button>
+        <button class="btn header-chip voice-entry" id="btn-voice" type="button" aria-pressed="false" hidden>Voice</button>
         <button class="btn btn-icon" id="btn-settings">⚙</button>
         <button class="header-chip readiness" id="btn-readiness">Readiness</button>
         <button class="header-chip" id="btn-jobs">Jobs <span id="jobs-count">0</span></button>
@@ -6849,6 +6860,7 @@
         <span class="recall-context-label" id="recall-context-label" data-tauri-drag-region></span>
       </div>
       <div class="recall-header-actions">
+        <button class="btn header-chip voice-entry" id="btn-recall-voice" type="button" aria-pressed="false" hidden>Voice</button>
         <button class="btn btn-secondary btn-sm" id="btn-recall-weekly">Weekly</button>
         <button class="btn btn-secondary btn-sm recall-end-btn" id="btn-recall-end">End Session</button>
         <button class="recall-mode-toggle" id="btn-recall-mode-toggle" title="Switch to Terminal"
@@ -7303,7 +7315,7 @@
         <div class="voice-meet-card" id="settings-voice-meet" hidden>
           <h3 id="settings-voice-meet-title" tabindex="-1">Meet Voice</h3>
           <p class="about-controls-meta">Try asking “What did I commit to this week?”</p>
-          <p class="about-controls-meta">The panel opens at the top by default. Drag it where you want it, then use the shortcut again or choose End Voice to finish.</p>
+          <p class="about-controls-meta">The panel opens at the top by default. Drag it where you want it. To end Voice, click × or press the shortcut again.</p>
           <div class="voice-meet-actions">
             <span class="about-controls-meta" id="settings-voice-meet-shortcut"></span>
             <button class="btn btn-primary btn-sm" id="settings-voice-meet-enable" type="button">Enable shortcut</button>

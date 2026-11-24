@@ -5989,14 +5989,20 @@
       opacity: 1;
     }
 
-    .voice-consent-dialog {
-      width: min(440px, calc(100vw - 32px));
+    .voice-consent-dialog[open] {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      max-width: none; max-height: none; margin: 0; padding: 16px; border: 0;
+      display: grid; place-items: center; overflow: hidden;
+      background: var(--shadow-stronger);
+    }
+    .voice-consent-dialog::backdrop { background: transparent; }
+    .voice-consent-card {
+      width: min(440px, 100%); max-height: 100%; overflow: auto;
       padding: 20px; border: 1px solid var(--border-mid); border-radius: 16px;
       background: var(--bg-elevated); color: var(--text);
     }
-    .voice-consent-dialog::backdrop { background: var(--shadow-stronger); }
-    .voice-consent-dialog h2 { margin-top: 0; }
-    .voice-consent-dialog form { display: flex; gap: 8px; justify-content: flex-end; }
+    .voice-consent-card h2 { margin: 0 0 8px; }
+    .voice-consent-card form { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
     #settings-voice-section[hidden] { display: none; }
 
     .settings-secret-row {
@@ -7308,9 +7314,9 @@
             <div class="about-controls-copy">Voice</div>
             <div class="about-controls-meta">Start a spoken conversation from the Minutes menu bar.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-voice-enabled" type="button" role="switch" aria-label="Voice" aria-checked="false">Off</button>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="settings-voice-enabled" type="button" role="switch" aria-label="Voice" aria-checked="false">OFF</button>
         </div>
-        <div class="about-controls" data-global-shortcut>
+        <div class="about-controls">
           <div class="about-controls-group">
             <div class="about-controls-copy">Voice shortcut</div>
             <button id="shortcut-recorder-voice" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" type="button" aria-label="Change Voice shortcut">Command Option Shift V</button>
@@ -7344,13 +7350,15 @@
           </div>
           <button class="btn btn-secondary btn-sm" id="settings-voice-test" type="button" disabled>Test voice</button>
         </div>
-        <dialog class="voice-consent-dialog" id="settings-voice-consent" aria-labelledby="settings-voice-consent-title">
-          <h2 id="settings-voice-consent-title">Turn on Voice?</h2>
-          <p>Your microphone audio and the answers Minutes looks up go to <span id="settings-voice-provider">Google</span> during Voice sessions.</p>
-          <form method="dialog">
-            <button class="btn btn-secondary btn-sm" type="submit" autofocus>Cancel</button>
-            <button class="btn btn-primary btn-sm" id="settings-voice-consent-accept" type="button">Turn on Voice</button>
-          </form>
+        <dialog class="voice-consent-dialog" id="settings-voice-consent" aria-labelledby="settings-voice-consent-title" aria-describedby="settings-voice-consent-description">
+          <div class="voice-consent-card">
+            <h2 id="settings-voice-consent-title">Turn on Voice?</h2>
+            <p id="settings-voice-consent-description">Your microphone audio and the answers Minutes looks up go to <span id="settings-voice-provider">Google</span> during Voice sessions.</p>
+            <form method="dialog">
+              <button class="btn btn-secondary btn-sm" type="submit" autofocus>Cancel</button>
+              <button class="btn btn-primary btn-sm" id="settings-voice-consent-accept" type="button">Turn on Voice</button>
+            </form>
+          </div>
         </dialog>
       </section>
 
@@ -15894,6 +15902,11 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         .replace(/CmdOrCtrl/g, 'Ctrl')
         .replace(/\+/g, '+');
     }
+    function voiceShortcutDisplayLabel(shortcut, keycode) {
+      if (!isMac) return shortcutDisplayLabel(shortcut, keycode);
+      const glyphs = { CmdOrCtrl: '⌘', Command: '⌘', Cmd: '⌘', Ctrl: '⌃', Control: '⌃', Alt: '⌥', Option: '⌥', Shift: '⇧' };
+      return shortcut.split('+').map(key => glyphs[key] || key).join('');
+    }
     function updateSlotUI(slot, status) {
       unifiedSlotState[slot] = status;
 
@@ -15909,7 +15922,8 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       const toggle = document.getElementById(recoveryToggleIds[slot] || 'shortcut-toggle-' + slot);
       if (!recorder || !statusEl || !toggle) return;
 
-      recorder.textContent = shortcutDisplayLabel(status.shortcut, status.keycode);
+      const display = (slot === 'voice' ? voiceShortcutDisplayLabel : shortcutDisplayLabel)(status.shortcut, status.keycode);
+      recorder.textContent = display;
       recorder.style.borderColor = '';
       recorder.style.color = '';
 
@@ -15929,7 +15943,13 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         statusEl.textContent = 'Requires Input Monitoring permission. Open System Settings to grant it.';
         statusEl.classList.add('error');
       } else if (isOn) {
-        statusEl.textContent = slot === 'dictation' ? `Hold ${shortcutDisplayLabel(status.shortcut, status.keycode)} to speak, or tap for hands-free. Escape cancels.` : status.message;
+        if (slot === 'voice' && status.message.startsWith('Press ')) {
+          statusEl.textContent = `Press ${display} to start or end Voice.`;
+        } else if (slot === 'dictation') {
+          statusEl.textContent = `Hold ${display} to speak, or tap for hands-free. Escape cancels.`;
+        } else {
+          statusEl.textContent = status.message;
+        }
         statusEl.classList.remove('error');
       } else {
         const defaultMsg = {
@@ -16022,7 +16042,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         button: btn, slot,
         read: () => unifiedSlotState[slot] || { ...SLOT_DEFAULTS[slot], enabled: false },
         build: buildShortcutString,
-        label: shortcutDisplayLabel,
+        label: slot === 'voice' ? voiceShortcutDisplayLabel : shortcutDisplayLabel,
         invoke,
         update: status => updateSlotUI(slot, status),
         standardOnly: slot === "voice" || RECOVERY_SLOTS.includes(slot),
@@ -16314,6 +16334,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
         return;
       }
       if (e.key === 'Escape' && settingsOverlay.classList.contains('active')) {
+        if (document.getElementById('settings-voice-consent').open) return;
         e.preventDefault();
         e.stopPropagation();
         closeSettings();

@@ -25,7 +25,7 @@
   function render() {
     if (!settings) return;
     section.hidden = !settings.available;
-    toggle.textContent = settings.enabled ? 'On' : 'Off';
+    toggle.textContent = settings.enabled ? 'ON' : 'OFF';
     toggle.setAttribute('aria-checked', String(settings.enabled));
     toggle.classList.toggle('btn-primary', settings.enabled);
     toggle.classList.toggle('btn-secondary', !settings.enabled);

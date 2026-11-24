@@ -7322,7 +7322,7 @@
             <button id="shortcut-recorder-voice" class="btn btn-secondary btn-sm shortcut-recorder-btn settings-shortcut-key" type="button" aria-label="Change Voice shortcut">Command Option Shift V</button>
             <div class="about-controls-meta" id="shortcut-status-voice" role="status">Press the shortcut to start or end Voice.</div>
           </div>
-          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-voice" type="button" aria-label="Enable Voice shortcut">Off</button>
+          <button class="btn btn-secondary btn-sm toggle-btn" id="shortcut-toggle-voice" type="button" aria-label="Voice shortcut" aria-pressed="false">Off</button>
         </div>
         <div class="about-controls">
           <div class="about-controls-group">
@@ -15932,6 +15932,7 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       if (toggle.type === 'checkbox') toggle.checked = isOn;
       else {
         toggle.textContent = isOn ? 'On' : 'Off';
+        if (slot === 'voice') toggle.setAttribute('aria-pressed', String(isOn));
         toggle.classList.toggle('btn-primary', isOn);
         toggle.classList.toggle('btn-secondary', !isOn);
       }

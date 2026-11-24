@@ -52,6 +52,8 @@ import {
   enforceRestrictedContentPolicy,
   enrichWithFrontmatter,
   extractMarkdownSection,
+  findStaleMinutesExtension,
+  isClaudeDesktopExtension,
   getEffectiveMeetingsDir,
   getReleaseBinaryName,
   handleMcpProcessAudioRequest,
@@ -138,6 +140,7 @@ import {
   restrictedMeetingStubResult,
   restrictedContentPolicyFromEnv,
   requireAgentTrustReadiness,
+  staleExtensionGuidance,
   terminalControlBeforeContentReadiness,
   selectCopilotNudges,
   shouldRunMainEntry,
@@ -6899,5 +6902,86 @@ describe("missing engine guidance (#774)", () => {
         throw new Error("something the caller must not see");
       })
     ).rejects.toThrow("could not be verified safely");
+  });
+});
+
+describe("stale Claude Desktop extension detection (#1220)", () => {
+  const tmpRoots: string[] = [];
+  const repository = { url: "https://github.com/silverstein/minutes" };
+
+  function extensionRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), "minutes-ext-"));
+    tmpRoots.push(root);
+    return root;
+  }
+
+  function writeExtension(root: string, name: string, manifest: object | string) {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "manifest.json"),
+      typeof manifest === "string" ? manifest : JSON.stringify(manifest)
+    );
+  }
+
+  afterEach(() => {
+    while (tmpRoots.length > 0) rmSync(tmpRoots.pop()!, { recursive: true, force: true });
+  });
+
+  it("flags an installed Minutes extension older than this server", () => {
+    const root = extensionRoot();
+    writeExtension(root, "ant.dir.gh.silverstein.minutes", {
+      name: "minutes",
+      version: "0.25.1",
+      repository,
+    });
+    expect(findStaleMinutesExtension([root], "0.34.2")).toEqual({
+      version: "0.25.1",
+    });
+  });
+
+  it("ignores a same-or-newer extension and non-Minutes manifests", () => {
+    const root = extensionRoot();
+    writeExtension(root, "ant.dir.gh.silverstein.minutes", {
+      name: "minutes",
+      version: "0.34.2",
+      repository,
+    });
+    writeExtension(root, "org.other.tool", { name: "other", version: "0.1.0" });
+    expect(findStaleMinutesExtension([root], "0.34.2")).toBeNull();
+  });
+
+  it("ignores another project's extension called minutes", () => {
+    const root = extensionRoot();
+    writeExtension(root, "org.other.minutes", {
+      name: "minutes",
+      version: "0.25.1",
+      repository: { url: "https://github.com/someone-else/minutes" },
+    });
+    expect(findStaleMinutesExtension([root], "0.34.2")).toBeNull();
+  });
+
+  it("identifies bundled servers on Windows as well as macOS", () => {
+    expect(isClaudeDesktopExtension(undefined, String.raw`C:\Users\Test\AppData\Roaming\Claude\Claude Extensions\minutes`)).toBe(true);
+    expect(isClaudeDesktopExtension(undefined, "/Users/test/Claude/claude-extensions/minutes")).toBe(true);
+    expect(isClaudeDesktopExtension("minutes", "/another/extension/location")).toBe(true);
+    expect(isClaudeDesktopExtension(undefined, "/tmp/Claude Extensions backup/minutes")).toBe(false);
+  });
+
+  it("tolerates missing roots and malformed manifests", () => {
+    const root = extensionRoot();
+    writeExtension(root, "broken", "{not json");
+    mkdirSync(join(root, "empty-dir"));
+    expect(
+      findStaleMinutesExtension([join(root, "nonexistent"), root], "0.34.2")
+    ).toBeNull();
+  });
+
+  it("names the stale version, the running version, and the fix", () => {
+    const text = staleExtensionGuidance("0.25.1");
+    expect(text).toContain("v0.25.1");
+    expect(text).toMatch(/v0\.3\d+\.\d+/);
+    expect(text).toContain("Settings → Extensions");
+    expect(text).toMatch(/remove or update/i);
   });
 });

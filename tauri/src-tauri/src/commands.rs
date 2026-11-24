@@ -14993,11 +14993,11 @@ pub fn cmd_set_screen_share_hidden(
 const COPILOT_HUD_WINDOW_LABEL: &str = "copilot-hud";
 
 pub(crate) fn content_protection_for_window(label: &str, globally_hidden: bool) -> bool {
-    label == COPILOT_HUD_WINDOW_LABEL || globally_hidden
+    matches!(label, COPILOT_HUD_WINDOW_LABEL | crate::voice_hud::LABEL) || globally_hidden
 }
 
 /// Apply the user's global screen-share preference without weakening the
-/// Coach HUD. Coaching advice is always private, even when the user chooses to
+/// Coach and Voice HUDs. Their content is private, even when the user chooses to
 /// make the rest of Minutes visible for a demo or recording.
 pub(crate) fn apply_screen_share_content_protection(app: &tauri::AppHandle, globally_hidden: bool) {
     for (label, window) in app.webview_windows() {
@@ -22089,6 +22089,7 @@ pub fn cmd_start_voice(
     try_acquire_voice(&state)?;
 
     let started = (|| -> Result<(), String> {
+        let hud_generation = crate::voice_hud::open(&app)?;
         let emitter = app.clone();
         // The session can end without anyone asking it to: the socket drops,
         // the microphone stream ends, the provider closes the turn. Nothing
@@ -22122,8 +22123,9 @@ pub fn cmd_start_voice(
                 );
                 // Emit first, so a HUD sees why it closed before it sees the
                 // tray go idle.
+                let current_hud = crate::voice_hud::event(&emitter, hud_generation, &event);
                 let _ = emitter.emit("voice:event", &event);
-                if ending {
+                if ending && current_hud {
                     closed_active.store(false, Ordering::SeqCst);
                     // Post the tray sync to the main thread rather than doing it
                     // here. Tray menu setters dispatch to the main thread and
@@ -22169,6 +22171,7 @@ pub fn cmd_start_voice(
             Ok("Voice session started".into())
         }
         Err(e) => {
+            crate::voice_hud::close(&app, "Could not start Voice");
             // Never leave the slot claimed by a session that failed to open.
             state.voice_active.store(false, Ordering::SeqCst);
             crate::sync_tray_state(&app);
@@ -22228,6 +22231,7 @@ pub fn cmd_stop_voice(
         end_voice_session_off_thread(session);
     }
     crate::sync_tray_state(&app);
+    crate::voice_hud::close(&app, "Voice ended");
     Ok("Voice session ended".into())
 }
 
@@ -22652,7 +22656,7 @@ fn show_dictation_overlay(app: &tauri::AppHandle) {
     }
 }
 
-fn dictation_hud_anchor_position(
+pub(crate) fn dictation_hud_anchor_position(
     anchor: &str,
     work_x: f64,
     work_y: f64,
@@ -22703,11 +22707,19 @@ pub fn cmd_remember_dictation_hud_position(app: tauri::AppHandle) -> Result<Stri
     let window = app
         .get_webview_window("dictation-overlay")
         .ok_or_else(|| "Dictation HUD is not open".to_string())?;
+    let anchor = current_hud_anchor(&window)?;
+    let mut config = Config::load();
+    config.ui.dictation_hud_anchor = anchor.into();
+    config.save().map_err(|error| error.to_string())?;
+    Ok(anchor.into())
+}
+
+pub(crate) fn current_hud_anchor(window: &tauri::WebviewWindow) -> Result<&'static str, String> {
     let monitor = window
         .current_monitor()
         .map_err(|error| error.to_string())?
         .or_else(|| window.primary_monitor().ok().flatten())
-        .ok_or_else(|| "Could not identify the Dictation HUD monitor".to_string())?;
+        .ok_or_else(|| "Could not identify the HUD monitor".to_string())?;
     let scale = monitor.scale_factor();
     let work_area = monitor.work_area();
     let position = window.outer_position().map_err(|error| error.to_string())?;
@@ -22720,10 +22732,7 @@ pub fn cmd_remember_dictation_hud_position(app: tauri::AppHandle) -> Result<Stri
     let center_y = position.y as f64 / scale + size.height as f64 / scale / 2.0;
     let anchor =
         nearest_dictation_hud_anchor(center_x, center_y, work_x, work_y, work_width, work_height);
-    let mut config = Config::load();
-    config.ui.dictation_hud_anchor = anchor.into();
-    config.save().map_err(|error| error.to_string())?;
-    Ok(anchor.into())
+    Ok(anchor)
 }
 
 // ── Copilot Coach HUD commands ──────────────────────────────

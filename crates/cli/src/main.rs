@@ -2884,6 +2884,9 @@ fn cmd_talk(
                 }
                 return;
             }
+            if matches!(event, VoiceLiveEvent::PlaybackLevel { .. }) {
+                return;
+            }
             if json {
                 if let Ok(line) = serde_json::to_string(&event) {
                     println!("{line}");
@@ -3087,7 +3090,7 @@ fn print_voice_event(
             let flag = if *error { " (error)" } else { "" };
             println!("  <- {name} {ms} ms, {chars} chars{flag}");
         }
-        VoiceLiveEvent::Level { .. } => {}
+        VoiceLiveEvent::Level { .. } | VoiceLiveEvent::PlaybackLevel { .. } => {}
         VoiceLiveEvent::Closed { reason } => println!("[closed] {reason}"),
     }
 }

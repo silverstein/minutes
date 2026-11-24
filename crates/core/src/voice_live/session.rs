@@ -90,6 +90,9 @@ pub enum VoiceLiveEvent {
     Level {
         rms: f32,
     },
+    PlaybackLevel {
+        rms: f32,
+    },
     Closed {
         reason: String,
     },
@@ -1019,6 +1022,12 @@ impl Runner {
                             self.audio.push_pcm16(&bytes);
                             last_audio = Instant::now();
                             set_state(&self, &mut state, VoiceLiveState::Speaking);
+                            let sum = bytes.chunks_exact(2).map(|sample| {
+                                let sample = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32768.0;
+                                sample * sample
+                            }).sum::<f32>();
+                            let rms = (sum / (bytes.len() / 2).max(1) as f32).sqrt();
+                            self.emit(VoiceLiveEvent::PlaybackLevel { rms });
                         }
                         ServerEvent::InputTranscript(t) => {
                             self.log_line(serde_json::json!({"event":"input_transcript_chunk","characters":t.chars().count(),"playback_pending":playback_pending}).to_string());

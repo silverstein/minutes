@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --capture: #62BCE9;
+      --capture-surface: #28231F;
+      --capture-edge: rgba(229, 201, 174, .14);
+      --text: #E8E4DA;
+      --text-secondary: #AAA49A;
+      --text-tertiary: #716C64;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --capture: #2F6F8F;
+        --capture-surface: #EFE6D8;
+        --capture-edge: rgba(113, 79, 52, .16);
+        --text: #1A1916;
+        --text-secondary: #6F6A62;
+        --text-tertiary: #958F85;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 6px; color: var(--text); font: 13px/1.45 system-ui, sans-serif; }
+    main {
+      padding: 10px 11px; border: 1px solid var(--capture-edge);
+      border-radius: 16px; background: var(--capture-surface);
+      box-shadow: 0 2px 6px #0003; transition: opacity 150ms ease;
+    }
+    header { display: flex; align-items: center; gap: 8px; cursor: grab; min-height: 28px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--capture); flex: none; }
+    [data-state="connecting"] .dot, [data-state="closed"] .dot { background: var(--text-tertiary); }
+    [data-state="closed"] { opacity: .55; }
+    [data-state="thinking"] .dot { animation: pulse 1.7s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .42; } }
+    #phase { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px ui-monospace, monospace; color: var(--text-secondary); }
+    .actions { display: flex; gap: 4px; margin-left: auto; }
+    button {
+      font: inherit; font-size: 11px; color: var(--text); background: transparent;
+      border: 1px solid var(--capture-edge); border-radius: 7px; padding: 4px 7px;
+    }
+    button:hover { background: var(--capture-edge); }
+    button:focus-visible { outline: 2px solid var(--capture); outline-offset: 1px; }
+    #meter { display: flex; gap: 2px; align-items: center; height: 15px; visibility: hidden; }
+    [data-state="listening"] #meter, [data-state="speaking"] #meter { visibility: visible; }
+    #meter i { display: block; width: 2px; height: 12px; background: var(--capture); border-radius: 2px; transform: scaleY(.15); transition: transform 120ms ease; }
+    #preview { margin: 3px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 19px; color: var(--text-secondary); }
+    #transcript { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--capture-edge); height: 174px; overflow: auto; overflow-wrap: anywhere; }
+    #transcript p { margin: 0 0 8px; white-space: pre-wrap; user-select: text; }
+    #user { color: var(--text-secondary); }
+    [hidden] { display: none !important; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main data-state="connecting">
+    <header>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="phase" role="status">Connecting</span>
+      <div id="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="actions">
+        <button id="details" aria-controls="transcript" aria-expanded="false" type="button">Transcript</button>
+        <button id="stop" type="button">End</button>
+      </div>
+    </header>
+    <p id="preview"></p>
+    <section id="transcript" aria-label="Voice transcript" hidden>
+      <p id="user"></p>
+      <p id="reply"></p>
+    </section>
+  </main>
+  <script>
+    const { core, event, window: tauriWindow } = window.__TAURI__;
+    const hud = document.querySelector('main');
+    const phase = document.getElementById('phase');
+    const meter = document.querySelectorAll('#meter i');
+    const preview = document.getElementById('preview');
+    const transcript = document.getElementById('transcript');
+    const user = document.getElementById('user');
+    const reply = document.getElementById('reply');
+    const details = document.getElementById('details');
+    const stop = document.getElementById('stop');
+    const labels = { connecting: 'Connecting', ready: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking', closed: 'Ended' };
+    let snapshot;
+    let meterTimeout;
+    let positionTimeout;
+
+    function showStatus() {
+      if (!snapshot) return;
+      const elapsed = snapshot.toolStartedMs
+        ? ' · ' + Math.max(0, Math.floor((Date.now() - snapshot.toolStartedMs) / 1000)) + 's'
+        : '';
+      const label = snapshot.state === 'thinking' && snapshot.detail ? snapshot.detail + elapsed : labels[snapshot.state];
+      if (phase.textContent !== label) phase.textContent = label;
+    }
+
+    function render(next) {
+      if (snapshot && next.revision <= snapshot.revision) return;
+      snapshot = next;
+      hud.dataset.state = next.state;
+      showStatus();
+      user.textContent = next.user ? 'You\n' + next.user : '';
+      reply.textContent = next.reply ? 'Minutes\n' + next.reply : '';
+      preview.textContent = next.state === 'closed' ? next.detail
+        : next.state === 'listening' ? next.user : next.reply || next.user;
+      stop.disabled = details.disabled = next.state === 'closed';
+      if (next.state === 'closed') {
+        transcript.hidden = true;
+        preview.hidden = false;
+      }
+      if (!transcript.hidden) transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    details.addEventListener('click', async () => {
+      const expand = transcript.hidden;
+      details.disabled = true;
+      try {
+        await core.invoke('cmd_voice_hud_resize', { expanded: expand });
+        transcript.hidden = !expand;
+        preview.hidden = expand;
+        details.setAttribute('aria-expanded', String(expand));
+        if (expand) transcript.scrollTop = transcript.scrollHeight;
+      } catch (error) {
+        preview.textContent = String(error);
+      } finally {
+        details.disabled = snapshot?.state === 'closed';
+      }
+    });
+
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try {
+        await core.invoke('cmd_stop_voice');
+      } catch (error) {
+        preview.textContent = String(error);
+        stop.disabled = false;
+      }
+    });
+
+    const nativeWindow = tauriWindow.getCurrentWindow();
+    hud.querySelector('header').addEventListener('mousedown', async (e) => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      try {
+        await nativeWindow.startDragging();
+      } catch (error) {
+        console.error('Could not move the Voice HUD', error);
+      }
+    });
+
+    function setMeter(level) {
+      meter.forEach((bar, index) => {
+        bar.style.transform = 'scaleY(' + (level * (1 - Math.abs(index - 3) * .18)) + ')';
+      });
+    }
+
+    Promise.all([
+      nativeWindow.onMoved(() => {
+        clearTimeout(positionTimeout);
+        positionTimeout = setTimeout(() => {
+          if (snapshot?.state !== 'closed') {
+            core.invoke('cmd_remember_voice_hud_position')
+              .catch(error => console.error('Could not remember the Voice HUD position', error));
+          }
+        }, 220);
+      }),
+      event.listen('voice:hud', ({ payload }) => render(payload)),
+      event.listen('voice:hud-level', ({ payload }) => {
+        clearTimeout(meterTimeout);
+        setMeter(Math.max(.15, Math.min(1, payload * 7)));
+        meterTimeout = setTimeout(() => setMeter(.15), 180);
+      }),
+    ]).then(() => core.invoke('cmd_voice_hud_ready')).then(render)
+      .catch((error) => { preview.textContent = String(error); });
+    setInterval(showStatus, 1000);
+  </script>
+</body>
+</html>

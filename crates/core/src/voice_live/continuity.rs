@@ -210,8 +210,11 @@ impl Continuity {
                 .unwrap_or("see exact payload").into(),
             payload,
         }, self.now(), 120_000, 0)?;
-        Ok(json!({"needs_host_approval":true,"proposal_id":proposal.id,
-            "note": format!("Nothing executed or saved. Tell Mat to review the terminal block and type /approve {} in this same Terminal to run these exact details, or /reject to refuse. Voice approval or a model token cannot release it.", proposal.id)}))
+        let mut receipt = json!({"needs_host_approval":true,"proposal_id":proposal.id});
+        if operation != "ask_agent" {
+            receipt["note"] = json!(format!("Nothing executed or saved. Tell Mat to review the terminal block and type /approve {} in this same Terminal to run these exact details, or /reject to refuse. Voice approval or a model token cannot release it.", proposal.id));
+        }
+        Ok(receipt)
     }
 
     /// Called at dequeue, not when approval is merely queued. Stop/reject and

@@ -7174,6 +7174,9 @@ fn cmd_transcribe(path: &Path, output_json: bool, do_diarize: bool, config: &Con
     // result.detected_language carries the language the ASR engine identified.
     let result = minutes_core::transcribe::transcribe(path, config)
         .map_err(|e| anyhow::anyhow!("transcription failed: {}", e))?;
+    if result.text.trim().is_empty() {
+        eprintln!("No speech found ({})", result.stats.diagnosis());
+    }
 
     let output = format_transcribe_result(&result, output_json, do_diarize, config, || {
         minutes_core::diarize::diarize(path, config)

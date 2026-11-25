@@ -66,6 +66,9 @@ pub struct FilterStats {
     pub cross_source_echo_suppressed: usize,
     /// Whisper decoded audio after Sherpa could not complete dispatch.
     pub sherpa_fell_back_to_whisper: bool,
+    /// Silero ran over the whole input and found no speech, so whisper was
+    /// not run (#1417).
+    pub silero_found_no_speech: bool,
 }
 
 impl FilterStats {
@@ -78,6 +81,10 @@ impl FilterStats {
                 "cross_source_echo_suppressed: {}",
                 self.cross_source_echo_suppressed
             ));
+        }
+        if self.silero_found_no_speech {
+            parts.push("Silero VAD heard no speech, so whisper did not run".into());
+            return parts.join(", ");
         }
         if self.samples_after_silence_strip == 0 {
             parts.push("silence strip removed ALL audio".into());
@@ -1699,6 +1706,53 @@ fn correlate_sherpa_segments(
 #[cfg(any(feature = "whisper", test))]
 type WhisperSegData = (f64, f64, String, Vec<crate::word_timing::WordTiming>);
 
+/// Silero's speech threshold for a second pass when the default (0.5) hears
+/// nothing, so a quiet voice is not lost. Whisper still decodes only what
+/// this pass calls speech, never the whole file.
+#[cfg(feature = "whisper")]
+const SILERO_LOW_THRESHOLD: f32 = 0.25;
+
+/// Run Silero over `samples` with whisper.cpp's default VAD parameters, and
+/// again at [`SILERO_LOW_THRESHOLD`] if that hears nothing, and return the
+/// speech-only audio with the way back to the input clock (#1417).
+/// `Ok(None)` means no speech at either threshold; `Err` means the VAD could
+/// not run.
+#[cfg(feature = "whisper")]
+fn silero_speech_gate(
+    vad_path: &Path,
+    samples: &[f32],
+) -> Result<Option<crate::speech_gate::SpeechGate>, String> {
+    let path = vad_path
+        .to_str()
+        .ok_or_else(|| "VAD model path is not UTF-8".to_string())?;
+    let mut vad =
+        whisper_rs::WhisperVadContext::new(path, whisper_rs::WhisperVadContextParams::default())
+            .map_err(|error| format!("load VAD model: {error}"))?;
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
+    for threshold in [None, Some(SILERO_LOW_THRESHOLD)] {
+        let mut params = whisper_rs::WhisperVadParams::default();
+        if let Some(threshold) = threshold {
+            params.set_threshold(threshold);
+        }
+        let speech = vad
+            .segments_from_samples(params, samples)
+            .map_err(|error| format!("detect speech: {error}"))?;
+        ranges = speech
+            .map(|segment| (segment.start as i64, segment.end as i64))
+            .collect();
+        if !ranges.is_empty() {
+            if threshold.is_some() {
+                tracing::info!(
+                    stretches = ranges.len(),
+                    "Silero heard speech only at its low threshold"
+                );
+            }
+            break;
+        }
+    }
+    Ok(crate::speech_gate::gate(samples, &ranges))
+}
+
 /// Reads word timings out of a finished whisper pass (#1413).
 ///
 /// Token times are on the same clock as segment times (see
@@ -1718,9 +1772,9 @@ struct WhisperWordClock {
 
 #[cfg(feature = "whisper")]
 impl WhisperWordClock {
-    /// The words of one segment, or none when they cannot be trusted.
-    /// `start_cs`/`end_cs` are whisper's segment times; `text` is the trimmed
-    /// segment text.
+    /// The words of one segment on the decoded clock, or none when they
+    /// cannot be trusted. `start_cs`/`end_cs` are whisper's segment times;
+    /// `text` is the trimmed segment text.
     fn segment_words(
         &mut self,
         segment: &whisper_rs::WhisperSegment<'_>,
@@ -1936,9 +1990,10 @@ fn transcribe_whisper_samples_on_clock(
     #[cfg(not(feature = "denoise"))]
     let samples = samples.to_vec();
 
-    // If Silero VAD model is available, whisper handles silence internally via
-    // integrated VAD (set in default_whisper_params). Otherwise, fall back to
-    // energy-based silence stripping to prevent hallucination loops (issue #21).
+    // With a Silero model, a whole-file call is gated to speech by Minutes
+    // (`silero_speech_gate`, #1417); a decode group is already speech the
+    // meeting VAD picked. Without one, energy-based silence stripping keeps
+    // whisper out of long silence (issue #21).
     let use_integrated_vad = resolve_vad_model_path(config).is_some();
 
     let prefix_samples = source_clock_prefix_samples(&samples, hints);
@@ -1961,15 +2016,27 @@ fn transcribe_whisper_samples_on_clock(
     if hints.preserve_source_timeline && samples.len() < 16_000 {
         samples.resize(16_000, 0.0);
     }
-    let mut result =
-        transcribe_with_whisper(ctx, &samples, audio_path, config, stats, false, hints)?;
+    // Silero gates whole-file calls only (#1417). A meeting decode group is
+    // already speech picked by the meeting VAD, and a source-timeline call
+    // keeps every sample where it is.
+    let gate_speech = clock == CallClock::Stripped && !hints.preserve_source_timeline;
+    let mut result = transcribe_with_whisper(
+        ctx,
+        &samples,
+        audio_path,
+        config,
+        stats,
+        !gate_speech,
+        hints,
+    )?;
 
-    // Auto-retry without VAD if the first attempt blanked on long audio.
-    // Silero VAD can be too aggressive on certain acoustic profiles or non-English
-    // audio, causing whisper to see almost no speech segments. Retrying with
-    // energy-based silence stripping gives whisper the full audio.
+    // Auto-retry without Silero if whisper blanked on long gated audio: the
+    // gate may have cut speech whisper needed. When Silero heard no speech
+    // even at its low threshold there is nothing to retry: decoding the whole
+    // file would only let whisper invent text from the noise (#1417).
     if result.stats.final_words == 0
         && use_integrated_vad
+        && !result.stats.silero_found_no_speech
         && result.stats.audio_duration_secs > 60.0
     {
         tracing::warn!(
@@ -1977,14 +2044,14 @@ fn transcribe_whisper_samples_on_clock(
             raw_segments = result.stats.raw_segments,
             "blank transcript from long audio with VAD — retrying without VAD"
         );
-        let mut retry_stats = FilterStats {
-            audio_duration_secs: result.stats.audio_duration_secs,
-            ..Default::default()
-        };
         let (retry_samples, retry_stripped) =
             prepare_whisper_samples_with_map(samples.clone(), false, hints);
-        retry_stats.samples_after_silence_strip = retry_samples.len();
         if !retry_samples.is_empty() {
+            let retry_stats = FilterStats {
+                audio_duration_secs: result.stats.audio_duration_secs,
+                samples_after_silence_strip: retry_samples.len(),
+                ..Default::default()
+            };
             result = transcribe_with_whisper(
                 ctx,
                 &retry_samples,
@@ -1995,6 +2062,13 @@ fn transcribe_whisper_samples_on_clock(
                 hints,
             )?;
             stripped = retry_stripped;
+            // A gated call answers on the input clock; its retry must too,
+            // whatever clock the caller asked for.
+            if gate_speech {
+                if let Some(runs) = stripped.take() {
+                    restore_stripped_clock(&mut result, &runs);
+                }
+            }
         }
     }
 
@@ -2141,8 +2215,44 @@ fn transcribe_with_whisper(
     };
     crate::process_trace::update_vad_enabled(vad_path.is_some());
     crate::process_trace::stage("whisper.vad_setup.done");
-    let vad_path_str = vad_path.as_ref().and_then(|p| p.to_str());
-    let mut params = default_whisper_params(vad_path_str);
+    // whisper-rs `full` never applies `params.vad` (#1417), so Minutes gates
+    // speech itself and never asks whisper to.
+    let gate = match vad_path.as_deref() {
+        Some(path) => match silero_speech_gate(path, samples) {
+            Ok(Some(gate)) => {
+                tracing::info!(
+                    input_secs = format!("{:.1}", samples.len() as f64 / 16_000.0),
+                    speech_secs = format!("{:.1}", gate.speech_secs()),
+                    decoded_secs = format!("{:.1}", gate.samples.len() as f64 / 16_000.0),
+                    "Silero VAD gating whisper to speech"
+                );
+                Some(gate)
+            }
+            Ok(None) => {
+                // whisper.cpp's own VAD returns no segments in this case.
+                tracing::info!(
+                    input_secs = format!("{:.1}", samples.len() as f64 / 16_000.0),
+                    "Silero VAD found no speech; whisper not run"
+                );
+                stats.silero_found_no_speech = true;
+                return Ok(TranscribeResult {
+                    text: String::new(),
+                    stats,
+                    segments: Vec::new(),
+                    detected_language: None,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Silero VAD unavailable; transcribing without speech gating");
+                None
+            }
+        },
+        None => None,
+    };
+    let decode_samples: &[f32] = gate
+        .as_ref()
+        .map_or(samples, |gate| gate.samples.as_slice());
+    let mut params = default_whisper_params(None);
     params.set_n_threads(num_cpus());
     params.set_language(config.transcription.language.as_deref());
     params.set_token_timestamps(true);
@@ -2173,7 +2283,7 @@ fn transcribe_with_whisper(
         "whisper.full.start",
         serde_json::json!({"stall_limit_secs": WHISPER_PROGRESS_STALL_LIMIT.as_secs()}),
     );
-    state.full(params, samples).map_err(|e| {
+    state.full(params, decode_samples).map_err(|e| {
         let msg = format!("{}", e);
         if msg.contains("abort") {
             TranscribeError::TranscriptionFailed(format!(
@@ -2215,8 +2325,17 @@ fn transcribe_with_whisper(
             None => continue,
         };
 
-        let start_ts = segment.start_timestamp();
-        let end_ts = segment.end_timestamp();
+        // Whisper times are on the decoded clock: the gated speech when
+        // Silero ran, else the input.
+        let decoded_start = segment.start_timestamp();
+        let decoded_end = segment.end_timestamp();
+        let (start_secs, end_secs) = match gate.as_ref() {
+            Some(gate) => {
+                gate.place_segment(decoded_start as f64 / 100.0, decoded_end as f64 / 100.0)
+            }
+            None => (decoded_start as f64 / 100.0, decoded_end as f64 / 100.0),
+        };
+        let start_ts = (start_secs * 100.0).round() as i64;
         let text = segment
             .to_str_lossy()
             .map_err(|e| TranscribeError::TranscriptionFailed(format!("get text: {}", e)))?;
@@ -2230,10 +2349,14 @@ fn transcribe_with_whisper(
         let secs = (start_ts % 6000) / 100;
         let line = format!("[{}:{:02}] {}", mins, secs, text);
 
-        // Centiseconds → seconds (centisecond precision)
-        let start_secs = start_ts as f64 / 100.0;
-        let end_secs = end_ts as f64 / 100.0;
-        let words = word_clock.segment_words(&segment, token_eot, start_ts, end_ts, text);
+        let mut words =
+            word_clock.segment_words(&segment, token_eot, decoded_start, decoded_end, text);
+        if let Some(gate) = gate.as_ref() {
+            for word in &mut words {
+                (word.start, word.end) =
+                    gate.place_word(word.start, word.end, (start_secs, end_secs));
+            }
+        }
         let seg_tuple = (start_secs, end_secs, text.to_string(), words);
 
         // Layer 3: Skip segments with high no_speech probability (likely hallucination)
@@ -6776,6 +6899,20 @@ Hello there.
     }
 
     #[test]
+    fn diagnosis_says_when_silero_heard_no_speech() {
+        let stats = FilterStats {
+            audio_duration_secs: 90.0,
+            samples_after_silence_strip: 16_000 * 90,
+            silero_found_no_speech: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats.diagnosis(),
+            "audio: 90.0s, Silero VAD heard no speech, so whisper did not run"
+        );
+    }
+
+    #[test]
     fn diagnosis_shows_rescue_when_all_segments_would_be_filtered() {
         let stats = FilterStats {
             audio_duration_secs: 2585.0,
@@ -6792,6 +6929,7 @@ Hello there.
             final_words: 5,
             cross_source_echo_suppressed: 0,
             sherpa_fell_back_to_whisper: false,
+            silero_found_no_speech: false,
         };
         let d = stats.diagnosis();
         assert!(
@@ -6828,6 +6966,7 @@ Hello there.
             final_words: 500,
             cross_source_echo_suppressed: 0,
             sherpa_fell_back_to_whisper: false,
+            silero_found_no_speech: false,
         };
         let d = stats.diagnosis();
         assert!(

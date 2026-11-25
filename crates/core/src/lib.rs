@@ -225,6 +225,8 @@ pub mod sherpa_engine;
 /// so default builds carry no loader at all.
 #[cfg(feature = "engine-sherpa")]
 pub mod sherpa_plugin;
+#[cfg(any(feature = "whisper", test))]
+pub(crate) mod speech_gate;
 pub(crate) mod stem_probe;
 pub mod stem_recovery;
 /// Incremental reader for stems that are still being written (#576).

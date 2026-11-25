@@ -248,6 +248,7 @@ pub(crate) fn merge_sources(
         final_words,
         cross_source_echo_suppressed,
         sherpa_fell_back_to_whisper: a.sherpa_fell_back_to_whisper || b.sherpa_fell_back_to_whisper,
+        silero_found_no_speech: a.silero_found_no_speech && b.silero_found_no_speech,
     };
     let detected_language = match (voice.detected_language, system.detected_language) {
         (Some(a), Some(b)) if a == b => Some(a),

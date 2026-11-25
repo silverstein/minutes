@@ -485,6 +485,16 @@ as multiple or inconsistent speakers.
 
 **tmux users:** tmux server runs as a separate process that doesn't inherit your terminal's mic permission. Either run `minutes record` from a direct terminal window (not inside tmux), or use the Minutes.app desktop bundle which gets its own mic permission.
 
+**`minutes record` says "already recording" after a crash:**
+If a previous recording was interrupted (crash, power loss, killed terminal), its capture files still occupy `~/.minutes`. Preserve them under a `recovered-<id>` prefix — audio, notes, context, and consent sidecars all move together — then start fresh:
+
+```bash
+minutes record --recover   # archive the interrupted session
+minutes record             # start a new recording
+```
+
+The recovered files can be processed later with `minutes process ~/.minutes/recovered-<id>.wav`. To discard them instead, delete the `~/.minutes/current*.wav` files and retry.
+
 **Build fails with C++ errors on macOS 26+:**
 whisper.cpp needs the SDK include path. Set `CXXFLAGS` as shown above before building.
 

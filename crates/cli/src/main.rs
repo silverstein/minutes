@@ -398,7 +398,8 @@ enum Commands {
         #[arg(long, value_name = "WAV_FILE")]
         diagnose: Option<PathBuf>,
 
-        /// Preserve an interrupted recording under a new filename without starting capture.
+        /// Preserve an interrupted recording — audio, notes, and context —
+        /// under a new filename without starting capture.
         #[arg(long, conflicts_with = "diagnose")]
         recover: bool,
 

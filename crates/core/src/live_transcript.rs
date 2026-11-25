@@ -360,6 +360,72 @@ static SIDECAR_SKIPPED_UTTERANCES: std::sync::atomic::AtomicU64 =
 /// than a silent engine failure: 30 s of 16 kHz samples.
 const SIDECAR_SUMMARY_SPEECH_SAMPLES_FLOOR: usize = 16_000 * 30;
 
+/// What the recording sidecar observed over one session, for its end summary.
+#[derive(Debug, Clone, Copy)]
+struct SidecarEndCounts {
+    lines: usize,
+    speech_detected: bool,
+    skipped_utterances: u64,
+    dropped_utterances: u64,
+    whisper_failures: u64,
+}
+
+/// Level and message for the `live_sidecar_ended` log, naming the most likely
+/// cause when the session produced fewer lines than its speech warranted.
+///
+/// A model that never loaded is checked first: it skips every utterance, and
+/// "no lines despite detected speech" alone sent users looking at their
+/// microphone instead of their `live_transcript.model` setting (#967).
+fn sidecar_end_summary(counts: SidecarEndCounts) -> (&'static str, String) {
+    let SidecarEndCounts {
+        lines,
+        speech_detected,
+        skipped_utterances,
+        dropped_utterances,
+        whisper_failures,
+    } = counts;
+    if skipped_utterances > 0 {
+        let outcome = if lines == 0 {
+            "ended with no lines"
+        } else {
+            "ended with missing lines"
+        };
+        return (
+            "warn",
+            format!(
+                "live transcript sidecar {outcome}: {skipped_utterances} utterance(s) were skipped \
+                 because the live transcript model could not be loaded. Live transcription uses \
+                 live_transcript.model, or the dictation model when that is empty (not \
+                 transcription.model); download it or point live_transcript.model at a model \
+                 you already have"
+            ),
+        );
+    }
+    if lines == 0 && speech_detected {
+        let cause = if whisper_failures > 0 {
+            format!("transcription failed on {whisper_failures} utterance(s)")
+        } else if dropped_utterances > 0 {
+            format!(
+                "{dropped_utterances} utterance(s) were dropped because transcription could not keep up"
+            )
+        } else {
+            "the model returned no text for any utterance".to_string()
+        };
+        return (
+            "warn",
+            format!("live transcript sidecar ended with no lines despite detected speech: {cause}"),
+        );
+    }
+    if dropped_utterances > 0 {
+        return (
+            "warn",
+            "live transcript sidecar ended; some utterances were dropped because transcription could not keep up"
+                .to_string(),
+        );
+    }
+    ("info", "live transcript sidecar ended".to_string())
+}
+
 #[cfg(all(feature = "whisper", target_os = "macos"))]
 fn emit_apple_speech_fallback_warning(source: &'static str, detail: &str) {
     eprintln!(
@@ -4020,22 +4086,19 @@ fn run_sidecar_inner_mpsc(
         "live sidecar ended (recording mode)"
     );
     let dropped_utterances = queue_counters.dropped.load(Ordering::Relaxed);
-    let no_output_despite_speech =
-        lines == 0 && speech_samples_total >= SIDECAR_SUMMARY_SPEECH_SAMPLES_FLOOR;
+    let skipped_utterances = SIDECAR_SKIPPED_UTTERANCES.load(Ordering::Relaxed);
+    let whisper_failures = crate::streaming_whisper::failure_count();
+    let (summary_level, summary_message) = sidecar_end_summary(SidecarEndCounts {
+        lines,
+        speech_detected: speech_samples_total >= SIDECAR_SUMMARY_SPEECH_SAMPLES_FLOOR,
+        skipped_utterances,
+        dropped_utterances,
+        whisper_failures,
+    });
     persist_sidecar_log(
-        if no_output_despite_speech || dropped_utterances > 0 {
-            "warn"
-        } else {
-            "info"
-        },
+        summary_level,
         "live_sidecar_ended",
-        if no_output_despite_speech {
-            "live transcript sidecar ended with no lines despite detected speech"
-        } else if dropped_utterances > 0 {
-            "live transcript sidecar ended; some utterances were dropped because transcription could not keep up"
-        } else {
-            "live transcript sidecar ended"
-        },
+        &summary_message,
         serde_json::json!({
             "lines": lines,
             "duration_secs": format!("{:.1}", duration),
@@ -4044,8 +4107,8 @@ fn run_sidecar_inner_mpsc(
             "silence_windows": gating_stats.silence_windows,
             "speech_secs": speech_samples_total / 16_000,
             "dropped_utterances": dropped_utterances,
-            "skipped_utterances": SIDECAR_SKIPPED_UTTERANCES.load(Ordering::Relaxed),
-            "whisper_failures": crate::streaming_whisper::failure_count(),
+            "skipped_utterances": skipped_utterances,
+            "whisper_failures": whisper_failures,
             "samples_fed": gating_stats.samples_fed,
             "samples_gated": gating_stats.samples_gated,
             "input_progress": progress.snapshot(),
@@ -6588,6 +6651,98 @@ mod tests {
                 message.contains("audio feeder disconnected while recording was still active")
             }));
         });
+    }
+
+    fn end_counts() -> SidecarEndCounts {
+        SidecarEndCounts {
+            lines: 0,
+            speech_detected: true,
+            skipped_utterances: 0,
+            dropped_utterances: 0,
+            whisper_failures: 0,
+        }
+    }
+
+    #[test]
+    fn sidecar_end_summary_names_an_unloaded_model_first() {
+        let (level, message) = sidecar_end_summary(SidecarEndCounts {
+            skipped_utterances: 42,
+            dropped_utterances: 3,
+            whisper_failures: 1,
+            ..end_counts()
+        });
+        assert_eq!(level, "warn");
+        assert!(message.contains("ended with no lines"), "{message}");
+        assert!(
+            message.contains("42 utterance(s) were skipped"),
+            "{message}"
+        );
+        assert!(message.contains("could not be loaded"), "{message}");
+        assert!(message.contains("live_transcript.model"), "{message}");
+        assert!(!message.contains("despite detected speech"), "{message}");
+    }
+
+    #[test]
+    fn sidecar_end_summary_reports_partial_skips_even_with_some_lines() {
+        let (level, message) = sidecar_end_summary(SidecarEndCounts {
+            lines: 5,
+            skipped_utterances: 2,
+            ..end_counts()
+        });
+        assert_eq!(level, "warn");
+        assert!(message.contains("ended with missing lines"), "{message}");
+    }
+
+    #[test]
+    fn sidecar_end_summary_explains_empty_sessions_by_cause() {
+        let (_, failed) = sidecar_end_summary(SidecarEndCounts {
+            whisper_failures: 7,
+            dropped_utterances: 2,
+            ..end_counts()
+        });
+        assert!(
+            failed.ends_with("transcription failed on 7 utterance(s)"),
+            "{failed}"
+        );
+
+        let (_, dropped) = sidecar_end_summary(SidecarEndCounts {
+            dropped_utterances: 2,
+            ..end_counts()
+        });
+        assert!(dropped.contains("2 utterance(s) were dropped"), "{dropped}");
+
+        let (level, empty) = sidecar_end_summary(end_counts());
+        assert_eq!(level, "warn");
+        assert!(
+            empty.ends_with("the model returned no text for any utterance"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn sidecar_end_summary_stays_quiet_for_healthy_or_quiet_sessions() {
+        let healthy = sidecar_end_summary(SidecarEndCounts {
+            lines: 12,
+            ..end_counts()
+        });
+        assert_eq!(
+            healthy,
+            ("info", "live transcript sidecar ended".to_string())
+        );
+
+        let quiet_room = sidecar_end_summary(SidecarEndCounts {
+            speech_detected: false,
+            ..end_counts()
+        });
+        assert_eq!(quiet_room.0, "info");
+
+        let (level, behind) = sidecar_end_summary(SidecarEndCounts {
+            lines: 12,
+            dropped_utterances: 1,
+            ..end_counts()
+        });
+        assert_eq!(level, "warn");
+        assert!(behind.contains("could not keep up"), "{behind}");
     }
 
     #[cfg(feature = "whisper")]

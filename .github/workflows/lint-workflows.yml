@@ -28,6 +28,9 @@ jobs:
       - name: Check runner context expressions
         run: node scripts/check_workflow_runner_context.mjs
 
+      - name: Check community alert formatting
+        run: node scripts/community_alerts.mjs --self-test
+
       - name: Check signed acceptance trust boundary
         run: |
           node scripts/check_signed_acceptance_policy.mjs

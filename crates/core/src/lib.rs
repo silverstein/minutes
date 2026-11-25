@@ -248,6 +248,7 @@ pub mod voice;
 #[cfg(feature = "voice-live")]
 pub mod voice_live;
 pub mod watch;
+pub mod word_timing;
 
 // Streaming audio API (for Prompter and other real-time consumers)
 #[cfg(feature = "streaming")]

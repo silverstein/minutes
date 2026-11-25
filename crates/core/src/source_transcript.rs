@@ -405,12 +405,14 @@ mod tests {
             start: 2.8,
             end: 3.0,
             text: "local".into(),
+            words: Vec::new(),
         });
         let mut system = result("[0:02] remote\n", 4.0);
         system.segments.push(TranscriptSegment {
             start: 2.1,
             end: 2.5,
             text: "remote".into(),
+            words: Vec::new(),
         });
         let (merged, _) = merge_sources(voice, system);
         assert_eq!(
@@ -433,11 +435,13 @@ mod tests {
                 start: 1.0,
                 end: 1.6,
                 text: "hello".into(),
+                words: Vec::new(),
             },
             TranscriptSegment {
                 start: 10.9,
                 end: 11.4,
                 text: "local".into(),
+                words: Vec::new(),
             },
         ];
         let mut system = result("[0:10] remote\n", 12.0);
@@ -445,6 +449,7 @@ mod tests {
             start: 10.2,
             end: 10.6,
             text: "remote".into(),
+            words: Vec::new(),
         });
         let (merged, _) = merge_sources(voice, system);
         assert_eq!(
@@ -577,6 +582,7 @@ mod tests {
                 start: *start,
                 end: *end,
                 text: (*text).into(),
+                words: Vec::new(),
             })
             .collect();
         result

@@ -13002,6 +13002,7 @@ mod tests {
                 start: 0.0,
                 end: 4.0,
                 text: "Our sok 2 audit.".into(),
+                words: Vec::new(),
             }],
             detected_language: None,
         };

@@ -152,6 +152,9 @@ pub struct TranscriptSegment {
     pub end: f64,
     /// Segment text, without any `[m:ss]` timestamp prefix.
     pub text: String,
+    /// Word spans on the same clock as `start`/`end`, when the engine gave
+    /// trustworthy ones (#1413). Empty means unknown, never "no words".
+    pub words: Vec<crate::word_timing::WordTiming>,
 }
 
 /// Result from the transcription pipeline, including filter diagnostics.
@@ -296,6 +299,12 @@ fn restore_stripped_clock(result: &mut TranscribeResult, runs: &[whisper_guard::
     for segment in &mut result.segments {
         segment.start = input_secs(segment.start);
         segment.end = input_secs(segment.end);
+        // Each word on its own: a segment can span a stripped pause, and a
+        // word after it must land after the restored pause.
+        for word in &mut segment.words {
+            word.start = input_secs(word.start);
+            word.end = input_secs(word.end);
+        }
     }
     if !lines.is_empty() {
         result.text = format!("{}\n", lines.join("\n"));
@@ -325,6 +334,10 @@ fn restore_source_clock(result: &mut TranscribeResult, offset: f64) {
     for segment in &mut result.segments {
         segment.start += offset;
         segment.end += offset;
+        for word in &mut segment.words {
+            word.start += offset;
+            word.end += offset;
+        }
     }
     let lines: Vec<_> = result.text.lines().collect();
     // Prefer exact timings over adding an offset to an already rounded label.
@@ -1674,10 +1687,118 @@ fn correlate_sherpa_segments(
             start: *start,
             end: *end,
             text: text.clone(),
+            words: Vec::new(),
         });
         si += found + 1;
     }
     result
+}
+
+/// One whisper segment before cleanup: `(start_secs, end_secs, clean_text,
+/// words)`.
+#[cfg(any(feature = "whisper", test))]
+type WhisperSegData = (f64, f64, String, Vec<crate::word_timing::WordTiming>);
+
+/// Reads word timings out of a finished whisper pass (#1413).
+///
+/// Token times are on the same clock as segment times (see
+/// [`crate::word_timing`]). Every segment is checked: whisper sets a
+/// segment's last token to end at the segment's end, so the two must agree
+/// exactly. One miss means token times are on another clock, and
+/// [`Self::finish`] drops every word of the call. Words never change the
+/// transcript; only attribution reads them.
+#[cfg(feature = "whisper")]
+#[derive(Default)]
+struct WhisperWordClock {
+    segments: usize,
+    with_words: usize,
+    text_mismatches: usize,
+    clock_mismatches: usize,
+}
+
+#[cfg(feature = "whisper")]
+impl WhisperWordClock {
+    /// The words of one segment, or none when they cannot be trusted.
+    /// `start_cs`/`end_cs` are whisper's segment times; `text` is the trimmed
+    /// segment text.
+    fn segment_words(
+        &mut self,
+        segment: &whisper_rs::WhisperSegment<'_>,
+        token_eot: whisper_rs::WhisperTokenId,
+        start_cs: i64,
+        end_cs: i64,
+        text: &str,
+    ) -> Vec<crate::word_timing::WordTiming> {
+        use crate::word_timing::{words_from_tokens, words_match_text, RawToken, WordTiming};
+        self.segments += 1;
+        let mut tokens = Vec::new();
+        let mut last_t1 = None;
+        for index in 0..segment.n_tokens() {
+            let Some(token) = segment.get_token(index) else {
+                continue;
+            };
+            let data = token.token_data();
+            last_t1 = Some(data.t1);
+            if data.id >= token_eot {
+                continue;
+            }
+            let Ok(bytes) = token.to_bytes() else {
+                continue;
+            };
+            tokens.push(RawToken {
+                bytes: bytes.to_vec(),
+                t0: data.t0,
+                t1: data.t1,
+            });
+        }
+        let Some(last_t1) = last_t1 else {
+            return Vec::new();
+        };
+        if last_t1 != end_cs {
+            self.clock_mismatches += 1;
+            return Vec::new();
+        }
+        let words: Vec<WordTiming> = words_from_tokens(&tokens)
+            .into_iter()
+            .map(|(t0, t1, text)| {
+                let start = t0.clamp(start_cs, end_cs);
+                let end = t1.clamp(start, end_cs);
+                WordTiming {
+                    start: start as f64 / 100.0,
+                    end: end as f64 / 100.0,
+                    text,
+                }
+            })
+            .collect();
+        if !words_match_text(&words, text) {
+            self.text_mismatches += 1;
+            return Vec::new();
+        }
+        self.with_words += 1;
+        words
+    }
+
+    /// Drop every word when any segment failed the clock check, and log
+    /// coverage either way.
+    fn finish(&self, kept: &mut [WhisperSegData], rescued: &mut [WhisperSegData]) {
+        if self.clock_mismatches > 0 {
+            for segment in kept.iter_mut().chain(rescued.iter_mut()) {
+                segment.3.clear();
+            }
+            tracing::warn!(
+                segments = self.segments,
+                clock_mismatches = self.clock_mismatches,
+                "word timings dropped: token times are not on the segment clock"
+            );
+            return;
+        }
+        tracing::info!(
+            segments = self.segments,
+            with_words = self.with_words,
+            text_mismatches = self.text_mismatches,
+            "word timings collected"
+        );
+    }
 }
 
 /// Correlate cleanup-surviving whisper lines back to raw segment timing data.
@@ -1692,7 +1813,7 @@ fn correlate_sherpa_segments(
 fn correlate_whisper_segments(
     cleanup_lines: &[String],
     all_lines: &[String],
-    seg_data: &[(f64, f64, String)],
+    seg_data: &[WhisperSegData],
 ) -> Vec<TranscriptSegment> {
     let mut si = 0usize;
     let mut result = Vec::new();
@@ -1700,11 +1821,12 @@ fn correlate_whisper_segments(
         let Some(found) = all_lines[si..].iter().position(|line| line == cleaned) else {
             continue;
         };
-        let (start, end, text) = &seg_data[si + found];
+        let (start, end, text, words) = &seg_data[si + found];
         result.push(TranscriptSegment {
             start: *start,
             end: *end,
             text: text.clone(),
+            words: words.clone(),
         });
         si += found + 1;
     }
@@ -2071,6 +2193,9 @@ fn transcribe_with_whisper(
     let num_segments = state.full_n_segments();
     stats.raw_segments = num_segments as usize;
 
+    let mut word_clock = WhisperWordClock::default();
+    let token_eot = ctx.token_eot();
+
     // Collect segments, filtering by no_speech probability.
     // We keep two lists: filtered (normal path) and rescued (all segments with text).
     // If the filter would produce 0 lines, we rescue the unfiltered segments instead
@@ -2080,9 +2205,9 @@ fn transcribe_with_whisper(
     // that after whisper-guard cleanup we can correlate surviving lines back to their
     // real centisecond-precision timestamps without re-parsing the [m:ss] prefix.
     let mut lines: Vec<String> = Vec::new();
-    let mut seg_data: Vec<(f64, f64, String)> = Vec::new(); // parallel to lines
+    let mut seg_data: Vec<WhisperSegData> = Vec::new(); // parallel to lines
     let mut rescued_lines: Vec<String> = Vec::new();
-    let mut rescued_seg_data: Vec<(f64, f64, String)> = Vec::new(); // parallel to rescued_lines
+    let mut rescued_seg_data: Vec<WhisperSegData> = Vec::new(); // parallel to rescued_lines
     let mut skipped_no_speech = 0u32;
     for i in 0..num_segments {
         let segment = match state.get_segment(i) {
@@ -2108,7 +2233,8 @@ fn transcribe_with_whisper(
         // Centiseconds → seconds (centisecond precision)
         let start_secs = start_ts as f64 / 100.0;
         let end_secs = end_ts as f64 / 100.0;
-        let seg_tuple = (start_secs, end_secs, text.to_string());
+        let words = word_clock.segment_words(&segment, token_eot, start_ts, end_ts, text);
+        let seg_tuple = (start_secs, end_secs, text.to_string(), words);
 
         // Layer 3: Skip segments with high no_speech probability (likely hallucination)
         let no_speech_prob = segment.no_speech_probability();
@@ -2129,6 +2255,8 @@ fn transcribe_with_whisper(
         lines.push(line);
         seg_data.push(seg_tuple);
     }
+
+    word_clock.finish(&mut seg_data, &mut rescued_seg_data);
 
     // Rescue: if ALL segments were filtered out but some had text, keep them.
     // This prevents blank transcripts from long recordings where the no_speech
@@ -5502,13 +5630,59 @@ mod tests {
                 start: 0.75,
                 end: 1.5,
                 text: "yes".into(),
+                words: Vec::new(),
             }],
             detected_language: None,
         };
+        result.segments[0].words = vec![crate::word_timing::WordTiming {
+            start: 0.8,
+            end: 1.4,
+            text: "yes".into(),
+        }];
         restore_source_clock(&mut result, 4.5);
         assert_eq!(result.text, "[0:05] yes\n");
         assert_eq!(result.segments[0].start, 5.25);
         assert_eq!(result.segments[0].end, 6.0);
+        let word = &result.segments[0].words[0];
+        assert_eq!((word.start, word.end), (5.3, 5.9));
+    }
+
+    #[test]
+    fn the_stripped_clock_is_restored_for_each_word_across_a_cut() {
+        // Output 0-1 s is input 0-1 s; output 1.3 s onward is input 61 s
+        // onward. One segment spans the cut.
+        let runs = [
+            whisper_guard::audio::KeptRun {
+                output_start: 0,
+                input_start: 0,
+                len: 16_000,
+            },
+            whisper_guard::audio::KeptRun {
+                output_start: 20_800,
+                input_start: 61 * 16_000,
+                len: 5 * 16_000,
+            },
+        ];
+        let word = |start: f64, end: f64, text: &str| crate::word_timing::WordTiming {
+            start,
+            end,
+            text: text.into(),
+        };
+        let mut result = TranscribeResult {
+            text: "[0:00] before after\n".into(),
+            stats: FilterStats::default(),
+            segments: vec![TranscriptSegment {
+                start: 0.5,
+                end: 1.8,
+                text: "before after".into(),
+                words: vec![word(0.5, 0.9, "before"), word(1.3, 1.8, "after")],
+            }],
+            detected_language: None,
+        };
+        restore_stripped_clock(&mut result, &runs);
+        let words = &result.segments[0].words;
+        assert_eq!((words[0].start, words[0].end), (0.5, 0.9));
+        assert_eq!((words[1].start, words[1].end), (61.0, 61.5));
     }
 
     /// A result as `transcribe_with_whisper` makes it from raw segments
@@ -5521,9 +5695,9 @@ mod tests {
                 format!("[{}:{:02}] {}", secs / 60, secs % 60, text)
             })
             .collect();
-        let seg_data: Vec<(f64, f64, String)> = raw
+        let seg_data: Vec<WhisperSegData> = raw
             .iter()
-            .map(|(start, end, text)| (*start, *end, text.to_string()))
+            .map(|(start, end, text)| (*start, *end, text.to_string(), Vec::new()))
             .collect();
         let cleanup = run_transcript_cleanup_pipeline(lines.clone());
         let segments = correlate_whisper_segments(&cleanup.lines, &lines, &seg_data);
@@ -5603,11 +5777,13 @@ mod tests {
                     start: 2.4,
                     end: 4.0,
                     text: "first".into(),
+                    words: Vec::new(),
                 },
                 TranscriptSegment {
                     start: 9.7,
                     end: 12.0,
                     text: "last".into(),
+                    words: Vec::new(),
                 },
             ],
             detected_language: None,
@@ -5710,11 +5886,13 @@ mod tests {
                     start: 0.25,
                     end: 0.9,
                     text: "one".into(),
+                    words: Vec::new(),
                 },
                 TranscriptSegment {
                     start: 3.8,
                     end: 5.3,
                     text: "two".into(),
+                    words: Vec::new(),
                 },
             ],
             detected_language: None,

@@ -82,6 +82,10 @@ impl FilterStats {
                 self.cross_source_echo_suppressed
             ));
         }
+        if self.silero_found_no_speech {
+            parts.push("Silero VAD heard no speech, so whisper did not run".into());
+            return parts.join(", ");
+        }
         if self.samples_after_silence_strip == 0 {
             parts.push("silence strip removed ALL audio".into());
             return parts.join(", ");
@@ -6892,6 +6896,20 @@ Hello there.
             parsed[1],
             Err(TranscribeError::EmptyTranscript(_))
         ));
+    }
+
+    #[test]
+    fn diagnosis_says_when_silero_heard_no_speech() {
+        let stats = FilterStats {
+            audio_duration_secs: 90.0,
+            samples_after_silence_strip: 16_000 * 90,
+            silero_found_no_speech: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats.diagnosis(),
+            "audio: 90.0s, Silero VAD heard no speech, so whisper did not run"
+        );
     }
 
     #[test]

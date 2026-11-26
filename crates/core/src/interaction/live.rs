@@ -29,7 +29,11 @@ impl LiveProfile {
 
     pub fn function_declaration(self, mut declaration: Value) -> Result<Value> {
         let object = declaration.as_object_mut().ok_or("invalid declaration")?;
-        if self == Self::AsyncReasoning {
+        // Standard Live honors SILENT on non-blocking calls. Minutes shows
+        // delegation review itself and sends the final outcome separately.
+        if self == Self::AsyncReasoning
+            || object.get("name").and_then(Value::as_str) == Some("ask_agent")
+        {
             object.insert("behavior".into(), json!("NON_BLOCKING"));
         }
         Ok(declaration)

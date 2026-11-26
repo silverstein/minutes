@@ -3238,6 +3238,16 @@ fn cleanup_live_capture_state() {
     minutes_core::notes::cleanup();
 }
 
+fn cleanup_failed_capture_state() -> bool {
+    let preserve_for_recovery = !minutes_core::pid::interrupted_recording_files().is_empty();
+    if !preserve_for_recovery {
+        minutes_core::pid::clear_recording_metadata().ok();
+        minutes_core::notes::cleanup();
+    }
+    minutes_core::pid::remove().ok();
+    preserve_for_recovery
+}
+
 fn desktop_call_capture_workaround() -> &'static str {
     "For native dual-source call capture, use the Minutes desktop app. The published Homebrew cask/update feed is Apple Silicon-only right now, but Intel Macs on macOS 15+ can still build the desktop app from source (see README \"Desktop app\")."
 }
@@ -3640,10 +3650,10 @@ fn cmd_record(
             capabilities,
         }),
     ) {
-        minutes_core::pid::remove().ok();
-        minutes_core::pid::clear_recording_metadata().ok();
-        if matches!(&error, minutes_core::error::CaptureError::Io(io)
-            if io.kind() == std::io::ErrorKind::AlreadyExists)
+        let preserve_for_recovery = cleanup_failed_capture_state();
+        if preserve_for_recovery
+            || matches!(&error, minutes_core::error::CaptureError::Io(io)
+                if io.kind() == std::io::ErrorKind::AlreadyExists)
         {
             anyhow::bail!("{error}. Run `minutes record --recover` to preserve interrupted recording files before retrying.");
         }
@@ -12082,6 +12092,61 @@ life (qmd://life/)
             assert!(!minutes_core::notes::recording_start_path().exists());
             assert!(minutes_core::notes::read_context().is_none());
             assert!(minutes_core::notes::read_notes().is_none());
+        });
+    }
+
+    #[test]
+    fn failed_capture_without_audio_clears_session_sidecars() {
+        with_temp_home(|_| {
+            minutes_core::pid::create().unwrap();
+            minutes_core::pid::write_recording_metadata(CaptureMode::Meeting).unwrap();
+            minutes_core::notes::save_recording_start().unwrap();
+            minutes_core::notes::save_context("pricing review").unwrap();
+            minutes_core::notes::add_note("remember to ask about budget").unwrap();
+            minutes_core::notes::save_consent(
+                Some(minutes_core::markdown::ConsentBasis::VerbalAllParties),
+                Some("recording with consent"),
+            )
+            .unwrap();
+
+            assert!(!cleanup_failed_capture_state());
+
+            assert!(!minutes_core::pid::pid_path().exists());
+            assert!(!minutes_core::pid::recording_meta_path().exists());
+            assert!(!minutes_core::notes::recording_start_path().exists());
+            assert!(!minutes_core::notes::consent_path().exists());
+            assert!(minutes_core::notes::read_context().is_none());
+            assert!(minutes_core::notes::read_notes().is_none());
+        });
+    }
+
+    #[test]
+    fn failed_capture_with_audio_keeps_session_sidecars_for_recovery() {
+        with_temp_home(|_| {
+            minutes_core::pid::create().unwrap();
+            minutes_core::pid::write_recording_metadata(CaptureMode::Meeting).unwrap();
+            minutes_core::notes::save_recording_start().unwrap();
+            minutes_core::notes::save_context("pricing review").unwrap();
+            minutes_core::notes::add_note("remember to ask about budget").unwrap();
+            minutes_core::notes::save_consent(
+                Some(minutes_core::markdown::ConsentBasis::VerbalAllParties),
+                Some("recording with consent"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(minutes_core::config::Config::minutes_dir()).unwrap();
+            std::fs::write(minutes_core::pid::current_wav_path(), vec![1u8; 4096]).unwrap();
+
+            assert!(cleanup_failed_capture_state());
+
+            assert!(!minutes_core::pid::pid_path().exists());
+            assert!(minutes_core::pid::recording_meta_path().exists());
+            assert!(minutes_core::notes::recording_start_path().exists());
+            assert!(minutes_core::notes::consent_path().exists());
+            assert_eq!(
+                minutes_core::notes::read_context().as_deref(),
+                Some("pricing review")
+            );
+            assert!(minutes_core::notes::read_notes().is_some());
         });
     }
 

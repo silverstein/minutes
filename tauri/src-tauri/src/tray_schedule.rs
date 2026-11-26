@@ -147,6 +147,7 @@ fn place(location: &str) -> Option<String> {
         ("zoom.us", "Zoom"),
         ("meet.google.com", "Google Meet"),
         ("teams.microsoft.com", "Teams"),
+        ("teams.cloud.microsoft", "Teams"),
         ("teams.live.com", "Teams"),
         ("webex.com", "Webex"),
     ]
@@ -311,6 +312,10 @@ mod tests {
         assert_eq!(
             place("https://meet.google.com/abc").as_deref(),
             Some("Google Meet")
+        );
+        assert_eq!(
+            place("https://teams.cloud.microsoft/l/meetup-join/abc").as_deref(),
+            Some("Teams")
         );
         assert_eq!(
             place("Room 4, https://meet.google.com/abc").as_deref(),

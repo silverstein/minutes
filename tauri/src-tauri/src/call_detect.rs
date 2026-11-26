@@ -1686,6 +1686,8 @@ fn title_indicates_teams_meeting(title: &str) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
+/// `teams.cloud.microsoft` (where Microsoft now redirects work/school
+/// `teams.microsoft.com`) serves only the v2 client, so any path there counts.
 fn is_teams_v2_root(url: &str) -> bool {
     let lower = url.trim().to_lowercase();
     let without_scheme = lower
@@ -1694,8 +1696,10 @@ fn is_teams_v2_root(url: &str) -> bool {
         .unwrap_or(&lower);
     without_scheme.starts_with("teams.live.com/v2/")
         || without_scheme.starts_with("teams.microsoft.com/v2/")
+        || without_scheme.starts_with("teams.cloud.microsoft/")
         || without_scheme == "teams.live.com/v2"
         || without_scheme == "teams.microsoft.com/v2"
+        || without_scheme == "teams.cloud.microsoft"
 }
 
 /// Combined Teams meeting check: URL pattern OR (Teams v2 root + meeting-y
@@ -1734,7 +1738,11 @@ fn looks_like_teams_meeting_url(url: &str) -> bool {
             || rest.contains("meet/");
     }
 
-    let Some(rest) = without_scheme.strip_prefix("teams.microsoft.com/") else {
+    // Work/school Teams; `teams.cloud.microsoft` is its new web domain.
+    let Some(rest) = without_scheme
+        .strip_prefix("teams.microsoft.com/")
+        .or_else(|| without_scheme.strip_prefix("teams.cloud.microsoft/"))
+    else {
         return false;
     };
 
@@ -3455,6 +3463,12 @@ mod tests {
         assert!(looks_like_teams_meeting_url(
             "https://teams.microsoft.com/v2/#/meetup-join/19:meeting_xyz@thread.v2/0"
         ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=x"
+        ));
+        assert!(looks_like_teams_meeting_url(
+            "https://teams.cloud.microsoft/_#/pre-join-calling/19:meeting_abc@thread.v2"
+        ));
 
         // Negative cases — these are Teams UI pages, not meetings.
         assert!(!looks_like_teams_meeting_url(
@@ -3468,7 +3482,13 @@ mod tests {
         ));
         assert!(!looks_like_teams_meeting_url("https://teams.live.com/"));
         assert!(!looks_like_teams_meeting_url(
+            "https://teams.cloud.microsoft/"
+        ));
+        assert!(!looks_like_teams_meeting_url(
             "https://example.com/l/meetup-join/abc"
+        ));
+        assert!(!looks_like_teams_meeting_url(
+            "https://teams.cloud.microsoft.example.com/l/meetup-join/abc"
         ));
     }
 
@@ -3487,6 +3507,19 @@ mod tests {
         assert!(looks_like_teams_meeting_tab(
             "https://teams.microsoft.com/v2/",
             "Calling Romuald | Microsoft Teams"
+        ));
+        // New work/school web domain: the client lives at the bare root.
+        assert!(looks_like_teams_meeting_tab(
+            "https://teams.cloud.microsoft/",
+            "Meeting | Standup | Microsoft Teams"
+        ));
+        assert!(!looks_like_teams_meeting_tab(
+            "https://teams.cloud.microsoft/",
+            "Chat | Project Apollo | Microsoft Teams"
+        ));
+        assert!(!looks_like_teams_meeting_tab(
+            "https://teams.cloud.microsoft.example.com/",
+            "Meeting | Standup | Microsoft Teams"
         ));
         // Chat tab on the same `/v2/` URL must not match — title prefix differs.
         assert!(!looks_like_teams_meeting_tab(

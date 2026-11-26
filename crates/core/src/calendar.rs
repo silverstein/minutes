@@ -202,7 +202,8 @@ fn is_meeting_url(url: &str) -> bool {
     }
 
     (host == "meet.google.com" && path.len() > 1)
-        || (host == "teams.microsoft.com" && path.starts_with("/l/meetup-join/"))
+        || (matches!(host, "teams.microsoft.com" | "teams.cloud.microsoft")
+            && path.starts_with("/l/meetup-join/"))
         || (host == "teams.live.com" && path.starts_with("/meet/"))
         || (matches_domain(host, "webex.com") && path.starts_with("/meet/"))
         || (host == "facetime.apple.com" && path.len() > 1)
@@ -1106,6 +1107,8 @@ mod tests {
             extract_meeting_url(text),
             Some("https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc".to_string())
         );
+        let text = "https://teams.cloud.microsoft/l/meetup-join/19%3ameeting_abc";
+        assert_eq!(extract_meeting_url(text), Some(text.to_string()));
     }
 
     #[test]

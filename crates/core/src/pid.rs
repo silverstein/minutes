@@ -71,6 +71,22 @@ pub fn current_wav_path() -> PathBuf {
     Config::minutes_dir().join("current.wav")
 }
 
+/// Capture files an interrupted recording left in `~/.minutes`: the
+/// `current*.wav` files that still hold audio. An empty or header-only
+/// reservation is not listed, because capture reuses it.
+///
+/// Recording startup checks this before it writes the new session's start
+/// stamp, consent, context or metadata, so `minutes record --recover`
+/// archives the interrupted session's own sidecars with its audio.
+pub fn interrupted_recording_files() -> Vec<PathBuf> {
+    let data = Config::minutes_dir();
+    ["current.voice.wav", "current.system.wav", "current.wav"]
+        .into_iter()
+        .map(|name| data.join(name))
+        .filter(|path| crate::capture::wav_holds_audio(path))
+        .collect()
+}
+
 /// Path to the last recording result JSON (`~/.minutes/last-result.json`).
 pub fn last_result_path() -> PathBuf {
     Config::minutes_dir().join("last-result.json")
@@ -790,8 +806,11 @@ fn write_owner_stamp(path: &Path, stamp: &RecordingOwnerStamp) -> std::io::Resul
 }
 
 /// Archive any remaining batch capture files together under a unique stem in
-/// the private data directory. Hold the same marker lock as recording startup
-/// and exact-file locks until the names have been moved.
+/// the private data directory. Session sidecars that are normally cleaned on
+/// a graceful stop — notes, context, consent, start stamp, recording metadata
+/// — move with the audio so the next recording cannot inherit them. Hold the
+/// same marker lock as recording startup and exact-file locks until the names
+/// have been moved.
 pub fn archive_interrupted_recording() -> Result<Option<PathBuf>, PidError> {
     use crate::policy_fs::BoundRecoveryDirectory;
     use std::ffi::OsStr;
@@ -806,6 +825,16 @@ pub fn archive_interrupted_recording() -> Result<Option<PathBuf>, PidError> {
         ("current.voice.wav", ".voice.wav"),
         ("current.system.wav", ".system.wav"),
         ("current.wav", ".wav"),
+        // Session sidecars of the interrupted recording. They are only
+        // cleaned after a successful stop, so a crashed session leaves them
+        // behind — where the next recording would read them as its own
+        // notes/context/consent and silently merge them into its output.
+        // Archiving keeps them with the audio they were written for.
+        ("current-notes.md", "-notes.md"),
+        ("current-context.txt", "-context.txt"),
+        ("current-consent.json", "-consent.json"),
+        ("recording-start.txt", "-start.txt"),
+        ("recording-meta.json", "-meta.json"),
     ] {
         let name = OsStr::new(name);
         if !directory.entry_exists(name)? {
@@ -1174,6 +1203,82 @@ mod tests {
             create().unwrap();
             assert_eq!(check_recording().unwrap(), Some(pid));
             remove().unwrap();
+        });
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn archive_interrupted_recording_moves_session_sidecars_with_the_audio() {
+        crate::test_support::with_temp_home(|_| {
+            let data = Config::minutes_dir();
+            fs::create_dir_all(&data).unwrap();
+            let sidecar_names = [
+                "current.wav",
+                "current-notes.md",
+                "current-context.txt",
+                "current-consent.json",
+                "recording-start.txt",
+                "recording-meta.json",
+            ];
+            for name in sidecar_names {
+                fs::write(data.join(name), b"interrupted session").unwrap();
+            }
+
+            let base = archive_interrupted_recording()
+                .unwrap()
+                .expect("interrupted files to archive");
+            let prefix = base.file_name().unwrap().to_str().unwrap();
+
+            for suffix in [
+                ".wav",
+                "-notes.md",
+                "-context.txt",
+                "-consent.json",
+                "-start.txt",
+                "-meta.json",
+            ] {
+                assert_eq!(
+                    fs::read(data.join(format!("{prefix}{suffix}"))).unwrap(),
+                    b"interrupted session",
+                    "{prefix}{suffix} should carry the interrupted session's data"
+                );
+            }
+            for name in sidecar_names {
+                assert!(!data.join(name).exists(), "{name} should be archived away");
+            }
+            // The next session cannot inherit the interrupted session's notes.
+            assert!(crate::notes::read_notes().is_none());
+        });
+    }
+
+    #[test]
+    fn interrupted_recording_files_skips_reservations_capture_reuses() {
+        crate::test_support::with_temp_home(|_| {
+            let data = Config::minutes_dir();
+            fs::create_dir_all(&data).unwrap();
+            assert!(interrupted_recording_files().is_empty());
+
+            // Empty and header-only reservations are reused by capture.
+            fs::write(data.join("current.voice.wav"), b"").unwrap();
+            hound::WavWriter::create(
+                data.join("current.system.wav"),
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap()
+            .finalize()
+            .unwrap();
+            assert!(interrupted_recording_files().is_empty());
+
+            fs::write(data.join("current.wav"), vec![1u8; 4096]).unwrap();
+            assert_eq!(
+                interrupted_recording_files(),
+                vec![data.join("current.wav")]
+            );
         });
     }
 

@@ -1268,6 +1268,24 @@ fn is_header_only_wav(file: &std::fs::File) -> bool {
     is_empty && (&*file).seek(SeekFrom::Start(0)).is_ok()
 }
 
+/// True when `path` holds a capture that recording startup must not reuse:
+/// anything but a missing, empty or header-only WAV. A link or other
+/// non-regular entry counts, since capture refuses those as well.
+pub(crate) fn wav_holds_audio(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return true;
+    }
+    if metadata.len() == 0 {
+        return false;
+    }
+    std::fs::File::open(path)
+        .map(|file| !is_header_only_wav(&file))
+        .unwrap_or(true)
+}
+
 fn create_wav_writer(
     output_path: &Path,
 ) -> Result<hound::WavWriter<std::io::BufWriter<std::fs::File>>, CaptureError> {

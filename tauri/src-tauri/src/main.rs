@@ -684,6 +684,8 @@ fn cmd_apply_recall_window_layout(
     Ok(())
 }
 
+mod voice_hud;
+
 /// Unscaled (zoom=16) logical size each secondary window is built at. Scaling
 /// always derives from this constant, never from the window's current size, so
 /// repeated opens can't compound the dimensions. Keep in sync with each
@@ -694,6 +696,7 @@ fn window_base_size(label: &str) -> Option<(f64, f64)> {
         "note" => Some((420.0, 260.0)),
         "dictation-overlay" => Some((320.0, 88.0)),
         "copilot-hud" => Some(commands::COPILOT_HUD_SIZE),
+        voice_hud::LABEL => Some(voice_hud::SIZE),
         "meeting-prompt" => Some((380.0, 240.0)),
         _ => None,
     }
@@ -2355,8 +2358,10 @@ fn main() {
                 .skip_initial_state("meeting-prompt")
                 .skip_initial_state("dictation-overlay")
                 .skip_initial_state("copilot-hud")
+                .skip_initial_state(voice_hud::LABEL)
                 .build(),
         )
+        .manage(voice_hud::VoiceHud::default())
         .manage(commands::AppState {
             recording: recording.clone(),
             starting: starting.clone(),
@@ -3594,6 +3599,9 @@ fn main() {
             commands::cmd_start_voice,
             commands::cmd_stop_voice,
             commands::cmd_voice_status,
+            voice_hud::cmd_voice_hud_ready,
+            voice_hud::cmd_voice_hud_resize,
+            voice_hud::cmd_remember_voice_hud_position,
             commands::cmd_voice_secret_status,
             commands::cmd_set_voice_api_key,
             commands::cmd_clear_voice_api_key,
@@ -4337,6 +4345,16 @@ mod tray_activity_tests {
         }
         assert!(hud.contains("id=\"nudge-text\""));
         assert!(hud.contains("@media (prefers-reduced-motion: reduce)"));
+    }
+
+    #[test]
+    fn voice_hud_stays_protected_when_screen_sharing_is_enabled() {
+        for hidden in [false, true] {
+            assert!(crate::commands::content_protection_for_window(
+                crate::voice_hud::LABEL,
+                hidden
+            ));
+        }
     }
 
     #[test]

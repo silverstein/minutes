@@ -32,6 +32,7 @@ const TOKEN_DEFINITION_FILES = new Set([
   "tauri/src/meeting-prompt.html",
   "tauri/src/terminal.html",
   "tauri/src/copilot-hud.html",
+  "tauri/src/voice-hud.html",
 ]);
 const SOURCE_EXTENSIONS = new Set([".css", ".html", ".js", ".jsx", ".ts", ".tsx"]);
 const CSS_NAMED_COLORS = new Set([

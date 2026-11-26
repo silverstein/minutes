@@ -72,6 +72,8 @@ pub struct UiConfig {
     pub language: String,
     /// Remembered edge anchor for the movable dictation HUD.
     pub dictation_hud_anchor: String,
+    /// Remembered edge anchor for the Voice Live HUD.
+    pub voice_hud_anchor: String,
 }
 
 impl Default for UiConfig {
@@ -79,6 +81,7 @@ impl Default for UiConfig {
         Self {
             language: "auto".into(),
             dictation_hud_anchor: "top_center".into(),
+            voice_hud_anchor: "top_center".into(),
         }
     }
 }

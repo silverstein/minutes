@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --capture: #62BCE9;
+      --capture-surface: #28231F;
+      --capture-edge: rgba(229, 201, 174, 0.14);
+      --panel-shadow: rgba(0, 0, 0, 0.16);
+      --text: #E8E4DA;
+      --text-secondary: #AAA49A;
+      --text-tertiary: #716C64;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --capture: #2F6F8F;
+        --capture-surface: #EFE6D8;
+        --capture-edge: rgba(113, 79, 52, 0.16);
+        --text: #1A1916;
+        --text-secondary: #6F6A62;
+        --text-tertiary: #958F85;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 5px; color: var(--text); font: 13px/1.4 system-ui, sans-serif; }
+    main {
+      --meter-scale: 1;
+      padding: 6px 10px; border: 1px solid var(--capture-edge);
+      border-radius: 15px; background: var(--capture-surface);
+      box-shadow: 0 2px 6px var(--panel-shadow); transition: opacity 150ms ease;
+    }
+    header { display: flex; align-items: center; gap: 9px; cursor: grab; min-height: 28px; }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--text-tertiary);
+      flex: none; transition: transform 120ms ease, background-color 150ms ease;
+    }
+    [data-state="closed"] { opacity: .65; }
+    [data-state="listening"] .dot, [data-state="speaking"] .dot {
+      background: var(--capture); transform: scale(var(--meter-scale));
+    }
+    [data-state="speaking"] .dot { filter: brightness(1.25); }
+    [data-state="thinking"] .dot { background: var(--capture); animation: pulse 1.8s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .35; } }
+    #phase {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font: 11px ui-monospace, monospace; color: var(--text-secondary);
+    }
+    [data-state="listening"] #phase, [data-state="speaking"] #phase { color: var(--text); }
+    .actions { display: flex; gap: 3px; margin-left: auto; }
+    button {
+      display: grid; place-items: center; width: 27px; height: 26px; padding: 0;
+      font: 16px/1 system-ui, sans-serif; color: var(--text-secondary); background: transparent;
+      border: 1px solid transparent; border-radius: 7px;
+    }
+    button:hover { background: var(--capture-edge); color: var(--text); }
+    button:disabled { opacity: .45; }
+    button:focus-visible { outline: 2px solid var(--capture); outline-offset: 1px; }
+    #stop { border-color: var(--capture-edge); }
+    .chevron { width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-1px) rotate(45deg); }
+    [aria-expanded="true"] .chevron { transform: translateY(1px) rotate(225deg); }
+    #meter { display: flex; gap: 3px; flex: none; align-items: center; height: 22px; visibility: hidden; }
+    [data-state="ready"] #meter { visibility: visible; opacity: .45; }
+    [data-state="listening"] #meter, [data-state="speaking"] #meter { visibility: visible; }
+    #meter i { display: block; width: 3px; height: 19px; background: var(--capture); border-radius: 2px; transform: scaleY(.16); transition: transform 110ms ease-out; }
+    #preview { margin: 3px 0 0; line-height: 1.35; overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    #preview[data-speaker="user"] { color: var(--text-secondary); }
+    main[data-expanded="true"] { max-height: calc(100vh - 10px); display: flex; flex-direction: column; }
+    #details-pane { display: flex; flex-direction: column; min-height: 0; margin-top: 5px; border-top: 1px solid var(--capture-edge); }
+    #route, #route-warning { flex: none; }
+    #route { margin: 6px 0 4px; color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #route-warning { margin: 0 0 5px; color: var(--text); font-size: 11px; }
+    #transcript { min-height: 0; margin-top: 6px; max-height: 132px; overflow: auto; overflow-wrap: anywhere; }
+    #transcript p { margin: 0 0 8px; white-space: pre-wrap; user-select: text; }
+    #user-line { color: var(--text-secondary); }
+    .speaker { display: block; font: 10px/1.4 ui-monospace, monospace; color: var(--text-secondary); }
+    [hidden] { display: none !important; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main data-state="connecting">
+    <header>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="phase" role="status">Connecting</span>
+      <div id="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="actions">
+        <button id="details" aria-controls="details-pane" aria-expanded="false" aria-label="Transcript and audio output" title="Transcript and audio output" type="button"><span class="chevron" aria-hidden="true"></span></button>
+        <button id="stop" type="button" aria-label="End Voice" title="End Voice"><span aria-hidden="true">×</span></button>
+      </div>
+    </header>
+    <p id="preview" hidden></p>
+    <section id="details-pane" aria-label="Voice details" hidden>
+      <p id="route" hidden></p>
+      <p id="route-warning" hidden>Virtual output selected. Check Sound settings if you can’t hear Voice.</p>
+      <div id="transcript" aria-label="Voice transcript">
+        <p id="user-line" hidden><span class="speaker">You</span><span id="user"></span></p>
+        <p id="reply-line" hidden><span class="speaker">Minutes</span><span id="reply"></span></p>
+      </div>
+    </section>
+  </main>
+  <script>
+    const { core, event, window: tauriWindow } = window.__TAURI__;
+    const hud = document.querySelector('main');
+    const phase = document.getElementById('phase');
+    const meter = document.querySelectorAll('#meter i');
+    const preview = document.getElementById('preview');
+    const pane = document.getElementById('details-pane');
+    const transcript = document.getElementById('transcript');
+    const user = document.getElementById('user');
+    const reply = document.getElementById('reply');
+    const userLine = document.getElementById('user-line');
+    const replyLine = document.getElementById('reply-line');
+    const route = document.getElementById('route');
+    const routeWarning = document.getElementById('route-warning');
+    const details = document.getElementById('details');
+    const stop = document.getElementById('stop');
+    const labels = { connecting: 'Connecting', ready: 'Ready', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking', closed: 'Ended' };
+    let snapshot;
+    let meterTimeout;
+    let positionTimeout;
+    let currentLayout = 'compact';
+    let resizing = false;
+
+    function showStatus() {
+      if (!snapshot) return;
+      const seconds = snapshot.toolStartedMs ? Math.floor((Date.now() - snapshot.toolStartedMs) / 1000) : 0;
+      const elapsed = seconds > 0 ? ' · ' + seconds + 's' : '';
+      const label = snapshot.state === 'thinking' && snapshot.detail ? snapshot.detail + elapsed : labels[snapshot.state];
+      if (phase.textContent !== label) phase.textContent = label;
+    }
+
+    function desiredLayout() {
+      if (!pane.hidden) return 'expanded';
+      return preview.hidden ? 'compact' : 'preview';
+    }
+
+    async function resize() {
+      if (resizing || snapshot?.state === 'closed') return;
+      resizing = true;
+      try {
+        while (desiredLayout() !== currentLayout && snapshot?.state !== 'closed') {
+          const layout = desiredLayout();
+          await core.invoke('cmd_voice_hud_resize', { layout });
+          currentLayout = layout;
+        }
+      } catch (error) {
+        console.error('Could not resize the Voice HUD', error);
+      } finally {
+        resizing = false;
+      }
+    }
+
+    function updatePreview() {
+      if (!snapshot) return;
+      const userSpeaking = snapshot.state === 'listening' || snapshot.state === 'thinking';
+      const text = snapshot.state === 'closed' ? snapshot.detail
+        : userSpeaking ? snapshot.user : snapshot.reply;
+      preview.dataset.speaker = userSpeaking ? 'user' : 'minutes';
+      preview.textContent = text;
+      preview.hidden = !pane.hidden || !text;
+    }
+
+    function render(next) {
+      if (snapshot && next.revision <= snapshot.revision) return;
+      if (snapshot?.state !== next.state) setMeter(.16);
+      snapshot = next;
+      hud.dataset.state = next.state;
+      showStatus();
+      user.textContent = next.user;
+      reply.textContent = next.reply;
+      userLine.hidden = !next.user;
+      replyLine.hidden = !next.reply;
+      route.hidden = !next.outputDevice;
+      route.textContent = next.outputDevice ? 'Playing on: ' + next.outputDevice : '';
+      route.title = route.textContent;
+      routeWarning.hidden = !next.virtualOutput;
+      stop.disabled = details.disabled = next.state === 'closed';
+      if (next.state === 'closed') pane.hidden = true;
+      hud.dataset.expanded = String(!pane.hidden);
+      if (!pane.hidden) transcript.scrollTop = transcript.scrollHeight;
+      updatePreview();
+      resize();
+    }
+
+    details.addEventListener('click', () => {
+      pane.hidden = !pane.hidden;
+      hud.dataset.expanded = String(!pane.hidden);
+      details.setAttribute('aria-expanded', String(!pane.hidden));
+      if (!pane.hidden) transcript.scrollTop = transcript.scrollHeight;
+      updatePreview();
+      resize();
+    });
+
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try {
+        await core.invoke('cmd_stop_voice');
+      } catch (error) {
+        preview.textContent = String(error);
+        preview.hidden = false;
+        stop.disabled = false;
+        resize();
+      }
+    });
+
+    const nativeWindow = tauriWindow.getCurrentWindow();
+    hud.querySelector('header').addEventListener('mousedown', async (e) => {
+      if (e.button !== 0 || e.target.closest('button')) return;
+      try {
+        await nativeWindow.startDragging();
+      } catch (error) {
+        console.error('Could not move the Voice HUD', error);
+      }
+    });
+
+    function setMeter(level) {
+      hud.style.setProperty('--meter-scale', String(1 + (level - .16) * .45));
+      meter.forEach((bar, index) => {
+        bar.style.transform = 'scaleY(' + (level * (1 - Math.abs(index - 3) * .18)) + ')';
+      });
+    }
+
+    Promise.all([
+      nativeWindow.onMoved(() => {
+        clearTimeout(positionTimeout);
+        positionTimeout = setTimeout(() => {
+          if (snapshot?.state !== 'closed') {
+            core.invoke('cmd_remember_voice_hud_position')
+              .catch(error => console.error('Could not remember the Voice HUD position', error));
+          }
+        }, 220);
+      }),
+      event.listen('voice:hud', ({ payload }) => render(payload)),
+      event.listen('voice:hud-level', ({ payload }) => {
+        clearTimeout(meterTimeout);
+        const input = snapshot?.state !== 'speaking';
+        const db = 20 * Math.log10(Math.max(.0001, payload));
+        const level = input ? .16 + .84 * Math.max(0, Math.min(1, (db + 58) / 42))
+          : Math.max(.16, Math.min(1, payload * 7));
+        setMeter(level);
+        meterTimeout = setTimeout(() => setMeter(.16), 230);
+      }),
+    ]).then(() => core.invoke('cmd_voice_hud_ready')).then(render)
+      .catch((error) => { preview.textContent = String(error); preview.hidden = false; resize(); });
+    setInterval(showStatus, 1000);
+  </script>
+</body>
+</html>

@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 pub enum ShortcutSlot {
     QuickThought,
     Dictation,
+    Voice,
 }
 
 impl ShortcutSlot {
@@ -18,6 +19,7 @@ impl ShortcutSlot {
         match self {
             Self::QuickThought => "quick_thought",
             Self::Dictation => "dictation",
+            Self::Voice => "voice",
         }
     }
 
@@ -25,6 +27,7 @@ impl ShortcutSlot {
         match s {
             "quick_thought" => Ok(Self::QuickThought),
             "dictation" => Ok(Self::Dictation),
+            "voice" => Ok(Self::Voice),
             _ => Err(format!("Unknown shortcut slot: {}", s)),
         }
     }
@@ -33,6 +36,7 @@ impl ShortcutSlot {
         match self {
             Self::QuickThought => "Quick Thought",
             Self::Dictation => "Dictation",
+            Self::Voice => "Voice",
         }
     }
 }
@@ -119,6 +123,8 @@ pub enum StateMachineAction {
     Lock,
     /// Stop the active session (release after hold, or second tap after lock).
     Stop { discard: bool },
+    /// Start or end a Voice session on one completed keypress.
+    ToggleVoice,
     /// No action (key event consumed but nothing to do).
     None,
 }
@@ -263,6 +269,14 @@ impl ShortcutManager {
         app: &tauri::AppHandle,
     ) -> Result<ShortcutStatus, String> {
         let backend = classify_shortcut(keycode);
+        if slot == ShortcutSlot::Voice {
+            if !crate::voice_settings::available() {
+                return Err("Desktop Voice is unavailable in this build.".into());
+            }
+            if backend == ShortcutBackend::Native {
+                return Err("Use a key combination for the Voice shortcut.".into());
+            }
+        }
 
         // Conflict detection: check the other slot by both string and keycode.
         for (&other_slot, other_active) in &self.slots {
@@ -461,6 +475,10 @@ impl ShortcutManager {
             None => return (slot, StateMachineAction::None),
         };
 
+        if slot == ShortcutSlot::Voice {
+            active.state_machine.key_down = true;
+            return (slot, StateMachineAction::None);
+        }
         let action = active.state_machine.handle_press(is_session_active);
         (slot, action)
     }
@@ -477,6 +495,14 @@ impl ShortcutManager {
             None => return (slot, StateMachineAction::None),
         };
 
+        if slot == ShortcutSlot::Voice {
+            let action = if std::mem::take(&mut active.state_machine.key_down) {
+                StateMachineAction::ToggleVoice
+            } else {
+                StateMachineAction::None
+            };
+            return (slot, action);
+        }
         let action = active.state_machine.handle_release(is_session_active);
         (slot, action)
     }
@@ -535,6 +561,8 @@ impl ShortcutManager {
                     format!("Starting {}...", active.shortcut_string)
                 } else if needs_permission {
                     "Requires Input Monitoring permission.".into()
+                } else if enabled && slot == ShortcutSlot::Voice {
+                    format!("Press {} to start or end Voice.", active.shortcut_string)
                 } else if enabled {
                     format!(
                         "Active. Hold {} to {}, or tap to lock and tap again to stop.",
@@ -542,6 +570,7 @@ impl ShortcutManager {
                         match slot {
                             ShortcutSlot::QuickThought => "record a quick thought",
                             ShortcutSlot::Dictation => "dictate",
+                            ShortcutSlot::Voice => "toggle Voice",
                         }
                     )
                 } else {
@@ -599,6 +628,7 @@ pub fn default_shortcut_for_slot(slot: ShortcutSlot) -> &'static str {
     match slot {
         ShortcutSlot::QuickThought => "CmdOrCtrl+Shift+M",
         ShortcutSlot::Dictation => "CmdOrCtrl+Shift+Space",
+        ShortcutSlot::Voice => "CmdOrCtrl+Alt+Shift+V",
     }
 }
 
@@ -619,6 +649,14 @@ pub fn persisted_shortcut_for_slot(
     slot: ShortcutSlot,
 ) -> (String, i64, &'static str) {
     match slot {
+        ShortcutSlot::Voice => {
+            let shortcut = if config.voice_live.shortcut.is_empty() {
+                default_shortcut_for_slot(slot).into()
+            } else {
+                config.voice_live.shortcut.clone()
+            };
+            (shortcut, -1, "standard")
+        }
         ShortcutSlot::Dictation => {
             if config.dictation.hotkey_enabled {
                 let kc = config.dictation.hotkey_keycode;
@@ -671,6 +709,7 @@ pub fn is_slot_session_active_fast(app: &tauri::AppHandle, slot: ShortcutSlot) -
             state.recording.load(Ordering::Relaxed) || state.starting.load(Ordering::Relaxed)
         }
         ShortcutSlot::Dictation => state.dictation_active.load(Ordering::Relaxed),
+        ShortcutSlot::Voice => state.voice_active.load(Ordering::Relaxed),
     }
 }
 
@@ -679,6 +718,11 @@ pub fn is_slot_session_active_fast(app: &tauri::AppHandle, slot: ShortcutSlot) -
 /// It may re-acquire the lock briefly to update state on success.
 pub fn execute_action(app: &tauri::AppHandle, slot: ShortcutSlot, action: StateMachineAction) {
     match action {
+        StateMachineAction::ToggleVoice => {
+            if let Err(error) = crate::voice_settings::toggle(app) {
+                crate::commands::show_user_notification(app, "Voice", &error);
+            }
+        }
         StateMachineAction::StartHold => {
             if let Err(e) = start_slot_session(app, slot, CaptureStyle::Hold) {
                 // Revert the mark on failure
@@ -732,6 +776,7 @@ fn start_slot_session(
     style: CaptureStyle,
 ) -> Result<(), String> {
     match slot {
+        ShortcutSlot::Voice => crate::voice_settings::toggle(app),
         ShortcutSlot::QuickThought => {
             let state = app.state::<crate::commands::AppState>();
             let capture_style = match style {
@@ -781,6 +826,9 @@ fn stop_slot_session(app: &tauri::AppHandle, slot: ShortcutSlot, discard: bool) 
     };
 
     match slot {
+        ShortcutSlot::Voice => {
+            let _ = crate::commands::cmd_stop_voice(app.clone(), state);
+        }
         ShortcutSlot::QuickThought => {
             if discard {
                 state
@@ -980,6 +1028,44 @@ mod tests {
             ShortcutSlot::Dictation
         );
         assert!(ShortcutSlot::from_str("bogus").is_err());
+    }
+
+    #[test]
+    fn voice_shortcut_toggles_once_on_release_without_entering_hold_mode() {
+        let mut manager = ShortcutManager::new();
+        let slot = ShortcutSlot::Voice;
+        manager.slots.insert(
+            slot,
+            ActiveShortcut {
+                shortcut_string: default_shortcut_for_slot(slot).into(),
+                keycode: -1,
+                backend: ShortcutBackend::Standard,
+                state_machine: ShortcutStateMachine::default(),
+                standard_shortcut_id: Some(1),
+                #[cfg(target_os = "macos")]
+                native_monitor: None,
+                native_lifecycle: NativeLifecycle::NotApplicable,
+                native_generation: 0,
+            },
+        );
+
+        for active in [false, true] {
+            for _ in 0..3 {
+                assert!(matches!(
+                    manager.handle_press(slot, active).1,
+                    StateMachineAction::None
+                ));
+            }
+            assert!(matches!(
+                manager.handle_release(slot, active).1,
+                StateMachineAction::ToggleVoice
+            ));
+            assert!(matches!(
+                manager.handle_release(slot, active).1,
+                StateMachineAction::None
+            ));
+            assert!(manager.slots[&slot].state_machine.active_capture.is_none());
+        }
     }
 
     #[test]

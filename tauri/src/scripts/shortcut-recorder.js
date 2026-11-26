@@ -77,7 +77,7 @@
         const choice = session.build(event);
         if (!choice) return;
         if (session.standardOnly && [57, 63].includes(choice.keycode)) {
-          session.status('Use a key combination with Command, Control or Option for recovery.');
+          session.status('Use a key combination with Command, Control or Option.');
           return;
         }
         detach(session); busy = true; button.disabled = true;

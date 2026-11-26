@@ -40,6 +40,7 @@ mod semantic_commands;
 mod shortcut_manager;
 mod text_insertion;
 mod tray_schedule;
+mod voice_settings;
 
 const MINUTES_WEBSITE_URL: &str = "https://useminutes.app";
 const MINUTES_CHANGELOG_URL: &str = "https://github.com/silverstein/minutes/releases";
@@ -2613,6 +2614,21 @@ fn main() {
                 }
             }
 
+            if voice_settings::available() && startup_config.voice_live.shortcut_enabled {
+                use shortcut_manager::{
+                    persisted_shortcut_for_slot, ShortcutManager, ShortcutSlot,
+                };
+                let (chord, keycode, _) =
+                    persisted_shortcut_for_slot(&startup_config, ShortcutSlot::Voice);
+                let manager = app.state::<Arc<Mutex<ShortcutManager>>>();
+                let mut manager = manager.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(error) =
+                    manager.register(ShortcutSlot::Voice, chord, keycode, app.handle())
+                {
+                    tracing::warn!("could not restore Voice shortcut: {error}");
+                }
+            }
+
             // Restore live transcript shortcut from config
             if startup_config.live_transcript.shortcut_enabled {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -2980,13 +2996,7 @@ fn main() {
                         }
                         #[cfg(feature = "voice-live")]
                         "voice-toggle" => {
-                            let state = app.state::<commands::AppState>();
-                            let result = if state.voice_active.load(Ordering::Relaxed) {
-                                commands::cmd_stop_voice(app.clone(), state).map(|_| ())
-                            } else {
-                                commands::cmd_start_voice(app.clone(), state).map(|_| ())
-                            };
-                            if let Err(error) = result {
+                            if let Err(error) = voice_settings::toggle(app) {
                                 commands::show_user_notification(app, "Voice", &error);
                             }
                         }
@@ -3597,6 +3607,11 @@ fn main() {
             commands::cmd_voice_secret_status,
             commands::cmd_set_voice_api_key,
             commands::cmd_clear_voice_api_key,
+            voice_settings::cmd_voice_settings,
+            voice_settings::cmd_set_voice_enabled,
+            voice_settings::cmd_set_voice_name,
+            voice_settings::cmd_test_voice,
+            voice_settings::cmd_toggle_desktop_voice,
             commands::cmd_start_dictation,
             commands::cmd_show_dictation_permission_help,
             commands::cmd_stop_dictation,

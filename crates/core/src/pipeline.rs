@@ -5148,7 +5148,7 @@ fn transcribe_to_artifact_with_authority(
     crate::process_trace::stage("transcribe.done");
     drop(prepared_input);
     let (result, spelling_corrections) = apply_vocabulary_spellings(result, vocabulary.as_ref());
-    let transcript = if content_type == ContentType::Meeting {
+    let transcript = if matches!(content_type, ContentType::Meeting | ContentType::Memo) {
         normalize_transcript_for_self_name_participant(&result.text, &attendees, &config.identity)
     } else {
         result.text
@@ -5292,7 +5292,7 @@ fn write_transcript_artifact_with_authority(
         .as_ref()
         .map(|event| event.attendees.clone())
         .unwrap_or_default();
-    let transcript = if content_type == ContentType::Meeting {
+    let transcript = if matches!(content_type, ContentType::Meeting | ContentType::Memo) {
         normalize_transcript_for_self_name_participant(&transcript, &attendees, &config.identity)
     } else {
         transcript
@@ -6322,7 +6322,7 @@ where
     drop(prepared_input);
     let (result, spelling_corrections) = apply_vocabulary_spellings(result, vocabulary.as_ref());
     let transcribe_ms = step_start.elapsed().as_millis() as u64;
-    let transcript = if content_type == ContentType::Meeting {
+    let transcript = if matches!(content_type, ContentType::Meeting | ContentType::Memo) {
         normalize_transcript_for_self_name_participant(
             &result.text,
             &calendar_attendees,
@@ -8269,7 +8269,7 @@ pub(crate) fn normalize_transcript_for_self_name_participant(
     attendees: &[String],
     identity: &IdentityConfig,
 ) -> String {
-    if !user_is_participant(attendees, identity) {
+    if !attendees.is_empty() && !user_is_participant(attendees, identity) {
         return transcript.to_string();
     }
 
@@ -13306,6 +13306,40 @@ mod tests {
     }
 
     #[test]
+    fn normalize_transcript_for_self_name_participant_rewrites_solo_intro() {
+        let identity = IdentityConfig {
+            name: Some("Mat".into()),
+            ..IdentityConfig::default()
+        };
+        let transcript = "[SPEAKER_1 0:00] This is Matt testing the solo path.\n";
+
+        let normalized = normalize_transcript_for_self_name_participant(transcript, &[], &identity);
+
+        assert!(
+            normalized.contains("This is Mat testing the solo path."),
+            "{normalized}"
+        );
+    }
+
+    #[test]
+    fn normalize_transcript_for_self_name_participant_still_requires_participation_with_attendees()
+    {
+        let identity = IdentityConfig {
+            name: Some("Mat".into()),
+            ..IdentityConfig::default()
+        };
+        let transcript = "[SPEAKER_1 0:00] This is Matt testing the attendee gate.\n";
+
+        let normalized = normalize_transcript_for_self_name_participant(
+            transcript,
+            &["Alex Chen".into()],
+            &identity,
+        );
+
+        assert_eq!(normalized, transcript);
+    }
+
+    #[test]
     fn collect_user_participant_variants_uses_attendee_forms_matching_identity() {
         let identity = IdentityConfig {
             name: Some("Mat".into()),
@@ -13378,6 +13412,43 @@ mod tests {
         assert_eq!(
             artifact.frontmatter.title,
             "Mat Is Outlining Onboarding Follow Up"
+        );
+    }
+
+    #[test]
+    fn write_transcript_artifact_normalizes_self_name_for_solo_memo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let audio_path = dir.path().join("memo.wav");
+        std::fs::write(&audio_path, vec![0u8; 64_044]).unwrap();
+
+        let config = Config {
+            output_dir: dir.path().to_path_buf(),
+            identity: IdentityConfig {
+                name: Some("Mat".into()),
+                ..IdentityConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let artifact = write_transcript_artifact(
+            &audio_path,
+            ContentType::Memo,
+            None,
+            &config,
+            &BackgroundPipelineContext::default(),
+            None,
+            "[SPEAKER_1 0:00] This is Matt testing the memo path.\n".into(),
+            crate::transcribe::FilterStats::default(),
+            0,
+        )
+        .unwrap();
+
+        assert!(
+            artifact
+                .transcript
+                .contains("This is Mat testing the memo path."),
+            "{}",
+            artifact.transcript
         );
     }
 

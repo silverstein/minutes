@@ -5098,6 +5098,7 @@ fn transcribe_to_artifact_with_authority(
             select_calendar_event(
                 &crate::calendar::events_overlapping(recording_date),
                 decode_title,
+                recording_minutes(audio_path, input_authority),
             )
         })
     } else {
@@ -5275,7 +5276,11 @@ fn write_transcript_artifact_with_authority(
         infer_recording_date(context.recorded_at, context.sidecar.as_ref(), &metadata);
     let matched_event = if content_type == ContentType::Meeting {
         context.calendar_event.clone().or_else(|| {
-            select_calendar_event(&crate::calendar::events_overlapping(recording_date), title)
+            select_calendar_event(
+                &crate::calendar::events_overlapping(recording_date),
+                title,
+                Some(filter_stats.audio_duration_secs / 60.0),
+            )
         })
     } else {
         None
@@ -6262,7 +6267,11 @@ where
     } else {
         Vec::new()
     };
-    let matched_event = select_calendar_event(&calendar_events, title);
+    let matched_event = select_calendar_event(
+        &calendar_events,
+        title,
+        recording_minutes(audio_path, input_authority),
+    );
     let calendar_event_title = matched_event.as_ref().map(|e| e.title.clone());
     let calendar_attendees: Vec<String> = matched_event
         .as_ref()
@@ -7641,13 +7650,57 @@ fn title_overlap(a: &str, b: &str) -> usize {
     a_tokens.intersection(&b_tokens).count()
 }
 
+/// How far an event may start after a recording ends, or end before it
+/// starts, and still be that recording's meeting: an early join or an
+/// overrun (#1419).
+const CALENDAR_MATCH_GRACE_MINUTES: f64 = 15.0;
+
+/// The length of a recording in minutes, when it can be read cheaply and
+/// safely (a WAV header). `None` otherwise.
+fn recording_minutes(
+    audio_path: &Path,
+    input_authority: Option<&AuthorizedProcessAudioInput>,
+) -> Option<f64> {
+    let secs = match input_authority {
+        Some(input) => diarize::audio_duration_secs_authorized(input),
+        None => diarize::audio_duration_secs(audio_path),
+    };
+    secs.ok().map(|secs| secs / 60.0)
+}
+
+/// An event's length in minutes from its `start` and `end`, or 0 when the
+/// source gave no end (the AppleScript fallback).
+fn calendar_event_minutes(event: &crate::calendar::CalendarEvent) -> f64 {
+    let parse = |text: &str| chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").ok();
+    match (parse(&event.start), event.end.as_deref().and_then(parse)) {
+        (Some(start), Some(end)) => (end - start).num_minutes().max(0) as f64,
+        _ => 0.0,
+    }
+}
+
+/// The calendar event a recording belongs to, if any.
+///
+/// `events` come from a query centred on the recording's start, so an
+/// event's `minutes_until` is its start relative to the recording's.
+/// `recording_minutes` is the recording's length; unknown is treated as a
+/// moment. An event must overlap the recording, give or take
+/// [`CALENDAR_MATCH_GRACE_MINUTES`]: the query returns everything within two
+/// hours, and nearest-start alone gave an ad hoc call the title and guest
+/// list of a meeting that had ended 40 minutes earlier (#1419). Of the
+/// events left, the one that overlaps the recording most wins, then the
+/// nearest start. With none left, nothing matches: a wrong title and
+/// attendee list is worse than none.
 fn select_calendar_event(
     events: &[crate::calendar::CalendarEvent],
     title_override: Option<&str>,
+    recording_minutes: Option<f64>,
 ) -> Option<crate::calendar::CalendarEvent> {
     let explicit_title = title_override
         .map(str::trim)
         .filter(|title| !title.is_empty());
+    let recording = recording_minutes
+        .filter(|minutes| minutes.is_finite() && *minutes > 0.0)
+        .unwrap_or(0.0);
 
     events
         .iter()
@@ -7656,8 +7709,23 @@ fn select_calendar_event(
                 .map(|title| title_overlap(title, &event.title) > 0)
                 .unwrap_or(true)
         })
-        .min_by_key(|event| event.minutes_until.abs())
-        .cloned()
+        .filter_map(|event| {
+            let start = event.minutes_until as f64;
+            let end = start + calendar_event_minutes(event);
+            if end + CALENDAR_MATCH_GRACE_MINUTES < 0.0
+                || start - CALENDAR_MATCH_GRACE_MINUTES > recording
+            {
+                return None;
+            }
+            let overlap = (end.min(recording) - start.max(0.0)).max(0.0);
+            Some((overlap, event))
+        })
+        .max_by(|(a_overlap, a), (b_overlap, b)| {
+            a_overlap
+                .total_cmp(b_overlap)
+                .then_with(|| b.minutes_until.abs().cmp(&a.minutes_until.abs()))
+        })
+        .map(|(_, event)| event.clone())
 }
 
 /// Narrow a merged attendee list down to the people actually established as
@@ -7887,7 +7955,13 @@ pub(crate) fn queued_meeting_decode_hints_at(
     recorded_at: DateTime<Local>,
     config: &Config,
 ) -> crate::transcribe::DecodeHints {
-    let event = select_calendar_event(&crate::calendar::events_overlapping(recorded_at), title);
+    // The length is not known before the job runs; only events around its
+    // start can match.
+    let event = select_calendar_event(
+        &crate::calendar::events_overlapping(recorded_at),
+        title,
+        None,
+    );
     let vocabulary = load_vocabulary_for_decode_hints();
     queued_meeting_decode_hints_for_event(
         title,
@@ -12221,6 +12295,7 @@ mod tests {
                 },
             ],
             None,
+            None,
         )
         .expect("expected a match");
 
@@ -12242,6 +12317,7 @@ mod tests {
                 uid: None,
             }],
             Some("Wesley prep session recovery"),
+            None,
         );
 
         assert!(selected.is_none());
@@ -12262,10 +12338,91 @@ mod tests {
                 uid: None,
             }],
             Some("Wesley prep session recovery"),
+            None,
         )
         .expect("expected overlapping explicit title to keep match");
 
         assert_eq!(selected.title, "Wesley Young Prep Session");
+    }
+
+    fn calendar_event_at(
+        title: &str,
+        minutes_until: i64,
+        start: &str,
+        end: Option<&str>,
+    ) -> crate::calendar::CalendarEvent {
+        crate::calendar::CalendarEvent {
+            title: title.into(),
+            start: start.into(),
+            minutes_until,
+            attendees: vec![format!("{title}@example.com")],
+            url: None,
+            calendar: None,
+            end: end.map(Into::into),
+            location: None,
+            uid: None,
+        }
+    }
+
+    #[test]
+    fn select_calendar_event_skips_an_event_that_ended_before_the_recording() {
+        // #1419: an ad hoc call recorded from 14:10 must not take the title
+        // and guests of a 13:00-13:30 meeting.
+        let earlier = calendar_event_at(
+            "Planning",
+            -70,
+            "2026-11-25 13:00",
+            Some("2026-11-25 13:30"),
+        );
+        assert!(select_calendar_event(std::slice::from_ref(&earlier), None, Some(25.0)).is_none());
+        assert!(select_calendar_event(&[earlier], None, None).is_none());
+    }
+
+    #[test]
+    fn select_calendar_event_skips_an_event_that_starts_after_the_recording() {
+        let later = calendar_event_at("Board", 60, "2026-11-25 15:10", Some("2026-11-25 16:00"));
+        assert!(select_calendar_event(&[later], None, Some(30.0)).is_none());
+    }
+
+    #[test]
+    fn select_calendar_event_allows_an_early_join_and_an_overrun() {
+        // Joined 10 minutes early.
+        let early = calendar_event_at("Sync", 10, "2026-11-25 14:20", Some("2026-11-25 14:50"));
+        assert!(select_calendar_event(&[early], None, Some(5.0)).is_some());
+        // Recording started 10 minutes after the meeting was due to end.
+        let overrun = calendar_event_at("Sync", -40, "2026-11-25 13:30", Some("2026-11-25 14:00"));
+        assert!(select_calendar_event(&[overrun], None, Some(20.0)).is_some());
+    }
+
+    #[test]
+    fn select_calendar_event_prefers_the_event_that_overlaps_the_recording_most() {
+        // A recording 14:00-15:00. The 13:30-14:05 event starts nearer, but
+        // the 14:10-15:00 event holds most of the recording.
+        let tail = calendar_event_at("Standup", -30, "2026-11-25 13:30", Some("2026-11-25 14:05"));
+        let main = calendar_event_at("Review", 10, "2026-11-25 14:10", Some("2026-11-25 15:00"));
+        let selected = select_calendar_event(&[tail, main], None, Some(60.0)).unwrap();
+        assert_eq!(selected.title, "Review");
+    }
+
+    #[test]
+    fn select_calendar_event_keeps_an_event_in_progress_when_recording_starts_late() {
+        let in_progress = calendar_event_at(
+            "All hands",
+            -40,
+            "2026-11-25 13:30",
+            Some("2026-11-25 15:00"),
+        );
+        let selected = select_calendar_event(&[in_progress], None, None).unwrap();
+        assert_eq!(selected.title, "All hands");
+    }
+
+    #[test]
+    fn select_calendar_event_without_an_end_matches_only_near_the_recording() {
+        // The AppleScript fallback gives no end: an event is a moment.
+        let near = calendar_event_at("Sync", -10, "2026-11-25 14:00", None);
+        let far = calendar_event_at("Old", -40, "2026-11-25 13:30", None);
+        assert!(select_calendar_event(&[near], None, None).is_some());
+        assert!(select_calendar_event(&[far], None, None).is_none());
     }
 
     #[test]
@@ -13002,6 +13159,7 @@ mod tests {
                 start: 0.0,
                 end: 4.0,
                 text: "Our sok 2 audit.".into(),
+                words: Vec::new(),
             }],
             detected_language: None,
         };

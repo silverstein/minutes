@@ -1,14 +1,21 @@
 //! Whisper parameter presets for stable transcription.
 //!
-//! These presets match whisper.cpp CLI defaults and include integrated
-//! Silero VAD support. Without these, whisper-rs with default `Greedy { best_of: 1 }`
+//! These presets match whisper.cpp CLI defaults and can set whisper.cpp's
+//! integrated Silero VAD. Without these, whisper-rs with default `Greedy { best_of: 1 }`
 //! can loop indefinitely on non-English or noisy audio.
 
 /// Build whisper FullParams with sane defaults matching whisper.cpp CLI.
 ///
 /// Uses `best_of=5`, entropy/logprob thresholds, and temperature fallback
 /// to prevent decoder loops. When a Silero VAD model path is provided,
-/// enables integrated VAD so whisper only transcribes speech segments.
+/// sets whisper.cpp's integrated VAD.
+///
+/// whisper.cpp applies that VAD only in `whisper_full` and
+/// `whisper_full_parallel`. whisper-rs `WhisperState::full` calls
+/// `whisper_full_with_state`, which ignores it, so through whisper-rs the
+/// model path gates nothing. To gate speech there, run
+/// `whisper_rs::WhisperVadContext` yourself and decode only the speech, as
+/// minutes-core does.
 ///
 /// Use this for batch transcription. For latency-sensitive streaming,
 /// use [`streaming_whisper_params`] instead.

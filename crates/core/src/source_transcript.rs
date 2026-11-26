@@ -248,6 +248,7 @@ pub(crate) fn merge_sources(
         final_words,
         cross_source_echo_suppressed,
         sherpa_fell_back_to_whisper: a.sherpa_fell_back_to_whisper || b.sherpa_fell_back_to_whisper,
+        silero_found_no_speech: a.silero_found_no_speech && b.silero_found_no_speech,
     };
     let detected_language = match (voice.detected_language, system.detected_language) {
         (Some(a), Some(b)) if a == b => Some(a),
@@ -405,12 +406,14 @@ mod tests {
             start: 2.8,
             end: 3.0,
             text: "local".into(),
+            words: Vec::new(),
         });
         let mut system = result("[0:02] remote\n", 4.0);
         system.segments.push(TranscriptSegment {
             start: 2.1,
             end: 2.5,
             text: "remote".into(),
+            words: Vec::new(),
         });
         let (merged, _) = merge_sources(voice, system);
         assert_eq!(
@@ -433,11 +436,13 @@ mod tests {
                 start: 1.0,
                 end: 1.6,
                 text: "hello".into(),
+                words: Vec::new(),
             },
             TranscriptSegment {
                 start: 10.9,
                 end: 11.4,
                 text: "local".into(),
+                words: Vec::new(),
             },
         ];
         let mut system = result("[0:10] remote\n", 12.0);
@@ -445,6 +450,7 @@ mod tests {
             start: 10.2,
             end: 10.6,
             text: "remote".into(),
+            words: Vec::new(),
         });
         let (merged, _) = merge_sources(voice, system);
         assert_eq!(
@@ -577,6 +583,7 @@ mod tests {
                 start: *start,
                 end: *end,
                 text: (*text).into(),
+                words: Vec::new(),
             })
             .collect();
         result

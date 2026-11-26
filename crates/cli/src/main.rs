@@ -3423,6 +3423,39 @@ fn check_meeting_system_audio_probe(
     }
 }
 
+/// Take the recording PID, or fail without touching the session files.
+///
+/// Checks, in order: no recording is running (`pid::create`), no sensitive
+/// session started since the early check, and no interrupted recording left
+/// audio behind. That last check has to come before the new session writes
+/// its start stamp, consent, context or metadata. Otherwise those writes
+/// replace the interrupted session's files and `minutes record --recover`
+/// archives this failed attempt's sidecars instead of the originals.
+fn claim_recording_slot() -> Result<()> {
+    minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Re-check sensitive-session exclusivity now that the recording PID (the
+    // atomic flock anchor) is held: a sensitive session may have started in
+    // the window between the early check and pid::create. With the PID held,
+    // a concurrent sensitive start is blocked by its own recording check, so
+    // this re-check closes the interleaving in both directions (review F3).
+    // On conflict, release the PID and bail.
+    if let Err(error) = minutes_core::sensitive::ensure_inactive_for_recording() {
+        let _ = minutes_core::pid::remove();
+        anyhow::bail!("{}", error);
+    }
+    // Checked with the PID held, so these files cannot belong to a live
+    // capture. Release only the PID: the metadata on disk is the
+    // interrupted session's and must stay for `--recover`.
+    if let Some(leftover) = minutes_core::pid::interrupted_recording_files().first() {
+        let _ = minutes_core::pid::remove();
+        anyhow::bail!(
+            "refusing to overwrite an existing recording at {}. Run `minutes record --recover` to preserve interrupted recording files before retrying.",
+            leftover.display()
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_record(
     title: Option<String>,
@@ -3506,19 +3539,8 @@ fn cmd_record(
         None
     };
 
-    // Check if already recording
     let recording_started_at = Local::now();
-    minutes_core::pid::create().map_err(|e| anyhow::anyhow!("{}", e))?;
-    // Re-check sensitive-session exclusivity now that the recording PID (the
-    // atomic flock anchor) is held: a sensitive session may have started in
-    // the window between the early check above and pid::create. With the PID
-    // held, a concurrent sensitive start is blocked by its own recording
-    // check, so this re-check closes the interleaving in both directions
-    // (review F3). On conflict, release the PID and bail.
-    if let Err(error) = minutes_core::sensitive::ensure_inactive_for_recording() {
-        let _ = minutes_core::pid::remove();
-        anyhow::bail!("{}", error);
-    }
+    claim_recording_slot()?;
     let context_session_id = minutes_core::desktop_context::maybe_start_capture_session(
         &config.desktop_context,
         config.screen_context.enabled,
@@ -10640,6 +10662,59 @@ mod tests {
             parse_recording_consent_basis("made_up_basis").expect_err("unknown basis should error");
 
         assert!(err.to_string().contains("unknown consent basis"));
+    }
+
+    #[test]
+    fn a_failed_start_leaves_the_interrupted_sidecars_for_recover() {
+        // #1412 review: a start that hits an interrupted recording must fail
+        // before it writes its own start stamp, consent, context or
+        // metadata, so `--recover` archives the crashed session's files.
+        with_temp_home(|_| {
+            let data = minutes_core::config::Config::minutes_dir();
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("current.wav"), vec![1u8; 4096]).unwrap();
+            let sidecars = [
+                ("current-notes.md", "-notes.md", "interrupted notes"),
+                ("current-context.txt", "-context.txt", "interrupted context"),
+                (
+                    "current-consent.json",
+                    "-consent.json",
+                    "interrupted consent",
+                ),
+                ("recording-start.txt", "-start.txt", "interrupted start"),
+                ("recording-meta.json", "-meta.json", "interrupted meta"),
+            ];
+            for (name, _, body) in sidecars {
+                std::fs::write(data.join(name), body).unwrap();
+            }
+
+            let error = claim_recording_slot().unwrap_err().to_string();
+            assert!(error.contains("minutes record --recover"), "{error}");
+            assert!(
+                !minutes_core::pid::pid_path().exists(),
+                "a failed start must release the PID"
+            );
+
+            let base = minutes_core::pid::archive_interrupted_recording()
+                .unwrap()
+                .expect("interrupted files to archive");
+            let prefix = base.file_name().unwrap().to_str().unwrap().to_owned();
+            assert_eq!(
+                std::fs::read(data.join(format!("{prefix}.wav"))).unwrap(),
+                vec![1u8; 4096]
+            );
+            for (name, suffix, body) in sidecars {
+                assert_eq!(
+                    std::fs::read_to_string(data.join(format!("{prefix}{suffix}"))).unwrap(),
+                    body,
+                    "{name} should be the interrupted session's"
+                );
+            }
+
+            // With the leftovers archived, the next start claims the slot.
+            claim_recording_slot().unwrap();
+            minutes_core::pid::remove().unwrap();
+        });
     }
 
     #[test]

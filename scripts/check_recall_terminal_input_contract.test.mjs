@@ -271,6 +271,95 @@ test("the panel wires xterm's user-input signal with a fail-closed fallback", ()
   );
 });
 
+test("a native screenshot drop, clipboard text, and keys reach only the selected Recall tab", async () => {
+  const dropSetup = panel.match(/    \/\/ Tauri's window-level drag-drop handler[\s\S]*?(?=    async function forwardRecallTerminalData\()/)?.[0];
+  assert.ok(dropSetup, "production file-drop setup exists");
+
+  const dropListeners = [];
+  const writes = [];
+  const context = vm.createContext({
+    setTimeout, clearTimeout, console, EventTarget, devicePixelRatio: 2,
+    document: {
+      documentElement: { dataset: { platform: "macos" } },
+      addEventListener() {},
+      createElement: () => ({ dataset: {}, setAttribute() {} }),
+    },
+    MutationObserver: class { observe() {} },
+    ResizeObserver: class { observe() {} },
+    FitAddon: { FitAddon: class { activate() {} } },
+    MINUTES_XTERM_THEME_QUERY: { addEventListener() {} },
+    __TAURI__: { event: { async listen(name, listener) {
+      assert.equal(name, "recall:file-drag");
+      dropListeners.push(listener);
+    } } },
+    recallTerminalContainer: {
+      appendChild() {},
+      classList: { contains: () => false, toggle() {} },
+      getBoundingClientRect: () => ({ width: 100, height: 100, left: 10, right: 110, top: 10, bottom: 110 }),
+    },
+    recallExpanded: true, isMac: true,
+    applyRecallTerminalTheme: () => ({}),
+    getTerminalFontSize: () => 13,
+    dismissRecallProviderNotice() {},
+    setRecallProviderNotice: message => assert.fail(message),
+    invoke: async (command, { sessionId, data }) => {
+      assert.equal(command, "cmd_pty_input");
+      writes.push({ sessionId, data });
+    },
+  });
+  context.self = context;
+  context.window = context;
+  vm.runInContext(xterm, context);
+  vm.runInContext(readFileSync("tauri/src/scripts/recall-tabs.js", "utf8"), context);
+  context.Terminal = class extends context.Terminal {
+    // Bind real xterm input handlers to event targets without a DOM renderer.
+    open() {
+      this._core.textarea = Object.assign(new EventTarget(), { value: "" });
+      this._core.element = Object.assign(new EventTarget(), { classList: { add() {}, remove() {} } });
+      this._core._compositionHelper = { keydown: () => true };
+      this._core._initGlobal();
+    }
+    focus() {}
+  };
+  const fixture = vm.runInContext(`
+    const recallTabStates = new Map();
+    let SESSION_ID = 'two';
+    ${['recallStateFor', 'activeRecallState', 'initRecallTerminal', 'forwardRecallTerminalData', 'updateRecallTerminalInputDraft', 'forwardRecallTerminalInput'].map(extractFunction).join('\n')}
+    ${dropSetup}
+    for (const id of ['one', 'two', 'three']) {
+      const tab = recallStateFor(id);
+      initRecallTerminal(tab);
+      tab.alive = true;
+    }
+    ({ tabs: recallTabStates, select: id => { SESSION_ID = id; } });
+  `, context);
+  const drain = () => Promise.all([...fixture.tabs.values()].map(tab => tab.queue));
+
+  const textarea = fixture.tabs.get("two").terminal.textarea;
+  textarea.dispatchEvent(Object.assign(new Event("paste", { bubbles: true }), {
+    clipboardData: { getData: type => type === "text/plain" ? "clipboard text" : "" },
+  }));
+  for (const [key, keyCode, ctrlKey] of [["x", 88, false], ["v", 86, true]]) {
+    textarea.dispatchEvent(Object.assign(new Event("keydown", { cancelable: true }), { key, keyCode, ctrlKey }));
+  }
+  await drain();
+  assert.deepEqual(writes.splice(0), [
+    { sessionId: "two", data: "clipboard text" },
+    { sessionId: "two", data: "x" },
+    { sessionId: "two", data: "\x16" }, // A TUI can use Ctrl+V to read its clipboard.
+  ]);
+
+  const dropTerminal = fixture.tabs.get("three").terminal;
+  await new Promise(resolve => dropTerminal.write("\x1b[?2004h", resolve));
+  const paths = ["/tmp/Screen Shot.png"];
+  const drag = type => dropListeners.forEach(listener => listener({ payload: { type, paths, x: 20, y: 20 } }));
+  drag("enter");
+  fixture.select("three");
+  drag("drop");
+  await drain();
+  assert.deepEqual(writes, [{ sessionId: "three", data: "\x1b[200~/tmp/Screen\\ Shot.png \x1b[201~" }]);
+});
+
 
 test("an input queued for tab A stays on A after selection switches to B", async () => {
   const harness = createHarness();

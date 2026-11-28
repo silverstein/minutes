@@ -17193,10 +17193,6 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
             setRecallProviderNotice(String(error), 'error');
           });
       });
-
-      registerRecallTerminalFileDrop().catch((error) => {
-        console.error('Recall terminal file drop:', error);
-      });
     }
 
     // Tauri's window-level drag-drop handler consumes native file drops before
@@ -17212,15 +17208,15 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       return path.replace(/[ !"#$&'()*;<>?[\\\]^`{|}~]/g, '\\$&');
     }
 
-    function recallTerminalDropRect() {
-      if (!activeRecallState().terminal || !activeRecallState().alive) return null;
+    function recallTerminalDropRect(tab) {
+      if (!tab?.terminal || !tab.alive) return null;
       if (recallTerminalContainer.classList.contains('hidden')) return null;
       const rect = recallTerminalContainer.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0 ? rect : null;
     }
 
-    function isOverRecallTerminal(position) {
-      const rect = recallTerminalDropRect();
+    function isOverRecallTerminal(tab, position) {
+      const rect = recallTerminalDropRect(tab);
       if (!rect || !position) return false;
       // Tauri labels the drag position physical, but on macOS wry reports
       // AppKit points (wry src/wkwebview/drag_drop.rs), which already equal
@@ -17239,19 +17235,25 @@ Mat" required maxlength="8192"></textarea></label><div class="dictation-form-act
       await window.__TAURI__.event.listen('recall:file-drag', (event) => {
         const { type, paths, x, y } = event.payload || {};
         if (type === 'enter') draggingFiles = Array.isArray(paths) && paths.length > 0;
-        const over = draggingFiles && isOverRecallTerminal(x == null ? null : { x, y });
+        const tab = recallTabStates.get(SESSION_ID);
+        const over = draggingFiles && isOverRecallTerminal(tab, x == null ? null : { x, y });
         recallTerminalContainer.classList.toggle('is-drop-target', over && type !== 'drop' && type !== 'leave');
         if (type === 'leave') draggingFiles = false;
         if (type !== 'drop') return;
         draggingFiles = false;
         if (!over || !paths?.length) return;
-        activeRecallState().terminal.focus();
+        tab.terminal.focus();
         // paste() routes through onData as user input, so the PTY write queue
         // and shadow line see it like any other paste, and bracketed paste is
         // applied when the TUI asked for it.
-        activeRecallState().terminal.paste(paths.map(shellEscapeDroppedPath).join(' ') + ' ');
+        tab.terminal.paste(paths.map(shellEscapeDroppedPath).join(' ') + ' ');
       });
     }
+
+    // A native drag belongs to the window. Route it to the selected tab at drop time.
+    registerRecallTerminalFileDrop().catch((error) => {
+      console.error('Recall terminal file drop:', error);
+    });
 
     async function forwardRecallTerminalData(data, isUserInput, tab = activeRecallState()) {
       if (!isUserInput) {
